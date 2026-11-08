@@ -22,7 +22,7 @@ import {
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
 import { Dynamic } from '@solidjs/web'
-import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import {
   CHAT_ACTIVE_THREAD_CHANGED_EVENT,
   CHAT_ACTIVE_THREAD_KEY,
@@ -51,6 +51,7 @@ import { VisibilitySidebarPanel } from '@/features/visibility/components/Visibil
 import { AnbudExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAnbudPanel'
 import { SupportExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSupportPanel'
 import { SpacesExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSpacesPanel'
+import { SpaceTotalAttentionBadge } from '@/features/core/components/sidebar/SpaceAttentionBadge'
 import {
   SidebarPanelTitle,
   SidebarSearchField,
@@ -80,6 +81,8 @@ import {
   unarchiveChatThread,
   type ChatThreadSession,
 } from '@/shared/api/chat-client'
+import { ATTENTION_CHANGED_EVENT, getAttention, type AttentionSnapshot } from '@/shared/api/attention-client'
+import { legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -87,8 +90,12 @@ import { cn } from '@/shared/lib/cn'
 import { hasWorkspaceAdminAccess, shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
+import { applyAttentionBadge, waitingThreadCount } from '@/features/core/lib/attention-badge'
 import { FilledRailIcon } from './FilledRailIcon'
 import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
+import { ChatProjectsSection } from './sidebar/ChatProjectsSection'
+import { chatProjectsEnabled } from '@/features/chat/lib/chat-projects'
+import { ChatAttentionSections, attentionSectionRows } from './sidebar/ChatAttentionSections'
 import { ChatWorkLinks } from './sidebar/ChatWorkLinks'
 
 /** How many chats the sidebar shows before "Load more" reveals the next batch. */
@@ -133,9 +140,9 @@ export function CoreSidebar(props: {
     .filter((section) => section.id !== 'settings' || shouldShowWorkspaceAdminNavigation(session))
     .map((section) => localizeSidebarSection(section, i18n))
   const activeSection = () => getSidebarSectionForPath(location.pathname, props.activeRoute, visibleSections())
-  // Ingestions remains directly routable, but the compact rail is intentionally
-  // limited to the operator-facing workspaces shown in the product shell.
-  const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom && !section.parentSectionId && section.id !== 'ingestions')
+  // These workspaces retain their routes and contextual navigation; the rail
+  // shows the sections used as primary entry points.
+  const mainSections = () => visibleSections().filter((section) => !section.pinnedBottom && !section.parentSectionId && !['ingestions', 'studio', 'social'].includes(section.id))
   const pinnedSections = () => visibleSections().filter((section) => section.pinnedBottom)
   const activeRailId = () => activeSection().parentSectionId ?? activeSection().id
   const accountActive = () => location.pathname === '/account' || location.pathname.startsWith('/account/')
@@ -375,6 +382,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   const [archivedSessions, setArchivedSessions] = createSignal<ChatThreadSession[]>([])
   const [archivedCursor, setArchivedCursor] = createSignal<string | null>(null)
   const [archivedLoading, setArchivedLoading] = createSignal(false)
+  const [attention, setAttention] = createSignal<AttentionSnapshot | null>(null)
 
   const refreshLocalSessions = () => {
     setActiveThreadId(readActiveChatThreadId())
@@ -403,6 +411,16 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
     return results.some((result) => result.status === 'fulfilled')
   }
 
+  // The rail reads the server's attention state (WS16 S2). A failed read leaves the rail
+  // empty; the list does not wait on it.
+  const refreshAttention = async () => {
+    try {
+      setAttention(await getAttention())
+    } catch {
+      setAttention(null)
+    }
+  }
+
   const refreshServerSessions = async () => {
     const localSessions = readChatThreadHistory()
     setLoading(localSessions.length === 0)
@@ -429,9 +447,14 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
     () => {
       refreshLocalSessions()
       void refreshServerSessions()
+      void refreshAttention()
 
       const handleHistoryChange = () => {
         refreshLocalSessions()
+        void refreshAttention()
+      }
+      const handleAttentionChange = () => {
+        void refreshAttention()
       }
       const handleStorageChange = (event: StorageEvent) => {
         if (
@@ -446,10 +469,14 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       window.addEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
       window.addEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
       window.addEventListener('storage', handleStorageChange)
+      window.addEventListener(ATTENTION_CHANGED_EVENT, handleAttentionChange)
+      window.addEventListener('focus', handleAttentionChange)
       return () => {
         window.removeEventListener(CHAT_ACTIVE_THREAD_CHANGED_EVENT, handleHistoryChange)
         window.removeEventListener(CHAT_THREAD_HISTORY_CHANGED_EVENT, handleHistoryChange)
         window.removeEventListener('storage', handleStorageChange)
+        window.removeEventListener(ATTENTION_CHANGED_EVENT, handleAttentionChange)
+        window.removeEventListener('focus', handleAttentionChange)
       }
     },
   )
@@ -498,6 +525,10 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   const hasMoreSessions = () => visibleSessions().length > shownCount()
   const pinnedSessions = createMemo(() => shownSessions().filter((item) => item.pinned))
   const unpinnedSessions = createMemo(() => shownSessions().filter((item) => !item.pinned))
+  // The rail sections and the tab count read one server state, so they cannot disagree.
+  const attentionGroups = createMemo(() => attentionSectionRows(attention(), visibleSessions()))
+  createEffect(() => waitingThreadCount(attention()?.items ?? []), (waiting) => applyAttentionBadge(waiting))
+  onCleanup(() => applyAttentionBadge(0))
   // Pin is server-owned (see `ChatThreadSession.pinned` in chat-client.ts) so
   // it follows the user across devices -- DashboardComposer's history panel
   // already round-trips it via `saveChatThreadSnapshot`. The local flip via
@@ -842,6 +873,10 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       <Show when={error() && (sessionCount() > 0 || chatAppearanceActive('organizer'))}>
         <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">{error()}</p>
       </Show>
+      {/* WS18-S4: projects sit above the organizer and the archive toggle. Off unless the build carries the project switch. */}
+      <Show when={chatProjectsEnabled()}>
+        <ChatProjectsSection />
+      </Show>
       <button
         type="button"
         class="core-chat-sidebar__archive-toggle"
@@ -853,6 +888,9 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
       </button>
       <Show when={chatAppearanceActive('organizer')} fallback={
       <nav class="core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
+        <Show when={!showArchived()}>
+          <ChatAttentionSections sections={attentionGroups()} renderRow={sessionRow} />
+        </Show>
         <Show when={showArchived()} fallback={
         <Show when={!loading()} fallback={<div class="core-sidebar-empty verevon-sidebar-row-normal">{i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</div>}>
           <Show
@@ -888,6 +926,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
           loading={showArchived() ? archivedLoading() : loading()}
           onNewChat={startNewChat}
           renderRow={showArchived() ? archivedRow : sessionRow}
+          attentionSections={showArchived() ? undefined : attentionGroups()}
           hasMore={showArchived() ? archivedCursor() !== null : hasMoreSessions()}
           onLoadMore={() => (showArchived() ? void loadArchived(archivedCursor() ?? undefined) : setShownCount((count) => count + SIDEBAR_PAGE_SIZE))}
         />
@@ -1065,31 +1104,18 @@ type ChatRunStatusChip = { label: string; tone: 'active' | 'attention' }
 
 /** Keep the personal thread rail calm: only active or attention states show a
  * hint. Completed/cancelled runs remain discoverable through the transcript
- * without turning every row into an operator console. */
+ * without turning every row into an operator console. The states come from the
+ * shared attention vocabulary (WS16 S2); this chip is retired with WS16 S7. */
 function chatRunStatusChip(
   value: string | undefined,
   i18n: ReturnType<typeof useI18n>,
 ): ChatRunStatusChip | undefined {
-  const status = value?.trim().toLowerCase()
-  if (!status) return undefined
-  if (status === 'queued' || status === 'pending') {
-    return { label: i18n.tr('I kø', 'Queued'), tone: 'active' }
-  }
-  if (status === 'running' || status === 'in_progress') {
-    return { label: i18n.tr('Pågår', 'Running'), tone: 'active' }
-  }
-  if (
-    status === 'awaiting_approval' ||
-    status === 'waiting_approval' ||
-    status === 'paused' ||
-    status === 'blocked' ||
-    status === 'ambiguous'
-  ) {
+  const state = legacyStateFromRunStatus(value)
+  if (state === 'working') return { label: i18n.tr('Pågår', 'Running'), tone: 'active' }
+  if (state === 'needs_approval' || state === 'needs_input') {
     return { label: i18n.tr('Trenger oppmerksomhet', 'Needs attention'), tone: 'attention' }
   }
-  if (status === 'failed' || status === 'timed_out' || status === 'denied' || status === 'rejected') {
-    return { label: i18n.tr('Mislyktes', 'Failed'), tone: 'attention' }
-  }
+  if (state === 'failed') return { label: i18n.tr('Mislyktes', 'Failed'), tone: 'attention' }
   return undefined
 }
 
@@ -1306,6 +1332,9 @@ function SidebarPanelLink(props: {
       <Show when={homeSection()} fallback={<a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
         <PanelItemIcon icon={props.item.icon} active={active()} />
         <span class={cn('core-sidebar-panel-link__label', active() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
+        <Show when={props.item.badge === 'attention'}>
+          <SpaceTotalAttentionBadge />
+        </Show>
       </a>}>
         <button type="button" aria-pressed={homeActive() ? 'true' : 'false'} class={cn('core-sidebar-panel-link', homeActive() && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')} onClick={() => {
           const action = homeOverviewActionSchema.parse({ type: 'home.overview.select', section: homeSection() })

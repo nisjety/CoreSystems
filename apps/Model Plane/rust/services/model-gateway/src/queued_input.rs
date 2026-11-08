@@ -71,12 +71,43 @@ restart work you have already completed, and do not leave the message \
 unanswered.]";
 
 /// Per message. A mid-run injection spends prompt budget the turn never planned
-/// for, and the turn may already be near the compaction threshold.
-pub const MAX_QUEUED_CHARS: usize = 2_000;
+/// for, and the turn may already be near the compaction threshold. Defined in
+/// `mp_contracts::queued_limits` so execution-core's browser steer queue (E3.3-f)
+/// is held to the same number.
+pub const MAX_QUEUED_CHARS: usize = mp_contracts::queued_limits::MAX_QUEUED_CHARS;
 
 /// Per run. Past a few, the user is not steering — they are typing at a wall,
-/// and delivering all of it would bury the task the run is actually on.
-pub const MAX_QUEUED_MESSAGES: usize = 3;
+/// and delivering all of it would bury the task the run is actually on. Shared
+/// with the browser steer queue like [`MAX_QUEUED_CHARS`].
+pub const MAX_QUEUED_MESSAGES: usize = mp_contracts::queued_limits::MAX_QUEUED_MESSAGES;
+
+/// Why the gateway refuses a steer text for a live browser run before it
+/// reaches execution-core (E3.3-f). The same caps and the same blank check as
+/// a queued chat message ([`EnqueueOutcome::TooLong`], [`EnqueueOutcome::Empty`]);
+/// the count cap is execution-core's, which owns the per-run queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SteerRefusal {
+    /// Nothing but whitespace.
+    Empty,
+    /// Longer than [`MAX_QUEUED_CHARS`].
+    TooLong { chars: usize },
+}
+
+/// The steer text to forward, trimmed, or why not. `None` in is `Ok(None)`.
+pub fn validate_steer_text(text: Option<&str>) -> Result<Option<String>, SteerRefusal> {
+    let Some(text) = text else {
+        return Ok(None);
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(SteerRefusal::Empty);
+    }
+    let chars = trimmed.chars().count();
+    if chars > MAX_QUEUED_CHARS {
+        return Err(SteerRefusal::TooLong { chars });
+    }
+    Ok(Some(trimmed.to_owned()))
+}
 
 /// The switch for durable send receipts (WS04 S6). Off, a queued message is enqueued first and
 /// persisted after, and a send names no message to the transcript; on, a message is persisted
@@ -528,6 +559,25 @@ pub async fn stream_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_steer_text_is_trimmed_and_held_to_the_queued_input_cap() {
+        assert_eq!(validate_steer_text(None), Ok(None));
+        assert_eq!(validate_steer_text(Some("  \n")), Err(SteerRefusal::Empty));
+        assert_eq!(
+            validate_steer_text(Some("  use the annual plan ")),
+            Ok(Some("use the annual plan".to_owned()))
+        );
+        let exact = "x".repeat(MAX_QUEUED_CHARS);
+        assert_eq!(validate_steer_text(Some(&exact)), Ok(Some(exact.clone())));
+        let long = "x".repeat(MAX_QUEUED_CHARS + 1);
+        assert_eq!(
+            validate_steer_text(Some(&long)),
+            Err(SteerRefusal::TooLong {
+                chars: MAX_QUEUED_CHARS + 1
+            })
+        );
+    }
 
     /// `enqueue_checked` with no claimed thread and no op id: the plain enqueue most cases test.
     fn enqueue(

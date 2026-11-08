@@ -207,6 +207,8 @@ struct CaptureState {
     list_approvals: Arc<Mutex<Option<(String, String)>>>,
     get_approval_id: Arc<Mutex<Option<String>>>,
     decide_approval: CapturedTransition,
+    /// EP-10-S4: `(patch_json, base_fingerprint)` of the last decide that carried an edit.
+    decide_edit: Arc<Mutex<Option<(String, String)>>>,
     lineage_thread_id: Arc<Mutex<Option<String>>>,
     stream_run_id: Arc<Mutex<Option<String>>>,
     /// `(run_id, org_id)` of the last `ListRunQuestions` call.
@@ -235,6 +237,49 @@ impl MockOrchestration {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for MockOrchestration {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
+    async fn reroute_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
+    }
+
+    async fn claim_once_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
+    }
+
+    async fn hold_quarantined_output(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
+    }
+
+    async fn claim_quarantine_release(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
+    }
+
+    async fn get_quarantine_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+    }
+
+    async fn get_approval_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+    }
+
     type StreamRunEventsStream = MockEventStream;
 
     async fn list_plans(
@@ -471,6 +516,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(ListApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-1".into(),
@@ -486,6 +534,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }],
         }))
     }
@@ -498,6 +547,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(OrgPendingApprovalsResponse {
             approvals: vec![Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-pending-1".into(),
@@ -517,6 +569,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 } else {
                     request.org_id
                 },
+                ..Default::default()
             }],
         }))
     }
@@ -527,11 +580,22 @@ impl OrchestrationCoreService for MockOrchestration {
     ) -> Result<Response<GetApprovalResponse>, Status> {
         let request = request.into_inner();
         *self.state.get_approval_id.lock().unwrap() = Some(request.approval_id.clone());
+        // An id that starts with `appr-stepup` stands for a cause that needs a fresh step-up.
+        let cause = request.approval_id.starts_with("appr-stepup").then(|| {
+            mp_contracts::model_plane::v1::ApprovalCause {
+                code: "provider_write".into(),
+                step_up_required: true,
+                ..Default::default()
+            }
+        });
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
-                cause: None,
+                cause,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -545,6 +609,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }),
         }))
     }
@@ -557,6 +622,9 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(CreateApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode: String::new(),
                 cause: None,
                 id: "appr-mock".into(),
@@ -572,6 +640,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: request.org_id,
+                ..Default::default()
             }),
         }))
     }
@@ -600,9 +669,20 @@ impl OrchestrationCoreService for MockOrchestration {
             request.decided_by.clone(),
             request.decision_reason.clone(),
         ));
+        if let Some(edit) = request.edit.as_ref() {
+            *self.state.decide_edit.lock().unwrap() =
+                Some((edit.patch_json.clone(), edit.base_fingerprint.clone()));
+            // Session Core answers a base it no longer holds with its closed code.
+            if edit.base_fingerprint == "f".repeat(64) {
+                return Err(Status::aborted("approval_changed"));
+            }
+        }
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
+                tool_key: String::new(),
+                action_label: String::new(),
+                continuation: None,
                 continuation_mode,
                 cause: None,
                 id: request.approval_id,
@@ -618,6 +698,7 @@ impl OrchestrationCoreService for MockOrchestration {
                 decided_at: None,
                 expires_at: None,
                 org_id: "org-1".into(),
+                ..Default::default()
             }),
         }))
     }
@@ -699,6 +780,7 @@ impl OrchestrationCoreService for MockOrchestration {
                     child_run_id: "run-child".into(),
                     role: 1,
                     spawned_at: None,
+                    ..Default::default()
                 }],
             }),
         }))
@@ -839,6 +921,8 @@ fn scripted_question(id: &str, run_id: &str, state: QuestionState) -> RunQuestio
         answered_at: None,
         answers: Vec::new(),
         answered_message_id: String::new(),
+        origin: String::new(),
+        origin_label: String::new(),
     }
 }
 
@@ -881,6 +965,14 @@ struct MockRunOwner {
 
 #[tonic::async_trait]
 impl RunService for MockRunOwner {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
+    async fn resolve_approval_authority(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+    }
+
     async fn get_run(
         &self,
         request: TonicRequest<GetRunRequest>,
@@ -989,6 +1081,20 @@ impl RunService for MockRunOwner {
         Err(Status::unimplemented(
             "scheduled step authority not needed in orchestration route test",
         ))
+    }
+
+    async fn authorize_room_run_attach(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+        Err(Status::unimplemented("room run attach not needed in this test"))
+    }
+
+    async fn cancel_run_as_room_manager(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+        Err(Status::unimplemented("room run stop not needed in this test"))
     }
 
     async fn get_scheduled_step_context(
@@ -1236,6 +1342,164 @@ async fn decide_approval_grant_of_a_loop_owned_approval_reports_awaiting_continu
     );
 }
 
+// ---------------------------------------------------------------------------
+// EP-10-S4: approve with edits. The switch is off by default; on, the edit reaches Session Core
+// with the grant and its closed refusals come back typed.
+// ---------------------------------------------------------------------------
+
+const EDIT_BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+fn edited_decide_request(tokens: &UserTokens, approval_id: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(format!("/v1/orchestration/approvals/{approval_id}/decide"))
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", tokens.execution),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap()
+}
+
+fn edit_body(base: &str, scope: &str) -> String {
+    serde_json::json!({
+        "decision": "approve",
+        "scope": scope,
+        "edit": { "patch": { "subject": "New subject" }, "base_fingerprint": base },
+    })
+    .to_string()
+}
+
+async fn json_of(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_off_by_default_is_forbidden() {
+    let _auth = AuthFixture::start().await;
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "once")))
+        .await
+        .unwrap();
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body={json}");
+    assert_eq!(json["error"]["code"], "approval_edit_disabled");
+    assert!(json["error"]["details"].is_object());
+    assert!(
+        capture.decide_approval.lock().unwrap().is_none()
+            && capture.get_approval_id.lock().unwrap().is_none(),
+        "nothing reaches Session Core while the switch is off"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_is_forwarded_with_the_grant_when_the_switch_is_on() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "once")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::OK, "body={json}");
+    let (patch, base) = capture.decide_edit.lock().unwrap().clone().expect("the edit reached it");
+    assert_eq!(base, EDIT_BASE);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&patch).unwrap(),
+        serde_json::json!({ "subject": "New subject" })
+    );
+    assert_eq!(
+        capture.decide_approval.lock().unwrap().as_ref().map(|d| d.1),
+        Some(ApprovalState::Granted as i32)
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_with_scope_thread_is_refused() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "thread")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body={json}");
+    assert_eq!(json["error"]["code"], "edit_requires_once");
+    assert!(capture.decide_approval.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn approval_changed_is_409() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, _capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let stale = "f".repeat(64);
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(&stale, "")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={json}");
+    assert_eq!(json["error"]["code"], "approval_changed");
+    assert!(json["error"]["details"].is_object());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edit_passes_step_up_like_a_grant() {
+    let _auth = AuthFixture::start().await;
+    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
+    std::env::set_var("APPROVAL_STEP_UP_ENFORCED", "enforce");
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let resp = app
+        .oneshot(edited_decide_request(&tokens, "appr-stepup-1", &edit_body(EDIT_BASE, "once")))
+        .await
+        .unwrap();
+    std::env::remove_var("APPROVAL_EDIT_ENABLED");
+    std::env::remove_var("APPROVAL_STEP_UP_ENFORCED");
+    let (status, json) = json_of(resp).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body={json}");
+    assert_eq!(
+        json["error"]["code"], "step_up_required",
+        "an edited grant needs the same fresh re-authentication as any grant"
+    );
+    assert!(capture.decide_edit.lock().unwrap().is_none());
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn decide_approval_reject_has_no_continuation_delivery_field() {
@@ -1302,6 +1566,49 @@ struct OrgScopedMock {
 
 #[tonic::async_trait]
 impl OrchestrationCoreService for OrgScopedMock {
+    // Main's RPCs (merged 2026-11-02); this double does not serve them.
+    async fn reroute_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::RerouteApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::RerouteApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("reroute_approval is not served by this double"))
+    }
+
+    async fn claim_once_approval(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimOnceApprovalRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimOnceApprovalResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_once_approval is not served by this double"))
+    }
+
+    async fn hold_quarantined_output(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::HoldQuarantinedOutputRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::HoldQuarantinedOutputResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("hold_quarantined_output is not served by this double"))
+    }
+
+    async fn claim_quarantine_release(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::ClaimQuarantineReleaseRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ClaimQuarantineReleaseResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("claim_quarantine_release is not served by this double"))
+    }
+
+    async fn get_quarantine_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetQuarantinePreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetQuarantinePreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_quarantine_preview is not served by this double"))
+    }
+
+    async fn get_approval_preview(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+    }
+
     async fn list_plans(
         &self,
         _: TonicRequest<ListPlansRequest>,
@@ -1507,6 +1814,9 @@ impl OrchestrationCoreService for OrgScopedMock {
 fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
         consumed_at: None,
+        tool_key: String::new(),
+        action_label: String::new(),
+        continuation: None,
         continuation_mode: String::new(),
         cause: None,
         id: "appr-owned".into(),
@@ -1522,6 +1832,7 @@ fn owned_approval(state: ApprovalState) -> Approval {
         decided_at: None,
         expires_at: None,
         org_id: OWNER_ORG.into(),
+        ..Default::default()
     }
 }
 
@@ -1886,6 +2197,28 @@ async fn post_plan_approval(
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
     (status, json)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_answers_next_message_while_the_execute_switch_is_off() {
+    // WS14 S2: with the approve-then-execute switch off (the default) the answer is the one it
+    // always was: the grant waits for the person's own next message, and nothing is sent by itself.
+    let harness = plan_gate_harness().await;
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["continuation"], "next_message", "{body}");
 }
 
 #[tokio::test]
@@ -2583,7 +2916,8 @@ async fn run_question_an_answer_never_touches_an_approval() {
 use mp_contracts::model_plane::v1::{
     thread_autonomy_client::ThreadAutonomyClient,
     thread_autonomy_server::{ThreadAutonomy, ThreadAutonomyServer},
-    GetThreadGrantRequest, GetThreadGrantResponse, SetRunModeRequest, SetRunModeResponse,
+    BindGrantToRunRequest, BindGrantToRunResponse, GetThreadGrantRequest, GetThreadGrantResponse,
+    SetRunModeRequest, SetRunModeResponse,
 };
 
 #[derive(Clone, Debug)]
@@ -2706,6 +3040,33 @@ impl ThreadAutonomy for SessionCoreDouble {
         };
         Ok(Response::new(answer))
     }
+
+    /// WS14 S2: binds only the grant the thread holds for exactly the plan asked for, as the
+    /// real bind does; anything else is the refusal the gateway treats as no bound grant.
+    async fn bind_grant_to_run(
+        &self,
+        request: TonicRequest<BindGrantToRunRequest>,
+    ) -> Result<Response<BindGrantToRunResponse>, Status> {
+        if request.metadata().get("authorization").is_none() {
+            return Err(Status::unauthenticated("verified session credential required"));
+        }
+        let request = request.into_inner();
+        match self.grant.lock().unwrap().clone() {
+            Some(grant)
+                if grant.org_id == request.org_id
+                    && grant.thread_id == request.thread_id
+                    && grant.plan_id == request.approved_plan_id
+                    && grant.expires_at > unix_now() =>
+            {
+                Ok(Response::new(BindGrantToRunResponse {
+                    granted_rung: grant.rung,
+                    justification: String::new(),
+                    approved_plan_id: grant.plan_id,
+                }))
+            }
+            _ => Err(Status::failed_precondition("plan_grant_unavailable")),
+        }
+    }
 }
 
 /// Only `SessionCore.SetRunMode` of the real service's surface; every other method answers
@@ -2804,12 +3165,21 @@ struct DurableGrantHarness {
 }
 
 async fn durable_grant_harness(durable: bool) -> DurableGrantHarness {
+    durable_grant_harness_with(durable, false).await
+}
+
+/// [`durable_grant_harness`] with the approve-then-execute switches of the plan store stated: the
+/// execute switch and the approval-resume switch, which an `execute_now` answer needs (WS14 S2).
+/// With `execute` false the store is the one `durable_grant_harness` has always built.
+async fn durable_grant_harness_with(durable: bool, execute: bool) -> DurableGrantHarness {
     let auth = AuthFixture::start().await;
     let owner = AuthFixture::user_tokens("org-owner", "owner-user");
     let double = SessionCoreDouble::default();
     let (session_client, grant_client) = spawn_session_core_double(&double).await;
     let configured = || {
-        let store = model_gateway::coordinator::PlanModeStore::default();
+        let store = model_gateway::coordinator::PlanModeStore::default()
+            .with_execute_enabled(execute)
+            .with_approval_resume_enabled(execute);
         if durable {
             store
                 .with_durable_grant_enabled(true)
@@ -2867,6 +3237,27 @@ async fn post_durable_approval(
     let status = response.status();
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+/// WS14 S2, approve then execute: a plan approval answers `execute_now` only when the approve
+/// switch is on, the grant is recorded durably for the plan, and an execute turn is accepted here
+/// (the execute switch and the approval-resume switch). Turning the execute switch off answers
+/// `next_message`, as it did before the switch existed.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_approval_answers_execute_now_only_when_every_switch_and_the_durable_record_hold() {
+    std::env::set_var("MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE", "true");
+    let on = durable_grant_harness_with(true, true).await;
+    let (status, body) = post_durable_approval(&on, "run-owned", &on.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["persisted"], true, "{body}");
+    assert_eq!(body["continuation"], "execute_now", "{body}");
+
+    let execute_off = durable_grant_harness_with(true, false).await;
+    let (status, body) = post_durable_approval(&execute_off, "run-owned", &execute_off.owner).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["continuation"], "next_message", "{body}");
+    std::env::remove_var("MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE");
 }
 
 /// The slice's point: approve on replica A, and a run started on replica B reads the rung and

@@ -259,6 +259,8 @@ export type BrowserTab = {
   url?: string | null
   /** Who opened the tab (WS8.F). Absent until Quarry reports it; the agent marker needs it. */
   openedBy?: 'human' | 'agent' | null
+  tabEpoch?: number
+  holder?: 'human' | 'agent'
 }
 
 export type BrowserSession = {
@@ -306,7 +308,14 @@ export type BrowserSession = {
 }
 
 export type BrowserSessionResponse = {
+  /** Initial document navigation failed, but the personal browser is still usable. */
+  navigationError?: {
+    code: 'browser_initial_navigation_failed'
+    httpStatus?: number
+    redirectCount?: number
+  }
   observation?: BrowserObservation | null
+  resolvedStartUrl?: string
   session: BrowserSession
 }
 
@@ -411,6 +420,7 @@ export type BrowserActionSuggestionResponse = {
 }
 
 export type CreateBrowserSessionRequest = {
+  purpose?: 'personal_browsing' | 'assistant_task'
   persistentProfile?: boolean
   profileId?: string
   /**
@@ -539,11 +549,55 @@ export async function getBrowserSession(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<BrowserSessionResponse> {
-  return requestJson<BrowserSessionResponse>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}`, {
+  // Unlike create/control/select, the owner GET deliberately returns Quarry's
+  // raw camelCase projection. Validate and adapt it at the API boundary so
+  // stale-control recovery and browser handoff consume the same shape.
+  const value = await requestJson<unknown>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'GET',
     headers: orgHeaders(orgId),
     signal,
   })
+  return browserSessionFromOwnerProjection(value, sessionId)
+}
+
+export function browserSessionFromOwnerProjection(value: unknown, expectedSessionId: string): BrowserSessionResponse {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid browser owner projection')
+  const raw = value as Record<string, unknown>
+  if (raw.runId !== expectedSessionId || typeof raw.live !== 'boolean' ||
+    (raw.controlMode !== 'agent_control' && raw.controlMode !== 'human_takeover') ||
+    (!Number.isSafeInteger(raw.controlEpoch) || (raw.controlEpoch as number) < 0)) {
+    throw new Error('Invalid browser owner projection')
+  }
+  const viewport = raw.viewport && typeof raw.viewport === 'object' ? raw.viewport as Record<string, unknown> : null
+  if (!viewport || typeof viewport.width !== 'number' || !Number.isFinite(viewport.width) || viewport.width <= 0 ||
+    typeof viewport.height !== 'number' || !Number.isFinite(viewport.height) || viewport.height <= 0 || typeof raw.zdr !== 'boolean') {
+    throw new Error('Invalid browser owner projection')
+  }
+  const width = viewport.width, height = viewport.height
+  const scopes: BrowserProfileScope[] = ['ephemeral', 'org_shared', 'run_scoped', 'user_private']
+  if (typeof raw.profileScope !== 'string' || !scopes.includes(raw.profileScope as BrowserProfileScope) ||
+    (raw.profileStorage !== 'ephemeral' && raw.profileStorage !== 'persistent')) throw new Error('Invalid browser owner projection')
+  const scope = raw.profileScope as BrowserProfileScope
+  const tabs = Array.isArray(raw.tabs) ? raw.tabs.filter((item): item is BrowserTab => Boolean(item && typeof item === 'object' && typeof item.tabId === 'string' && typeof item.active === 'boolean')) : []
+  const url = typeof raw.currentUrl === 'string' ? raw.currentUrl : ''
+  return {
+    session: {
+      id: expectedSessionId,
+      status: raw.live ? 'live' : raw.status === 'closed' ? 'closed' : 'degraded',
+      renderMode: 'chromium',
+      control: { mode: raw.controlMode, epoch: typeof raw.controlEpoch === 'number' ? raw.controlEpoch : null },
+      profile: { id: typeof raw.profileId === 'string' ? raw.profileId : null, scope, storage: raw.profileStorage === 'persistent' ? 'persistent' : 'isolated' },
+      viewport: { width, height },
+      title: tabs.find(tab => tab.active)?.title ?? url,
+      url, tabs,
+      leaseId: typeof raw.leaseId === 'string' ? raw.leaseId : null,
+      // The raw projection is not the BFF capability envelope. Keep this empty;
+      // a normalized mutation response supplies the authoritative capabilities.
+      capabilities: [],
+      zdr: raw.zdr,
+    },
+    observation: raw.lastObservation && typeof raw.lastObservation === 'object' ? raw.lastObservation as BrowserObservation : null,
+  }
 }
 
 /** Read the actor-scoped, append-only browser timeline from its Quarry owner.

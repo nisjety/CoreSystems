@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+import "model_plane/v1/sessions.proto";
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+// SpaceRoomReadService: Session Core's read-side aggregates for the Space room
+// (artifacts, timeline, thread activity summary). Separate file and service so
+// that SessionCore and every mock of it stay source-compatible.
+//
+// P-SC1 registered the service EMPTY. Each consumer adds its RPC and messages here,
+// in merge order, one proto PR at a time:
+//   WS07-S9   ListSpaceArtifacts
+//   WS15-S6   ListSpaceTimeline
+//   WS11-S2   attention reads
+// Every RPC added here is owner-plane read-only: Space access never widens an
+// owner-plane ACL, and a ZDR thread fails closed with the typed refusal
+// catalogue (mp-contracts zdr_refusal.rs).
+service SpaceRoomReadService {
+  // WS07-S9: the room's artifact aggregate. Summaries only (never content); the
+  // caller must be a user principal and must hold a Control Space read decision
+  // (audience `model-plane`, thread:read) for exactly this org, user and Space.
+  rpc ListSpaceArtifacts(ListSpaceArtifactsRequest) returns (ListSpaceArtifactsResponse);
+
+  // WS15-S6: one window of the room's posts, newest activity first, from the thread activity
+  // summary (migration 0078). Same authority as ListSpaceArtifacts: a user principal holding a
+  // Control Space read decision for exactly this org, user and Space; the audience ceiling it
+  // carries is applied to every thread. Refused with FAILED_PRECONDITION
+  // "summary_backfill_pending" while the summary backfill has not finished, and with
+  // UNIMPLEMENTED while SPACE_TIMELINE_CORE is off. Summaries only: no message content.
+  rpc ListSpaceTimeline(ListSpaceTimelineRequest) returns (ListSpaceTimelineResponse);
+}
+
+// Request for one page of the Space's artifacts.
+message ListSpaceArtifactsRequest {
+  // Id of the org the request runs in.
+  string org_id = 1;
+  // Id of the Space whose artifacts are listed.
+  string space_id = 2;
+  // 0 means the default of 50; clamped to 1..200.
+  uint32 limit = 3;
+  // Opaque keyset cursor from a previous response; empty for the first page.
+  string cursor = 4;
+  // Control `model.thread.read` decision reference for this Space.
+  string space_read_decision_ref = 5;
+  // Token for the decision named by space_read_decision_ref.
+  string space_read_decision_token = 6;
+}
+
+// One artifact of the room at its latest version. No content: the viewer reads
+// the thread through the existing transcript route and its own authority.
+message SpaceArtifactSummary {
+  // Id of the thread the artifact is in.
+  string thread_id = 1;
+  // Id of the message the artifact belongs to.
+  string message_id = 2;
+  // Id of the artifact.
+  string artifact_id = 3;
+  // Kind of artifact.
+  string kind = 4;
+  // Title of the artifact.
+  string title = 5;
+  // Latest version number of the artifact.
+  int64 version = 6;
+  // Number of versions the artifact has.
+  int64 version_count = 7;
+  // Size of the artifact content, in characters.
+  int64 size_chars = 8;
+  // Name of the agent that made the artifact.
+  string agent_name = 9;
+  // When the artifact was created.
+  string created_at = 10;
+  // Id of the Space the artifact is in.
+  string space_id = 11;
+}
+
+// One page of artifact summaries.
+message ListSpaceArtifactsResponse {
+  // Artifact summaries on this page.
+  repeated SpaceArtifactSummary artifacts = 1;
+  // Empty when there is no further page.
+  string next_cursor = 2;
+}
+
+// Request for one window of the Space's posts.
+message ListSpaceTimelineRequest {
+  // Id of the org the request runs in.
+  string org_id = 1;
+  // Id of the Space whose timeline is read.
+  string space_id = 2;
+  // Control `model.thread.read` decision reference for this Space.
+  string space_read_decision_ref = 3;
+  // Token for the decision named by space_read_decision_ref.
+  string space_read_decision_token = 4;
+  // 0 means the default of 50; clamped to 1..100.
+  uint32 limit = 5;
+  // Page of posts whose newest message sequence is below this (older). 0 = newest page.
+  uint64 before_seq = 6;
+  // Posts whose newest message sequence is above this (newer), returned oldest first
+  // by the keyset and re-sorted newest first. 0 = unset. Not combined with before_seq.
+  uint64 after_seq = 7;
+  // At most 30 thread ids of this Space to re-read in full summary form (a run changed state
+  // or a thread gained a reply). Ids outside the Space or the ceiling are silently absent.
+  repeated string refresh_thread_ids = 8;
+  // First page only: also return up to 10 pinned posts, even older than the window.
+  bool include_pinned = 9;
+}
+
+// One window of the Space's posts, with pinned and refreshed posts.
+message ListSpaceTimelineResponse {
+  // The window, newest activity first.
+  repeated ThreadSummary posts = 1;
+  // Pinned posts; filled on the first page only.
+  repeated ThreadSummary pinned = 2;
+  // Summaries of the threads named in refresh_thread_ids.
+  repeated ThreadSummary refreshed = 3;
+  // True when more posts exist beyond the window in the direction asked.
+  bool has_more = 4;
+  // Smallest and largest `last_message_seq` in `posts`; 0 when the window is empty.
+  uint64 oldest_seq = 5;
+  // Largest last_message_seq in posts; 0 when the window is empty.
+  uint64 newest_seq = 6;
+  // Posts the reader may see, counted on the first page (no cursor) only; 0 otherwise.
+  uint32 total_posts = 7;
+}

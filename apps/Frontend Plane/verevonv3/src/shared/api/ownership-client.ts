@@ -23,6 +23,8 @@ export async function getOwnershipStatus(): Promise<OwnershipStatus> {
 /** One explicit grant on a document (the ShareDialog "shared with" rows). */
 export type DocumentGrant = {
   grant_id: string
+  /** `user` for a person; `space` for a room attachment, which is read-only here. */
+  subject_type?: string
   subject_id: string
   role: string
   granted_by: string

@@ -11,6 +11,7 @@ export type WebSearchResult = {
   displayUrl?: string
   highlights?: string[]
   hostname?: string
+  provider?: string
   score?: number
   snippet?: string
   title?: string
@@ -27,9 +28,13 @@ export type SearchTimeRange = 'day' | 'month' | 'week' | 'year'
  * and `timeRange: null` mean "no filter" (the default broad search).
  */
 export type WebSearchFilters = {
+  /** Two-letter market hint, e.g. `NO`. */
+  country?: string | null
   exactMatch?: boolean
   excludeDomains?: string[]
   includeDomains?: string[]
+  /** Two- or three-letter language hint, e.g. `no`. */
+  language?: string | null
   timeRange?: SearchTimeRange | null
   topic?: SearchTopic | null
 }
@@ -48,8 +53,15 @@ export type WebSearchCitation = {
   url: string
 }
 
+/** quarry's answer status when an answer was asked for (INNH-8). */
+export type SearchAnswerStatus = 'ok' | 'no_sources' | 'skipped_zdr' | 'unavailable'
+
 export type WebSearchPayload = {
   answer?: string | null
+  /** Why there is no answer: `ok`, `no_sources` (nothing to answer from), `skipped_zdr` (a ZDR org) or `unavailable`. Absent on older answers. */
+  answerStatus?: SearchAnswerStatus | null
+  /** Set when `answerStatus` is `unavailable`: the operator's setting that is missing, e.g. `synthesis_disabled`. */
+  answerReason?: string | null
   citations?: WebSearchCitation[]
   description?: string | null
   excerpt?: string | null
@@ -87,6 +99,7 @@ export function runWebSearch(
     filters?: WebSearchFilters
     includeAnswer?: boolean
     limit?: number
+    publicOnly?: boolean
     query: string
   },
   signal?: AbortSignal,
@@ -104,6 +117,9 @@ export function runWebSearch(
   if (filters.exactMatch) body.exactMatch = true
   if (filters.includeDomains?.length) body.includeDomains = filters.includeDomains
   if (filters.excludeDomains?.length) body.excludeDomains = filters.excludeDomains
+  if (filters.country) body.country = filters.country
+  if (filters.language) body.language = filters.language
+  if (input.publicOnly) body.publicOnly = true
   return requestJson<WebSearchPayload>('/api/v1/search/web', {
     method: 'POST',
     body: JSON.stringify(body),

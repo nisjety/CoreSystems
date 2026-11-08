@@ -233,8 +233,17 @@ fn check_manifest(manifest: &SkillBundleManifest, mount: &SkillMount) -> Result<
 /// Where a bundle is read from: capability-core in production, a fake in tests.
 #[tonic::async_trait]
 pub trait SkillBundleSource: Send + Sync {
-    /// The manifest of `skill_id`'s bundle, read for `org_id`.
-    async fn manifest(&self, org_id: &str, skill_id: &str) -> Result<SkillBundleManifest, Status>;
+    /// The manifest of `skill_id`'s bundle whose digest is `manifest_sha256` (the one the gateway
+    /// named), read for `org_id`. capability-core reads that kept bundle while its
+    /// `SKILL_BUNDLE_RETENTION` is on, so a run pinned to an older skill version mounts its own
+    /// files (EP-11 S5); with it off it reads the live bundle and [`check_manifest`] refuses a
+    /// different one, as before.
+    async fn manifest(
+        &self,
+        org_id: &str,
+        skill_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<SkillBundleManifest, Status>;
     /// The bytes that hash to `sha256` in `skill_id`'s bundle, read for `org_id`.
     async fn blob(&self, org_id: &str, skill_id: &str, sha256: &str) -> Result<Vec<u8>, Status>;
 }
@@ -280,12 +289,18 @@ impl GrpcSkillBundleSource {
 
 #[tonic::async_trait]
 impl SkillBundleSource for GrpcSkillBundleSource {
-    async fn manifest(&self, org_id: &str, skill_id: &str) -> Result<SkillBundleManifest, Status> {
+    async fn manifest(
+        &self,
+        org_id: &str,
+        skill_id: &str,
+        manifest_sha256: &str,
+    ) -> Result<SkillBundleManifest, Status> {
         let request = self
             .authorized(
                 org_id,
                 GetSkillBundleManifestRequest {
                     skill_id: skill_id.to_owned(),
+                    manifest_sha256: manifest_sha256.to_owned(),
                 },
             )
             .await?;
@@ -502,7 +517,7 @@ pub async fn materialise(
     // contents exist.
     let mut directories = vec![tree.root.clone()];
     for mount in mounts {
-        let manifest = source.manifest(org_id, &mount.skill_id).await?;
+        let manifest = source.manifest(org_id, &mount.skill_id, &mount.manifest_sha256).await?;
         check_manifest(&manifest, mount)?;
         let mount_dir = tree.root.join(&mount.name);
         std::fs::create_dir(&mount_dir).map_err(io_status)?;
@@ -634,7 +649,9 @@ pub async fn stage_for_step(
         return Ok(None);
     }
     validate(mounts, tool_name, zdr_or_waived).map_err(refusal_status)?;
-    let source = source.ok_or_else(|| Status::failed_precondition("skill_mounts_unavailable"))?;
+    let Some(source) = source else {
+        return Err(Status::failed_precondition("skill_mounts_unavailable"));
+    };
     let tree = materialise(source, blob_cache(), org_id, mounts, &std::env::temp_dir()).await?;
     global().hold(org_id, run_id, mounts, tree).map(Some)
 }
@@ -682,6 +699,8 @@ mod tests {
         manifests: HashMap<String, SkillBundleManifest>,
         blobs: HashMap<String, Vec<u8>>,
         tamper: Option<String>,
+        /// The manifest digests materialise asked for, in order.
+        asked: Mutex<Vec<String>>,
     }
 
     #[tonic::async_trait]
@@ -690,7 +709,9 @@ mod tests {
             &self,
             _org_id: &str,
             skill_id: &str,
+            manifest_sha256: &str,
         ) -> Result<SkillBundleManifest, Status> {
+            self.asked.lock().unwrap().push(manifest_sha256.to_owned());
             self.manifests
                 .get(skill_id)
                 .cloned()
@@ -774,6 +795,27 @@ mod tests {
             Err(MountRefusal::TooMany)
         );
         assert_eq!(validate(&[], "shell", true), Ok(()));
+    }
+
+    /// EP-11 S5: the manifest read names the bundle the gateway named, so capability-core can
+    /// serve the kept bundle of the version a run pinned rather than whatever is live now.
+    #[tokio::test]
+    async fn materialise_asks_for_the_bundle_the_gateway_named() {
+        let bundle = manifest("skill-1", vec![file("SKILL.md", b"pinned", false)]);
+        let source = source_with(&bundle, &[("SKILL.md", b"pinned")]);
+        let base = scratch_base("skill-mount-pinned");
+        let tree = materialise(
+            &source,
+            &BlobCache::new(4, 1 << 20),
+            ORG,
+            &[mount_for(&bundle, "docx")],
+            &base,
+        )
+        .await
+        .expect("the named bundle mounts");
+        assert_eq!(*source.asked.lock().unwrap(), vec![bundle.manifest_sha256.clone()]);
+        drop(tree);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[tokio::test]

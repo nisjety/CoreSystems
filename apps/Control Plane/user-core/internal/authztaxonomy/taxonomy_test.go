@@ -98,3 +98,33 @@ func TestIsOwnableIsTeamShared(t *testing.T) {
 		t.Error("inbox should not be ownable")
 	}
 }
+
+// TestConversationSnapshotIsOwnableAndNotTeamShared pins the share model (EP-12
+// D10): a share snapshot is its own ownable type so per-user grants can name it,
+// while the live conversation stays team-shared. The type has no owner service
+// and no Space grant yet, so no grant can be written for it until the snapshot
+// store registers one.
+func TestConversationSnapshotIsOwnableAndNotTeamShared(t *testing.T) {
+	got, err := Classify("conversation_snapshot")
+	if err != nil {
+		t.Fatalf("Classify(conversation_snapshot): unexpected error: %v", err)
+	}
+	if got != CategoryOwnable {
+		t.Errorf("Classify(conversation_snapshot) = %q, want %q", got, CategoryOwnable)
+	}
+	if IsTeamShared("conversation_snapshot") {
+		t.Error("conversation_snapshot should not be team-shared")
+	}
+	if err := ValidateUserGrant("conversation_snapshot"); err != nil {
+		t.Errorf("ValidateUserGrant(conversation_snapshot): unexpected error: %v", err)
+	}
+	if IsOwnable("conversation") {
+		t.Error("conversation should stay team-shared, not ownable")
+	}
+	if owner, ok := OwnerService("conversation_snapshot"); ok {
+		t.Errorf("conversation_snapshot has owner service %q; none is expected until the snapshot store ships", owner)
+	}
+	if SpaceGrantable("conversation_snapshot") {
+		t.Error("conversation_snapshot should not be Space-grantable")
+	}
+}

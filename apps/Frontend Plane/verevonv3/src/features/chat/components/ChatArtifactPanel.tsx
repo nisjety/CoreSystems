@@ -7,9 +7,21 @@
  * renderer, untrusted HTML in a sandboxed iframe, images, and generated binaries
  * as a download card. A `‹ v2/3 ›` stepper walks the revision history of a
  * repeatedly re-emitted artifact and always opens on the newest revision.
+ *
+ * With the server's revision history on (EP-3 S3, `artifact_history` in the
+ * gateway's composer capabilities), a chat thread's panel also reads every
+ * stored revision (action `chat.list_artifact_revisions`), so the stepper
+ * survives a reload and another device and names who made each revision. A
+ * room and a temporary thread never ask.
+ *
+ * With the BFF's promote switch on (EP-3 S8, `artifact_promote`), a document
+ * artifact in a chat thread can be saved to knowledge (action
+ * `chat.save_artifact_to_knowledge`): the revision on screen becomes an
+ * independent Data Plane document that stays when the chat is deleted.
  */
 import {
   AlertCircle,
+  BookOpen,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -23,7 +35,9 @@ import {
   FileText,
   Globe,
   Image as ImageIcon,
+  Pencil,
   Presentation,
+  RotateCcw,
 } from '@/shared/icons'
 import { Dynamic } from '@solidjs/web'
 import {
@@ -36,7 +50,23 @@ import {
   createSignal,
   onCleanup,
 } from 'solid-js'
+import {
+  artifactConflictHeadVersion,
+  restoreArtifactRevision,
+  type SavedArtifactRevision,
+} from '@/shared/api/chat-client'
+import { deckManifestRenderer } from './ArtifactDeckView'
+import { ArtifactEditor } from './ArtifactEditor'
+import {
+  type ArtifactSelectionRange,
+  type ArtifactSelectionRequest,
+  quoteSha256,
+  SOURCE_VIEW_ATTRIBUTE,
+  sourceSelectionRange,
+} from './ArtifactSelection'
 import { extraArtifactRenderers } from './artifact-renderers'
+import { officePdfRenderer } from './ArtifactOfficePreview'
+import { ArtifactProvenance } from './ArtifactProvenance'
 import {
   ChatMarkdown,
   DiffView,
@@ -59,6 +89,8 @@ import {
   artifactVersions,
   imageArtifactSrc,
   isCopyableRenderKind,
+  mergeArtifactVersion,
+  mergeServerRevisions,
 } from './chat-artifacts'
 import {
   highlightCode,
@@ -71,10 +103,28 @@ import {
 } from './chat-media-markdown'
 import {
   type ArtifactPanelItem,
+  type ChatArtifactVersion,
   type IconComponent,
 } from './chat-types'
+import {
+  type ArtifactRevision,
+  getComposerCapabilities,
+  listArtifactRevisions,
+  uploadChatDocument,
+} from '@/shared/api/chat-client'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
+import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/artifacts/viewer-registry'
+
+/**
+ * Room HTML previews the reader has explicitly started, for this page session
+ * only (memory, never storage). Keyed on id + version + content hash, so consent
+ * covers exactly the markup that was shown.
+ */
+const [activatedPreviews, setActivatedPreviews] = createSignal<ReadonlySet<string>>(new Set())
+
+extraArtifactRenderers.register(officePdfRenderer)
+extraArtifactRenderers.register(deckManifestRenderer)
 
 const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   binary: FileSpreadsheet,
@@ -87,9 +137,93 @@ const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
   text: FileCode2,
 }
 
-export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
+/** The thread whose stored history the panel may read; only a chat thread passes one. */
+export type ArtifactHistorySource = {
+  threadId: string
+  /** A temporary (zero-retention) thread keeps no history, so the panel never asks for it. */
+  temporary: boolean
+}
+
+/** Kinds the server stores revisions of; every other kind keeps its streamed history only. */
+const STORED_REVISION_KINDS = new Set(['document', 'code', 'html'])
+
+/** The kinds the person may edit as source text (EP-3 S4); the server refuses every other kind. */
+const EDITABLE_ARTIFACT_KINDS: ReadonlySet<string> = new Set(['document', 'code', 'html'])
+
+/**
+ * What the panel needs to offer Edit and Restore (EP-3 S4). `enabled` is the gateway's `artifact_editing`
+ * capability; a temporary or Space thread never edits, whatever the capability says. Absent, the panel is the
+ * read-only viewer it always was.
+ */
+export type ArtifactEditing = {
+  enabled: boolean
+  threadId: string
+  temporary: boolean
+  spaceThread: boolean
+  /** Told about every revision the person saved or restored, so the conversation's artifact state can fold it in. */
+  onSaved?: (revision: SavedArtifactRevision) => void
+}
+
+/** A selection the person made in a source view and has not sent yet, with the revision it was made on (EP-3 S6). */
+type PendingSelection = ArtifactSelectionRange & { version: number }
+
+/** The selected text as the popover shows it: its first 80 characters, the rest cut. */
+function excerpt(text: string): string {
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text
+}
+
+export function ArtifactsPanel(props: {
+  items: ArtifactPanelItem[]
+  surface?: ViewerSurface
+  history?: ArtifactHistorySource
+  editing?: ArtifactEditing
+  /** Sends one selection edit as a normal turn (EP-3 S6). Absent, the panel offers no "Ask for a change". */
+  onAskAboutSelection?: (request: ArtifactSelectionRequest) => Promise<unknown> | void
+}) {
   const i18n = useI18n()
   const [requestedId, setRequestedId] = createSignal<string | null>(null)
+  /** The thread to read stored history for, once the gateway says its history is on. */
+  const [historyThreadId, setHistoryThreadId] = createSignal<string | null>(null)
+  /** The thread a document revision may be saved to knowledge from, once the BFF says promote is on. */
+  const [promoteThreadId, setPromoteThreadId] = createSignal<string | null>(null)
+  // While the editor is open the other artifacts cannot be picked: switching would drop unsaved text.
+  const [editorOpen, setEditorOpen] = createSignal(false)
+
+  createEffect(
+    () => {
+      const history = props.history
+      const eligible = (props.surface ?? 'chat') === 'chat' && history != null && !history.temporary
+      return eligible ? history.threadId.trim() : ''
+    },
+    (threadId) => {
+      setHistoryThreadId(null)
+      setPromoteThreadId(null)
+      if (!threadId) return
+      let cancelled = false
+      void getComposerCapabilities().then((capabilities) => {
+        if (cancelled) return
+        if (capabilities.artifactHistory) setHistoryThreadId(threadId)
+        if (capabilities.artifactPromote) setPromoteThreadId(threadId)
+      })
+      return () => { cancelled = true }
+    },
+  )
+
+  // Whether the gateway may revise a selected range (EP-3 S6, `selection_edit`). Asked only where the panel can send the
+  // turn; a temporary chat never asks, because the gateway refuses the reference there.
+  const [selectionEditOn, setSelectionEditOn] = createSignal(false)
+  createEffect(
+    () => props.onAskAboutSelection != null && (props.surface ?? 'chat') === 'chat' && props.history?.temporary !== true,
+    (eligible) => {
+      setSelectionEditOn(false)
+      if (!eligible) return
+      let cancelled = false
+      void getComposerCapabilities().then((capabilities) => {
+        if (!cancelled) setSelectionEditOn(capabilities.selectionEdit)
+      })
+      return () => { cancelled = true }
+    },
+  )
 
   // The selection follows the newest artifact until the user picks one, and
   // falls back to the newest again if the picked artifact leaves the list
@@ -119,20 +253,32 @@ export function ArtifactsPanel(props: { items: ArtifactPanelItem[] }) {
               <ArtifactListEntry
                 item={item}
                 selected={selected()?.artifact.id === item.artifact.id}
+                disabled={editorOpen() && selected()?.artifact.id !== item.artifact.id}
                 onSelect={() => setRequestedId(item.artifact.id)}
               />
             )}
           </For>
         </div>
         <Show when={selected()}>
-          {(item) => <ArtifactViewer item={item()} />}
+          {(item) => (
+            <ArtifactViewer
+              item={item()}
+              surface={props.surface}
+              historyThreadId={historyThreadId()}
+              promoteThreadId={promoteThreadId()}
+              editing={props.editing}
+              onEditorOpenChange={setEditorOpen}
+              selectionEdit={selectionEditOn()}
+              onAskAboutSelection={props.onAskAboutSelection}
+            />
+          )}
         </Show>
       </div>
     </Show>
   )
 }
 
-function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; onSelect: () => void }) {
+function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; disabled?: boolean; onSelect: () => void }) {
   const renderKind = createMemo(() => artifactRenderKind(props.item.artifact))
   const versionCount = createMemo(() => artifactVersions(props.item.artifact).length)
   const i18n = useI18n()
@@ -143,6 +289,7 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; 
       type="button"
       role="tab"
       aria-selected={props.selected ? 'true' : 'false'}
+      disabled={props.disabled}
       class={{
         'verevon-chat-artifact-list__item': true,
         'verevon-chat-artifact-list__item--active': props.selected,
@@ -163,9 +310,36 @@ function ArtifactListEntry(props: { item: ArtifactPanelItem; selected: boolean; 
   )
 }
 
-export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
+function revisionVersion(revision: ArtifactRevision): ChatArtifactVersion {
+  return {
+    content: revision.content,
+    title: revision.title,
+    version: revision.version,
+    editorKind: revision.editorKind,
+    ...(revision.restoredFromVersion ? { restoredFromVersion: revision.restoredFromVersion } : {}),
+  }
+}
+
+export function ArtifactViewer(props: {
+  item: ArtifactPanelItem
+  surface?: ViewerSurface
+  /** Set only when the server's history is on for a chat thread that is not temporary. */
+  historyThreadId?: string | null
+  /** Set only when the BFF's promote switch is on for a chat thread that is not temporary (EP-3 S8). */
+  promoteThreadId?: string | null
+  editing?: ArtifactEditing
+  onEditorOpenChange?: (open: boolean) => void
+  /** The gateway's `selection_edit` capability, already narrowed to the surfaces that may ask (EP-3 S6). */
+  selectionEdit?: boolean
+  onAskAboutSelection?: (request: ArtifactSelectionRequest) => Promise<unknown> | void
+}) {
   const i18n = useI18n()
+  const surface = (): ViewerSurface => props.surface ?? 'chat'
   const [versionCursor, setVersionCursor] = createSignal<number | null>(null)
+  /** Revisions read from the server's history, every page loaded so far. */
+  const [serverRevisions, setServerRevisions] = createSignal<ChatArtifactVersion[]>([])
+  const [olderRevisionsExist, setOlderRevisionsExist] = createSignal(false)
+  const [loadingOlder, setLoadingOlder] = createSignal(false)
   const [copyState, setCopyState] = createSignal<'copied' | 'failed' | 'idle'>('idle')
   const [showSource, setShowSource] = createSignal(false)
   /**
@@ -176,8 +350,38 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   const [showDiff, setShowDiff] = createSignal(false)
   const [imageFailed, setImageFailed] = createSignal(false)
   const [exportFailed, setExportFailed] = createSignal(false)
+  /**
+   * Revisions the person saved or restored here (EP-3 S4), folded over the conversation's copy so the panel
+   * shows them at once; a later turn's revision carries them in its own history.
+   */
+  const [savedRevisions, setSavedRevisions] = createSignal<SavedArtifactRevision[]>([])
+  const [editorOpen, setEditorOpen] = createSignal(false)
+  const [restoring, setRestoring] = createSignal(false)
+  const [restoreFailure, setRestoreFailure] = createSignal<string | null>(null)
+  /** The selection the person made in a source view and has not sent, and the instruction they are writing (EP-3 S6). */
+  const [pendingSelection, setPendingSelection] = createSignal<PendingSelection | null>(null)
+  const [askText, setAskText] = createSignal('')
+  const [asking, setAsking] = createSignal(false)
+  const [askFailure, setAskFailure] = createSignal<string | null>(null)
+  let bodyRef: HTMLDivElement | undefined
+  const [promoting, setPromoting] = createSignal(false)
+  /** The outcome of the last "save to knowledge" for this artifact; `documentId` links the copy. */
+  const [promoteResult, setPromoteResult] = createSignal<{ ok: true; documentId: string } | { ok: false } | null>(null)
 
-  const artifact = () => props.item.artifact
+  const artifact = createMemo(() => savedRevisions().reduce(
+    (carried, saved) => mergeArtifactVersion(carried, {
+      id: carried.id,
+      kind: carried.kind,
+      content: saved.content,
+      title: saved.title,
+      version: saved.version,
+    }),
+    serverRevisions().length > 0
+      ? mergeServerRevisions(props.item.artifact, serverRevisions())
+      : props.item.artifact,
+  ))
+  /** Versions the person wrote: a model's provenance stamp does not describe them. */
+  const personVersions = createMemo(() => new Set(savedRevisions().map((saved) => saved.version)))
   const versions = createMemo(() => artifactVersions(artifact()))
   const revision = createMemo(() => artifactVersionAt(artifact(), versionCursor()))
   const revisionIndex = createMemo(() => {
@@ -208,18 +412,117 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   })
   const renderKind = createMemo(() => artifactRenderKind(displayed()))
   /** A registered extra viewer, if one claims this revision. It takes the body; the header stays on the built-in kind. */
-  const extraRenderer = createMemo(() => extraArtifactRenderers.resolve(displayed()))
+  const extraRenderer = createMemo(() => (surface() === 'chat' ? extraArtifactRenderers.resolve(displayed()) : undefined))
+  /** The registry's verdict for this kind on this surface; `undefined` means the surface may not draw it. */
+  const viewer = createMemo(() => viewerFor(renderKind(), surface()))
+  const previewGated = createMemo(
+    () => viewer()?.requiresActivation === true && !activatedPreviews().has(viewerActivationKey(displayed())),
+  )
   const missing = createMemo(() => artifactContentMissing(displayed().content))
   const fileMeta = createMemo(() => artifactFileMeta(displayed(), renderKind(), props.item.file))
   const title = createMemo(() => artifactDisplayTitle({ ...props.item, artifact: displayed() }, renderKind(), i18n.tr))
+  /**
+   * Edit and Restore (EP-3 S4): only with the gateway's capability on, in a chat (never a room), in a thread that
+   * keeps history (never temporary, never a Space's), for a text kind whose text arrived.
+   */
+  const canEdit = createMemo(() => {
+    const editing = props.editing
+    return editing?.enabled === true
+      && !editing.temporary
+      && !editing.spaceThread
+      && editing.threadId.length > 0
+      && surface() === 'chat'
+      && EDITABLE_ARTIFACT_KINDS.has(artifact().kind)
+      && !artifactContentMissing(artifact().content)
+  })
+  const onLatest = createMemo(() => revisionIndex() >= versions().length - 1)
+  /**
+   * Asking about a selection (EP-3 S6): the gateway said selection edits are on, this is a chat that is not temporary,
+   * the person is not editing, and the kind is a text kind. Which views show the source is decided by `selectionAllowed`.
+   */
+  const selectionOffered = createMemo(() => props.selectionEdit === true
+    && props.onAskAboutSelection != null
+    && surface() === 'chat'
+    && !editorOpen()
+    && EDITABLE_ARTIFACT_KINDS.has(artifact().kind)
+    && !artifactContentMissing(artifact().content))
+  /** The body on screen is the artifact's own text: the code view, or the source of an HTML page or a document. */
+  const selectionAllowed = createMemo(() => selectionOffered() && (renderKind() === 'code' || showSource()))
+  /** Save to knowledge (EP-3 S8): a document whose text arrived, on the chat surface, outside the editor. */
+  const canPromote = createMemo(() => Boolean(props.promoteThreadId)
+    && surface() === 'chat'
+    && artifact().kind === 'document'
+    && renderKind() === 'document'
+    && !missing()
+    && !editorOpen())
+
+  const openEditor = (open: boolean) => {
+    setEditorOpen(open)
+    props.onEditorOpenChange?.(open)
+  }
+  onCleanup(() => props.onEditorOpenChange?.(false))
+
+  const acceptSaved = (saved: SavedArtifactRevision) => {
+    setSavedRevisions((current) => [...current, saved])
+    setVersionCursor(null)
+    setShowDiff(false)
+    props.editing?.onSaved?.(saved)
+  }
+
+  const restoreShown = async () => {
+    const editing = props.editing
+    if (!editing || restoring()) return
+    setRestoring(true)
+    setRestoreFailure(null)
+    try {
+      acceptSaved(await restoreArtifactRevision({
+        threadId: editing.threadId,
+        artifactId: artifact().id,
+        version: revision().version,
+        expectedVersion: artifact().version,
+      }))
+    } catch (error) {
+      setRestoreFailure(artifactConflictHeadVersion(error) != null
+        ? i18n.tr(
+          'Artefaktet ble endret etter at du åpnet det. Last inn samtalen på nytt og prøv igjen.',
+          'The artifact changed after you opened it. Reload the conversation and try again.',
+        )
+        : i18n.tr('Kunne ikke gjenopprette versjonen. Prøv igjen.', 'Could not restore the version. Please try again.'))
+    } finally {
+      setRestoring(false)
+    }
+  }
+
+  /** Copies the revision on screen, not the newest one: that is the text the person chose to keep. */
+  const saveToKnowledge = async () => {
+    const threadId = props.promoteThreadId
+    if (!threadId || promoting()) return
+    const shown = displayed()
+    setPromoting(true)
+    setPromoteResult(null)
+    try {
+      const saved = await uploadChatDocument(title(), shown.content, {
+        origin: 'chat-artifact',
+        sourceRef: { threadId, artifactId: shown.id, version: shown.version },
+      })
+      setPromoteResult({ ok: true, documentId: saved.documentId })
+    } catch {
+      setPromoteResult({ ok: false })
+    } finally {
+      setPromoting(false)
+    }
+  }
 
   // Reset the revision cursor, the HTML source toggle, and any image failure
   // when the panel switches to a different artifact — a new selection must open
   // on the newest revision in preview mode. Keyed on the id alone so a version
   // streaming in for the artifact the user is already reading does NOT yank
-  // their revision cursor forward.
+  // their revision cursor forward. The key is a memo: a Solid 2 effect runs
+  // whenever its compute re-runs, equal value or not, and `artifact()` re-runs
+  // on every saved or server revision, which this effect itself clears.
+  const artifactId = createMemo(() => artifact().id)
   createEffect(
-    () => artifact().id,
+    artifactId,
     () => {
       setVersionCursor(null)
       setShowSource(false)
@@ -227,8 +530,78 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
       setImageFailed(false)
       setCopyState('idle')
       setExportFailed(false)
+      setSavedRevisions([])
+      setRestoreFailure(null)
+      setPromoteResult(null)
+      openEditor(false)
     },
   )
+
+  // The stored history of this artifact, first page on open. Keyed on the
+  // thread and the artifact, so a revision streaming in does not refetch; a
+  // failed read leaves the streamed history as it was.
+  let historyGeneration = 0
+  const loadRevisions = (threadId: string, artifactId: string, beforeVersion?: number) => {
+    const generation = historyGeneration
+    setLoadingOlder(beforeVersion != null)
+    return listArtifactRevisions(threadId, artifactId, beforeVersion != null ? { beforeVersion } : {})
+      .then((page) => {
+        if (generation !== historyGeneration) return
+        setServerRevisions((current) => [...current, ...page.revisions.map(revisionVersion)])
+        setOlderRevisionsExist(page.hasMore)
+      })
+      .catch(() => {
+        // The history is a richer view of what streamed, never a precondition for reading it.
+      })
+      .finally(() => {
+        if (generation === historyGeneration) setLoadingOlder(false)
+      })
+  }
+  // A memo, so a new item object for the same artifact (a streamed revision) does not re-run the effect.
+  const historyKey = createMemo(() => {
+    const threadId = props.historyThreadId ?? ''
+    const item = props.item.artifact
+    return threadId && STORED_REVISION_KINDS.has(item.kind) ? `${threadId}\n${item.id}` : ''
+  })
+  createEffect(
+    historyKey,
+    (key) => {
+      historyGeneration += 1
+      setServerRevisions([])
+      setOlderRevisionsExist(false)
+      if (!key) return
+      const [threadId = '', artifactId = ''] = key.split('\n')
+      void loadRevisions(threadId, artifactId)
+    },
+  )
+  const loadOlderRevisions = () => {
+    const threadId = props.historyThreadId
+    const oldest = serverRevisions().reduce<number | null>(
+      (lowest, entry) => (lowest == null || entry.version < lowest ? entry.version : lowest),
+      null,
+    )
+    if (!threadId || oldest == null || loadingOlder()) return
+    void loadRevisions(threadId, props.item.artifact.id, oldest)
+  }
+  /** `v3 · you`, `v4 · Verevon`, `v5 · restored from v2`; the plain position when no editor is known. */
+  const revisionLabel = createMemo(() => {
+    const current = revision()
+    switch (current.editorKind) {
+      case 'model':
+        return `v${current.version} · Verevon`
+      case 'user':
+        return i18n.tr(`v${current.version} · deg`, `v${current.version} · you`)
+      case 'restore':
+        return current.restoredFromVersion
+          ? i18n.tr(
+            `v${current.version} · gjenopprettet fra v${current.restoredFromVersion}`,
+            `v${current.version} · restored from v${current.restoredFromVersion}`,
+          )
+          : i18n.tr(`v${current.version} · gjenopprettet`, `v${current.version} · restored`)
+      default:
+        return `v${current.version} · ${revisionIndex() + 1}/${versions().length}`
+    }
+  })
 
   // Word/Excel/PowerPoint/PDF for a document artifact, built in the browser
   // from the revision on screen (lib/chat-export). The same four choices an
@@ -282,6 +655,52 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
     if (next) setVersionCursor(next.version)
   }
 
+  /** Reads the selection the person made in the body after a release there; only a source view offers one. */
+  const readSourceSelection = () => {
+    const body = bodyRef
+    if (!body || !body.hasAttribute(SOURCE_VIEW_ATTRIBUTE)) {
+      setPendingSelection(null)
+      return
+    }
+    const range = sourceSelectionRange(body, displayed().content)
+    setPendingSelection(range ? { ...range, version: revision().version } : null)
+  }
+  // A selection belongs to the text on screen: moving to another revision, or leaving the source view, drops it.
+  // A memo, so a re-read of the same revision (a server page, a saved revision) keeps the selection.
+  const selectionKey = createMemo(() => `${revision().version}:${selectionAllowed()}`)
+  createEffect(
+    selectionKey,
+    () => {
+      setPendingSelection(null)
+    },
+  )
+
+  /** Sends the selection and the person's instruction as one turn (EP-3 S6). The selected text is hashed, never sent. */
+  const askAboutSelection = async (range: PendingSelection) => {
+    const send = props.onAskAboutSelection
+    const instruction = askText().trim()
+    if (!send || !instruction || asking()) return
+    setAsking(true)
+    setAskFailure(null)
+    try {
+      await send({
+        artifactId: artifact().id,
+        title: title(),
+        version: range.version,
+        start: range.start,
+        end: range.end,
+        quoteSha256: await quoteSha256(range.quote),
+        instruction,
+      })
+      setPendingSelection(null)
+      setAskText('')
+    } catch {
+      setAskFailure(i18n.tr('Kunne ikke sende endringen. Prøv igjen.', 'Could not send the change. Please try again.'))
+    } finally {
+      setAsking(false)
+    }
+  }
+
   return (
     <section class="verevon-chat-artifact-view" data-menu-boundary aria-label={i18n.tr(`Artefakt ${title()}`, `Artifact ${title()}`)}>
       <header class="verevon-chat-artifact-view__head">
@@ -321,7 +740,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               >
                 <ChevronLeft size={14} />
               </button>
-              <span>v{revision().version} · {revisionIndex() + 1}/{versions().length}</span>
+              <span>{revisionLabel()}</span>
               <button
                 type="button"
                 aria-label={i18n.tr('Neste versjon', 'Next version')}
@@ -331,6 +750,33 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
                 <ChevronRight size={14} />
               </button>
             </div>
+          </Show>
+          <Show when={olderRevisionsExist()}>
+            <button
+              type="button"
+              class="verevon-chat-artifact-action"
+              disabled={loadingOlder()}
+              onClick={() => loadOlderRevisions()}
+            >
+              {i18n.tr('Tidligere versjoner', 'Earlier versions')}
+            </button>
+          </Show>
+          <Show when={canEdit() && !editorOpen() && onLatest()}>
+            <button type="button" class="verevon-chat-artifact-action" onClick={() => openEditor(true)}>
+              <Pencil size={14} />
+              {i18n.tr('Rediger', 'Edit')}
+            </button>
+          </Show>
+          <Show when={canEdit() && !editorOpen() && !onLatest()}>
+            <button
+              type="button"
+              class="verevon-chat-artifact-action"
+              disabled={restoring()}
+              onClick={() => void restoreShown()}
+            >
+              <RotateCcw size={14} />
+              {i18n.tr('Gjenopprett denne versjonen', 'Restore this version')}
+            </button>
           </Show>
           {/* The value the accessor receives must be the diff itself, so the
               `missing` guard is a ternary rather than an && (which narrows to `true`). */}
@@ -351,14 +797,18 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               </button>
             )}
           </Show>
-          <Show when={renderKind() === 'html' && !missing()}>
+          <Show when={(renderKind() === 'html' || (renderKind() === 'document' && selectionOffered())) && !missing()}>
             <button
               type="button"
               class="verevon-chat-artifact-action"
               onClick={() => setShowSource((value) => !value)}
             >
               {showSource() ? <Eye size={14} /> : <Code2 size={14} />}
-              {showSource() ? i18n.tr('Vis forhåndsvisning', 'Show preview') : i18n.tr('Vis kode', 'Show code')}
+              {showSource()
+                ? i18n.tr('Vis forhåndsvisning', 'Show preview')
+                : renderKind() === 'document'
+                  ? i18n.tr('Vis kilde', 'Show source')
+                  : i18n.tr('Vis kode', 'Show code')}
             </button>
           </Show>
           <Show when={isCopyableRenderKind(renderKind()) && !missing()}>
@@ -380,6 +830,17 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               </Switch>
             </button>
           </Show>
+          <Show when={canPromote()}>
+            <button
+              type="button"
+              class="verevon-chat-artifact-action"
+              disabled={promoting()}
+              onClick={() => void saveToKnowledge()}
+            >
+              <BookOpen size={14} />
+              {i18n.tr('Lagre kopi i kunnskapsbasen', 'Save a copy to knowledge')}
+            </button>
+          </Show>
           <Show when={renderKind() === 'document' && !missing()}>
             <MessageMenu
               align="auto"
@@ -393,7 +854,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               items={exportItems()}
             />
           </Show>
-          <Show when={fileMeta()}>
+          <Show when={viewer() ? fileMeta() : null}>
             {(meta) => (
               <a
                 class="verevon-chat-artifact-action verevon-chat-artifact-action--primary"
@@ -412,8 +873,97 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
           {i18n.tr('Eksport mislyktes. Prøv igjen.', 'Export failed. Please try again.')}
         </p>
       </Show>
+      <Show when={restoreFailure()}>
+        {(message) => <p class="verevon-chat-feedback-reasons__note" role="alert">{message()}</p>}
+      </Show>
+      <Show when={promoteResult()}>
+        {(result) => {
+          const outcome = result()
+          return outcome.ok
+            ? (
+              <p class="verevon-chat-feedback-reasons__note" role="status">
+                {i18n.tr(
+                  'Kopien er lagret i kunnskapsbasen. Den blir værende hvis samtalen slettes, og senere endringer her blir ikke med.',
+                  'The copy is saved to knowledge. It stays if the chat is deleted, and later edits here do not carry over.',
+                )}
+                <Show when={outcome.documentId}>
+                  {' '}
+                  <a href={`/knowledge?source=${encodeURIComponent(outcome.documentId)}`}>
+                    {i18n.tr('Åpne kopien', 'Open the copy')}
+                  </a>
+                </Show>
+              </p>
+            )
+            : (
+              <p class="verevon-chat-feedback-reasons__note" role="alert">
+                {i18n.tr('Kunne ikke lagre kopien i kunnskapsbasen. Prøv igjen.', 'Could not save the copy to knowledge. Please try again.')}
+              </p>
+            )
+        }}
+      </Show>
 
-      <div class="verevon-chat-artifact-view__body">
+      <Show when={pendingSelection()}>
+        {(range) => (
+          <form
+            class="verevon-chat-artifact-ask"
+            onSubmit={(event) => {
+              event.preventDefault()
+              void askAboutSelection(range())
+            }}
+          >
+            <p>
+              {i18n.tr('Valgt tekst', 'Selected text')}: <q>{excerpt(range().quote)}</q>
+            </p>
+            <textarea
+              rows={2}
+              value={askText()}
+              aria-label={i18n.tr('Hva skal endres i det valgte?', 'What should change in the selection?')}
+              onInput={(event) => setAskText(event.currentTarget.value)}
+            />
+            <Show when={askFailure()}>
+              {(message) => <p class="verevon-chat-feedback-reasons__note" role="alert">{message()}</p>}
+            </Show>
+            <div class="verevon-chat-artifact-ask__actions">
+              <button
+                type="submit"
+                class="verevon-chat-artifact-action verevon-chat-artifact-action--primary"
+                disabled={asking() || askText().trim().length === 0}
+              >
+                {i18n.tr('Be om endring', 'Ask for a change')}
+              </button>
+              <button type="button" class="verevon-chat-artifact-action" onClick={() => setPendingSelection(null)}>
+                {i18n.tr('Avbryt', 'Cancel')}
+              </button>
+            </div>
+          </form>
+        )}
+      </Show>
+      <div
+        ref={bodyRef}
+        class="verevon-chat-artifact-view__body"
+        data-artifact-source={selectionAllowed() ? '' : undefined}
+        onMouseUp={() => readSourceSelection()}
+        onKeyUp={() => readSourceSelection()}
+      >
+        <Show
+          when={!(editorOpen() && props.editing)}
+          fallback={(
+            <ArtifactEditor
+              threadId={props.editing?.threadId ?? ''}
+              artifactId={artifact().id}
+              title={title()}
+              content={artifact().content}
+              headVersion={artifact().version}
+              newest={() => ({ content: artifact().content, title: artifact().title, version: artifact().version })}
+              onSaved={(saved) => {
+                acceptSaved(saved)
+                openEditor(false)
+              }}
+              onClose={() => openEditor(false)}
+            />
+          )}
+        >
+        <Show when={viewer()} fallback={<ArtifactSurfaceRefusal />}>
         <Show when={!missing()} fallback={<ArtifactLoadFailure kind={artifact().kind} />}>
           <Show
             when={!(showDiff() && revisionDiff())}
@@ -421,22 +971,48 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
           >
           <Switch fallback={<ArtifactPlainText content={displayed().content} />}>
             <Match when={extraRenderer()?.component}>
-              {(component) => <Dynamic component={component()} artifact={displayed()} />}
+              {(component) => (
+                <Dynamic
+                  component={component()}
+                  artifact={displayed()}
+                  file={props.item.file}
+                  fallback={() => (
+                    <Show when={fileMeta()}>{(meta) => <ArtifactFileCard meta={meta()} title={title()} />}</Show>
+                  )}
+                />
+              )}
             </Match>
             <Match when={renderKind() === 'code'}>
               <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />
             </Match>
             <Match when={renderKind() === 'document'}>
-              <div ref={documentRef} class="verevon-chat-artifact-document">
-                <ChatMarkdown content={displayed().content} />
-              </div>
+              <Show
+                when={!(showSource() && selectionOffered())}
+                fallback={<ArtifactPlainText content={displayed().content} />}
+              >
+                <div ref={documentRef} class="verevon-chat-artifact-document">
+                  <ChatMarkdown content={displayed().content} />
+                </div>
+              </Show>
             </Match>
             <Match when={renderKind() === 'html'}>
               <Show
                 when={!showSource()}
                 fallback={<ArtifactCodeView content={displayed().content} language="html" />}
               >
-                <ArtifactHtmlPreview html={displayed().content} title={title()} />
+                <Show
+                  when={!previewGated()}
+                  fallback={(
+                    <ArtifactRunPreviewGate
+                      onRun={() => {
+                        const key = viewerActivationKey(displayed())
+                        setActivatedPreviews((current) => new Set(current).add(key))
+                      }}
+                    />
+                  )}
+                >
+                  <ArtifactHtmlPreview html={displayed().content} title={title()} />
+                </Show>
               </Show>
             </Match>
             <Match when={renderKind() === 'image'}>
@@ -472,7 +1048,12 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
           </Switch>
           </Show>
         </Show>
+        </Show>
+        </Show>
       </div>
+      <Show when={!personVersions().has(revision().version)}>
+        <ArtifactProvenance provenance={(artifact() as { provenance?: unknown }).provenance} />
+      </Show>
     </section>
   )
 }
@@ -622,6 +1203,54 @@ export function ArtifactLoadFailure(props: { kind: string }) {
           )}
         </p>
       </div>
+    </div>
+  )
+}
+
+/**
+ * The surface has no viewer for this kind (a room never draws PDF, image,
+ * binary or unknown kinds). Deliberately no download link and no content.
+ */
+function ArtifactSurfaceRefusal() {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-chat-artifact-failure verevon-chat-artifact-failure--neutral" role="status">
+      <AlertCircle size={18} />
+      <div>
+        <strong>{i18n.tr('Forhåndsvisning er ikke tilgjengelig i rommet', 'Preview not available in the room')}</strong>
+        <p>
+          {i18n.tr(
+            'Denne typen artefakt vises ikke i rommet.',
+            'This kind of artifact is not shown in the room.',
+          )}
+        </p>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Room HTML is untrusted markup: nothing runs until the reader asks for it. The
+ * "Show code" toggle in the header stays available without running anything.
+ */
+function ArtifactRunPreviewGate(props: { onRun: () => void }) {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-chat-artifact-gate">
+      <Globe size={20} />
+      <div>
+        <strong>{i18n.tr('Forhåndsvisningen er ikke startet', 'Preview not started')}</strong>
+        <p>
+          {i18n.tr(
+            'Dette er HTML skrevet av en agent. Den kjører isolert, men først når du starter den.',
+            'This is HTML written by an agent. It runs in isolation, but only once you start it.',
+          )}
+        </p>
+      </div>
+      <button type="button" class="verevon-chat-artifact-action verevon-chat-artifact-action--primary" onClick={() => props.onRun()}>
+        <Eye size={14} />
+        {i18n.tr('Kjør forhåndsvisning', 'Run preview')}
+      </button>
     </div>
   )
 }

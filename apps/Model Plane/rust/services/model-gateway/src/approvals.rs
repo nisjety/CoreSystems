@@ -74,6 +74,13 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         // The cache knows a kind and a free-text reason, not which rule held the call, so
         // it states no cause rather than guessing one (build plan WS13 S1).
         cause: None,
+        // Nor does it know the tool, so it states no card context (build plan WS10 S1).
+        tool_key: String::new(),
+        action_digest: String::new(),
+        turn_origin: String::new(),
+        grant_use_token: String::new(),
+        context_json: String::new(),
+        ..Default::default()
     }
 }
 
@@ -97,6 +104,7 @@ pub fn gateway_approval_from_proto(a: &Approval) -> GatewayApproval {
         ApprovalKind::Plan => "plan",
         ApprovalKind::Permission => "permission",
         ApprovalKind::Destructive => "destructive_action",
+        ApprovalKind::UntrustedContent => "untrusted_content",
         _ => "custom",
     };
     let status = match ApprovalState::try_from(a.state).unwrap_or(ApprovalState::Unspecified) {
@@ -918,6 +926,7 @@ pub(crate) async fn read_through_approval_for_owner_authenticated(
             GetApprovalRequest {
                 approval_id: approval_id.to_owned(),
                 org_id: org_id.to_owned(),
+                ..Default::default()
             },
             bearer,
         )?)
@@ -1124,6 +1133,7 @@ async fn publish_event<P: EventPublisher>(
             "comment": approval.comment,
         }),
         zdr: false,
+        ..Default::default()
     };
     if let Err(e) = publisher.publish(subject, &envelope).await {
         warn!(error = %e, subject = %subject, "failed to publish approval event");
@@ -1520,6 +1530,9 @@ mod tests {
     fn durable_pending(id: &str, org: &str, run: &str) -> Approval {
         Approval {
             consumed_at: None,
+            tool_key: String::new(),
+            action_label: String::new(),
+            continuation: None,
             continuation_mode: String::new(),
             id: id.into(),
             run_id: run.into(),
@@ -1538,6 +1551,7 @@ mod tests {
             expires_at: None,
             org_id: org.into(),
             cause: None,
+            ..Default::default()
         }
     }
 

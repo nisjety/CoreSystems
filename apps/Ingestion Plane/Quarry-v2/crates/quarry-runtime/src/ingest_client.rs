@@ -456,7 +456,7 @@ impl CreateDocumentBody {
         Self {
             org_id: request.org_id.clone(),
             source: "quarry",
-            doc_type: "web_page",
+            doc_type: document_type_for(request),
             title,
             content: request.markdown.clone().unwrap_or_default(),
             metadata: serde_json::Value::Object(meta),
@@ -504,6 +504,381 @@ fn map_document_response(doc: CreateDocumentResponse, trace_id: String) -> DataP
         retrievable_after: None,
         trace_id,
     }
+}
+
+// ---------------------------------------------------------------------------
+// E3.4-8: governed download hand-off (Quarry → Data Plane).
+//
+// A file the browser downloaded (a PDF, a text file) reaches Data Plane only
+// through this module's `DataPlaneIngest` transport, under the same
+// `POST /v1/documents` contract a crawled page uses. There is no other path:
+// no direct database write and no second HTTP client. What the hand-off adds is
+// the governance in front of that transport:
+//
+// * the flag `QUARRY_EDGE__DOWNLOAD_HANDOFF` (default off);
+// * ZDR refused first, before any field is read into an error or a request;
+// * the document is stamped with the org of the verified claim, never with an
+//   org the caller supplied, and an artifact owned by another org is refused;
+// * a typed rejection for a type outside the allow-list (Office documents,
+//   images and archives are refused), for a file with no text layer, and for
+//   text over Data Plane's content cap.
+//
+// The bytes of the file never travel: the caller hands over the text the parser
+// already derived from them (`quarry-transform`), and the artifact id, type,
+// size and digest ride in metadata for provenance.
+// ---------------------------------------------------------------------------
+
+/// The flag that turns the download hand-off on. Default off.
+pub const ENV_DOWNLOAD_HANDOFF: &str = "QUARRY_EDGE__DOWNLOAD_HANDOFF";
+
+/// Data Plane's `MaxContentLength` (documents-api `internal/validate`): the most
+/// text one document may carry, in bytes.
+pub const DOWNLOAD_HANDOFF_MAX_TEXT_BYTES: usize = 5 * 1024 * 1024;
+
+/// The longest title the hand-off sends, in characters (documents-api allows
+/// 1024; a file name is cut well below that).
+const DOWNLOAD_TITLE_MAX_CHARS: usize = 255;
+
+/// The metadata key that marks a Data Plane ingest as a download hand-off. The
+/// wire mapping reads its `document_type` to pick the document type.
+pub const DOWNLOAD_METADATA_KEY: &str = "quarry_download";
+
+/// Whether a raw flag value turns the hand-off on. Unset or anything other than
+/// the usual "on" spellings is off.
+pub fn download_handoff_enabled(raw: Option<&str>) -> bool {
+    crate::org_erasure::flag_on(raw)
+}
+
+/// Reads [`ENV_DOWNLOAD_HANDOFF`].
+pub fn download_handoff_enabled_from_env() -> bool {
+    download_handoff_enabled(std::env::var(ENV_DOWNLOAD_HANDOFF).ok().as_deref())
+}
+
+/// The download types the hand-off admits. Each is a type whose text the parser
+/// derives and that Data Plane stores as a text document. Everything else
+/// (Office documents, images, archives, executables) is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadDocumentKind {
+    Pdf,
+    PlainText,
+    Markdown,
+    Csv,
+}
+
+impl DownloadDocumentKind {
+    pub const ALL: [Self; 4] = [Self::Pdf, Self::PlainText, Self::Markdown, Self::Csv];
+
+    /// The kind for a MIME type. Parameters (`; charset=utf-8`) and case are
+    /// ignored. `None` is a type outside the allow-list.
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        match normalize_mime(mime).as_str() {
+            "application/pdf" => Some(Self::Pdf),
+            "text/plain" => Some(Self::PlainText),
+            "text/markdown" | "text/x-markdown" => Some(Self::Markdown),
+            "text/csv" => Some(Self::Csv),
+            _ => None,
+        }
+    }
+
+    /// The Data Plane document `type` this kind is stored as.
+    pub fn document_type(self) -> &'static str {
+        match self {
+            Self::Pdf => "download_pdf",
+            Self::PlainText => "download_text",
+            Self::Markdown => "download_markdown",
+            Self::Csv => "download_csv",
+        }
+    }
+
+    /// The kind whose document type is `value`, if any.
+    pub fn from_document_type(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.document_type() == value)
+    }
+}
+
+/// The MIME type in lower case, without parameters.
+fn normalize_mime(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Why a download was not handed off. Each is a typed, non-retryable refusal
+/// with a stable `reason` in the error details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadHandoffRejection {
+    /// `QUARRY_EDGE__DOWNLOAD_HANDOFF` is off.
+    Disabled,
+    /// The run is under ZDR: a durable Data Plane write is never allowed.
+    ZdrRefused,
+    /// The verified claim carries no org.
+    MissingOrg,
+    /// The artifact belongs to another org than the claim's.
+    OrgMismatch,
+    /// The type is outside the allow-list.
+    UnsupportedType,
+    /// The parser found no text (for example a scanned PDF without OCR).
+    NoText,
+    /// The text is over Data Plane's content cap.
+    TooLarge,
+    /// The download's source URL is not an http(s) URL.
+    InvalidSourceUrl,
+    /// The digest is not a 64-character hex SHA-256.
+    InvalidDigest,
+}
+
+impl DownloadHandoffRejection {
+    /// The stable reason written into the error details.
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Disabled => "download_handoff_disabled",
+            Self::ZdrRefused => "download_handoff_zdr_refused",
+            Self::MissingOrg => "download_handoff_missing_org",
+            Self::OrgMismatch => "download_handoff_org_mismatch",
+            Self::UnsupportedType => "download_handoff_unsupported_type",
+            Self::NoText => "download_handoff_no_text",
+            Self::TooLarge => "download_handoff_too_large",
+            Self::InvalidSourceUrl => "download_handoff_invalid_source_url",
+            Self::InvalidDigest => "download_handoff_invalid_digest",
+        }
+    }
+
+    /// The error class the refusal is reported as.
+    pub fn code(self) -> ErrorCode {
+        match self {
+            Self::Disabled => ErrorCode::Unsupported,
+            Self::ZdrRefused | Self::MissingOrg | Self::OrgMismatch => ErrorCode::Forbidden,
+            Self::UnsupportedType | Self::NoText => ErrorCode::UnsupportedMedia,
+            Self::TooLarge | Self::InvalidSourceUrl | Self::InvalidDigest => {
+                ErrorCode::BadRequest
+            }
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::Disabled => "download hand-off to Data Plane is not enabled",
+            Self::ZdrRefused => "ZDR active: download hand-off to Data Plane denied",
+            Self::MissingOrg => "download hand-off needs the org of a verified claim",
+            Self::OrgMismatch => "the downloaded artifact belongs to another org",
+            Self::UnsupportedType => "this download type cannot be handed off to Data Plane",
+            Self::NoText => "the download has no text to hand off",
+            Self::TooLarge => "the download's text is over Data Plane's content cap",
+            Self::InvalidSourceUrl => "the download's source URL is not an http(s) URL",
+            Self::InvalidDigest => "the download's digest is not a SHA-256 hex digest",
+        }
+    }
+
+    /// The typed error, with `details.reason`. Nothing caller-supplied is
+    /// added, so the error is safe to log and return under any posture.
+    pub fn into_error(self) -> QuarryError {
+        let mut error = QuarryError::new(self.code(), self.message())
+            .with_details(serde_json::json!({ "reason": self.reason() }));
+        error.retryable = false;
+        error
+    }
+
+    /// The typed error with one extra, already-safe detail field.
+    fn into_error_with(self, key: &str, value: serde_json::Value) -> QuarryError {
+        let mut details = serde_json::Map::new();
+        details.insert("reason".to_string(), serde_json::Value::from(self.reason()));
+        details.insert(key.to_string(), value);
+        let mut error = QuarryError::new(self.code(), self.message())
+            .with_details(serde_json::Value::Object(details));
+        error.retryable = false;
+        error
+    }
+}
+
+/// The identity of the verified caller. The edge fills it from the claim it
+/// already verified; the hand-off never reads an org from anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadHandoffClaim {
+    pub org_id: String,
+    /// The initiating user, when the claim names one. Forwarded so Data Plane
+    /// stamps ownership the same way it does for a page the user crawled.
+    pub user_id: Option<String>,
+}
+
+/// One downloaded file, as the download path left it: a tenant-owned artifact
+/// plus the text the parser derived from its bytes.
+#[derive(Debug, Clone)]
+pub struct DownloadedArtifact {
+    pub artifact_id: quarry_core::ids::kinds::ArtifactKind,
+    /// The org that owns the artifact row.
+    pub org_id: String,
+    pub run_id: quarry_core::ids::kinds::RunKind,
+    /// The URL the file was downloaded from.
+    pub source_url: String,
+    /// The MIME type the download admission recorded.
+    pub mime_type: String,
+    pub byte_size: u64,
+    /// SHA-256 of the bytes, lower-case hex.
+    pub sha256: String,
+    pub filename: Option<String>,
+    /// The text the parser derived from the bytes.
+    pub extracted_text: String,
+    pub zdr: ZdrMode,
+    pub privacy_policy: Option<PrivacyPolicy>,
+}
+
+/// Builds the Data Plane ingest request for one download, or the typed
+/// refusal. Pure: the flag is checked by [`DownloadHandoff`].
+///
+/// Order matters: ZDR is refused before any other field is read, and the org
+/// check comes before anything about the file, so a cross-tenant call learns
+/// nothing about the artifact.
+pub fn build_download_ingest_request(
+    claim: &DownloadHandoffClaim,
+    artifact: &DownloadedArtifact,
+) -> QuarryResult<DataPlaneIngestRequest> {
+    if artifact.zdr.is_active() {
+        return Err(DownloadHandoffRejection::ZdrRefused.into_error());
+    }
+    let org_id = claim.org_id.trim();
+    if org_id.is_empty() {
+        return Err(DownloadHandoffRejection::MissingOrg.into_error());
+    }
+    if artifact.org_id != org_id {
+        return Err(DownloadHandoffRejection::OrgMismatch.into_error());
+    }
+    let Some(kind) = DownloadDocumentKind::from_mime(&artifact.mime_type) else {
+        let mime: String = normalize_mime(&artifact.mime_type).chars().take(128).collect();
+        return Err(DownloadHandoffRejection::UnsupportedType
+            .into_error_with("mime_type", serde_json::Value::String(mime)));
+    };
+    if artifact.extracted_text.trim().is_empty() {
+        return Err(DownloadHandoffRejection::NoText.into_error());
+    }
+    if artifact.extracted_text.len() > DOWNLOAD_HANDOFF_MAX_TEXT_BYTES {
+        return Err(DownloadHandoffRejection::TooLarge.into_error_with(
+            "max_bytes",
+            serde_json::Value::from(DOWNLOAD_HANDOFF_MAX_TEXT_BYTES as u64),
+        ));
+    }
+    match url::Url::parse(&artifact.source_url) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => {}
+        _ => return Err(DownloadHandoffRejection::InvalidSourceUrl.into_error()),
+    }
+    let sha256 = artifact.sha256.trim().to_ascii_lowercase();
+    if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(DownloadHandoffRejection::InvalidDigest.into_error());
+    }
+
+    let filename = artifact
+        .filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| name.chars().take(DOWNLOAD_TITLE_MAX_CHARS).collect::<String>());
+
+    let mut download = serde_json::Map::new();
+    download.insert(
+        "artifact_id".to_string(),
+        serde_json::Value::String(artifact.artifact_id.to_string()),
+    );
+    download.insert(
+        "document_type".to_string(),
+        serde_json::Value::from(kind.document_type()),
+    );
+    download.insert(
+        "mime_type".to_string(),
+        serde_json::Value::String(normalize_mime(&artifact.mime_type)),
+    );
+    download.insert(
+        "byte_size".to_string(),
+        serde_json::Value::from(artifact.byte_size),
+    );
+    download.insert(
+        "sha256".to_string(),
+        serde_json::Value::String(sha256.clone()),
+    );
+    if let Some(name) = &filename {
+        download.insert("filename".to_string(), serde_json::Value::String(name.clone()));
+    }
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        DOWNLOAD_METADATA_KEY.to_string(),
+        serde_json::Value::Object(download),
+    );
+
+    Ok(DataPlaneIngestRequest {
+        run_id: artifact.run_id.clone(),
+        // Stamped from the verified claim, never from the artifact row.
+        org_id: org_id.to_string(),
+        source_url: artifact.source_url.clone(),
+        title: filename,
+        markdown: Some(artifact.extracted_text.clone()),
+        html_ref: None,
+        raw_ref: None,
+        chunks: Vec::new(),
+        metadata: serde_json::Value::Object(metadata),
+        fingerprint: format!("sha256:{sha256}"),
+        zdr: artifact.zdr,
+        retention_policy: None,
+        privacy_policy: artifact.privacy_policy.clone(),
+        source_trace: None,
+        initiator_user_id: claim
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|user| !user.is_empty())
+            .map(str::to_string),
+        visibility: None,
+    })
+}
+
+/// The governed hand-off: the flag, then [`build_download_ingest_request`],
+/// then the one Data Plane ingest transport. The transport repeats its own ZDR
+/// guard before any wire I/O.
+pub struct DownloadHandoff {
+    ingest: Arc<dyn DataPlaneIngest>,
+    enabled: bool,
+}
+
+impl DownloadHandoff {
+    pub fn new(ingest: Arc<dyn DataPlaneIngest>, enabled: bool) -> Self {
+        Self { ingest, enabled }
+    }
+
+    /// Enabled by [`ENV_DOWNLOAD_HANDOFF`].
+    pub fn from_env(ingest: Arc<dyn DataPlaneIngest>) -> Self {
+        Self::new(ingest, download_handoff_enabled_from_env())
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Hands one download to Data Plane, or refuses it with a typed error.
+    pub async fn hand_off(
+        &self,
+        claim: &DownloadHandoffClaim,
+        artifact: &DownloadedArtifact,
+    ) -> QuarryResult<DataPlaneIngestResponse> {
+        if !self.enabled {
+            return Err(DownloadHandoffRejection::Disabled.into_error());
+        }
+        let request = build_download_ingest_request(claim, artifact)?;
+        self.ingest.ingest(&request).await
+    }
+}
+
+/// The Data Plane document type for an ingest request: a download hand-off
+/// carries an allow-listed type in its metadata; everything else is a page.
+fn document_type_for(request: &DataPlaneIngestRequest) -> &'static str {
+    request
+        .metadata
+        .get(DOWNLOAD_METADATA_KEY)
+        .and_then(|download| download.get("document_type"))
+        .and_then(|value| value.as_str())
+        .and_then(DownloadDocumentKind::from_document_type)
+        .map(DownloadDocumentKind::document_type)
+        .unwrap_or("web_page")
 }
 
 #[cfg(test)]
@@ -885,5 +1260,298 @@ mod tests {
             "legitimate_interest"
         );
         assert_eq!(v["metadata"]["privacy_policy"]["residency"], "eu");
+    }
+}
+
+/// E3.4-8: the download hand-off, against a hermetic fake of the ingest
+/// transport (and one wiremock run of the real HTTP mapping).
+#[cfg(test)]
+mod download_handoff_tests {
+    use super::*;
+    use quarry_core::ids::Id;
+    use serde_json::json;
+    use std::sync::Mutex;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TEST_BEARER: &str =
+        "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzZXJ2aWNlOnF1YXJyeSJ9.c2lnbmF0dXJl";
+    const DIGEST: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    /// Records every request it is handed; never touches the network.
+    #[derive(Default)]
+    struct FakeIngest {
+        seen: Mutex<Vec<DataPlaneIngestRequest>>,
+    }
+
+    impl FakeIngest {
+        fn seen(&self) -> Vec<DataPlaneIngestRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl DataPlaneIngest for FakeIngest {
+        async fn ingest(
+            &self,
+            request: &DataPlaneIngestRequest,
+        ) -> QuarryResult<DataPlaneIngestResponse> {
+            // The real transports refuse ZDR before wire I/O; so does the fake.
+            ensure_durable_ingest_allowed(request.zdr)?;
+            self.seen.lock().unwrap().push(request.clone());
+            Ok(DataPlaneIngestResponse {
+                document_id: "doc_download".into(),
+                index_status: IndexStatus::Pending,
+                knowledge_unit_count: 0,
+                embedding_status: EmbeddingStatus::Pending,
+                retrievable_after: None,
+                trace_id: String::new(),
+            })
+        }
+    }
+
+    fn claim() -> DownloadHandoffClaim {
+        DownloadHandoffClaim {
+            org_id: "org_a".into(),
+            user_id: Some("user_1".into()),
+        }
+    }
+
+    fn artifact() -> DownloadedArtifact {
+        DownloadedArtifact {
+            artifact_id: Id::new(),
+            org_id: "org_a".into(),
+            run_id: Id::new(),
+            source_url: "https://example.com/files/report.pdf".into(),
+            mime_type: "application/PDF; charset=binary".into(),
+            byte_size: 4_096,
+            sha256: DIGEST.into(),
+            filename: Some("report.pdf".into()),
+            extracted_text: "Quarterly report\n\nRevenue grew.".into(),
+            zdr: ZdrMode::Off,
+            privacy_policy: Some(PrivacyPolicy::default()),
+        }
+    }
+
+    fn reason(error: &QuarryError) -> &str {
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details.get("reason"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn the_flag_is_off_unless_turned_on() {
+        assert!(!download_handoff_enabled(None));
+        assert!(!download_handoff_enabled(Some("")));
+        assert!(!download_handoff_enabled(Some("off")));
+        assert!(!download_handoff_enabled(Some("observe")));
+        assert!(download_handoff_enabled(Some("on")));
+        assert!(download_handoff_enabled(Some(" TRUE ")));
+        assert!(download_handoff_enabled(Some("1")));
+        assert_eq!(ENV_DOWNLOAD_HANDOFF, "QUARRY_EDGE__DOWNLOAD_HANDOFF");
+    }
+
+    #[tokio::test]
+    async fn a_disabled_handoff_refuses_without_calling_data_plane() {
+        let fake = Arc::new(FakeIngest::default());
+        let handoff = DownloadHandoff::new(fake.clone(), false);
+        assert!(!handoff.enabled());
+        let error = handoff.hand_off(&claim(), &artifact()).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert_eq!(reason(&error), "download_handoff_disabled");
+        assert!(!error.retryable);
+        assert!(fake.seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_admitted_pdf_is_stamped_with_the_claims_org_and_handed_off() {
+        let fake = Arc::new(FakeIngest::default());
+        let handoff = DownloadHandoff::new(fake.clone(), true);
+        let artifact = artifact();
+        let response = handoff.hand_off(&claim(), &artifact).await.unwrap();
+        assert_eq!(response.document_id, "doc_download");
+
+        let seen = fake.seen();
+        assert_eq!(seen.len(), 1);
+        let request = &seen[0];
+        assert_eq!(request.org_id, "org_a");
+        assert_eq!(request.initiator_user_id.as_deref(), Some("user_1"));
+        assert_eq!(request.source_url, artifact.source_url);
+        assert_eq!(request.title.as_deref(), Some("report.pdf"));
+        assert_eq!(request.markdown.as_deref(), Some(artifact.extracted_text.as_str()));
+        assert_eq!(request.fingerprint, format!("sha256:{DIGEST}"));
+        assert!(request.html_ref.is_none() && request.raw_ref.is_none());
+        assert!(request.chunks.is_empty());
+        let download = &request.metadata[DOWNLOAD_METADATA_KEY];
+        assert_eq!(download["document_type"], "download_pdf");
+        assert_eq!(download["mime_type"], "application/pdf");
+        assert_eq!(download["byte_size"], 4_096);
+        assert_eq!(download["sha256"], DIGEST);
+        assert_eq!(download["artifact_id"], artifact.artifact_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn zdr_is_refused_before_anything_else() {
+        let fake = Arc::new(FakeIngest::default());
+        let handoff = DownloadHandoff::new(fake.clone(), true);
+        let mut artifact = artifact();
+        artifact.zdr = ZdrMode::On;
+        // Also wrong org and wrong type: ZDR still wins, and says nothing else.
+        artifact.org_id = "org_b".into();
+        artifact.mime_type = "application/zip".into();
+        let error = handoff.hand_off(&claim(), &artifact).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(reason(&error), "download_handoff_zdr_refused");
+        assert_eq!(error.details, Some(json!({ "reason": "download_handoff_zdr_refused" })));
+        assert!(fake.seen().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_artifact_of_another_org_is_refused() {
+        let fake = Arc::new(FakeIngest::default());
+        let handoff = DownloadHandoff::new(fake.clone(), true);
+        let mut artifact = artifact();
+        artifact.org_id = "org_b".into();
+        let error = handoff.hand_off(&claim(), &artifact).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(reason(&error), "download_handoff_org_mismatch");
+        assert!(fake.seen().is_empty());
+    }
+
+    #[test]
+    fn a_claim_without_an_org_is_refused() {
+        let claim = DownloadHandoffClaim {
+            org_id: "  ".into(),
+            user_id: None,
+        };
+        let error = build_download_ingest_request(&claim, &artifact()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(reason(&error), "download_handoff_missing_org");
+    }
+
+    #[test]
+    fn types_outside_the_allow_list_get_a_typed_rejection() {
+        for mime in [
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
+            "application/vnd.ms-excel",
+            "image/png",
+            "application/zip",
+            "application/octet-stream",
+            "text/html",
+            "",
+        ] {
+            let mut artifact = artifact();
+            artifact.mime_type = mime.into();
+            let error = build_download_ingest_request(&claim(), &artifact).unwrap_err();
+            assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{mime}");
+            assert_eq!(reason(&error), "download_handoff_unsupported_type", "{mime}");
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn each_admitted_type_maps_to_its_document_type() {
+        let cases = [
+            ("application/pdf", "download_pdf"),
+            ("text/plain; charset=utf-8", "download_text"),
+            ("text/markdown", "download_markdown"),
+            ("text/csv", "download_csv"),
+        ];
+        for (mime, document_type) in cases {
+            let mut artifact = artifact();
+            artifact.mime_type = mime.into();
+            let request = build_download_ingest_request(&claim(), &artifact).unwrap();
+            assert_eq!(document_type_for(&request), document_type, "{mime}");
+        }
+    }
+
+    #[test]
+    fn a_download_without_text_is_refused() {
+        let mut artifact = artifact();
+        artifact.extracted_text = " \n\t ".into();
+        let error = build_download_ingest_request(&claim(), &artifact).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(reason(&error), "download_handoff_no_text");
+    }
+
+    #[test]
+    fn text_over_the_data_plane_cap_is_refused() {
+        let mut artifact = artifact();
+        artifact.extracted_text = "x".repeat(DOWNLOAD_HANDOFF_MAX_TEXT_BYTES + 1);
+        let error = build_download_ingest_request(&claim(), &artifact).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert_eq!(reason(&error), "download_handoff_too_large");
+    }
+
+    #[test]
+    fn a_non_http_source_and_a_bad_digest_are_refused() {
+        let mut artifact = artifact();
+        artifact.source_url = "file:///etc/passwd".into();
+        let error = build_download_ingest_request(&claim(), &artifact).unwrap_err();
+        assert_eq!(reason(&error), "download_handoff_invalid_source_url");
+
+        let mut artifact = self::artifact();
+        artifact.sha256 = "not-a-digest".into();
+        let error = build_download_ingest_request(&claim(), &artifact).unwrap_err();
+        assert_eq!(reason(&error), "download_handoff_invalid_digest");
+    }
+
+    #[test]
+    fn a_page_ingest_keeps_the_web_page_type() {
+        let mut artifact = artifact();
+        artifact.filename = None;
+        let mut request = build_download_ingest_request(&claim(), &artifact).unwrap();
+        // An unknown document type in the marker falls back to a page.
+        request.metadata[DOWNLOAD_METADATA_KEY]["document_type"] = json!("download_exe");
+        assert_eq!(document_type_for(&request), "web_page");
+        request.metadata = json!({});
+        assert_eq!(document_type_for(&request), "web_page");
+    }
+
+    #[tokio::test]
+    async fn the_http_transport_sends_the_download_as_a_typed_document() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/documents"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "document_id": "doc_pdf",
+                "status": "pending"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = IngestClient::new(server.uri(), TEST_BEARER).unwrap();
+        let handoff = DownloadHandoff::new(Arc::new(client), true);
+
+        let response = handoff.hand_off(&claim(), &artifact()).await.unwrap();
+        assert_eq!(response.document_id, "doc_pdf");
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(body["org_id"], "org_a");
+        assert_eq!(body["source"], "quarry");
+        assert_eq!(body["type"], "download_pdf");
+        assert_eq!(body["title"], "report.pdf");
+        assert_eq!(body["content"], "Quarterly report\n\nRevenue grew.");
+        assert_eq!(body["metadata"]["url"], "https://example.com/files/report.pdf");
+        assert_eq!(body["metadata"][DOWNLOAD_METADATA_KEY]["document_type"], "download_pdf");
+        assert_eq!(body["metadata"]["fingerprint"], format!("sha256:{DIGEST}"));
+    }
+
+    #[tokio::test]
+    async fn the_http_transport_never_sends_a_zdr_download() {
+        // Dead address: a refusal must come before any request could fire.
+        let client = IngestClient::new("http://127.0.0.1:1", TEST_BEARER).unwrap();
+        let handoff = DownloadHandoff::new(Arc::new(client), true);
+        let mut artifact = artifact();
+        artifact.zdr = ZdrMode::On;
+        let error = handoff.hand_off(&claim(), &artifact).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(reason(&error), "download_handoff_zdr_refused");
     }
 }

@@ -8,7 +8,10 @@ package spaces
 
 import (
 	"fmt"
+	"net"
+	"sort"
 	"strings"
+	"time"
 )
 
 type Kind string
@@ -18,7 +21,37 @@ const (
 	KindRoom     Kind = "room"
 	KindProject  Kind = "project"
 	KindCase     Kind = "case"
+	// KindDM is a direct message between exactly two people and KindGroupDM one
+	// between three and MaxDMParticipants (WS12-S1). Both have a roster fixed at
+	// registration, humans only, and are identified by participant_hash.
+	KindDM      Kind = "dm"
+	KindGroupDM Kind = "group_dm"
 )
+
+// IsDM reports whether the kind is one of the two direct-message kinds.
+func (k Kind) IsDM() bool { return k == KindDM || k == KindGroupDM }
+
+// Agent scopes a Space kind implies. Control owns this fact (WS12 D1.1): a
+// room-like Space shares its agent with the room, a personal Space keeps a
+// personal agent, and a DM carries no agent at all.
+const (
+	AgentScopePersonal = "personal"
+	AgentScopeRoom     = "room"
+	AgentScopeNone     = "none"
+)
+
+// AgentScope derives the agent scope from the kind. An unknown kind has none:
+// no permissive default.
+func (k Kind) AgentScope() string {
+	switch k {
+	case KindPersonal:
+		return AgentScopePersonal
+	case KindRoom, KindProject, KindCase:
+		return AgentScopeRoom
+	default:
+		return AgentScopeNone
+	}
+}
 
 // SpaceLifecycle is Application's canonical lifecycle vocabulary. Control
 // records the mapped access state, but never lets an unrecognized producer
@@ -43,6 +76,12 @@ type Registration struct {
 	Kind              Kind           `json:"kind"`
 	Lifecycle         SpaceLifecycle `json:"lifecycle"`
 	LifecycleRevision int64          `json:"lifecycle_revision"`
+	// Participants and ParticipantHash travel only for the DM kinds (WS12-S1):
+	// the complete, fixed roster and its content-free commitment. Validate
+	// requires both for a DM kind, neither for any other, and recomputes the
+	// hash, so an Application payload cannot register a roster it did not hash.
+	Participants    []string `json:"participants,omitempty"`
+	ParticipantHash string   `json:"participant_hash,omitempty"`
 }
 
 // RegistrationState maps an Application lifecycle event into Control's
@@ -106,7 +145,7 @@ func (r Registration) Validate() error {
 		return fmt.Errorf("space registration identity is required")
 	}
 	switch r.Kind {
-	case KindPersonal, KindRoom, KindProject, KindCase:
+	case KindPersonal, KindRoom, KindProject, KindCase, KindDM, KindGroupDM:
 	default:
 		return fmt.Errorf("unknown Space kind %q", r.Kind)
 	}
@@ -116,8 +155,47 @@ func (r Registration) Validate() error {
 	if _, err := r.RegistrationState(); err != nil {
 		return err
 	}
+	return r.validateParticipants()
+}
+
+// validateParticipants enforces the DM roster contract: DM kinds carry 2 to 9
+// distinct participants including the owner and a hash that recomputes equal;
+// every other kind carries neither field.
+func (r Registration) validateParticipants() error {
+	if !r.Kind.IsDM() {
+		if len(r.Participants) != 0 || strings.TrimSpace(r.ParticipantHash) != "" {
+			return fmt.Errorf("participants are only valid for direct-message Spaces")
+		}
+		return nil
+	}
+	canonical, err := CanonicalParticipants(r.Participants)
+	if err != nil {
+		return err
+	}
+	if kind, _ := DMKindForCount(len(canonical)); kind != r.Kind {
+		return &DMParticipantInvalidError{Reason: DMReasonCount}
+	}
+	owner := strings.TrimSpace(r.OwnerPrincipalID)
+	if i := sort.SearchStrings(canonical, owner); i >= len(canonical) || canonical[i] != owner {
+		return &DMParticipantInvalidError{Reason: DMReasonOwnerMissing}
+	}
+	hash, err := ParticipantSetHash(canonical...)
+	if err != nil {
+		return err
+	}
+	if r.ParticipantHash != hash {
+		return fmt.Errorf("participant hash does not match participants")
+	}
 	return nil
 }
+
+// Roster modes of a registered Space (WS04-S4). "managed" rooms take Control
+// writes; "org_derived" is the organization room, converged by the
+// declarative sync and refused by the Control writer.
+const (
+	RosterModeManaged    = "managed"
+	RosterModeOrgDerived = "org_derived"
+)
 
 type AuthorityChange string
 
@@ -186,6 +264,27 @@ type EffectPolicy struct {
 	// later. A Space allowed the first is not thereby allowed the second. See
 	// apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §4.
 	ProcessRegistryEntitled bool `json:"process_registry_entitled"`
+	// RunControlEntitled (WS09-S7) lets a room manager or owner cancel another
+	// member's live run. Stopping someone else's turn is a different power from
+	// speaking or reading in the room, so it is its own deny-by-default floor
+	// and is never inherited from ThreadCreateEntitled or ThreadReadEntitled.
+	RunControlEntitled bool `json:"run_control_entitled"`
+	// ApprovalGrantEntitled (WS10-S2) lets a room manager record a standing
+	// approval rule and lets the rule pass a prompt. A rule waives a prompt, not
+	// authority, so it is its own deny-by-default floor and is never inherited
+	// from AgentActionEntitled or ThreadCreateEntitled.
+	ApprovalGrantEntitled bool `json:"approval_grant_entitled"`
+	// DMCreateEntitled (WS12-S1) lets a member open a direct message. A DM also
+	// needs ThreadCreateEntitled and ThreadReadEntitled; this bit is its own
+	// deny-by-default floor and is never inherited from either.
+	DMCreateEntitled bool `json:"dm_create_entitled"`
+	// MessageReviseEntitled (WS12-S5) lets a member edit or delete their own
+	// message and retract an agent reply they started. MessageModerateEntitled
+	// additionally lets a room manager or owner delete another member's
+	// message. Both are their own deny-by-default floors, never inherited from
+	// ThreadCreateEntitled, and both are inert under Zero Data Retention.
+	MessageReviseEntitled   bool `json:"message_revise_entitled"`
+	MessageModerateEntitled bool `json:"message_moderate_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {
@@ -200,6 +299,111 @@ func (p EffectPolicy) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Sandbox egress tiers (EP-9 E2, decision D-E3). The vocabulary is closed and
+// ordered: a higher tier reaches strictly more of the network. Control signs
+// at most min(claim, org ceiling), and nothing above off under Zero Data
+// Retention. Mirrored by sandbox-manager's authz egress tiers and, from E3, by
+// execution-core; the spelling is bound into the capability decision.
+const (
+	SandboxEgressOff        = "off"
+	SandboxEgressRegistries = "registries"
+	SandboxEgressAllowlist  = "allowlist"
+	// SandboxEgressAll is in the vocabulary so a backend can state what it can
+	// enforce, but it is not storable in W3: no org ceiling can be all, so no
+	// decision ever grants it.
+	SandboxEgressAll = "all"
+)
+
+// maxSandboxEgressAllowlistHosts bounds an org's allow-list. Migration 044
+// enforces the same cap as a backstop for a writer that bypasses this package.
+const maxSandboxEgressAllowlistHosts = 32
+
+// sandboxEgressRank orders the tiers. A value missing here is not a tier;
+// callers treat it as off (unknown means off), never as a wider reach.
+var sandboxEgressRank = map[string]int{
+	SandboxEgressOff: 0, SandboxEgressRegistries: 1, SandboxEgressAllowlist: 2, SandboxEgressAll: 3,
+}
+
+// SandboxEgressPolicy is an org's sandbox egress ceiling, stored beside the
+// effect policy (space_effect_policies.sandbox_egress_tier and
+// sandbox_egress_allowlist). It is a separate type rather than EffectPolicy
+// fields because EffectPolicy is compared with == by the effect-policy writer
+// and a slice would make it incomparable. Host names only, never content.
+type SandboxEgressPolicy struct {
+	Tier      string   `json:"sandbox_egress_tier"`
+	Allowlist []string `json:"sandbox_egress_allowlist"`
+}
+
+// Normalize validates a policy for storage and returns it with the allow-list
+// in canonical form (lower-case, de-duplicated, sorted). It refuses all (not
+// storable in W3) and every value outside the vocabulary, so a typo is an
+// error rather than a silent off. An allow-list may be stored under a lower
+// tier; it is only signed into a decision whose granted tier is allowlist.
+func (p SandboxEgressPolicy) Normalize() (SandboxEgressPolicy, error) {
+	tier := strings.TrimSpace(p.Tier)
+	switch tier {
+	case SandboxEgressOff, SandboxEgressRegistries, SandboxEgressAllowlist:
+	case SandboxEgressAll:
+		return SandboxEgressPolicy{}, fmt.Errorf("sandbox egress tier %q is not storable", tier)
+	default:
+		return SandboxEgressPolicy{}, fmt.Errorf("unknown sandbox egress tier %q", p.Tier)
+	}
+	if len(p.Allowlist) > maxSandboxEgressAllowlistHosts {
+		return SandboxEgressPolicy{}, fmt.Errorf("sandbox egress allow-list exceeds %d hosts", maxSandboxEgressAllowlistHosts)
+	}
+	hosts := make([]string, 0, len(p.Allowlist))
+	seen := make(map[string]struct{}, len(p.Allowlist))
+	for _, raw := range p.Allowlist {
+		host, err := CanonicalEgressHost(raw)
+		if err != nil {
+			return SandboxEgressPolicy{}, err
+		}
+		if _, duplicate := seen[host]; duplicate {
+			continue
+		}
+		seen[host] = struct{}{}
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return SandboxEgressPolicy{Tier: tier, Allowlist: hosts}, nil
+}
+
+// CanonicalEgressHost returns the canonical spelling of one allow-list host:
+// a lower-case DNS name of at least two labels, with no scheme, port, path,
+// wildcard or IP literal. IP literals are refused because an allow-list entry
+// must name a host the egress proxy resolves and checks itself (E3 refuses
+// private and metadata addresses after resolution); a literal would bypass
+// that check. Internationalized names must be given in punycode.
+func CanonicalEgressHost(raw string) (string, error) {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(raw)), ".")
+	if host == "" || len(host) > 253 {
+		return "", fmt.Errorf("sandbox egress host %q is not a valid host name", raw)
+	}
+	if net.ParseIP(host) != nil {
+		return "", fmt.Errorf("sandbox egress host %q is an IP literal", raw)
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 {
+		return "", fmt.Errorf("sandbox egress host %q is not a fully qualified host name", raw)
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("sandbox egress host %q is not a valid host name", raw)
+		}
+		for _, ch := range label {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+				return "", fmt.Errorf("sandbox egress host %q is not a valid host name", raw)
+			}
+		}
+	}
+	// An all-digit last label is a numeric address in another spelling
+	// (for example 127.1), which ParseIP does not catch.
+	if strings.Trim(labels[len(labels)-1], "0123456789") == "" {
+		return "", fmt.Errorf("sandbox egress host %q is an IP literal", raw)
+	}
+	return host, nil
 }
 
 // RosterMember is one participant of a Space as shown to another participant.
@@ -226,6 +430,22 @@ type SpaceIndexEntry struct {
 	OrgID    string `json:"org_id"`
 	Kind     Kind   `json:"kind"`
 	Role     string `json:"role"`
+	// State is the registration state the index resolved: "active" or
+	// "archived" (WS04-S7). Archived rooms stay listed and readable.
+	State string `json:"state"`
+	// AgentScope is Control's derived agent scope for the kind ("personal",
+	// "room" or "none"; WS12-S1).
+	AgentScope string `json:"agent_scope"`
+	// Participants is the fixed roster of a DM kind, omitted for every other
+	// kind. Ids and display names only, never an email.
+	Participants []DMParticipant `json:"participants,omitempty"`
+}
+
+// DMParticipant is one person of a direct message as shown to another
+// participant. Same sanitization as RosterMember: no email.
+type DMParticipant struct {
+	SubjectID   string `json:"subject_id"`
+	DisplayName string `json:"display_name"`
 }
 
 // MemberGrant is one subject's place in a Space. `service` covers agent and
@@ -264,6 +484,10 @@ type MembershipReplacement struct {
 	//
 	// Callers that manage one kind must say so: `["user"]`.
 	ManagedSubjectTypes []string `json:"managed_subject_types,omitempty"`
+	// RosterMode is optional. Only the organization-room sync sends
+	// "org_derived"; Control sets it once on the Space row and never clears it
+	// (WS04-S4). Absent leaves the Space's mode unchanged.
+	RosterMode string `json:"roster_mode,omitempty"`
 }
 
 // managedSubjectTypeSet resolves the kinds this replacement may deactivate.
@@ -287,6 +511,9 @@ func (m MembershipReplacement) Validate() error {
 	}
 	if len(m.Members) > maxSpaceMembers {
 		return fmt.Errorf("space membership exceeds %d subjects", maxSpaceMembers)
+	}
+	if mode := strings.TrimSpace(m.RosterMode); mode != "" && mode != RosterModeOrgDerived {
+		return fmt.Errorf("unknown Space roster mode %q", m.RosterMode)
 	}
 	seen := make(map[string]struct{}, len(m.Members))
 	for _, member := range m.Members {
@@ -346,6 +573,27 @@ type CurrentMembership struct {
 	Kind      Kind              `json:"kind"`
 	Role      string            `json:"role"`
 	Revisions AuthorityRevision `json:"revisions"`
+	// RecipientReady is true when the subject is in the Space's registered
+	// recipient audience at the current audience revision (always true for a
+	// personal Space). Membership without it cannot yet read or post through a
+	// shared decision, so a client shows "access is being prepared" (WS04-S4).
+	RecipientReady bool `json:"recipient_ready"`
+	// RosterMode is "managed" (Control writers) or "org_derived" (the
+	// organization room, whose roster follows the organization).
+	RosterMode string `json:"roster_mode,omitempty"`
+	// State is "active" or, for ResolveReadableUserMembership only, "archived"
+	// (WS04-S7). ArchivedAt is set when State is "archived".
+	State      string     `json:"state,omitempty"`
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
+	// Visibility is "private" or "org_public" and JoinRole the role a self-join
+	// receives (WS04-S8). Both are additive facts for the settings UI; neither
+	// grants access by itself.
+	Visibility string `json:"visibility,omitempty"`
+	JoinRole   string `json:"join_role,omitempty"`
+	// HistoryMode is "full" or "since_join" (WS04-S11): a stored room fact for
+	// the settings UI. Whether a floor is actually signed also depends on the
+	// SPACE_HISTORY_WINDOW_CLAIM rollout switch.
+	HistoryMode string `json:"history_mode,omitempty"`
 }
 
 func (m CurrentMembership) Validate() error {
@@ -353,7 +601,7 @@ func (m CurrentMembership) Validate() error {
 		return fmt.Errorf("current Space membership identity is required")
 	}
 	switch m.Kind {
-	case KindPersonal, KindRoom, KindProject, KindCase:
+	case KindPersonal, KindRoom, KindProject, KindCase, KindDM, KindGroupDM:
 	default:
 		return fmt.Errorf("unknown Space kind %q", m.Kind)
 	}

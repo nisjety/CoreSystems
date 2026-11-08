@@ -8,7 +8,7 @@
  * without pulling in the renderer.
  *
  * The backend contract this implements (model-gateway SSE):
- *   artifact: { id, kind, title, content, version }
+ *   artifact: { id, kind, title, content, version, editor? }
  * where `kind` is free-form and `content` is either source text, Markdown, a
  * complete HTML document, or a `data:` URI (base64) for generated binaries.
  * The same `id` re-emitted with a higher `version` is an UPDATE of the same
@@ -448,7 +448,12 @@ export function artifactFileMeta(
 // ── Version history ──────────────────────────────────────────────────────────
 
 function versionOf(artifact: ChatArtifact): ChatArtifactVersion {
-  return { content: artifact.content, title: artifact.title, version: artifact.version }
+  return {
+    content: artifact.content,
+    title: artifact.title,
+    version: artifact.version,
+    ...(artifact.editor ? { editorKind: artifact.editor } : {}),
+  }
 }
 
 export function isChatArtifactVersion(value: unknown): value is ChatArtifactVersion {
@@ -469,7 +474,9 @@ export function isChatArtifactVersion(value: unknown): value is ChatArtifactVers
 export function artifactVersions(artifact: ChatArtifact): ChatArtifactVersion[] {
   const byVersion = new Map((artifact.history ?? []).filter(isChatArtifactVersion)
     .map((entry) => [entry.version, entry]))
-  byVersion.set(artifact.version, versionOf(artifact))
+  // The current fields win on text; an attribution the history already holds
+  // for that version (from the server) is kept when the frame named none.
+  byVersion.set(artifact.version, { ...byVersion.get(artifact.version), ...versionOf(artifact) })
   return [...byVersion.values()].sort((left, right) => left.version - right.version)
 }
 
@@ -519,6 +526,32 @@ export function mergeArtifactVersion(existing: ChatArtifact | undefined, incomin
     title: newest.title,
     version: newest.version,
   }
+}
+
+/**
+ * Folds revisions read from the server's history (EP-3 S3) into an artifact's
+ * `history`. The server is the durable record, so on an equal version its
+ * revision replaces the streamed one (it carries the editor). An older page
+ * only adds entries; the top-level fields still mirror the newest revision,
+ * and a server head newer than anything streamed (another device's turn)
+ * becomes what the panel shows.
+ */
+export function mergeServerRevisions(artifact: ChatArtifact, revisions: ChatArtifactVersion[]): ChatArtifact {
+  const byVersion = new Map(artifactVersions(artifact).map((entry) => [entry.version, entry]))
+  for (const entry of revisions.filter(isChatArtifactVersion)) byVersion.set(entry.version, entry)
+  const history = [...byVersion.values()].sort((left, right) => left.version - right.version)
+  const newest = history[history.length - 1] ?? versionOf(artifact)
+  const merged: ChatArtifact = {
+    ...artifact,
+    content: newest.content,
+    history,
+    title: newest.title,
+    version: newest.version,
+  }
+  // The top-level editor names the newest revision, which may now be another one.
+  if (newest.editorKind) merged.editor = newest.editorKind
+  else delete merged.editor
+  return merged
 }
 
 /** Finds the artifact with this id anywhere in a set of per-turn artifact lists. */

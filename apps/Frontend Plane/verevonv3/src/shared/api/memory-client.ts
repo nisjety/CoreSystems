@@ -21,7 +21,19 @@ export interface MemoryEntry {
   content: string
   updatedAt: string
   provenance: MemoryProvenance
+  /**
+   * Set only for a row learned in a shared room before containment existed:
+   * listed to its owner, never recalled by any conversation. The owner may keep
+   * or delete it. Absent for every ordinary row (including from an older
+   * gateway that never sends the field).
+   */
+  withheldReason?: WithheldReason
+  /** Space the withheld row was learned in (an id, never content). */
+  originSpaceRef?: string
 }
+
+/** Closed vocabulary; an unrecognised value is read as withheld for an unknown reason. */
+export type WithheldReason = 'room_origin_unverified' | 'unknown'
 
 export interface ListMemoriesResult {
   memories: MemoryEntry[]
@@ -44,6 +56,10 @@ interface ListMemoriesResponse {
     updated_at?: string
     updatedAt?: string
     provenance?: string
+    withheld_reason?: string
+    withheldReason?: string
+    origin_space_ref?: string
+    originSpaceRef?: string
   }>
   degraded?: boolean
   degradation_reason?: string
@@ -53,6 +69,8 @@ interface ListMemoriesResponse {
 function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[number]): MemoryEntry | null {
   const memoryId = raw.memory_id ?? raw.memoryId ?? ''
   if (!memoryId) return null
+  const withheldRaw = raw.withheld_reason ?? raw.withheldReason ?? ''
+  const originSpaceRef = raw.origin_space_ref ?? raw.originSpaceRef ?? ''
   return {
     memoryId,
     topic: raw.topic ?? '',
@@ -62,6 +80,10 @@ function normalizeMemory(raw: NonNullable<ListMemoriesResponse['memories']>[numb
     // at all — is 'unknown'. Never default to a real value.
     provenance:
       raw.provenance === 'stated' || raw.provenance === 'inferred' ? raw.provenance : 'unknown',
+    ...(withheldRaw
+      ? { withheldReason: withheldRaw === 'room_origin_unverified' ? withheldRaw : ('unknown' as const) }
+      : {}),
+    ...(originSpaceRef ? { originSpaceRef } : {}),
   }
 }
 
@@ -309,4 +331,98 @@ export async function rememberMemory(threadId: string, content: string): Promise
     body: JSON.stringify({ threadId, content }),
   })
   return { memoryId: response.memory_id ?? response.memoryId ?? '' }
+}
+
+/**
+ * The standing profile (EP-8 S4): a short text built from the memories the user
+ * has accepted, or as they last edited it. `sourceMemoryIds` are the memories
+ * behind the built lines, in line order (ids only).
+ */
+export interface UserProfile {
+  content: string
+  sourceMemoryIds: string[]
+  origin: 'built' | 'edited'
+  revision: number
+  updatedAt: string | null
+  /** For an edited profile: how many of its source memories were deleted since the edit. */
+  sourcesDeletedSinceEdit: number
+}
+
+export interface UserProfileResult {
+  /** `null` when there is none yet, or when it is hidden (memory off, org disabled, ZDR). */
+  profile: UserProfile | null
+  /** Why the profile is not used in conversations; empty when it is. */
+  skipReason: MemoryControlsReason | ''
+}
+
+interface UserProfileResponse {
+  profile?: {
+    content?: string
+    source_memory_ids?: string[]
+    origin?: string
+    revision?: number
+    updated_at?: string | null
+    sources_deleted_since_edit?: number
+  } | null
+  skip_reason?: string
+}
+
+/** The longest profile the server stores, in characters. */
+export const PROFILE_MAX_CHARS = 1400
+
+/** The refusal code while the profile is switched off on this deployment. */
+export const PROFILE_NOT_ENABLED = 'profile_not_enabled'
+
+function normalizeProfile(raw: UserProfileResponse): UserProfileResult {
+  const reason = raw.skip_reason ?? ''
+  const profile = raw.profile
+  return {
+    profile: profile
+      ? {
+          content: profile.content ?? '',
+          sourceMemoryIds: profile.source_memory_ids ?? [],
+          // Anything but the one word for an edit reads as built, which is what a rebuild replaces.
+          origin: profile.origin === 'edited' ? 'edited' : 'built',
+          revision: profile.revision ?? 0,
+          updatedAt: profile.updated_at ?? null,
+          sourcesDeletedSinceEdit: profile.sources_deleted_since_edit ?? 0,
+        }
+      : null,
+    skipReason: reason === '' ? '' : CONTROL_REASONS.includes(reason) ? (reason as MemoryControlsReason) : 'unknown',
+  }
+}
+
+/**
+ * The signed-in user's profile. Rejects with code `profile_not_enabled` while
+ * the deployment has the profile switched off.
+ */
+export async function getProfile(): Promise<UserProfileResult> {
+  return normalizeProfile(await requestJson<UserProfileResponse>('/api/v1/memory/profile'))
+}
+
+/**
+ * Saves the user's own edit. `expectedRevision` is the revision the edit was
+ * made against (0 when there was no profile); a stale one is refused
+ * (`profile_revision_stale`), as is a ZDR session.
+ */
+export async function saveProfile(content: string, expectedRevision: number): Promise<UserProfileResult> {
+  return normalizeProfile(
+    await requestJson<UserProfileResponse>('/api/v1/memory/profile', {
+      method: 'PUT',
+      body: JSON.stringify({ content, expectedRevision }),
+    }),
+  )
+}
+
+/**
+ * Rebuilds the profile from the user's memories. `force` replaces an edited
+ * profile; the person's own button always sends it.
+ */
+export async function rebuildProfile(force: boolean): Promise<UserProfileResult> {
+  return normalizeProfile(
+    await requestJson<UserProfileResponse>('/api/v1/memory/profile/rebuild', {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    }),
+  )
 }

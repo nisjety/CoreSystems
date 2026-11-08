@@ -1,0 +1,45 @@
+--- a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-session.ts	
+@@ -127,15 +127,10 @@
+     ?? resolveVisualObservationUrl(session?.id, visualObservationArtifactId)
+ 
+   return {
+-    capabilities: session?.capabilities ?? ['annotate', 'dom_select', 'knowledge_ingest'],
+-    commentAnchors: [
+-      {
+-        id: 'comment-1',
+-        label: '1',
+-        x: 0.07,
+-        y: 0.18,
+-      },
+-    ],
++    // No session: the gateway advertised no capability, so the fallback claims none.
++    capabilities: session?.capabilities ?? [],
++    // No placeholder anchor: the annotate capability is not built.
++    commentAnchors: [],
+     consoleEntries: observation?.console_summary ?? [],
+     domNodes: observation?.dom_summary
+       ? domNodesFromObservation(observation)
+--- a/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx	
+@@ -2055,20 +2055,6 @@
+                 </div>
+               )}
+             </Show>
+-            <For each={session().commentAnchors}>
+-              {(anchor) => (
+-                <span
+-                  class="knowledge-browser-comment-anchor"
+-                  style={{
+-                    left: `${anchor.x * 100}%`,
+-                    top: `${anchor.y * 100}%`,
+-                  }}
+-                  aria-label={`Kommentar ${anchor.label}`}
+-                >
+-                  {anchor.label}
+-                </span>
+-              )}
+-            </For>
+             <Show
+               when={searchQuery() ? null : frameUrl()}
+               keyed

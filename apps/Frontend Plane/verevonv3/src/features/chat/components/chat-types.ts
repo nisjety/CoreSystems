@@ -2,14 +2,21 @@ import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import {
+  type AgentModeId,
+  type ArtifactEditorKind,
   type AutonomyRung,
   type ChatAction,
   type ChatCostBasis,
+  type ChatCostByCategory,
   type ChatTurnTiming,
+  type ChatUsagePhase,
+  type ChatUsageProgressEvent,
   type ChatVerificationEvent,
+  type CitationLocator,
   type EffortLevel,
   type EffortProfile,
   type RecalledMemory,
+  type ResearchProvenance,
 } from '@/shared/api/chat-client'
 import {
   type AnswerServedBy,
@@ -53,11 +60,15 @@ export type ChatCancelFailure = {
 }
 export type IconComponent = (props: LucideProps) => JSX.Element
 
-/** One revision of an artifact, as emitted by a single `artifact` SSE event. */
+/** One revision of an artifact, as emitted by a single `artifact` SSE event or read from the server's history. */
 export type ChatArtifactVersion = {
   content: string
   title: string
   version: number
+  /** Absent for a revision the server has not attributed (history off, or an older frame). */
+  editorKind?: ArtifactEditorKind
+  /** For a restore, the version whose text it brought back. */
+  restoredFromVersion?: number
 }
 
 export type ChatArtifact = {
@@ -78,6 +89,10 @@ export type ChatArtifact = {
    * then treats the current fields as a single revision.
    */
   history?: ChatArtifactVersion[]
+  /** A research report's provenance stamp (EP-2-S4), in the wire shape. */
+  provenance?: ResearchProvenance
+  /** Who made the newest revision, when the frame named it (EP-3 S3). */
+  editor?: ArtifactEditorKind
 }
 
 export type ChatToolCall = {
@@ -94,6 +109,12 @@ export type Citation = {
   title: string
   url: string
   snippet: string
+  /**
+   * The `[n]` the server numbered this source with. A marker binds by this, never by array position: the
+   * numbering has gaps, because a source that was not read takes no number. Absent from an older gateway and
+   * from a stored turn written before numbers were kept.
+   */
+  number?: number
   /** Optional server-issued claim binding. The current gateway may omit it;
    * the UI must never infer these values from prose. */
   claimId?: string
@@ -141,6 +162,38 @@ export type Citation = {
    * metadata line only, never body text, so the card shows those and nothing more.
    */
   origin?: 'web' | 'knowledge' | 'connector'
+  /** The passage this source contributed (EP-2-S4), when the server sent one. */
+  quote?: string
+  /** Where a knowledge source's passage sits in Data Plane, in the wire shape. */
+  locator?: CitationLocator
+}
+
+export type GeneratedFileCheckLevel = 'passed' | 'warnings' | 'failed' | 'skipped'
+
+/**
+ * The gateway's structural check of a generated Office or PDF file: what the
+ * check found in the file's container. It never says the file opens in Office,
+ * and no surface may say it does. A `skipped` check has no verdict.
+ */
+export type GeneratedFileCheck = {
+  level: GeneratedFileCheckLevel
+  checks: { id: string; level: GeneratedFileCheckLevel; message: string }[]
+}
+
+/**
+ * The render of a generated Office file for the artifact panel: its pages as a
+ * PDF, with thumbnails of the first pages. It shows the file; it is never the
+ * download, and it is not kept with the thread.
+ */
+export type GeneratedFilePreview = {
+  mime: 'application/pdf'
+  /** A `data:` URI of the rendered PDF. */
+  url: string
+  pages: number
+  /** True when a font the file names was drawn with a stand-in, so the viewer says so. */
+  fontsSubstituted: boolean
+  /** `data:` URIs of the first pages, in page order. */
+  thumbs: string[]
 }
 
 export type GeneratedFile = {
@@ -149,6 +202,10 @@ export type GeneratedFile = {
   mime: string
   size: number
   url: string
+  /** Present only when `code_interpreter` ran the structural check on this file. */
+  check?: GeneratedFileCheck
+  /** Present only when the render layer made a preview of this Office file. */
+  preview?: GeneratedFilePreview
 }
 
 export type GeneratedImagePreview = {
@@ -248,6 +305,85 @@ export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
 export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'open_integrations' | 'none'
 
 /**
+ * The running cost and usage of one turn or agent run (WS27-S4): the latest `usage_progress` frame,
+ * replaced by the turn's `usage` frame. Counts and closed tokens only; every key is optional because
+ * a frame carries only what it has. Session-only: never written to the thread transcript, so a reload
+ * shows the turn's own usage fields and no breakdown.
+ */
+export type RunMeter = {
+  /** Model calls the total covers so far. */
+  calls?: number
+  /** The provider call the latest progress frame reports. */
+  phase?: ChatUsagePhase
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  /** The metered cost. Never set on a subscription turn, whose wire 0.0 is a placeholder. */
+  costUsd?: number
+  costBasis?: ChatCostBasis
+  /** Of `calls`, the metered ones whose price was unknown. A total with any has no `costUsd`. */
+  unpricedCalls?: number
+  /** The cost by what was billed. Only the `usage` frame states it, and only for a priced total. */
+  costByCategory?: ChatCostByCategory
+  /** The run's caps and the share of them used (WS27-S6). */
+  ceilingUsd?: number
+  ceilingTokens?: number
+  fraction?: number
+  warning?: NonNullable<ChatUsageProgressEvent['warning']>
+  /** How the budget moved the turn's route (WS27-S7), once a call states it. */
+  routing?: NonNullable<ChatUsageProgressEvent['routing']>
+}
+
+/**
+ * A run lifecycle notice on one turn (WS15): something the gateway did to the turn or to a tool call while it
+ * ran, from the `retry_scheduled`, `compaction`, `context_change` and `retrieval_notice` frames. Only the
+ * gateway's counts and closed tokens are kept, never text. Session-only: `turnsToTranscript` does not copy it,
+ * so nothing is stored locally or on the server, and a reload shows none.
+ */
+export type LifecycleNotice =
+  /** `callId` is the tool call the retry was matched to when it arrived, if one was out. */
+  | { kind: 'retry'; tool?: string; attempt: number; maxAttempts: number; reason: string; callId?: string }
+  | { kind: 'compaction'; scope: string; outcome: string }
+  | { kind: 'context'; change: string; messagesDropped?: number }
+  /** `wordingKey` is the gateway's catalogued key for why the answer was reduced. */
+  | { kind: 'retrieval'; wordingKey: string }
+
+/** The most notices one turn keeps. The oldest go first. */
+export const LIFECYCLE_NOTICE_CAP = 20
+
+/** The providers a connected-app suggestion may name: mp-contracts `connector_suggest`'s closed list. */
+export const CONNECTOR_SUGGESTION_PROVIDERS = ['google', 'microsoft'] as const
+export type ConnectorSuggestionProvider = (typeof CONNECTOR_SUGGESTION_PROVIDERS)[number]
+
+/**
+ * One connected-app suggestion (`connector_suggestion`, EP-10 S8). The reason is the gateway's scrubbed line,
+ * rendered as text. `restored` marks a suggestion read back from the cache after a reload: the moment it
+ * answered has passed, so the card shows it as a note and offers nothing.
+ */
+export type ChatConnectorSuggestion = {
+  suggestionId: string
+  provider: ConnectorSuggestionProvider
+  reason: string
+  requestId?: string
+  restored?: boolean
+}
+
+/**
+ * `notices` with `notice` appended. An exact repeat of a notice the turn already holds is not added again: a
+ * resumed stream replays what the turn saw. The list keeps its newest `LIFECYCLE_NOTICE_CAP` entries.
+ */
+export function addLifecycleNotice(
+  notices: readonly LifecycleNotice[] | undefined,
+  notice: LifecycleNotice,
+): LifecycleNotice[] {
+  const held = notices ?? []
+  const key = JSON.stringify(notice)
+  if (held.some((item) => JSON.stringify(item) === key)) return [...held]
+  return [...held, notice].slice(-LIFECYCLE_NOTICE_CAP)
+}
+
+/**
  * One conversation turn as the chat renders it.
  *
  * Every field is named. Server message metadata is never spread onto a turn:
@@ -307,6 +443,11 @@ export type ChatTurn = {
    * A restored transcript keeps only the three totals.
    */
   timing?: ChatTurnTiming
+  /**
+   * The turn's running cost and usage (see `RunMeter`), for the Work panel and the agent console.
+   * Session-only: `turnsToTranscript` does not copy it.
+   */
+  meter?: RunMeter
   /**
    * Answer text that streamed live and was then NOT saved: the server ended
    * the turn with an error that says so (`session_liveness_failed`, for one,
@@ -372,6 +513,11 @@ export type ChatTurn = {
    */
   recalledMemories?: RecalledMemory[]
   /**
+   * The run lifecycle notices this turn has had, in arrival order, capped (see `LifecycleNotice`). Session-only:
+   * `turnsToTranscript` drops it. Absent means none.
+   */
+  lifecycle?: LifecycleNotice[]
+  /**
    * Why generation stopped, when the backend reported it. `'stream_incomplete'`
    * means the provider connection broke before any proper termination signal,
    * so the answer may be cut off mid-thought — rendered as an honest notice
@@ -397,6 +543,11 @@ export type ChatTurn = {
    * the authority to execute.
    */
   planMode?: boolean
+  /**
+   * The agent mode this turn was sent under, when the person chose one (WS25-S11). Captured at send time, as
+   * `planMode` is, so a later picker change does not relabel a turn that already ran.
+   */
+  agentMode?: AgentModeId
   /**
    * This turn ran the plan the person had approved (WS14 S2a): an EXECUTING run
    * under the grant the Model Plane holds for the thread, not a planning one.
@@ -442,6 +593,11 @@ export type ChatTurn = {
    * than stale suggestions for an answer the user has moved past.
    */
   followUps?: string[]
+  /**
+   * The connected-app suggestion this turn's model made (`connector_suggestion`, EP-10 S8): at most one
+   * per turn. Kept with the turn's cached metadata so a reloaded thread shows it as a resolved note.
+   */
+  connectorSuggestion?: ChatConnectorSuggestion
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
   /**
@@ -451,14 +607,22 @@ export type ChatTurn = {
    * read back on history playback (`ChatMessage.retrievalScope`).
    */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** The context chips this turn was sent with (EP-3 S5): kind, id and label only. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /**
    * The server's own confirmation of `retrievalScope` (`source_scope_applied`
    * SSE event) — the concrete "shown in the receipt" surface. Absent until
-   * the event arrives, and never emitted at all for a turn whose effective
-   * scope was `auto`/omitted. `excludedTools` names the builtin tool classes
-   * this turn's offered set did NOT include because of the filter.
+   * the event arrives. A turn whose scope was `auto`/omitted gets one only
+   * when a Space scoped it, and then its scope is `auto` with a `knowledge`
+   * receipt (WS18-S3). `excludedTools` names the builtin tool classes this
+   * turn's offered set did NOT include because of the filter.
    */
-  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
+  /**
+   * The search providers that served this turn's web searches, and the route its entitlement allowed
+   * (`search_provenance` SSE event, EP-9 W1). Live only: nothing stores it, so a reloaded turn has none.
+   */
+  searchProvenance?: import('@/shared/api/chat-client').ChatSearchProvenanceEvent
 }
 
 export type AgentTaskStep = {
@@ -585,6 +749,10 @@ export type SendOptions = {
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   /** See `ChatInvokeRequest.connectorScope`. Per-turn, like `retrievalScope`. */
   connectorScope?: string[]
+  /** See `ChatInvokeRequest.contextRefs`. Per-turn, like `connectorScope`. */
+  contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
+  agentMode?: AgentModeId
   actions?: ChatAction[]
   /** Explicit provider route for a connected user-owned model subscription. */
   provider?: string

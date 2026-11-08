@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { LearningSection, lineDiff } from '@/features/settings/components/LearningSection'
+import { LearningSection, lineDiff, proposalReason } from '@/features/settings/components/LearningSection'
 
 vi.mock('@/shared/session/session-store', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/shared/session/session-store')>()),
@@ -112,7 +112,34 @@ describe('lineDiff', () => {
   })
 })
 
+describe('proposalReason', () => {
+  it('reads the /learn marker and shows the reason without it (EP-11 S7)', () => {
+    expect(proposalReason('learn: Brukt hver uke')).toEqual({ requested: true, text: 'Brukt hver uke' })
+    expect(proposalReason('Gjentatt i tre samtaler')).toEqual({ requested: false, text: 'Gjentatt i tre samtaler' })
+    expect(proposalReason('')).toEqual({ requested: false, text: '' })
+  })
+})
+
 describe('LearningSection proposals', () => {
+  it('marks a proposal the owner asked for with /learn as requested by them', async () => {
+    stubBackend({ skills: { skills: [{ ...PROPOSAL, proposal_reason: 'learn:Brukt hver uke' }] } })
+
+    render(() => <LearningSection />)
+
+    expect(await screen.findByText('Brukt hver uke')).toBeTruthy()
+    expect(screen.getByText('Bedt om av deg')).toBeTruthy()
+    expect(screen.queryByText('learn:Brukt hver uke')).toBeNull()
+  })
+
+  it('does not mark a proposal the background review made', async () => {
+    stubBackend({ skills: { skills: [PROPOSAL] } })
+
+    render(() => <LearningSection />)
+
+    expect(await screen.findByText('Gjentatt i tre samtaler')).toBeTruthy()
+    expect(screen.queryByText('Bedt om av deg')).toBeNull()
+  })
+
   it('shows a pending proposal with its reason, its change, and a link to its conversation', async () => {
     stubBackend({
       skills: { skills: [PROPOSAL] },

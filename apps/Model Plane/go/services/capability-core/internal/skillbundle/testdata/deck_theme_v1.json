@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "name": "Aquatiq brand",
+  "description": "Blue on white, for customer decks.",
+  "colors": {
+    "primary": "#0A3D62",
+    "secondary": "#3c6382",
+    "text": "#1E272E",
+    "background": "#FFFFFF",
+    "accent": ["#E58E26", "#B71540"]
+  },
+  "fonts": { "heading": "Calibri", "body": "Brand Sans Pro" },
+  "logo": "templates/logo.png",
+  "master": "templates/master.pptx",
+  "footer_text": "Aquatiq - internal"
+}

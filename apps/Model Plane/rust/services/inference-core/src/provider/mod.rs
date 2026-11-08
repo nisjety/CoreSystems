@@ -9,17 +9,23 @@ mod codex_subscription_tools;
 pub mod doc_intel;
 pub mod effort;
 pub mod fallback;
+pub mod gemini;
+pub mod gemini_schema;
 pub mod intent;
 pub mod language;
 pub mod logprobs;
+pub mod model_record;
 pub mod openai;
 pub mod overflow;
 pub mod policy_client;
 pub mod realtime;
+pub mod role;
+pub mod routing_diff;
 pub mod routing_policy;
 pub mod speech;
 pub mod timing;
 pub mod translation;
+pub mod vertex_auth;
 pub mod video;
 pub mod vision;
 pub mod zdr;
@@ -507,6 +513,13 @@ pub struct ModelInfo {
     /// Reasoning effort levels the model accepts, weakest first; empty when it
     /// has no effort control.
     pub effort_levels: Vec<effort::Level>,
+    /// The context window in tokens, lowered to this provider's own ceiling. Zero when
+    /// no sourced row names the model (see [`model_record`]).
+    pub context_window_tokens: u32,
+    /// The synchronous output ceiling in tokens this model is served at. Zero when unknown.
+    pub max_output_tokens: u32,
+    /// The vendor lifecycle stage. `None` when no sourced row names the model.
+    pub lifecycle: Option<model_record::Lifecycle>,
 }
 
 /// Introspectable feature flags for a provider.
@@ -616,6 +629,8 @@ pub enum ModelFamily {
     OpenAiCompatible,
     /// Anthropic Messages shape, direct or via Azure AI Foundry.
     Anthropic,
+    /// Gemini on Vertex AI, served over the native `generateContent` surface.
+    Gemini,
 }
 
 /// The strongest residency guarantee a provider's traffic honors.

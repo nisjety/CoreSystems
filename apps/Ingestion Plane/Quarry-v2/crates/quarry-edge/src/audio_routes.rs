@@ -79,6 +79,33 @@ fn raise_to_zdr_floor(claims: &crate::auth::Claims, requested: Option<bool>) -> 
     }
 }
 
+/// Gate the `audio_url` of a transcription request under the web policy of the caller. The
+/// posture is the body's `zdr` raised by the token's floor, the same rule every route takes, so
+/// under ZDR the refusal carries no host.
+fn gate_audio_url(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    stt: &SttRequest,
+) -> Result<(), quarry_core::error::QuarryError> {
+    let zdr = claims.effective_zdr(stt.zdr.unwrap_or(false));
+    let decision = crate::web_policy_edge::decide(&state.policy, claims, zdr, None)?;
+    crate::web_policy_edge::gate_url(&decision, stt.audio_url.trim())
+}
+
+/// A policy refusal in the shape this route answers in: the error text, the wire code, and the
+/// denial's closed details (capability, decision source; never a URL).
+fn policy_refusal(error: quarry_core::error::QuarryError) -> (StatusCode, Json<serde_json::Value>) {
+    let status = StatusCode::from_u16(error.code.http_status()).unwrap_or(StatusCode::FORBIDDEN);
+    (
+        status,
+        Json(serde_json::json!({
+            "error": error.message,
+            "code": error.code.wire_name(),
+            "details": error.details,
+        })),
+    )
+}
+
 pub async fn audio(
     State(state): State<AppState>,
     axum::Extension(claims): axum::Extension<crate::auth::Claims>,
@@ -139,6 +166,12 @@ pub async fn audio(
             )
         }
         AudioRequest::Stt(mut stt) => {
+            // The audio URL is a web fetch the Model Plane makes for the caller, so the org web
+            // policy (deny list, allow list, the ZDR posture) decides it before anything leaves
+            // the edge. A denied URL never reaches the token mint or the Model Plane.
+            if let Err(error) = gate_audio_url(&state, &claims, &stt) {
+                return policy_refusal(error);
+            }
             stt.zdr = raise_to_zdr_floor(&claims, stt.zdr);
             (
                 "/v1/ai/transcribe".to_string(),

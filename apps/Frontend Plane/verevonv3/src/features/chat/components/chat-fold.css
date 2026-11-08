@@ -1,0 +1,51 @@
+/*
+ * Settled-turn fold (EP-14 S1). The row reuses the steps pill's tokens, so it reads
+ * as the same kind of control. The body takes no `display` of its own: a folded
+ * body is `hidden`, and an author rule would override the UA's `display: none`
+ * that the browsers without `hidden="until-found"` rely on.
+ */
+
+.verevon-chat-settled-fold {
+  margin-bottom: 10px;
+}
+
+.verevon-chat-settled-fold__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-settled-fold__toggle:hover {
+  color: var(--verevon-j-text);
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, var(--verevon-surface-soft));
+}
+
+.verevon-chat-settled-fold__toggle svg {
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: transform 140ms ease;
+}
+
+.verevon-chat-settled-fold__toggle[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-chat-settled-fold__toggle,
+  .verevon-chat-settled-fold__toggle svg {
+    transition: none;
+  }
+}

@@ -126,8 +126,16 @@ pub async fn run(
                 histogram!("mp_session_gdpr_erasure_duration_seconds")
                     .record(started.elapsed().as_secs_f64());
                 error!(error = %e, "failed to process GDPR erasure event");
-                counter!("mp_session_gdpr_erasure_total", "result" => "error").increment(1);
-                if let Err(ack_err) = msg.ack_with(AckKind::Nak(None)).await {
+                // EP-9 C4: a held org stays held until Control releases it, so its event waits
+                // five minutes before redelivery instead of looping hot while the check is on.
+                let held = e.downcast_ref::<crate::gdpr::ErasureHoldError>().is_some();
+                if held {
+                    counter!("mp_session_gdpr_erasure_total", "result" => "held").increment(1);
+                } else {
+                    counter!("mp_session_gdpr_erasure_total", "result" => "error").increment(1);
+                }
+                let delay = held.then(|| Duration::from_secs(300));
+                if let Err(ack_err) = msg.ack_with(AckKind::Nak(delay)).await {
                     warn!(error = %ack_err, "nak failed");
                 }
             }
@@ -150,6 +158,19 @@ async fn handle_message(
 ) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
+        // EP-8 S7: a per-user erasure drops that person's part of Space memory, nothing else.
+        if let Some(user) =
+            crate::gdpr::parse_user_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
+        {
+            let space =
+                crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
+            info!(
+                org_id = %user.org_id,
+                deleted = space.deleted,
+                narrowed = space.narrowed,
+                "GDPR user erasure: Space memory sources dropped"
+            );
+        }
         return Ok(Outcome::Skipped);
     };
 

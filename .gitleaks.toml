@@ -66,6 +66,14 @@ paths = [
 # merely *contains* one of these words is still caught only if it is
 # dominated by it.
 regexes = [
+  # Public Web Push test values (WS16-S6), matched exactly: the auth secret of the RFC 8291 Appendix A
+  # test vector (notification-core webpush/encryption_test.go), and a VAPID PUBLIC key the SPA's
+  # push-subscription test hands to subscribe(). Neither is a credential; a different value still flags.
+  '''^BTBZMqHH6r4Tts7J_aSIgg$''',
+  '''^BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8$''',
+  # Fake service-token placeholders in gateway test fixtures
+  # ("billing-test-secret-at-least-32-bytes" and siblings), not real credentials.
+  '''.*-test-secret-at-least-32-bytes$''',
   '''(?i)\b(your[-_ ]?(api[-_ ]?)?(key|token|secret|password)|change[-_ ]?me|placeholder|replace[-_ ]?me|example[-_ ]?(key|token|secret)?|dummy|sample|redacted|todo|tbd|<[a-z0-9_ -]+>|\$\{[^}]+\}|xxxxx+|token[-_ ]?here|secret[-_ ]?here)\b''',
   # Test-only fixtures & env-var NAME references (not secret values), all in
   # *_test.go: NATS auth table tests reference the env-var identifier they read
@@ -94,6 +102,9 @@ regexes = [
   '''^dev-test-key-12345$''',
   '''^dev-token$''',
   '''^t=r\.latencyMs$''',
+  # The idempotency key of the authored run-trace envelope golden (WS10.S2) and its three vendored copies: a
+  # synthetic ULID under the key name idempotency_key, which generic-api-key reads as a key. Matched exactly.
+  '''^01JC7K3M9Q4R8T2V5W6X7Y8Z9A$''',
   # Synthetic test fixtures (added 2026-10-08). The pre-commit hook scans diff text on stdin, which carries no file path,
   # so the path allowlist above cannot apply to it. Each entry below is therefore a narrow content match that was
   # checked against the exact strings gitleaks extracted from the real fixtures; none can match a working credential.

@@ -294,3 +294,90 @@ func TestLoadSpaceCapabilityVerifierFromEnvRejectsInvalidConfiguration(t *testin
 		t.Fatal("expected error for malformed public key")
 	}
 }
+
+// A key in any encoding Control or an operator may plausibly configure must start the
+// verifier and verify the same decision; a std-base64-only or url-only decoder once
+// silently disabled the whole decision lane.
+func TestLoadSpaceCapabilityVerifierFromEnvAcceptsEveryKeyEncodingAndRefusesGarbage(t *testing.T) {
+	var public ed25519.PublicKey
+	var private ed25519.PrivateKey
+	for { // a key whose standard form differs from its url-safe form
+		var err error
+		public, private, err = ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.ContainsAny(base64.RawStdEncoding.EncodeToString(public), "+/") {
+			break
+		}
+	}
+	claims := validCapabilityClaims()
+	token, claimsJSON := signedCapabilityToken(t, private, "key-1", claims, nil)
+	for name, encoded := range map[string]string{
+		"unpadded base64url": base64.RawURLEncoding.EncodeToString(public),
+		"padded base64url":   base64.URLEncoding.EncodeToString(public),
+		"standard base64":    base64.StdEncoding.EncodeToString(public),
+	} {
+		verifier, err := LoadSpaceCapabilityVerifierFromEnv(func(env string) string {
+			switch env {
+			case "CONTROL_SPACE_DECISION_KEY_ID":
+				return "key-1"
+			case "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64":
+				return encoded
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if _, err := verifier.Verify(token, claimsJSON, expectedCapabilityVerifyRequest()); err != nil {
+			t.Fatalf("%s: decision not verified: %v", name, err)
+		}
+	}
+	_, err := LoadSpaceCapabilityVerifierFromEnv(func(env string) string {
+		switch env {
+		case "CONTROL_SPACE_DECISION_KEY_ID":
+			return "key-1"
+		case "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64":
+			return "!!! not base64 !!!"
+		}
+		return ""
+	})
+	if err == nil || err.Error() != "Space capability decision public key is invalid" {
+		t.Fatalf("garbage key: err = %v, want the unchanged refusal", err)
+	}
+}
+
+// WS06-S6: the decision's zero_data_retention flag must reach the verified
+// capability, because scratch-only leases (S6b) read it from there.
+func TestVerifySurfacesZeroDataRetentionFromTheSignedDecision(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := LoadSpaceCapabilityVerifierFromEnv(func(name string) string {
+		switch name {
+		case "CONTROL_SPACE_DECISION_KEY_ID":
+			return "key-1"
+		case "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64":
+			return base64.RawURLEncoding.EncodeToString(public)
+		default:
+			return ""
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, zdr := range []bool{true, false} {
+		token, claimsJSON := signedCapabilityToken(t, private, "key-1", validCapabilityClaims(), func(d *spaceCapabilityDecision) {
+			d.ZeroDataRetention = zdr
+		})
+		got, err := verifier.Verify(token, claimsJSON, expectedCapabilityVerifyRequest())
+		if err != nil {
+			t.Fatalf("zdr=%v: valid decision denied: %v", zdr, err)
+		}
+		if got.ZeroDataRetention != zdr {
+			t.Fatalf("VerifiedCapability.ZeroDataRetention = %v, want %v", got.ZeroDataRetention, zdr)
+		}
+	}
+}

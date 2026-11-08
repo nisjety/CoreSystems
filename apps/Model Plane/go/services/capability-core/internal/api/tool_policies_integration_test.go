@@ -118,14 +118,15 @@ func TestToolPoliciesAgainstPostgres(t *testing.T) {
 			t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
 		}
 		aliceAllowID = policyID(t, response)
-		if policyAudit(t, pool, aliceAllowID, auditActionToolPolicySet) != 1 {
+		// An allow is a rule with a lapse (WS13-S7), so its first write is audited as a rule's creation.
+		if policyAudit(t, pool, aliceAllowID, auditActionToolPolicyRuleCreated) != 1 {
 			t.Fatal("the write was not audited")
 		}
 		again := callToolPolicies(t, pool, alice, http.MethodPut, echoPath, `{"decision":"ask","reason":"changed my mind"}`)
 		if again.Code != http.StatusOK || policyID(t, again) != aliceAllowID {
 			t.Fatalf("a second set did not update in place: %d %s", again.Code, again.Body.String())
 		}
-		if policyAudit(t, pool, aliceAllowID, auditActionToolPolicySet) != 2 {
+		if policyAudit(t, pool, aliceAllowID, auditActionToolPolicySet) != 1 {
 			t.Fatal("the second write was not audited")
 		}
 		var diff string
@@ -209,10 +210,11 @@ func TestToolPoliciesAgainstPostgres(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("status = %d", response.Code)
 		}
-		var views []toolPolicyView
-		if err := json.Unmarshal(response.Body.Bytes(), &views); err != nil {
+		var listed toolPolicyListResponse
+		if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
 			t.Fatal(err)
 		}
+		views := listed.Policies
 		for _, v := range views {
 			if v.ScopeKind == "user" && v.ScopeValue != "user-bob" {
 				t.Fatalf("bob was shown %s's policy", v.ScopeValue)
@@ -222,7 +224,9 @@ func TestToolPoliciesAgainstPostgres(t *testing.T) {
 			t.Fatalf("bob sees %d policies, want the 2 org ones: %+v", len(views), views)
 		}
 		filtered := callToolPolicies(t, pool, alice, http.MethodGet, "/api/v1/tool-policies?capability_id="+echo.capabilityID, "")
-		if err := json.Unmarshal(filtered.Body.Bytes(), &views); err != nil || len(views) != 1 || views[0].Decision != policy.ToolPolicyAllow {
+		listed = toolPolicyListResponse{}
+		err := json.Unmarshal(filtered.Body.Bytes(), &listed)
+		if views = listed.Policies; err != nil || len(views) != 1 || views[0].Decision != policy.ToolPolicyAllow {
 			t.Fatalf("filtered list = %+v err=%v", views, err)
 		}
 	})

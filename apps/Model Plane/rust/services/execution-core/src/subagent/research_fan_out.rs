@@ -374,6 +374,23 @@ impl FanOutItemResult {
             error: Some(reason),
         }
     }
+
+    /// An item not started because the fan-out's child token budget was spent (EP-2 S9). It is a
+    /// refusal whose reason starts with [`BUDGET_REACHED`], so the merge can count it.
+    #[must_use]
+    pub fn budget_reached(item: &FanOutItem, spent: u64, budget: u64) -> Self {
+        Self::refused(item, budget_reached_refusal(spent, budget))
+    }
+
+    /// Whether this item ended unstarted at the child token budget.
+    #[must_use]
+    pub fn is_budget_reached(&self) -> bool {
+        self.status == ItemStatus::Refused
+            && self
+                .error
+                .as_deref()
+                .is_some_and(|reason| reason.starts_with(BUDGET_REACHED))
+    }
 }
 
 /// Cap on how many source URLs one item contributes to the merged digest, so
@@ -561,6 +578,17 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
         "verification: {{\"checked\": {}, \"confirmed\": {confirmed}}}",
         results.len()
     );
+    // Only when the child token budget stopped items (EP-2 S9), so a digest without that is
+    // what it was before the budget existed.
+    let unstarted = results.iter().filter(|r| r.is_budget_reached()).count();
+    if unstarted > 0 {
+        let _ = writeln!(
+            head,
+            "budget: {unstarted} of {} item(s) were not started because the fan-out's child \
+             token budget was spent.",
+            results.len()
+        );
+    }
 
     let answered = results.iter().filter(|r| r.answer.is_some()).count();
     // What every section costs before any answer is added, at a given number of
@@ -597,6 +625,311 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
     out
 }
 
+/// Longest item a wide-research run seeds into its goal (Wave 3 EP-2 S8). An item is the person's
+/// own question; a longer one is cut, never dropped.
+pub const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+
+/// Most items one `WideResearchRequest` is read for, kept and dropped together, so a pasted list
+/// cannot grow the run's goal without bound. Items past it are neither researched nor named.
+pub const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
+
+/// A wide-research run's items once the org-clamped cap is applied (Wave 3 EP-2 S8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WideResearchPlan {
+    /// The cap the run is held to: `WideResearchRequest.item_cap`, at most
+    /// [`super::MAX_WIDE_RESEARCH_ITEMS`].
+    pub cap: u32,
+    /// The items the run researches, in the order given. Empty when the person chose a count
+    /// and left the model to split the question.
+    pub kept: Vec<String>,
+    /// The items past the cap, in the order given. The run does not research them, and the
+    /// answer names them ([`dropped_items_note`]).
+    pub dropped: Vec<String>,
+}
+
+/// What a wide-research run is refused with when its org has wide research off (`item_cap` 0).
+#[must_use]
+pub fn wide_research_off_refusal() -> String {
+    "Wide research is turned off for this organisation (its research.max_fan_out_items policy is \
+     0), so this run was not started."
+        .to_owned()
+}
+
+/// One item as the run's goal carries it: trimmed, control characters as spaces, at most
+/// [`MAX_WIDE_RESEARCH_ITEM_CHARS`] characters. `None` for an item with nothing left.
+fn wide_research_item(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cut: String = cleaned
+        .trim()
+        .chars()
+        .take(MAX_WIDE_RESEARCH_ITEM_CHARS)
+        .collect();
+    let item = cut.trim_end();
+    (!item.is_empty()).then(|| item.to_owned())
+}
+
+/// Splits a wide-research request's items at its cap.
+///
+/// # Errors
+///
+/// [`wide_research_off_refusal`] when the cap is 0: the org has wide research off, and the run
+/// is refused before its first round rather than started with no delegation allowed.
+pub fn plan_wide_research(items: &[String], item_cap: u32) -> Result<WideResearchPlan, String> {
+    let cap = item_cap.min(super::MAX_WIDE_RESEARCH_ITEMS);
+    if cap == 0 {
+        return Err(wide_research_off_refusal());
+    }
+    let mut kept: Vec<String> = items
+        .iter()
+        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
+        .filter_map(|raw| wide_research_item(raw))
+        .collect();
+    let at = kept.len().min(usize::try_from(cap).unwrap_or(usize::MAX));
+    let dropped = kept.split_off(at);
+    Ok(WideResearchPlan { cap, kept, dropped })
+}
+
+/// The block appended to a wide-research run's goal: the items to fan out, or the cap the model
+/// splits the question within, and the items past the cap it must name. The items are the
+/// person's own text, as the goal above them is.
+#[must_use]
+pub fn wide_research_goal_context(plan: &WideResearchPlan) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    if plan.kept.is_empty() {
+        let _ = writeln!(
+            out,
+            "Wide research: split the question above into at most {} self-contained research \
+             items and research them with one {RESEARCH_TOOL_NAME} call, then answer from its \
+             merged results.",
+            plan.cap
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "Wide research: research exactly these {} item(s) with one {RESEARCH_TOOL_NAME} call, \
+             one item per entry and in this order, then answer from its merged results.",
+            plan.kept.len()
+        );
+        for (index, item) in plan.kept.iter().enumerate() {
+            let _ = writeln!(out, "{}. {item}", index + 1);
+        }
+    }
+    if !plan.dropped.is_empty() {
+        let _ = writeln!(
+            out,
+            "These {} item(s) are past this organisation's limit of {} and are not researched. \
+             Say so in the answer and name them:",
+            plan.dropped.len(),
+            plan.cap
+        );
+        for item in &plan.dropped {
+            let _ = writeln!(out, "- {item}");
+        }
+    }
+    out
+}
+
+/// The note a finished wide-research answer ends with when items were past the cap: added by the
+/// run itself, so the person learns what was left out even if the model did not say it.
+#[must_use]
+pub fn dropped_items_note(plan: &WideResearchPlan) -> Option<String> {
+    if plan.dropped.is_empty() {
+        return None;
+    }
+    let mut note = format!(
+        "Not researched ({} item(s) past this organisation's limit of {}):",
+        plan.dropped.len(),
+        plan.cap
+    );
+    for item in &plan.dropped {
+        note.push_str("\n- ");
+        note.push_str(item);
+    }
+    Some(note)
+}
+
+/// Env var: the switch that makes the fan-out's child token budget refuse items (Wave 3 EP-2 S9,
+/// decision D4). Opt-in: only the literal `true` enables it. Off, a spent budget is logged and
+/// every item still starts, so a fan-out runs exactly as it did before the budget existed.
+pub const BUDGET_ENFORCED_ENV: &str = "WIDE_RESEARCH_CHILD_BUDGET_ENFORCED";
+
+/// Env var: the metered tokens all children of one fan-out call may spend before no further item
+/// starts (EP-2 S9).
+pub const CHILD_TOKEN_BUDGET_ENV: &str = "WIDE_RESEARCH_CHILD_TOKEN_BUDGET";
+
+/// Default child token budget of one fan-out call (decision D4: 400,000 metered tokens).
+pub const DEFAULT_CHILD_TOKEN_BUDGET: u64 = 400_000;
+
+/// What an item's refusal reason starts with when the child token budget stopped it, and the
+/// status the person's grid shows for it.
+pub const BUDGET_REACHED: &str = "budget_reached";
+
+/// Whether the child token budget is enforced, from an already-read env value: only `true`.
+#[must_use]
+pub fn parse_budget_enforced(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
+/// The child token budget, from an already-read env value: unset, unparsable or zero falls back
+/// to [`DEFAULT_CHILD_TOKEN_BUDGET`]. Zero is not "no budget": switching enforcement off is how a
+/// deployment runs without one.
+#[must_use]
+pub fn parse_child_token_budget(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|&budget| budget > 0)
+        .unwrap_or(DEFAULT_CHILD_TOKEN_BUDGET)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A per-thread stand-in for the two budget env vars (`(enforced, budget)`), for the same
+    /// reason as [`ENABLED_OVERRIDE`].
+    static BUDGET_OVERRIDE: std::cell::Cell<Option<(bool, u64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Forces [`ChildBudget::from_env`] on the current thread until dropped. Test-only.
+#[cfg(test)]
+pub(crate) struct BudgetOverride;
+
+#[cfg(test)]
+impl BudgetOverride {
+    pub(crate) fn set(enforced: bool, budget: u64) -> Self {
+        BUDGET_OVERRIDE.with(|cell| cell.set(Some((enforced, budget))));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for BudgetOverride {
+    fn drop(&mut self) {
+        BUDGET_OVERRIDE.with(|cell| cell.set(None));
+    }
+}
+
+/// One fan-out call's child token budget, resolved once when the call is dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildBudget {
+    /// Metered tokens all of the call's finished children may spend.
+    pub tokens: u64,
+    /// Whether a spent budget stops further items, or is only logged.
+    pub enforced: bool,
+}
+
+/// What the budget says about starting the next item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetCheck {
+    /// Budget left: start the item.
+    Within,
+    /// Spent, but not enforced: start the item and log it.
+    SpentNotEnforced,
+    /// Spent and enforced: the item ends [`BUDGET_REACHED`] without starting.
+    Reached,
+}
+
+impl ChildBudget {
+    /// This deployment's budget.
+    #[must_use]
+    pub fn from_env() -> Self {
+        #[cfg(test)]
+        if let Some((enforced, tokens)) = BUDGET_OVERRIDE.with(std::cell::Cell::get) {
+            return Self { tokens, enforced };
+        }
+        Self {
+            tokens: parse_child_token_budget(std::env::var(CHILD_TOKEN_BUDGET_ENV).ok().as_deref()),
+            enforced: parse_budget_enforced(std::env::var(BUDGET_ENFORCED_ENV).ok().as_deref()),
+        }
+    }
+
+    /// Checked before each item starts, against the metered tokens of the call's FINISHED children.
+    /// A started item is never stopped by it: the check sits before the start, so a child in
+    /// flight when the budget runs out finishes, and the budget can be overshot by what the
+    /// children in flight spend.
+    #[must_use]
+    pub fn check(self, finished_spent: u64) -> BudgetCheck {
+        if finished_spent < self.tokens {
+            BudgetCheck::Within
+        } else if self.enforced {
+            BudgetCheck::Reached
+        } else {
+            BudgetCheck::SpentNotEnforced
+        }
+    }
+}
+
+/// The metered tokens one inference round adds to a fan-out's child budget: its input and output,
+/// unless the ChatGPT subscription served it. A subscription round is usage, not spend, so it adds
+/// none (the gateway's run ceiling counts the same way); its rounds still count against the run's
+/// round budget. A negative count is a provider bug and adds nothing.
+#[must_use]
+pub fn metered_tokens(provider_used: &str, input_tokens: i32, output_tokens: i32) -> u64 {
+    if provider_used == mp_contracts::agentic_subscription::PROVIDER_ID {
+        return 0;
+    }
+    let count = |tokens: i32| u64::try_from(tokens).unwrap_or(0);
+    count(input_tokens).saturating_add(count(output_tokens))
+}
+
+/// The refusal an item ends with when the child token budget was spent before it started. Aimed at
+/// the parent model, which should answer from the items that ran rather than delegate again.
+#[must_use]
+pub fn budget_reached_refusal(spent: u64, budget: u64) -> String {
+    format!(
+        "{BUDGET_REACHED}: not started, because this fan-out's children had already spent {spent} \
+         of their {budget}-token budget. Answer from the items that ran and name this one as not \
+         researched."
+    )
+}
+
+/// The fan-out batch a retry run's items join (EP-2 S9): the batch named on the request when it
+/// is a retry, so the retried item is grouped with the batch it came from. `None` for every other
+/// run, whose fan-out call names its own batch.
+#[must_use]
+pub fn retry_batch_id<'a>(retry_of_child_run_id: &str, batch_id: &'a str) -> Option<&'a str> {
+    (!retry_of_child_run_id.is_empty() && !batch_id.is_empty()).then_some(batch_id)
+}
+
+/// What a retry is refused with when the child run cannot be read back or is not a fan-out item
+/// of this conversation. One text for every cause, so a refusal does not say whether a run with
+/// that id exists for someone else.
+#[must_use]
+pub fn retry_unavailable_refusal() -> String {
+    "That wide-research item cannot be retried: it is not an item of a wide-research run in this \
+     conversation that you can read."
+        .to_owned()
+}
+
+/// The item a retry runs again: the retried child run's goal, after checking the run is a fan-out
+/// item (its agent is this tool's label and it has a parent run) of the same thread as the retry.
+/// The caller reads the run under the person's own credential, so session-core's run-owner check
+/// has already passed.
+///
+/// # Errors
+///
+/// [`retry_unavailable_refusal`] for a run of another thread, one that is not a fan-out item, or
+/// one with no goal left to research.
+pub fn retry_item_goal(
+    thread_id: &str,
+    child_thread_id: &str,
+    child_parent_run_id: &str,
+    child_agent_id: &str,
+    child_goal: &str,
+) -> Result<String, String> {
+    let is_item = !thread_id.is_empty()
+        && child_thread_id == thread_id
+        && !child_parent_run_id.is_empty()
+        && child_agent_id == super::label(RESEARCH_TOOL_NAME);
+    match wide_research_item(child_goal) {
+        Some(goal) if is_item => Ok(goal),
+        _ => Err(retry_unavailable_refusal()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,6 +939,65 @@ mod tests {
             id: id.to_owned(),
             goal: goal.to_owned(),
         }
+    }
+
+    fn items(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn plan_wide_research_keeps_the_cap_and_names_the_rest() {
+        let plan = plan_wide_research(&items(&["a", "b", "c", "d", "e"]), 3).expect("cap 3");
+        assert_eq!(plan.cap, 3);
+        assert_eq!(plan.kept, items(&["a", "b", "c"]));
+        assert_eq!(plan.dropped, items(&["d", "e"]));
+        let note = dropped_items_note(&plan).expect("two items were dropped");
+        assert!(note.contains("limit of 3"), "{note}");
+        assert!(note.contains("\n- d") && note.contains("\n- e"), "{note}");
+        let context = wide_research_goal_context(&plan);
+        assert!(context.contains(RESEARCH_TOOL_NAME), "{context}");
+        assert!(context.contains("1. a\n2. b\n3. c\n"), "{context}");
+        assert!(context.contains("- d\n- e\n"), "{context}");
+    }
+
+    #[test]
+    fn plan_wide_research_with_cap_zero_is_refused() {
+        let refused = plan_wide_research(&items(&["a"]), 0).expect_err("the org has it off");
+        assert_eq!(refused, wide_research_off_refusal());
+    }
+
+    #[test]
+    fn plan_wide_research_holds_an_unclamped_cap_to_sixteen() {
+        let many: Vec<String> = (0..20).map(|n| format!("item {n}")).collect();
+        let plan = plan_wide_research(&many, 40).expect("cap held to 16");
+        assert_eq!(plan.cap, crate::subagent::MAX_WIDE_RESEARCH_ITEMS);
+        assert_eq!(plan.kept.len(), 16);
+        assert_eq!(plan.dropped.len(), 4);
+    }
+
+    #[test]
+    fn plan_wide_research_cleans_cuts_and_bounds_the_items() {
+        let long = "x".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 50);
+        let plan = plan_wide_research(&items(&["  a\u{0}b  ", "   ", &long]), 8).expect("cap 8");
+        assert_eq!(plan.kept[0], "a b");
+        assert_eq!(plan.kept.len(), 2, "a blank item is skipped");
+        assert_eq!(plan.kept[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
+
+        let flood: Vec<String> = (0..100).map(|n| format!("q{n}")).collect();
+        let plan = plan_wide_research(&flood, 16).expect("cap 16");
+        assert_eq!(
+            plan.kept.len() + plan.dropped.len(),
+            MAX_WIDE_RESEARCH_REQUEST_ITEMS
+        );
+    }
+
+    #[test]
+    fn plan_wide_research_without_items_leaves_the_split_to_the_model() {
+        let plan = plan_wide_research(&[], 5).expect("a count preset");
+        assert!(plan.kept.is_empty() && plan.dropped.is_empty());
+        assert_eq!(dropped_items_note(&plan), None);
+        let context = wide_research_goal_context(&plan);
+        assert!(context.contains("at most 5"), "{context}");
     }
 
     #[test]
@@ -966,5 +1358,137 @@ mod tests {
         let refusal = disabled_refusal();
         assert!(refusal.contains(RESEARCH_TOOL_NAME), "{refusal}");
         assert!(refusal.contains("subagent.task"), "{refusal}");
+    }
+
+    #[test]
+    fn the_budget_switch_is_only_the_literal_true_and_the_budget_defaults_to_400k() {
+        for (raw, on) in [
+            (None, false),
+            (Some("false"), false),
+            (Some("1"), false),
+            (Some("TRUE"), false),
+            (Some("yes"), false),
+            (Some("true"), true),
+        ] {
+            assert_eq!(parse_budget_enforced(raw), on, "{raw:?}");
+        }
+        assert_eq!(DEFAULT_CHILD_TOKEN_BUDGET, 400_000, "decision D4");
+        assert_eq!(parse_child_token_budget(None), DEFAULT_CHILD_TOKEN_BUDGET);
+        assert_eq!(parse_child_token_budget(Some("junk")), DEFAULT_CHILD_TOKEN_BUDGET);
+        assert_eq!(parse_child_token_budget(Some("0")), DEFAULT_CHILD_TOKEN_BUDGET);
+        assert_eq!(parse_child_token_budget(Some(" 50000 ")), 50_000);
+    }
+
+    #[test]
+    fn a_spent_budget_refuses_only_when_enforced() {
+        let enforced = ChildBudget {
+            tokens: 100,
+            enforced: true,
+        };
+        assert_eq!(enforced.check(0), BudgetCheck::Within);
+        assert_eq!(enforced.check(99), BudgetCheck::Within);
+        assert_eq!(enforced.check(100), BudgetCheck::Reached);
+        assert_eq!(enforced.check(5_000), BudgetCheck::Reached);
+        let logged = ChildBudget {
+            tokens: 100,
+            enforced: false,
+        };
+        assert_eq!(logged.check(99), BudgetCheck::Within);
+        assert_eq!(logged.check(100), BudgetCheck::SpentNotEnforced);
+    }
+
+    #[test]
+    fn subscription_rounds_spend_no_metered_tokens() {
+        assert_eq!(metered_tokens("anthropic", 1_200, 300), 1_500);
+        assert_eq!(
+            metered_tokens(mp_contracts::agentic_subscription::PROVIDER_ID, 1_200, 300),
+            0,
+            "a subscription child never trips the token budget"
+        );
+        assert_eq!(metered_tokens("anthropic", -5, 10), 10, "a negative count adds nothing");
+    }
+
+    #[test]
+    fn budget_reached_items_are_refused_named_and_counted_in_the_digest() {
+        let items: Vec<FanOutItem> = (0..10)
+            .map(|i| item(&format!("q{i}"), &format!("question {i}")))
+            .collect();
+        let mut results: Vec<FanOutItemResult> = items
+            .iter()
+            .take(6)
+            .map(|item| FanOutItemResult::ok(item, format!("answer {}", item.id)))
+            .collect();
+        results.extend(
+            items
+                .iter()
+                .skip(6)
+                .map(|item| FanOutItemResult::budget_reached(item, 410_000, 400_000)),
+        );
+        assert!(results[6].is_budget_reached());
+        assert!(!results[0].is_budget_reached());
+        assert!(
+            !FanOutItemResult::refused(&items[0], "per-run limit".to_owned()).is_budget_reached(),
+            "another refusal is not a budget refusal"
+        );
+
+        let merged = merge(&results);
+        assert!(merged.contains("verification: {\"checked\": 10, \"confirmed\": 6}"));
+        assert!(
+            merged.contains("budget: 4 of 10 item(s) were not started"),
+            "{merged}"
+        );
+        assert_eq!(merged.matches("Reason: budget_reached").count(), 4, "{merged}");
+        for item in items.iter().skip(6) {
+            assert!(merged.contains(&item.id), "an unstarted item is still named: {merged}");
+        }
+    }
+
+    #[test]
+    fn a_digest_without_a_budget_refusal_has_no_budget_line() {
+        let results = vec![
+            FanOutItemResult::ok(&item("a", "question a"), "answer a".to_owned()),
+            FanOutItemResult::refused(&item("b", "question b"), "per-run limit".to_owned()),
+        ];
+        assert!(!merge(&results).contains("budget:"));
+    }
+
+    #[test]
+    fn a_retry_joins_the_batch_it_names_and_only_a_retry_does() {
+        assert_eq!(
+            retry_batch_id("run-child", "run-1:tool_1_fan-1"),
+            Some("run-1:tool_1_fan-1")
+        );
+        assert_eq!(retry_batch_id("", "run-1:tool_1_fan-1"), None);
+        assert_eq!(retry_batch_id("run-child", ""), None);
+    }
+
+    #[test]
+    fn a_retry_reads_back_only_a_fan_out_item_of_the_same_thread() {
+        let label = super::super::label(RESEARCH_TOOL_NAME);
+        assert_eq!(
+            retry_item_goal("thread-1", "thread-1", "run-parent", label, "  look up A \n"),
+            Ok("look up A".to_owned())
+        );
+        let refused = Err(retry_unavailable_refusal());
+        // Another conversation's run, even one the person owns.
+        assert_eq!(
+            retry_item_goal("thread-1", "thread-2", "run-parent", label, "look up A"),
+            refused
+        );
+        // A top-level run, or a child that is not a fan-out item.
+        assert_eq!(
+            retry_item_goal("thread-1", "thread-1", "", label, "look up A"),
+            refused
+        );
+        assert_eq!(
+            retry_item_goal("thread-1", "thread-1", "run-parent", "task", "look up A"),
+            refused
+        );
+        // A child with no goal left (a zero-retention child stores none).
+        assert_eq!(
+            retry_item_goal("thread-1", "thread-1", "run-parent", label, "   "),
+            refused
+        );
+        assert_eq!(retry_item_goal("", "", "run-parent", label, "look up A"), refused);
     }
 }

@@ -259,6 +259,26 @@ pub const NO_GROUNDING_SYSTEM_NOTICE: &str = "You have NO knowledge-base context
     still answer general-knowledge questions unrelated to this organization \
     normally.";
 
+/// [`NO_GROUNDING_SYSTEM_NOTICE`] for a turn whose retrieval Control declined (D1-242): the same
+/// instruction, with the reason in the gateway's own words, so the answer's gap says why nothing was
+/// retrieved instead of implying the knowledge base is empty. Without a reason it is the notice
+/// as it always was.
+#[must_use]
+pub fn no_grounding_notice(
+    decline: Option<crate::retrieval_metadata::RetrievalDeclineReason>,
+) -> String {
+    match decline {
+        None => NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
+        Some(reason) => format!(
+            "{NO_GROUNDING_SYSTEM_NOTICE} Retrieval was not attempted on this turn, so this says \
+            nothing about whether the knowledge base holds the answer: {}. When you tell the \
+            user you cannot answer from the knowledge base, give this reason in one short \
+            sentence.",
+            reason.statement()
+        ),
+    }
+}
+
 /// Appended to the context block when grounding WAS found but is weak (Data
 /// Plane's `low_confidence` flag, or a fact count too small to be a real
 /// answer). Distinguishes "nothing found" from "found something, but it's a
@@ -2362,5 +2382,21 @@ mod tests {
             .to_lowercase()
             .contains("do not have this"));
         assert!(LOW_CONFIDENCE_GROUNDING_NOTICE.contains("low-confidence"));
+    }
+
+    /// Without a reason the notice is byte-identical to what a turn got before the reason existed; with
+    /// one it is that notice plus this gateway's own sentence for the reason, and nothing else.
+    #[test]
+    fn a_declined_retrieval_names_its_reason_and_an_absent_reason_changes_nothing() {
+        use crate::retrieval_metadata::RetrievalDeclineReason;
+        assert_eq!(no_grounding_notice(None), NO_GROUNDING_SYSTEM_NOTICE);
+        let declined = no_grounding_notice(Some(RetrievalDeclineReason::EntitlementOff));
+        assert!(declined.starts_with(NO_GROUNDING_SYSTEM_NOTICE));
+        assert!(declined.contains(RetrievalDeclineReason::EntitlementOff.statement()));
+        assert!(declined.contains("not attempted"));
+        assert_ne!(
+            declined,
+            no_grounding_notice(Some(RetrievalDeclineReason::SpaceNotActive))
+        );
     }
 }

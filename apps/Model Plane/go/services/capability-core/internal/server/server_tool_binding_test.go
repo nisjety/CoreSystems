@@ -25,7 +25,7 @@ import (
 
 // bindingRow is one result row of toolBindingSQL, in column order.
 type bindingRow struct {
-	capabilityID, toolName, qualifiedName, class, floor, digest, reviewState, version string
+	capabilityID, toolName, qualifiedName, class, floor, digest, reviewState, version, serverID string
 }
 
 type bindingRows struct {
@@ -43,7 +43,7 @@ func (r *bindingRows) Conn() *pgx.Conn                              { return nil
 func (r *bindingRows) Next() bool                                   { r.next++; return r.next <= len(r.rows) }
 func (r *bindingRows) Scan(dest ...any) error {
 	row := r.rows[r.next-1]
-	values := []string{row.capabilityID, row.toolName, row.qualifiedName, row.class, row.floor, row.digest, row.reviewState, row.version}
+	values := []string{row.capabilityID, row.toolName, row.qualifiedName, row.class, row.floor, row.digest, row.reviewState, row.version, row.serverID}
 	for i := range dest {
 		*(dest[i].(*string)) = values[i]
 	}

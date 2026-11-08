@@ -25,7 +25,8 @@ const base: ScheduleFromChatInput = {
 const readTool = { tool: 'web_search', capability: 'cap.tool.web_search' }
 
 function sentTemplate(): Record<string, unknown> {
-  const body = vi.mocked(createCronSchedule).mock.calls[0]?.[1] as { task_template: Record<string, unknown> }
+  // Through unknown: the body is the typed CronTaskTemplate, which an interface does not widen to a record.
+  const body = vi.mocked(createCronSchedule).mock.calls[0]?.[1] as unknown as { task_template: Record<string, unknown> }
   return body.task_template
 }
 

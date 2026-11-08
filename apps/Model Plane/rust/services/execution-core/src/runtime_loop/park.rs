@@ -529,8 +529,11 @@ pub(crate) fn parked_response(
             .park_until
             .to_rfc3339_opts(SecondsFormat::Secs, true),
         park_reason: parked.reason.as_str().to_owned(),
+        loop_stop_code: String::new(),
         // The loop holds the tally, and sets it on the response it returns.
         usage: None,
+        // The caller that holds the loop's round log sets it.
+        round_timing: Vec::new(),
     }
 }
 
@@ -1513,7 +1516,9 @@ mod tests {
                 retry_after_ms: None,
                 resets_at: "2026-10-20T01:21:00Z".to_owned(),
                 park_reason: "provider_exhausted".to_owned(),
+                loop_stop_code: String::new(),
                 usage: None,
+                round_timing: Vec::new(),
             }
         );
         // Whole seconds, UTC, whatever the sub-second part.

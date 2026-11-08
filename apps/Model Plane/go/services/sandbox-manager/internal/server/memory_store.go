@@ -58,9 +58,10 @@ func (s *MemoryLeaseStore) Create(_ context.Context, scopeID, scopeType, orgID, 
 	l := &lease.Lease{
 		ID: id, ScopeID: scopeID, ScopeType: scopeType, OrgID: orgID, OwnerID: ownerID,
 		Endpoint: "sandbox://" + id, SpaceID: spaceID, BackendID: backendID,
-		ProcessesPermitted: grant.ProcessesPermitted,
-		AudienceRevision:   grant.RecipientAudienceRevision,
-		State: mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: now.Add(ttl), CreatedAt: now,
+		ProcessesPermitted:  grant.ProcessesPermitted,
+		AudienceRevision:    grant.RecipientAudienceRevision,
+		EgressTierPermitted: grant.EgressTierPermitted,
+		State:               mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: now.Add(ttl), CreatedAt: now, LastActivityAt: now,
 	}
 	s.mu.Lock()
 	s.byID[id] = cloneLease(l)
@@ -77,13 +78,15 @@ func (s *MemoryLeaseStore) AcquireThread(_ context.Context, threadID, orgID, own
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	expires := s.nowFn().Add(ttl)
+	now := s.nowFn()
+	expires := now.Add(ttl)
 	for _, l := range s.byID {
 		if l.ScopeType == "thread" && l.ScopeID == threadID && l.OrgID == orgID && l.OwnerID == ownerID &&
 			l.State != mpv1.SandboxLifecycleState_DESTROYED {
 			if expires.After(l.ExpiresAt) {
 				l.ExpiresAt = expires
 			}
+			l.LastActivityAt = now
 			return cloneLease(l), nil
 		}
 	}
@@ -94,7 +97,7 @@ func (s *MemoryLeaseStore) AcquireThread(_ context.Context, threadID, orgID, own
 	l := &lease.Lease{
 		ID: id, ScopeID: threadID, ScopeType: "thread", OrgID: orgID, OwnerID: ownerID,
 		Endpoint: "sandbox://" + id, BackendID: backendID,
-		State: mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: expires, CreatedAt: s.nowFn(),
+		State: mpv1.SandboxLifecycleState_SCRATCH, ExpiresAt: expires, CreatedAt: now, LastActivityAt: now,
 	}
 	s.byID[id] = cloneLease(l)
 	return cloneLease(l), nil
@@ -193,6 +196,19 @@ func (s *MemoryLeaseStore) GetAny(_ context.Context, id, orgID, ownerID, backend
 		return nil, lease.ErrLeaseBackendMismatch
 	}
 	return cloneLease(l), nil
+}
+
+// RecordActivity is the in-memory counterpart of lease.Store.RecordActivity.
+func (s *MemoryLeaseStore) RecordActivity(_ context.Context, id, orgID, ownerID string, cause mpv1.SandboxFailureCause, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l, ok := s.byID[id]
+	if !ok || l.OrgID != orgID || l.OwnerID != ownerID {
+		return lease.ErrLeaseNotFound
+	}
+	l.FailureCause = cause
+	l.LastActivityAt = at
+	return nil
 }
 
 func cloneLease(value *lease.Lease) *lease.Lease {

@@ -90,6 +90,15 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
         Treatment::Inert("it appends to a durable thread, which a ZDR turn never writes"),
     ),
     ("space_context", Treatment::Honored),
+    // A wake starts a durable run from a stored post. The invoke stream refuses it first with the
+    // same code (`space_sse::check_wake`); this row keeps the table total and the answer the same.
+    (
+        "wake_context",
+        Treatment::Refused {
+            code: code::DURABLE_MUTATION_FORBIDDEN,
+            feature: None,
+        },
+    ),
     // The schema is sent to the model with the turn, on both ZDR paths, as the
     // unary path always did: the provider answers in the schema's shape.
     ("structured_output_schema", Treatment::Honored),
@@ -98,8 +107,21 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("browse_web", refused_feature("web_search")),
     ("skill_ids", refused_feature("skills")),
     ("deep_research", refused_feature("deep_research")),
+    // EP-2 S5: the plan and run turns of a two-turn deep research. Both only shape a deep-research
+    // turn, which `deep_research` refuses before either phase, so a plan turn under ZDR gets the
+    // same refusal and neither field has anything to do on its own.
+    (
+        "research_phase",
+        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
+    ),
+    (
+        "research_plan",
+        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
+    ),
     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
-    // then reads org knowledge only, and no web source was asked for.
+    // then reads org knowledge only, and no web source was asked for. A
+    // knowledge-only deep research (EP-2 S7) is still refused, through
+    // `deep_research`, which [`refusal`] decides before the scope.
     ("retrieval_scope", refused_feature("web_search")),
     ("connector_scope", refused_feature("connector_read")),
     (
@@ -120,6 +142,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // `chat` is honored. A deployed-agent profile is an unattended agent, which
     // ZDR refuses.
     ("profile", refused_feature("deployed_agent")),
+    // The mode a person chose is resolved before a turn is admitted (WS25-S6): it only tightens the
+    // posture, and a plan gate it sets is refused through `plan_mode` like any plan flag.
+    ("agent_mode", Treatment::Honored),
     ("verbosity", Treatment::Honored),
     ("effort", Treatment::Honored),
     ("features", Treatment::PerMember),
@@ -135,6 +160,7 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // An execute turn runs an executing loop under a plan grant. A ZDR turn keeps no
     // plan and no grant, so it is refused through the `agentic` feature it rides on.
     ("execute_granted", refused_feature("agentic")),
+    ("approved_plan_id", refused_feature("agentic")),
     // A client's own tool definitions. Those the composer derives from its
     // actions are declared here too, so an action is refused the same way.
     ("tools", refused_feature("client_tools")),
@@ -145,6 +171,36 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("org_instructions", Treatment::Honored),
     ("space_instructions", Treatment::Honored),
     ("persona_instructions", Treatment::Honored),
+    ("persona_tone", Treatment::Honored),
+    ("locale", Treatment::Honored),
+    ("client_timezone", Treatment::Honored),
+    ("client_utc_offset_minutes", Treatment::Honored),
+    ("ui_locale", Treatment::Honored),
+    (
+        "agent_roles",
+        Treatment::Inert(
+            "no tool loop runs on a ZDR turn, so no subagent takes a role; the catalogue is never built",
+        ),
+    ),
+    // EP-6 S9: the pinned agent version is read before the ZDR branch, so its allowlist and
+    // autonomy cap narrow a ZDR turn exactly as any other; only ids and the digest are logged.
+    ("agent_ref", Treatment::Honored),
+    ("agent_version", Treatment::Honored),
+    ("agent_digest", Treatment::Honored),
+    ("agent_tool_capability_ids", Treatment::Honored),
+    ("agent_autonomy_cap", Treatment::Honored),
+    // EP-2 S8: a wide-research run is a Do run, refused under ZDR through the `agentic` feature it
+    // rides on; the estimate route refuses a ZDR caller the same way.
+    ("wide_research", refused_feature("agentic")),
+    // EP-3 S5: a reference is resolved against durable state (a document's ACL, a thread, a
+    // revision), so a ZDR turn carrying any is refused, and none is silently dropped.
+    ("context_refs", refused_feature("context_references")),
+    // EP-5 S7: a deck template is a skill bundle; a ZDR turn never mounts one, so a pick is refused like a skill.
+    ("deck_template", refused_feature("skills")),
+    // EP-7 S1: a goal is user content in a durable store, so a ZDR turn naming one is refused.
+    ("goal_id", refused_feature("thread_goal")),
+    // EP-7 S4: a pump-sent goal turn continues a goal, so a ZDR turn carrying the mark is refused like the goal.
+    ("goal_auto", refused_feature("thread_goal")),
 ];
 
 /// The feature strings the gateway reads, each with its treatment. A feature
@@ -218,12 +274,15 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         thread_id: _,
         space_append_context: _,
         space_context: _,
+        wake_context: _,
         structured_output_schema: _,
         zdr: _,
         min_privacy_tier: _,
         browse_web: _,
         skill_ids: _,
         deep_research: _,
+        research_phase: _,
+        research_plan: _,
         retrieval_scope: _,
         connector_scope: _,
         regenerated: _,
@@ -234,6 +293,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         max_cost_usd: _,
         max_tokens: _,
         profile: _,
+        agent_mode: _,
         verbosity: _,
         effort: _,
         features: _,
@@ -242,6 +302,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         generate_image: _,
         plan_mode: _,
         execute_granted: _,
+        approved_plan_id: _,
         tools: _,
         org_name: _,
         user_name: _,
@@ -250,6 +311,22 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         org_instructions: _,
         space_instructions: _,
         persona_instructions: _,
+        persona_tone: _,
+        locale: _,
+        client_timezone: _,
+        client_utc_offset_minutes: _,
+        ui_locale: _,
+        agent_roles: _,
+        agent_ref: _,
+        agent_version: _,
+        agent_digest: _,
+        agent_tool_capability_ids: _,
+        agent_autonomy_cap: _,
+        wide_research: _,
+        context_refs: _,
+        deck_template: _,
+        goal_id: _,
+        goal_auto: _,
     } = request;
     vec![
         "content",
@@ -260,12 +337,15 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "thread_id",
         "space_append_context",
         "space_context",
+        "wake_context",
         "structured_output_schema",
         "zdr",
         "min_privacy_tier",
         "browse_web",
         "skill_ids",
         "deep_research",
+        "research_phase",
+        "research_plan",
         "retrieval_scope",
         "connector_scope",
         "regenerated",
@@ -276,6 +356,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "max_cost_usd",
         "max_tokens",
         "profile",
+        "agent_mode",
         "verbosity",
         "effort",
         "features",
@@ -284,6 +365,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "generate_image",
         "plan_mode",
         "execute_granted",
+        "approved_plan_id",
         "tools",
         "org_name",
         "user_name",
@@ -292,6 +374,22 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "org_instructions",
         "space_instructions",
         "persona_instructions",
+        "persona_tone",
+        "locale",
+        "client_timezone",
+        "client_utc_offset_minutes",
+        "ui_locale",
+        "agent_roles",
+        "agent_ref",
+        "agent_version",
+        "agent_digest",
+        "agent_tool_capability_ids",
+        "agent_autonomy_cap",
+        "wide_research",
+        "context_refs",
+        "deck_template",
+        "goal_id",
+        "goal_auto",
     ]
 }
 
@@ -304,6 +402,16 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
 /// connection route is not decided here: the turn's posture decision answers it first.
 #[must_use]
 pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
+    refusal_with(request, crate::deck_templates::enabled())
+}
+
+/// [`refusal`] with the deck-template switch (`SKILL_DECK_TEMPLATES_ENABLED`, EP-5 S7) passed in, so
+/// a test decides a `deck_template` row under either setting without writing the process environment.
+#[must_use]
+pub fn refusal_with(request: &InvokeRequest, deck_templates_enabled: bool) -> Option<Refusal> {
+    if request.wake_context.is_some() {
+        return Some(Refusal::DURABLE_MUTATION_FORBIDDEN);
+    }
     let conversation_only = request
         .features
         .iter()
@@ -322,6 +430,12 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
         return feature("agentic");
     }
     if request.execute_granted {
+        return feature("agentic");
+    }
+    if request.approved_plan_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return feature("agentic");
+    }
+    if request.wide_research.as_ref().is_some_and(|wide| !wide.is_null()) {
         return feature("agentic");
     }
     if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
@@ -352,6 +466,18 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
     }
     if !request.pinned_message_ids.is_empty() {
         return feature("pinned_messages");
+    }
+    if crate::context_refs::requested(request.context_refs.as_ref()) {
+        return feature(crate::context_refs::ZDR_FEATURE);
+    }
+    if crate::deck_templates::zdr_refused(deck_templates_enabled, request.deck_template.as_ref()) {
+        return feature(crate::deck_templates::ZDR_FEATURE);
+    }
+    if request.goal_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+        return feature(crate::thread_goal_routes::ZDR_FEATURE);
+    }
+    if request.goal_auto {
+        return feature(crate::thread_goal_routes::ZDR_FEATURE);
     }
     if request.max_cost_usd.is_some() {
         return feature("spend_cap");
@@ -389,4 +515,63 @@ pub fn identity_framing(request: &InvokeRequest) -> Option<String> {
             "You are Verevon, the AI assistant currently helping {org}. When the user says \"we\", \"us\", \"our\", or \"the company\", they mean {org}, not Verevon itself."
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn request(body: serde_json::Value) -> InvokeRequest {
+        serde_json::from_value(body).expect("a wire body parses")
+    }
+
+    /// EP-2 S7: knowledge and connector sources in deep research change nothing on a ZDR turn. Deep
+    /// research is refused before the scope or the selection is read, so neither switch can let a
+    /// knowledge-only run or a connected-account read slip past it.
+    #[test]
+    fn deep_research_with_internal_sources_is_refused_under_zdr() {
+        let deep_research = Some(Refusal::feature_not_supported("deep_research"));
+        // e_zdr_token_knowledge_only_deep_research_refused
+        assert_eq!(
+            refusal_with(
+                &request(json!({
+                    "content": "hello",
+                    "deep_research": true,
+                    "retrieval_scope": "knowledge_only",
+                })),
+                false,
+            ),
+            deep_research
+        );
+        // e_zdr_token_deep_research_connector_sources_refused
+        assert_eq!(
+            refusal_with(
+                &request(json!({
+                    "content": "hello",
+                    "deep_research": true,
+                    "connector_scope": ["conn_1"],
+                })),
+                false,
+            ),
+            deep_research
+        );
+        // Without deep research the knowledge-only scope is honoured and a selection is refused
+        // for itself, as before.
+        assert_eq!(
+            refusal_with(
+                &request(json!({"content": "hello", "retrieval_scope": "knowledge_only"})),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            refusal_with(
+                &request(json!({"content": "hello", "connector_scope": ["conn_1"]})),
+                false,
+            ),
+            Some(Refusal::feature_not_supported("connector_read"))
+        );
+    }
 }

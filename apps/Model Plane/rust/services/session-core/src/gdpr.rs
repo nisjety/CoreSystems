@@ -33,6 +33,8 @@
 
 use serde::Deserialize;
 use sqlx::{Postgres, Transaction};
+use std::{sync::OnceLock, time::Duration};
+use tonic::Status;
 
 use crate::store::Pool;
 
@@ -141,8 +143,16 @@ pub struct PurgeSummary {
     pub todos: u64,
     pub plan_steps: u64,
     pub approvals: u64,
+    /// Standing approval grants erased with the organization (build plan WS13 S6).
+    pub approval_scope_grants: u64,
     pub plans: u64,
     pub memory_index: u64,
+    /// Artifact revision texts (EP-3 S2). They also cascade from `threads`; counted here so the
+    /// erasure proof names the content table.
+    pub artifact_revisions: u64,
+    /// Thread goals, the owner's objectives and criteria (EP-7 S1). They also cascade from
+    /// `threads`; counted here so the erasure proof names the content table.
+    pub thread_goals: u64,
     pub messages: u64,
     pub task_events: u64,
     pub task_assignments: u64,
@@ -151,13 +161,22 @@ pub struct PurgeSummary {
     pub tasks: u64,
     pub cron_schedules: u64,
     pub events: u64,
+    pub run_trace_events: u64,
+    /// Request snapshots and their system/tool blobs (EP-14 S6).
+    pub run_request_snapshots: u64,
+    pub run_request_snapshot_blobs: u64,
     pub runs: u64,
     pub threads: u64,
     pub hook_configs: u64,
     pub agent_skills: u64,
     pub skill_revisions: u64,
+    /// Immutable skill versions and their bodies (EP-11 S2). A skill's delete also removes them;
+    /// they are purged before the skills so the erasure proof counts them.
+    pub agent_skill_versions: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
+    /// Standing user profiles (EP-8 S4).
+    pub user_profiles: u64,
     pub forgotten_memory_ids: u64,
     pub memory_control_events: u64,
     pub org_learning_policy_mirror: u64,
@@ -185,8 +204,11 @@ impl PurgeSummary {
             + self.todos
             + self.plan_steps
             + self.approvals
+            + self.approval_scope_grants
             + self.plans
             + self.memory_index
+            + self.artifact_revisions
+            + self.thread_goals
             + self.messages
             + self.task_events
             + self.task_assignments
@@ -195,13 +217,18 @@ impl PurgeSummary {
             + self.tasks
             + self.cron_schedules
             + self.events
+            + self.run_trace_events
+            + self.run_request_snapshots
+            + self.run_request_snapshot_blobs
             + self.runs
             + self.threads
             + self.hook_configs
             + self.agent_skills
             + self.skill_revisions
+            + self.agent_skill_versions
             + self.agent_memory
             + self.user_memory_controls
+            + self.user_profiles
             + self.forgotten_memory_ids
             + self.memory_control_events
             + self.org_learning_policy_mirror
@@ -209,6 +236,247 @@ impl PurgeSummary {
             + self.dream_runs
             + self.session_audit_outbox
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Legal holds against erasure (EP-9 C4, decision D-C1).
+//
+// org-core is the hold record (EP-9 C1). Before a user deletes a thread, bulk-deletes their
+// history, or an organisation erasure purges the org, session-core asks org-core's check route
+// whether the organisation or any of the threads is held. A held scope is refused with
+// `erasure_blocked_legal_hold`; the hold is released in Control, never overridden here. A check
+// that cannot be answered refuses with the retryable `erasure_hold_check_unavailable`: a hold
+// that cannot be ruled out is treated as present, because a wrong refusal is retried and a
+// wrong erasure is not recoverable.
+// ---------------------------------------------------------------------------------------------
+
+/// The switch. Only the literal `true` turns the check on; off, no hold is asked and every
+/// erasure runs exactly as before.
+pub(crate) const ERASURE_HOLD_CHECK_ENV: &str = "ERASURE_HOLD_CHECK";
+
+/// Typed refusal words on the `x-mp-error-code` trailer.
+pub(crate) const ERASURE_BLOCKED_LEGAL_HOLD: &str = "erasure_blocked_legal_hold";
+pub(crate) const ERASURE_HOLD_CHECK_UNAVAILABLE: &str = "erasure_hold_check_unavailable";
+
+/// What a hold keeps when it blocks a thread erase: every content family `delete_thread_rows`
+/// and the org purge remove, named so the refusal says what stays. Thread goals and artifact
+/// revisions are thread-bound tables of their own (C-B9) and must stay in this list.
+pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
+    "messages",
+    "runs",
+    "plans",
+    "approvals",
+    "tasks",
+    "agent_memory",
+    "thread_goals",
+    "artifact_revisions",
+];
+
+/// The most thread ids one check call may name (org-core `retention.MaxCheckThreadIDs`).
+const CHECK_PAGE: usize = 500;
+/// A full page of held ids is well under this; anything larger is not a check answer.
+const MAX_CHECK_BODY_BYTES: usize = 128 * 1024;
+const CHECK_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Above org-core's own 3 s bound on the check, so its typed answer arrives first.
+const CHECK_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why an erasure was refused.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ErasureHoldError {
+    /// An active org hold covers every thread of the organisation.
+    #[error("erasure_blocked_legal_hold: an active legal hold covers the organisation")]
+    OrgHeld,
+    /// Active thread holds cover this many of the threads asked about.
+    #[error("erasure_blocked_legal_hold: an active legal hold covers {0} of the threads")]
+    ThreadsHeld(usize),
+    /// No answer could be had, so no hold can be ruled out. The text is for logs only.
+    #[error("erasure_hold_check_unavailable: {0}")]
+    Unavailable(String),
+}
+
+impl ErasureHoldError {
+    /// The gRPC refusal. Held is `FailedPrecondition` (retrying changes nothing until the hold is
+    /// released); unavailable is `Unavailable` (a retry may succeed). The message never carries
+    /// the internal cause, which can hold org-core's address.
+    pub(crate) fn into_status(self) -> Status {
+        let held = |scope: &str| {
+            Status::failed_precondition(format!(
+                "a legal hold covers {scope}, so nothing was deleted; its {} are kept until the hold is released",
+                HELD_THREAD_CONTENT.join(", ")
+            ))
+        };
+        match self {
+            Self::OrgHeld => crate::space::mentions::coded_status(
+                held("this organisation"),
+                ERASURE_BLOCKED_LEGAL_HOLD,
+            ),
+            Self::ThreadsHeld(count) => crate::space::mentions::coded_status(
+                held(&format!("{count} of these conversations")),
+                ERASURE_BLOCKED_LEGAL_HOLD,
+            ),
+            Self::Unavailable(cause) => {
+                tracing::warn!(%cause, "legal hold check unavailable; erasure refused");
+                crate::space::mentions::coded_status(
+                    Status::unavailable(
+                        "legal holds could not be checked, so nothing was deleted; try again shortly",
+                    ),
+                    ERASURE_HOLD_CHECK_UNAVAILABLE,
+                )
+            }
+        }
+    }
+}
+
+/// org-core's check answer, read strictly: both fields are required. The window and revision
+/// it also carries are the sweeper's, not this gate's.
+#[derive(Deserialize)]
+struct CheckWire {
+    org_held: bool,
+    held_thread_ids: Vec<String>,
+}
+
+/// Asks org-core's check route on behalf of session-core. Holds a service credential, so it has
+/// no `Debug`.
+pub(crate) struct HoldChecker {
+    base_url: String,
+    token: String,
+    client: reqwest::Client,
+}
+
+impl HoldChecker {
+    /// `None` when org-core's address or the service token is unset. It reuses the org policy
+    /// poller's credentials: one session-core principal at org-core, holding the check scope.
+    fn from_lookup(get: &impl Fn(&str) -> Option<String>) -> Option<Self> {
+        let base_url = get(crate::org_policy::ORG_CORE_URL_ENV)?.trim().to_owned();
+        let token = get(crate::org_policy::SERVICE_TOKEN_ENV)?.trim().to_owned();
+        if base_url.is_empty() || token.is_empty() {
+            return None;
+        }
+        let client = reqwest::Client::builder()
+            .connect_timeout(CHECK_CONNECT_TIMEOUT)
+            .timeout(CHECK_REQUEST_TIMEOUT)
+            .build()
+            .ok()?;
+        Some(Self { base_url, token, client })
+    }
+
+    fn check_url(&self, org_id: &str) -> Result<reqwest::Url, ErasureHoldError> {
+        let mut url = reqwest::Url::parse(&self.base_url)
+            .map_err(|_| ErasureHoldError::Unavailable("ORG_CORE_URL is not a URL".to_owned()))?;
+        url.path_segments_mut()
+            .map_err(|()| ErasureHoldError::Unavailable("ORG_CORE_URL cannot carry a path".to_owned()))?
+            .pop_if_empty()
+            .extend(["internal", "orgs", org_id, "retention", "check"]);
+        Ok(url)
+    }
+
+    /// One page. `None` is org-core's definitive 404: the organisation is not live, and its
+    /// holds went with it (`org_legal_holds` cascades from the organisation).
+    async fn ask_page(&self, org_id: &str, page: &[String]) -> Result<Option<CheckWire>, ErasureHoldError> {
+        let unavailable = ErasureHoldError::Unavailable;
+        let response = self
+            .client
+            .post(self.check_url(org_id)?)
+            .header("x-service-id", "session-core")
+            .header("x-service-token", &self.token)
+            .json(&serde_json::json!({ "thread_ids": page }))
+            .send()
+            .await
+            .map_err(|error| unavailable(format!("check request failed: {error}")))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(unavailable(format!("check answered {status}")));
+        }
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| unavailable(format!("check body unreadable: {error}")))?;
+        if body.len() > MAX_CHECK_BODY_BYTES {
+            return Err(unavailable("check body too large".to_owned()));
+        }
+        serde_json::from_slice(&body)
+            .map(Some)
+            .map_err(|error| unavailable(format!("check body is not a check answer: {error}")))
+    }
+
+    /// Whether the organisation or any of `thread_ids` is held, paging the ids. An org hold
+    /// answers at once; thread holds are counted over every page.
+    async fn ensure_not_held(&self, org_id: &str, thread_ids: &[String]) -> Result<(), ErasureHoldError> {
+        let empty: [String; 0] = [];
+        let pages: Vec<&[String]> = if thread_ids.is_empty() {
+            vec![&empty[..]]
+        } else {
+            thread_ids.chunks(CHECK_PAGE).collect()
+        };
+        let mut held = 0usize;
+        for page in pages {
+            let Some(answer) = self.ask_page(org_id, page).await? else {
+                return Ok(());
+            };
+            if answer.org_held {
+                return Err(ErasureHoldError::OrgHeld);
+            }
+            held += answer.held_thread_ids.len();
+        }
+        if held > 0 {
+            return Err(ErasureHoldError::ThreadsHeld(held));
+        }
+        Ok(())
+    }
+}
+
+/// The gate every erasure path asks.
+pub(crate) enum ErasureHoldGate {
+    /// The switch is off: nothing is asked.
+    Off,
+    /// The switch is on but org-core cannot be addressed: every erasure is refused as
+    /// unavailable, since no hold can be ruled out.
+    Unconfigured,
+    On(HoldChecker),
+}
+
+impl ErasureHoldGate {
+    pub(crate) fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Self {
+        if get(ERASURE_HOLD_CHECK_ENV).as_deref() != Some("true") {
+            return Self::Off;
+        }
+        HoldChecker::from_lookup(&get).map_or(Self::Unconfigured, Self::On)
+    }
+
+    /// Refuses when the organisation or any of `thread_ids` (empty: the organisation alone) is
+    /// under an active legal hold, or when that cannot be ruled out.
+    ///
+    /// # Errors
+    ///
+    /// [`ErasureHoldError`] names the refusal.
+    pub(crate) async fn ensure_not_held(&self, org_id: &str, thread_ids: &[String]) -> Result<(), ErasureHoldError> {
+        match self {
+            Self::Off => Ok(()),
+            Self::Unconfigured => Err(ErasureHoldError::Unavailable(format!(
+                "{ERASURE_HOLD_CHECK_ENV} is true but {} or {} is unset",
+                crate::org_policy::ORG_CORE_URL_ENV,
+                crate::org_policy::SERVICE_TOKEN_ENV
+            ))),
+            Self::On(checker) => checker.ensure_not_held(org_id, thread_ids).await,
+        }
+    }
+}
+
+/// The process gate, read once.
+pub(crate) fn erasure_hold_gate() -> &'static ErasureHoldGate {
+    static GATE: OnceLock<ErasureHoldGate> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let gate = ErasureHoldGate::from_lookup(|name| std::env::var(name).ok());
+        if matches!(gate, ErasureHoldGate::Unconfigured) {
+            tracing::error!(
+                "{ERASURE_HOLD_CHECK_ENV} is true but org-core credentials are unset: every thread delete and org erasure is refused"
+            );
+        }
+        gate
+    })
 }
 
 /// Hard-purge every org-scoped row this crate owns for `org_id`, in one
@@ -223,7 +491,9 @@ impl PurgeSummary {
 ///
 /// Returns an error if the transaction fails to begin, any statement fails,
 /// or the commit fails. On error nothing is purged — the transaction rolls
-/// back, so a NAK'd redelivery retries the whole purge cleanly.
+/// back, so a NAK'd redelivery retries the whole purge cleanly. With
+/// `ERASURE_HOLD_CHECK` on it also returns an [`ErasureHoldError`] before any
+/// statement when the organisation is held or its holds cannot be checked.
 // Fields are populated one statement at a time (not as a single struct
 // literal) because the comments between them document real FK-ordering
 // dependencies between the awaited statements — collapsing this into one
@@ -234,8 +504,17 @@ pub async fn purge_organization_data(
     org_id: &str,
     letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
 ) -> anyhow::Result<PurgeSummary> {
+    // EP-9 C4: a held organisation is not purged. Asked before the transaction opens, so a
+    // refusal touches nothing and the consumer's redelivery retries it after the release.
+    erasure_hold_gate().ensure_not_held(org_id, &[]).await?;
+
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
+
+    // Space event log: switch the deferred event triggers off for this transaction FIRST.
+    // They fire at commit, and without this the thread/run deletes below would write new
+    // `thread.deleted` rows for an org that was just erased.
+    crate::space::events::suppress(&mut tx).await?;
 
     // The loop's sealed folds are erased with the org's runs, before them.
     sqlx::query(
@@ -280,6 +559,14 @@ pub async fn purge_organization_data(
     .await?
     .rows_affected();
 
+    // Standing grants reference their approval, run and thread, so they go before any of them.
+    summary.approval_scope_grants =
+        sqlx::query("DELETE FROM approval_scope_grants WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
     // `approvals` references both `plans` and `runs` — delete before either.
     // `approval_delivery_outbox` cascades from `approvals` automatically.
     summary.approvals = sqlx::query("DELETE FROM approvals WHERE org_id = $1")
@@ -295,6 +582,21 @@ pub async fn purge_organization_data(
         .rows_affected();
 
     summary.memory_index = sqlx::query("DELETE FROM memory_index WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Artifact revisions (EP-3 S2) go before their messages and threads. The thread FK cascades
+    // too; the explicit statement keeps the count and survives a dropped cascade.
+    summary.artifact_revisions = sqlx::query("DELETE FROM artifact_revisions WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Thread goals (EP-7 S1) go before their threads, for the same reasons.
+    summary.thread_goals = sqlx::query("DELETE FROM thread_goals WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -371,6 +673,39 @@ pub async fn purge_organization_data(
     .await?
     .rows_affected();
 
+    // Space event log (ids and kinds only): the org's rows and per-Space heads go with its
+    // events. Not counted in the summary (the erasure proof counts content tables).
+    sqlx::query("DELETE FROM space_event_log WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM space_event_heads WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // The run trace (WS10.S6): scoped by its own `org_id`, and removed explicitly before `runs`
+    // so the count is the purge's own rather than the cascade's.
+    summary.run_trace_events = sqlx::query("DELETE FROM run_trace_events WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Request snapshots (EP-14 S6): they would cascade from `runs`, but are removed explicitly by their own
+    // `org_id` so the purge counts them, as the run trace is.
+    summary.run_request_snapshot_blobs =
+        sqlx::query("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    summary.run_request_snapshots = sqlx::query("DELETE FROM run_request_snapshots WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
     // `runs` — cascades `session_tool_audit_intents` and
     // `managed_run_terminalization_outbox` (ON DELETE CASCADE).
     summary.runs = sqlx::query("DELETE FROM runs WHERE org_id = $1")
@@ -392,6 +727,22 @@ pub async fn purge_organization_data(
         .execute(&mut *tx)
         .await?
         .rows_affected();
+
+    // Before the skills, so the count is the purge's own rather than the skill delete trigger's.
+    // A version row refuses any delete outside erasure (migration 0108); the setting is put back
+    // at once so nothing else in this transaction deletes a version through it.
+    sqlx::query("SELECT set_config('mp.version_erasure', 'on', true)")
+        .execute(&mut *tx)
+        .await?;
+    summary.agent_skill_versions =
+        sqlx::query("DELETE FROM agent_skill_versions WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    sqlx::query("SELECT set_config('mp.version_erasure', '', true)")
+        .execute(&mut *tx)
+        .await?;
 
     summary.agent_skills = sqlx::query("DELETE FROM agent_skills WHERE org_id = $1")
         .bind(org_id)
@@ -435,6 +786,9 @@ pub async fn purge_organization_data(
     summary.forgotten_memory_ids = sqlx::query("DELETE FROM forgotten_memory_ids WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.user_memory_controls = sqlx::query("DELETE FROM user_memory_controls WHERE org_id = $1")
+        .bind(org_id).execute(&mut *tx).await?.rows_affected();
+    // The profile is derived from the agent_memory rows erased above, or is the person's own text.
+    summary.user_profiles = sqlx::query("DELETE FROM user_profiles WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
     summary.memory_control_events = sqlx::query("DELETE FROM memory_control_events WHERE org_id = $1")
         .bind(org_id).execute(&mut *tx).await?.rows_affected();
@@ -484,6 +838,175 @@ pub async fn purge_organization_data(
             "operation" => "gdpr_purge"
         )
         .increment(summary.semantic_memory.unconfirmed);
+    }
+    Ok(summary)
+}
+
+/// A validated per-user erasure (`user-core`'s saga, `subject_type == "user"`), read only for the
+/// one thing session-core erases per user today: that person's part of Space memory (EP-8 S7).
+/// Everything else the module note says about per-user events still holds: the org is not purged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserErasure {
+    pub org_id: String,
+    pub user_id: String,
+}
+
+/// Decode the fan-out payload as a per-user erasure. `Ok(None)` for every other subject type
+/// (`user_anonymize` included: it keeps the records and removes the identity, which a Space row
+/// does not carry).
+///
+/// # Errors
+///
+/// Returns [`ErasureEventError`] for a payload that is not JSON, or a `user` event without a
+/// bounded org or subject.
+pub fn parse_user_erasure_event(payload: &[u8]) -> Result<Option<UserErasure>, ErasureEventError> {
+    let wire: ErasureEventWire =
+        serde_json::from_slice(payload).map_err(|e| ErasureEventError::Decode(e.to_string()))?;
+    if wire.subject_type.as_deref().unwrap_or_default() != "user" {
+        return Ok(None);
+    }
+    let org_id = wire.org_id.unwrap_or_default().trim().to_owned();
+    if org_id.is_empty() {
+        return Err(ErasureEventError::MissingOrgId);
+    }
+    if org_id.len() > MAX_ID_LEN {
+        return Err(ErasureEventError::OrgIdTooLong);
+    }
+    let user_id = wire.subject_id.unwrap_or_default().trim().to_owned();
+    if user_id.is_empty() || user_id.len() > MAX_ID_LEN {
+        return Err(ErasureEventError::MissingSubjectId);
+    }
+    Ok(Some(UserErasure { org_id, user_id }))
+}
+
+/// What erasing one person does to one Space row, pure. `links` are the row's `source_links`;
+/// `attributed` names the person each attributable link came from: a `message:<id>` link its
+/// author, the `tool:save_memory` link of an explicit save the owner of the thread it was saved in.
+/// A link nobody is attributed to (a `thread:` link, a message already gone) supports nobody.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpaceSourceErasure {
+    /// The person is not a source of this row.
+    Untouched,
+    /// The person was the row's only source: the row goes (EP-8 S7, DPO rule assumed).
+    Delete,
+    /// Others are sources too: the row stays, without the person's links.
+    Keep(Vec<String>),
+}
+
+pub fn space_source_erasure(
+    links: &[String],
+    attributed: &std::collections::HashMap<String, String>,
+    user_id: &str,
+) -> SpaceSourceErasure {
+    let is_users = |link: &String| attributed.get(link).is_some_and(|subject| subject == user_id);
+    if !links.iter().any(is_users) {
+        return SpaceSourceErasure::Untouched;
+    }
+    let others = links
+        .iter()
+        .any(|link| attributed.get(link).is_some_and(|subject| subject != user_id));
+    if !others {
+        return SpaceSourceErasure::Delete;
+    }
+    SpaceSourceErasure::Keep(links.iter().filter(|link| !is_users(link)).cloned().collect())
+}
+
+/// Counts of one person's Space-memory erasure.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceSourceSummary {
+    pub deleted: u64,
+    pub narrowed: u64,
+}
+
+/// Drops one person's part of every Space memory row of their org, in one transaction (EP-8 S7):
+/// a row only they were the source of is deleted, a row with other members' sources keeps those
+/// and loses theirs. Space rows have no Letta copy (EP-8 S6), so this is the whole erasure.
+/// Idempotent: a redelivered event finds nothing of the person left.
+///
+/// # Errors
+///
+/// Returns an error if any statement or the commit fails; nothing is changed then.
+pub async fn erase_user_space_memory_sources(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+) -> anyhow::Result<SpaceSourceSummary> {
+    let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+    // The rows the person may be a source of, locked: a message they wrote, or an explicit save in
+    // a thread they own.
+    let rows: Vec<(String, Vec<String>, Option<String>)> = sqlx::query_as(
+        "SELECT am.id, am.source_links, am.source_label FROM agent_memory am \
+         WHERE am.org_id = $1 AND am.scope = 'space' AND ( \
+           EXISTS (SELECT 1 FROM unnest(am.source_links) AS sl(link) \
+                   JOIN messages m ON m.id = substr(sl.link, 9) \
+                   JOIN threads t ON t.id = m.thread_id \
+                   WHERE sl.link LIKE 'message:%' AND t.org_id = $1 \
+                     AND COALESCE(m.author_subject_id, t.user_id) = $2) \
+           OR (am.source_label = 'member_save' AND EXISTS ( \
+                   SELECT 1 FROM unnest(am.source_links) AS sl(link) \
+                   JOIN threads t ON t.id = substr(sl.link, 8) \
+                   WHERE sl.link LIKE 'thread:%' AND t.org_id = $1 AND t.user_id = $2))) \
+         ORDER BY am.id FOR UPDATE OF am",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut summary = SpaceSourceSummary::default();
+    for (memory_id, links, source_label) in rows {
+        let mut attributed: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
+            "SELECT 'message:' || m.id, COALESCE(m.author_subject_id, t.user_id) \
+             FROM messages m JOIN threads t ON t.id = m.thread_id \
+             WHERE t.org_id = $1 AND ('message:' || m.id) = ANY($2)",
+        )
+        .bind(org_id)
+        .bind(&links)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+        // An explicit save is the saving thread owner's statement.
+        if source_label.as_deref() == Some("member_save") {
+            let saver: Option<String> = sqlx::query_scalar(
+                "SELECT t.user_id FROM threads t \
+                 WHERE t.org_id = $1 AND ('thread:' || t.id) = ANY($2) ORDER BY t.id LIMIT 1",
+            )
+            .bind(org_id)
+            .bind(&links)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(saver) = saver {
+                attributed.insert("tool:save_memory".to_owned(), saver);
+            }
+        }
+        match space_source_erasure(&links, &attributed, user_id) {
+            SpaceSourceErasure::Untouched => {}
+            SpaceSourceErasure::Delete => {
+                summary.deleted += sqlx::query("DELETE FROM agent_memory WHERE id = $1 AND org_id = $2")
+                    .bind(&memory_id)
+                    .bind(org_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+            }
+            SpaceSourceErasure::Keep(remaining) => {
+                summary.narrowed += sqlx::query(
+                    "UPDATE agent_memory SET source_links = $3, updated_at = now() WHERE id = $1 AND org_id = $2",
+                )
+                .bind(&memory_id)
+                .bind(org_id)
+                .bind(&remaining)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            }
+        }
+    }
+    tx.commit().await?;
+    if summary.deleted > 0 {
+        metrics::counter!("mp_session_space_memory_erased_total", "op" => "gdpr_user")
+            .increment(summary.deleted);
     }
     Ok(summary)
 }
@@ -625,6 +1148,50 @@ mod tests {
         ));
     }
 
+    // WS10.S6: the run trace goes with its org, and only with its org.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn gdpr_org_purge_removes_trace_events() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (run, org, _) = seed_run(&pool, "persistent").await;
+        let (other_run, other_org, _) = seed_run(&pool, "persistent").await;
+        for (run_id, org_id) in [(&run, &org), (&other_run, &other_org)] {
+            for seq in 1..=3_i64 {
+                sqlx::query(
+                    "INSERT INTO run_trace_events (event_id, run_id, org_id, producer, producer_seq,                      event_type, occurred_at, resource_ref)                      VALUES ($1, $2, $3, 'quarry-edge', $4, 'BROWSER_SESSION_OPENED', now(), $5)",
+                )
+                .bind(format!("gdpr-{run_id}-{seq}"))
+                .bind(run_id)
+                .bind(org_id)
+                .bind(seq)
+                .bind(format!("run/{run_id}"))
+                .execute(&pool)
+                .await
+                .expect("seed trace row");
+            }
+        }
+        let summary = purge_organization_data(&pool, &org, None).await.expect("purge");
+        assert_eq!(summary.run_trace_events, 3);
+        let left = |run_id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM run_trace_events WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count")
+            }
+        };
+        assert_eq!(left(run).await, 0, "the erased org's trace is gone");
+        assert_eq!(left(other_run).await, 3, "another org's trace is untouched");
+        purge_organization_data(&pool, &other_org, None).await.expect("cleanup");
+    }
+
     #[test]
     fn purge_summary_total_sums_every_field() {
         let summary = PurgeSummary {
@@ -633,8 +1200,11 @@ mod tests {
             todos: 1,
             plan_steps: 1,
             approvals: 1,
+            approval_scope_grants: 1,
             plans: 1,
             memory_index: 1,
+            artifact_revisions: 1,
+            thread_goals: 1,
             messages: 1,
             task_events: 1,
             task_assignments: 1,
@@ -643,13 +1213,18 @@ mod tests {
             tasks: 1,
             cron_schedules: 1,
             events: 1,
+            run_trace_events: 1,
+            run_request_snapshots: 1,
+            run_request_snapshot_blobs: 1,
             runs: 1,
             threads: 1,
             hook_configs: 1,
             agent_skills: 1,
             skill_revisions: 1,
+            agent_skill_versions: 1,
             agent_memory: 1,
             user_memory_controls: 1,
+            user_profiles: 1,
             forgotten_memory_ids: 1,
             memory_control_events: 1,
             org_learning_policy_mirror: 1,
@@ -668,7 +1243,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            28,
+            36,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -708,6 +1283,8 @@ mod tests {
         let plan_steps = pos("DELETE FROM plan_steps");
         let approvals = pos("DELETE FROM approvals WHERE org_id = $1");
         let plans = pos("DELETE FROM plans WHERE org_id = $1");
+        let artifact_revisions = pos("DELETE FROM artifact_revisions WHERE org_id = $1");
+        let thread_goals = pos("DELETE FROM thread_goals WHERE org_id = $1");
         let messages = pos("DELETE FROM messages");
         let task_events = pos("DELETE FROM task_events");
         let task_assignments = pos("DELETE FROM task_assignments");
@@ -716,6 +1293,9 @@ mod tests {
         let tasks = pos("DELETE FROM tasks WHERE org_id = $1");
         let cron_schedules = pos("DELETE FROM cron_schedules WHERE org_id = $1");
         let events = pos("DELETE FROM events");
+        let trace_events = pos("DELETE FROM run_trace_events WHERE org_id = $1");
+        let snapshot_blobs = pos("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1");
+        let snapshots = pos("DELETE FROM run_request_snapshots WHERE org_id = $1");
         let runs = pos("DELETE FROM runs WHERE org_id = $1");
         let threads = pos("DELETE FROM threads WHERE org_id = $1");
 
@@ -740,6 +1320,14 @@ mod tests {
             "plans (references runs) must be purged before runs"
         );
         assert!(messages < threads, "messages must be purged before threads");
+        assert!(
+            artifact_revisions < messages && artifact_revisions < threads,
+            "artifact revisions (EP-3 S2) must be purged before their messages and threads"
+        );
+        assert!(
+            thread_goals < threads,
+            "thread goals (EP-7 S1) must be purged before their threads"
+        );
         assert!(
             task_events < tasks,
             "task_events must be purged before tasks"
@@ -768,11 +1356,403 @@ mod tests {
             events < runs,
             "events' run_id sweep must run while runs still exist"
         );
+        assert!(
+            trace_events < runs,
+            "the run trace must be purged before runs (its rows reference them)"
+        );
+        assert!(
+            snapshot_blobs < runs && snapshots < runs,
+            "request snapshots must be purged before runs (their rows reference them)"
+        );
         assert!(runs < threads, "runs must be purged before threads");
         assert!(
             pos("DELETE FROM agent_skills WHERE org_id = $1")
                 < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
             "deleting a skill writes a revision holding its text, so the revisions are purged after the skills"
         );
+        // EP-11 S2: the versions are purged under the erasure setting, before the skills, and the
+        // setting is put back before anything else runs.
+        let erasure_on = pos("set_config('mp.version_erasure', 'on', true)");
+        let versions = pos("DELETE FROM agent_skill_versions WHERE org_id = $1");
+        let erasure_off = pos("set_config('mp.version_erasure', '', true)");
+        assert!(
+            erasure_on < versions && versions < erasure_off,
+            "the version delete runs inside the erasure setting"
+        );
+        assert!(
+            erasure_off < pos("DELETE FROM agent_skills WHERE org_id = $1"),
+            "skill versions are purged before the skills"
+        );
+    }
+
+    /// WS02-S1: the org erasure switches the Space event triggers off before any delete that
+    /// could fire them, and purges the Space log beside the org's events, before runs and
+    /// threads. Without the suppression the deferred delete triggers would write fresh
+    /// tombstones for an org that was just erased.
+    #[test]
+    fn purge_suppresses_space_events_before_deletes_and_purges_the_log() {
+        let source = include_str!("gdpr.rs");
+        let pos = |needle: &str| {
+            source
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected to find {needle:?} in gdpr.rs"))
+        };
+        let suppress = pos("space::events::suppress(");
+        let first_delete = pos("DELETE FROM run_loop_checkpoints");
+        let events = pos("DELETE FROM events");
+        let log = pos("DELETE FROM space_event_log WHERE org_id = $1");
+        let heads = pos("DELETE FROM space_event_heads WHERE org_id = $1");
+        let runs = pos("DELETE FROM runs WHERE org_id = $1");
+        let messages = pos("DELETE FROM messages");
+        let threads = pos("DELETE FROM threads WHERE org_id = $1");
+        assert!(
+            suppress < first_delete,
+            "suppress must precede the first DELETE of the transaction"
+        );
+        assert!(suppress < messages && suppress < runs && suppress < threads);
+        assert!(
+            events < log && log < heads && heads < runs,
+            "the Space log is purged beside the org's events, and its heads after it"
+        );
+        assert!(log < threads, "the log is purged before the threads whose delete triggers fire");
+    }
+
+    #[test]
+    fn user_erasure_is_parsed_and_every_other_subject_is_not() {
+        let user = serde_json::to_vec(&serde_json::json!({
+            "subject_type": "user", "subject_id": "user_1", "org_id": "org_1",
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_user_erasure_event(&user).unwrap(),
+            Some(UserErasure { org_id: "org_1".to_owned(), user_id: "user_1".to_owned() })
+        );
+        for subject_type in ["organization", "user_anonymize", "other"] {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "subject_type": subject_type, "subject_id": "org_1", "org_id": "org_1",
+            }))
+            .unwrap();
+            assert_eq!(parse_user_erasure_event(&payload).unwrap(), None, "{subject_type}");
+        }
+        let no_user = serde_json::to_vec(&serde_json::json!({"subject_type": "user", "org_id": "org_1"})).unwrap();
+        assert_eq!(parse_user_erasure_event(&no_user), Err(ErasureEventError::MissingSubjectId));
+        assert!(parse_erasure_event(&user).unwrap().is_none(), "a user erasure never purges the org");
+    }
+
+    #[test]
+    fn space_source_erasure_deletes_sole_rows_and_narrows_shared_ones() {
+        let attributed: std::collections::HashMap<String, String> = [
+            ("message:m1", "user_1"),
+            ("message:m2", "user_2"),
+            ("tool:save_memory", "user_1"),
+        ]
+        .into_iter()
+        .map(|(link, subject)| (link.to_owned(), subject.to_owned()))
+        .collect();
+        let links = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:m1"]), &attributed, "user_1"),
+            SpaceSourceErasure::Delete
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "tool:save_memory"]), &attributed, "user_1"),
+            SpaceSourceErasure::Delete,
+            "an explicit save of theirs alone"
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:m1", "message:m2"]), &attributed, "user_1"),
+            SpaceSourceErasure::Keep(links(&["thread:t1", "message:m2"]))
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:m2"]), &attributed, "user_1"),
+            SpaceSourceErasure::Untouched
+        );
+        assert_eq!(
+            space_source_erasure(&links(&["thread:t1", "message:gone", "message:m1"]), &attributed, "user_1"),
+            SpaceSourceErasure::Delete,
+            "a link nobody is attributed to supports nobody"
+        );
+    }
+
+    /// EP-8 S7: erasing a person deletes the Space rows only they were the source of and drops
+    /// their message from rows other members also stated; other rows are untouched.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn gdpr_erasure_drops_user_sources() {
+        use crate::space::test_support;
+        let Some(pool) = test_support::connect().await else { return };
+        let nonce = mp_ids::new_ulid();
+        let org = format!("gdpr-space-org-{nonce}");
+        let space = format!("gdpr-space-{nonce}");
+        let thread = format!("gdpr-space-thread-{nonce}");
+        let (mine, theirs) = (format!("gdpr-msg-a-{nonce}"), format!("gdpr-msg-b-{nonce}"));
+        test_support::seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        test_support::seed_space_message(&pool, &space, &thread, &mine, "user", Some("erased-user")).await;
+        test_support::seed_space_message(&pool, &space, &thread, &theirs, "user", Some("other-user")).await;
+        let insert = |key: &'static str, links: Vec<String>| {
+            let (pool, org, space) = (pool.clone(), org.clone(), space.clone());
+            async move {
+                let id = mp_ids::new_ulid();
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+                     source_links, review_state, audience_hash, audience_revision, source_label) \
+                     VALUES ($1, $2, 'space', $3, $4, 'c', 'fact', 0.9, '', $5, 'accepted', 'sha256:audience-1', 1, \
+                     'room_statement')",
+                )
+                .bind(&id)
+                .bind(&org)
+                .bind(&space)
+                .bind(format!("{space}/{key}"))
+                .bind(links)
+                .execute(&pool)
+                .await
+                .expect("seed space row");
+                id
+            }
+        };
+        let thread_link = format!("thread:{thread}");
+        let sole = insert("sole", vec![thread_link.clone(), format!("message:{mine}")]).await;
+        let shared = insert("shared", vec![thread_link.clone(), format!("message:{mine}"), format!("message:{theirs}")]).await;
+        let other = insert("other", vec![thread_link.clone(), format!("message:{theirs}")]).await;
+
+        let summary = erase_user_space_memory_sources(&pool, &org, "erased-user").await.expect("erasure");
+        assert_eq!(summary, SpaceSourceSummary { deleted: 1, narrowed: 1 });
+        let links_of = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Vec<String>>("SELECT source_links FROM agent_memory WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("read row")
+            }
+        };
+        assert_eq!(links_of(sole).await, None, "a row only the person stated is gone");
+        assert_eq!(links_of(shared).await, Some(vec![thread_link.clone(), format!("message:{theirs}")]));
+        assert_eq!(links_of(other).await, Some(vec![thread_link, format!("message:{theirs}")]));
+        assert_eq!(
+            erase_user_space_memory_sources(&pool, &org, "erased-user").await.expect("redelivery"),
+            SpaceSourceSummary::default(),
+            "a redelivered event finds nothing left"
+        );
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1").bind(&org).execute(&pool).await.ok();
+        test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    // EP-9 C4: legal holds against erasure.
+
+    fn hold_env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        move |name| map.get(name).cloned()
+    }
+
+    fn hold_gate(url: &str) -> ErasureHoldGate {
+        ErasureHoldGate::from_lookup(hold_env(&[
+            (ERASURE_HOLD_CHECK_ENV, "true"),
+            (crate::org_policy::ORG_CORE_URL_ENV, url),
+            (crate::org_policy::SERVICE_TOKEN_ENV, "session-token"),
+        ]))
+    }
+
+    fn check_answer(org_held: bool, held: &[&str]) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "organization_id": "org_1",
+            "window_days": null,
+            "revision": 0,
+            "org_held": org_held,
+            "held_thread_ids": held,
+        }))
+    }
+
+    async fn mount_check(server: &wiremock::MockServer, answer: wiremock::ResponseTemplate) {
+        use wiremock::matchers::{header, method, path};
+        server.reset().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/internal/orgs/org_1/retention/check"))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "session-token"))
+            .respond_with(answer)
+            .mount(server)
+            .await;
+    }
+
+    fn trailer(status: &Status) -> Option<String> {
+        status
+            .metadata()
+            .get(crate::run_phase::ERROR_CODE_TRAILER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn erasure_hold_switch_is_strict() {
+        for value in ["", "1", "TRUE", "True", "yes", " true"] {
+            let gate = ErasureHoldGate::from_lookup(hold_env(&[
+                (ERASURE_HOLD_CHECK_ENV, value),
+                (crate::org_policy::ORG_CORE_URL_ENV, "http://org-core:8080"),
+                (crate::org_policy::SERVICE_TOKEN_ENV, "session-token"),
+            ]));
+            assert!(matches!(gate, ErasureHoldGate::Off), "{value:?} must leave the check off");
+        }
+        assert!(matches!(ErasureHoldGate::from_lookup(hold_env(&[])), ErasureHoldGate::Off));
+        assert!(matches!(hold_gate("http://org-core:8080"), ErasureHoldGate::On(_)));
+        assert!(matches!(
+            ErasureHoldGate::from_lookup(hold_env(&[(ERASURE_HOLD_CHECK_ENV, "true")])),
+            ErasureHoldGate::Unconfigured
+        ));
+    }
+
+    #[tokio::test]
+    async fn erasure_hold_gate_off_asks_nothing() {
+        // No server at all: an Off gate must not try to reach one.
+        let gate = ErasureHoldGate::from_lookup(hold_env(&[]));
+        assert_eq!(gate.ensure_not_held("org_1", &["thr_1".to_owned()]).await, Ok(()));
+        assert_eq!(gate.ensure_not_held("org_1", &[]).await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn erasure_hold_unconfigured_refuses_as_unavailable() {
+        let gate = ErasureHoldGate::from_lookup(hold_env(&[(ERASURE_HOLD_CHECK_ENV, "true")]));
+        let refusal = gate.ensure_not_held("org_1", &["thr_1".to_owned()]).await.unwrap_err();
+        assert!(matches!(refusal, ErasureHoldError::Unavailable(_)));
+        let status = refusal.into_status();
+        assert_eq!(status.code(), tonic::Code::Unavailable);
+        assert_eq!(trailer(&status).as_deref(), Some(ERASURE_HOLD_CHECK_UNAVAILABLE));
+    }
+
+    /// A held thread is refused, and the same delete passes once the hold is released.
+    #[tokio::test]
+    async fn thread_hold_refuses_until_released() {
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let thread = ["thr_1".to_owned()];
+
+        mount_check(&server, check_answer(false, &["thr_1"])).await;
+        let refusal = gate.ensure_not_held("org_1", &thread).await.unwrap_err();
+        assert_eq!(refusal, ErasureHoldError::ThreadsHeld(1));
+        let status = refusal.into_status();
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(trailer(&status).as_deref(), Some(ERASURE_BLOCKED_LEGAL_HOLD));
+        assert!(
+            status.message().contains("thread_goals") && status.message().contains("artifact_revisions"),
+            "the refusal names goals and revisions among what is kept: {}",
+            status.message()
+        );
+
+        mount_check(&server, check_answer(false, &[])).await;
+        assert_eq!(gate.ensure_not_held("org_1", &thread).await, Ok(()));
+    }
+
+    /// An org hold blocks a thread delete and the org purge alike, until released.
+    #[tokio::test]
+    async fn org_hold_refuses_until_released() {
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+
+        mount_check(&server, check_answer(true, &[])).await;
+        assert_eq!(
+            gate.ensure_not_held("org_1", &["thr_free".to_owned()]).await,
+            Err(ErasureHoldError::OrgHeld)
+        );
+        assert_eq!(gate.ensure_not_held("org_1", &[]).await, Err(ErasureHoldError::OrgHeld));
+
+        mount_check(&server, check_answer(false, &[])).await;
+        assert_eq!(gate.ensure_not_held("org_1", &[]).await, Ok(()));
+    }
+
+    /// An outage, an unexpected status or a body that is not a check answer refuses with the
+    /// retryable code; org-core's definitive 404 (organisation gone, holds with it) does not.
+    #[tokio::test]
+    async fn hold_check_failures_refuse_and_a_gone_org_does_not() {
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let thread = ["thr_1".to_owned()];
+
+        for answer in [
+            wiremock::ResponseTemplate::new(500),
+            wiremock::ResponseTemplate::new(503),
+            wiremock::ResponseTemplate::new(403),
+            wiremock::ResponseTemplate::new(200).set_body_string("not json"),
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"held_thread_ids": []})),
+        ] {
+            mount_check(&server, answer).await;
+            assert!(matches!(
+                gate.ensure_not_held("org_1", &thread).await,
+                Err(ErasureHoldError::Unavailable(_))
+            ));
+        }
+
+        mount_check(&server, wiremock::ResponseTemplate::new(404)).await;
+        assert_eq!(gate.ensure_not_held("org_1", &thread).await, Ok(()));
+
+        // Unreachable org-core: nothing listens on the dropped server's port.
+        let gone = hold_gate("http://127.0.0.1:9");
+        assert!(matches!(
+            gone.ensure_not_held("org_1", &thread).await,
+            Err(ErasureHoldError::Unavailable(_))
+        ));
+    }
+
+    /// A bulk erase of more threads than one check may name is asked page by page, and a hold
+    /// on the last page still refuses it.
+    #[tokio::test]
+    async fn hold_check_pages_large_erases() {
+        use wiremock::matchers::{body_partial_json, method, path};
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let threads: Vec<String> = (0..(CHECK_PAGE + 3)).map(|i| format!("thr_{i:04}")).collect();
+
+        wiremock::Mock::given(method("POST"))
+            .and(path("/internal/orgs/org_1/retention/check"))
+            .and(body_partial_json(serde_json::json!({"thread_ids": [format!("thr_{:04}", CHECK_PAGE)]})))
+            .respond_with(check_answer(false, &["thr_0502"]))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/internal/orgs/org_1/retention/check"))
+            .respond_with(check_answer(false, &[]))
+            .with_priority(2)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            gate.ensure_not_held("org_1", &threads).await,
+            Err(ErasureHoldError::ThreadsHeld(1))
+        );
+        server.verify().await;
+    }
+
+    /// C-B9: the held scope names thread goals and artifact revisions, and both erase paths
+    /// still remove them, so the list and the deletes cannot drift apart unnoticed.
+    #[test]
+    fn held_scope_names_goals_and_revisions_that_erasure_removes() {
+        for table in ["thread_goals", "artifact_revisions"] {
+            assert!(HELD_THREAD_CONTENT.contains(&table), "{table} must be in the held scope");
+            assert!(
+                include_str!("grpc.rs").contains(&format!("DELETE FROM {table} WHERE thread_id = $1")),
+                "delete_thread_rows must remove {table}"
+            );
+            assert!(
+                include_str!("gdpr.rs").contains(&format!("DELETE FROM {table} WHERE org_id = $1")),
+                "the org purge must remove {table}"
+            );
+        }
+    }
+
+    /// The org purge asks the gate before it opens its transaction.
+    #[test]
+    fn org_purge_checks_holds_before_any_delete() {
+        let source = include_str!("gdpr.rs");
+        let check = source
+            .find("erasure_hold_gate().ensure_not_held(org_id, &[])")
+            .expect("the purge asks the hold gate");
+        let begin = source.find("let mut tx: Transaction<'_, Postgres> = pool.begin()").expect("purge transaction");
+        assert!(check < begin, "the hold check must precede the purge transaction");
     }
 }

@@ -59,6 +59,93 @@ fn settle_budget() -> Duration {
         .unwrap_or(Duration::from_millis(DEFAULT_SETTLE_MS))
 }
 
+/// E3.3-j: the post-action settle is on only when this flag reads `1`, `true`, `on` or `yes`.
+/// It is off by default, so an observation then carries no `settle_ms` and its wire is unchanged.
+/// The name is its own: `QUARRY_BROWSER_SETTLE_MS` above is the hydration budget, live in the stack.
+pub const ENV_ACTION_SETTLE: &str = "QUARRY_BROWSER_ACTION_SETTLE";
+/// E3.3-j: the bound on the post-action wait in ms, read only when the settle is on. A malformed
+/// value takes the default, and any value is capped at `ACTION_SETTLE_MAX_MS`.
+pub const ENV_ACTION_SETTLE_MS: &str = "QUARRY_BROWSER_ACTION_SETTLE_MS";
+const ACTION_SETTLE_DEFAULT_MS: u64 = 300;
+const ACTION_SETTLE_MAX_MS: u64 = 2_000;
+/// E3.3-j: the gap between two DOM samples. The DOM is quiet when two samples one gap apart match.
+const ACTION_SETTLE_SAMPLE: Duration = Duration::from_millis(100);
+
+/// E3.3-j: the post-action settle bound, or `None` when the settle is off.
+pub(crate) fn action_settle_bound() -> Option<Duration> {
+    action_settle_bound_from(
+        std::env::var(ENV_ACTION_SETTLE).ok().as_deref(),
+        std::env::var(ENV_ACTION_SETTLE_MS).ok().as_deref(),
+    )
+}
+
+/// The pure form of [`action_settle_bound`]. An unrecognised flag is off, as an unset one is: a
+/// typo must not switch a wait on. A bound of zero is off too.
+fn action_settle_bound_from(flag: Option<&str>, bound_ms: Option<&str>) -> Option<Duration> {
+    let on = matches!(
+        flag.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    );
+    if !on {
+        return None;
+    }
+    let ms = bound_ms
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(ACTION_SETTLE_DEFAULT_MS)
+        .min(ACTION_SETTLE_MAX_MS);
+    (ms > 0).then(|| Duration::from_millis(ms))
+}
+
+/// E3.3-j: how long the page's DOM took to go quiet after an action, in ms, never more than
+/// `bound`. The DOM is sampled through `content()`, not watched by a mutation observer: it is
+/// quiet when two samples one `ACTION_SETTLE_SAMPLE` apart are byte-identical. A value equal to
+/// `bound` means it was still changing when the bound ran out. A failed or slow read ends the
+/// wait at once, and nothing is retried. The samples are compared in memory and then dropped.
+pub(crate) async fn settle_after_action(
+    browser: &dyn BrowserDriverTrait,
+    session: &BrowserSession,
+    bound: Duration,
+) -> u64 {
+    settle_quiescence(bound, move || async move { browser.content(session).await.ok() }).await
+}
+
+/// The quiescence loop behind [`settle_after_action`], over any sampler, so a test can script the
+/// DOM. A `None` from the sampler is a failed read, or one that ran past the bound.
+async fn settle_quiescence<F, Fut>(bound: Duration, mut sample: F) -> u64
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<bytes::Bytes>>,
+{
+    let started = Instant::now();
+    let deadline = started + bound;
+    let elapsed_ms = || started.elapsed().min(bound).as_millis() as u64;
+    let Some(mut previous) = sample_before(deadline, sample()).await else {
+        return elapsed_ms();
+    };
+    while Instant::now() < deadline {
+        let gap = ACTION_SETTLE_SAMPLE.min(deadline.saturating_duration_since(Instant::now()));
+        tokio::time::sleep(gap).await;
+        if Instant::now() >= deadline {
+            break;
+        }
+        match sample_before(deadline, sample()).await {
+            Some(next) if next == previous => return elapsed_ms(),
+            Some(next) => previous = next,
+            None => return elapsed_ms(),
+        }
+    }
+    elapsed_ms()
+}
+
+/// One DOM sample, cut off at `deadline`: a read that runs past the bound is no sample.
+async fn sample_before<Fut>(deadline: Instant, read: Fut) -> Option<bytes::Bytes>
+where
+    Fut: std::future::Future<Output = Option<bytes::Bytes>>,
+{
+    let left = deadline.saturating_duration_since(Instant::now());
+    tokio::time::timeout(left, read).await.ok().flatten()
+}
+
 /// A snapshot that still needs hydration time: carries scripts (so it *can*
 /// hydrate) but exposes little or no readable text yet. Script-less bodies
 /// (plain HTML, test stubs) never wait.
@@ -1791,5 +1878,100 @@ mod capture_tests {
         let captures = resp.captures.expect("captures carried on the response");
         assert_eq!(captures.blocked_requests, 2);
         assert!(captures.final_url.is_none(), "the mock reports no current url");
+    }
+}
+
+#[cfg(test)]
+mod action_settle_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A DOM that answers `script` in order and then repeats its last answer. `None` is a failed
+    /// read. The counter returned with it is the number of reads taken.
+    fn scripted_dom(
+        script: &[Option<&'static str>],
+    ) -> (impl FnMut() -> std::future::Ready<Option<bytes::Bytes>>, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&reads);
+        let mut answers: VecDeque<Option<&'static str>> = script.iter().copied().collect();
+        let sampler = move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let answer = if answers.len() > 1 {
+                answers.pop_front().flatten()
+            } else {
+                answers.front().copied().flatten()
+            };
+            std::future::ready(answer.map(|html| bytes::Bytes::from_static(html.as_bytes())))
+        };
+        (sampler, reads)
+    }
+
+    #[tokio::test]
+    async fn a_quiet_dom_settles_on_the_second_matching_sample() {
+        let (dom, reads) = scripted_dom(&[Some("<p>a</p>"), Some("<p>a</p>")]);
+        let settled = settle_quiescence(Duration::from_millis(2_000), dom).await;
+        assert!(settled < 2_000, "a quiet DOM ends the wait before the bound: {settled} ms");
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_dom_that_changes_once_settles_at_the_first_matching_pair() {
+        let (dom, reads) = scripted_dom(&[Some("<p>a</p>"), Some("<p>b</p>"), Some("<p>b</p>")]);
+        let settled = settle_quiescence(Duration::from_millis(2_000), dom).await;
+        assert!(settled < 2_000, "the wait ends at the quiet pair: {settled} ms");
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_dom_that_keeps_changing_is_bounded_and_reports_the_bound() {
+        let (dom, reads) = scripted_dom(&[
+            Some("<p>1</p>"),
+            Some("<p>2</p>"),
+            Some("<p>3</p>"),
+            Some("<p>4</p>"),
+            Some("<p>5</p>"),
+        ]);
+        let settled = settle_quiescence(Duration::from_millis(300), dom).await;
+        assert_eq!(settled, 300, "still changing at the bound: the bound is reported");
+        assert!(reads.load(Ordering::SeqCst) <= 4, "the samples stop at the bound");
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_read_ends_the_wait_without_a_retry() {
+        let (dom, reads) = scripted_dom(&[None]);
+        let settled = settle_quiescence(Duration::from_millis(300), dom).await;
+        assert!(settled < 300, "a failed first read ends the wait at once: {settled} ms");
+        assert_eq!(reads.load(Ordering::SeqCst), 1, "a failed read is not retried");
+    }
+
+    #[tokio::test]
+    async fn a_read_that_fails_mid_wait_stops_the_wait_without_a_retry() {
+        let (dom, reads) = scripted_dom(&[Some("<p>a</p>"), None]);
+        let settled = settle_quiescence(Duration::from_millis(2_000), dom).await;
+        assert!(settled < 2_000, "the wait stops at the failed read: {settled} ms");
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "the failed read is not retried");
+    }
+
+    #[test]
+    fn the_settle_is_off_unless_its_flag_is_on() {
+        assert_eq!(action_settle_bound_from(None, None), None);
+        assert_eq!(action_settle_bound_from(None, Some("750")), None);
+        assert_eq!(action_settle_bound_from(Some("0"), Some("750")), None);
+        assert_eq!(action_settle_bound_from(Some("off"), None), None);
+        assert_eq!(action_settle_bound_from(Some("maybe"), Some("750")), None, "a typo stays off");
+    }
+
+    #[test]
+    fn an_on_flag_takes_the_bound_with_its_default_and_cap() {
+        assert_eq!(action_settle_bound_from(Some("1"), None), Some(Duration::from_millis(300)));
+        assert_eq!(
+            action_settle_bound_from(Some(" ON "), Some("nope")),
+            Some(Duration::from_millis(300)),
+            "a malformed bound takes the default"
+        );
+        assert_eq!(action_settle_bound_from(Some("true"), Some("750")), Some(Duration::from_millis(750)));
+        assert_eq!(action_settle_bound_from(Some("yes"), Some("5000")), Some(Duration::from_millis(2_000)));
+        assert_eq!(action_settle_bound_from(Some("on"), Some("0")), None, "a zero bound is off");
     }
 }

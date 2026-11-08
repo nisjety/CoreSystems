@@ -665,6 +665,29 @@ func (s *Service) GetSettings(ctx context.Context, userID, category string, defa
 	return merged, nil
 }
 
+// GetSettingsExplicit is GetSettings plus the stored row on its own: the
+// first map is defaults merged with the stored row (same as GetSettings), the
+// second holds only the keys present in the stored row (nil when no row
+// exists). Callers use it to tell an explicit choice from a default.
+func (s *Service) GetSettingsExplicit(ctx context.Context, userID, category string, defaults map[string]any) (merged map[string]any, stored map[string]any, err error) {
+	if userID == "" {
+		return nil, nil, fmt.Errorf("user ID is required")
+	}
+	row, err := s.repo.GetSettings(ctx, userID, category)
+	if err != nil {
+		return nil, nil, err
+	}
+	merged = make(map[string]any, len(defaults))
+	maps.Copy(merged, defaults)
+	if row == nil {
+		return merged, nil, nil
+	}
+	maps.Copy(merged, row.Settings)
+	stored = make(map[string]any, len(row.Settings))
+	maps.Copy(stored, row.Settings)
+	return merged, stored, nil
+}
+
 // UpsertSettings saves a partial or full settings map for a user + category.
 func (s *Service) UpsertSettings(ctx context.Context, userID, category string, settings map[string]any) (map[string]any, error) {
 	if userID == "" {

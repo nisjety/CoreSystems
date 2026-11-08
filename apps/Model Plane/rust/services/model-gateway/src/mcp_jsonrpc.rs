@@ -16,6 +16,12 @@ use sha2::{Digest, Sha256};
 pub const JSONRPC_VERSION: &str = "2.0";
 /// MCP protocol revision advertised in `initialize`.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+/// The first MCP revision with `elicitation/create` (EP-4 S4). Advertised only when the caller
+/// allows the server to ask the user something; every other session keeps
+/// [`MCP_PROTOCOL_VERSION`] byte for byte.
+pub const ELICITATION_PROTOCOL_VERSION: &str = "2025-06-18";
+/// JSON-RPC "method not found": the answer to a server request this client does not serve.
+pub const METHOD_NOT_FOUND: i64 = -32601;
 
 /// Outcome of parsing a `tools/call` response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,15 +36,97 @@ pub enum McpCallOutcome {
 /// Build the `initialize` request that opens an MCP session.
 #[must_use]
 pub fn build_initialize_request(id: i64) -> Value {
+    build_initialize_request_with(id, false)
+}
+
+/// Build the `initialize` request, advertising elicitation only when `elicitation` is true
+/// (EP-4 S4, D6). Without it the request is exactly today's: the old revision and empty
+/// capabilities, so a server can never ask. `sampling` is never advertised (D15).
+#[must_use]
+pub fn build_initialize_request_with(id: i64, elicitation: bool) -> Value {
+    let (revision, capabilities) = if elicitation {
+        (ELICITATION_PROTOCOL_VERSION, json!({ "elicitation": {} }))
+    } else {
+        (MCP_PROTOCOL_VERSION, json!({}))
+    };
     json!({
         "jsonrpc": JSONRPC_VERSION,
         "id": id,
         "method": "initialize",
         "params": {
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {},
+            "protocolVersion": revision,
+            "capabilities": capabilities,
             "clientInfo": { "name": "model-gateway", "version": "1" }
         }
+    })
+}
+
+/// A request the SERVER sent the client inside a response stream.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ServerRequest {
+    /// `elicitation/create`: the server asks the user for a form. `params` is the request's
+    /// `params` object (`message`, `requestedSchema`).
+    Elicitation { id: Value, params: Value },
+    /// `ping`: answered with an empty result.
+    Ping { id: Value },
+    /// Anything else, `sampling/createMessage` included: answered with method-not-found, so a
+    /// server can never make this gateway run inference for it.
+    Unsupported { id: Value, method: String },
+}
+
+impl ServerRequest {
+    /// The JSON-RPC id the client's response must carry.
+    #[must_use]
+    pub fn id(&self) -> &Value {
+        match self {
+            Self::Elicitation { id, .. } | Self::Ping { id } | Self::Unsupported { id, .. } => id,
+        }
+    }
+}
+
+/// Read a server-to-client request out of one JSON-RPC message. A response (no `method`) and a
+/// notification (no `id`) are not requests and yield `None`.
+#[must_use]
+pub fn parse_server_request(value: &Value) -> Option<ServerRequest> {
+    let method = value.get("method").and_then(Value::as_str)?;
+    let id = value.get("id").filter(|id| id.is_string() || id.is_number())?;
+    Some(match method {
+        "elicitation/create" => ServerRequest::Elicitation {
+            id: id.clone(),
+            params: value.get("params").cloned().unwrap_or(Value::Null),
+        },
+        "ping" => ServerRequest::Ping { id: id.clone() },
+        other => ServerRequest::Unsupported {
+            id: id.clone(),
+            method: other.to_owned(),
+        },
+    })
+}
+
+/// The client's result for an `elicitation/create`: `accept` with `content`, or `decline` /
+/// `cancel` without it.
+#[must_use]
+pub fn build_elicitation_result(id: &Value, action: &str, content: Option<&Value>) -> Value {
+    let mut result = json!({ "action": action });
+    if let Some(content) = content {
+        result["content"] = content.clone();
+    }
+    json!({ "jsonrpc": JSONRPC_VERSION, "id": id.clone(), "result": result })
+}
+
+/// An empty result, the answer to a server's `ping`.
+#[must_use]
+pub fn build_empty_result(id: &Value) -> Value {
+    json!({ "jsonrpc": JSONRPC_VERSION, "id": id.clone(), "result": {} })
+}
+
+/// The method-not-found error for a server request this client does not serve.
+#[must_use]
+pub fn build_method_not_found(id: &Value) -> Value {
+    json!({
+        "jsonrpc": JSONRPC_VERSION,
+        "id": id.clone(),
+        "error": { "code": METHOD_NOT_FOUND, "message": "Method not found" }
     })
 }
 
@@ -798,5 +886,87 @@ mod tests {
         assert!(parse_list_tools_response(3, no_tools)
             .unwrap_err()
             .contains("missing tools array"));
+    }
+
+    #[test]
+    fn initialize_without_elicitation_is_unchanged() {
+        // The exact bytes every session sent before EP-4: the switch-off path must keep them.
+        let expected = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "model-gateway", "version": "1" }
+            }
+        });
+        assert_eq!(build_initialize_request(1), expected);
+        assert_eq!(build_initialize_request_with(1, false), expected);
+        assert_eq!(
+            build_initialize_request(1).to_string(),
+            expected.to_string()
+        );
+    }
+
+    #[test]
+    fn initialize_with_elicitation_advertises_it() {
+        let r = build_initialize_request_with(1, true);
+        assert_eq!(r["params"]["protocolVersion"], ELICITATION_PROTOCOL_VERSION);
+        assert_eq!(r["params"]["capabilities"], json!({ "elicitation": {} }));
+        assert!(r["params"]["capabilities"].get("sampling").is_none());
+    }
+
+    #[test]
+    fn server_request_is_parsed() {
+        let elicit = json!({
+            "jsonrpc": "2.0",
+            "id": "s-1",
+            "method": "elicitation/create",
+            "params": { "message": "Hvilket prosjekt?", "requestedSchema": { "type": "object" } }
+        });
+        let parsed = parse_server_request(&elicit).expect("a request");
+        assert_eq!(parsed.id(), &json!("s-1"));
+        match parsed {
+            ServerRequest::Elicitation { params, .. } => {
+                assert_eq!(params["message"], "Hvilket prosjekt?");
+            }
+            other => panic!("not an elicitation: {other:?}"),
+        }
+        assert_eq!(
+            parse_server_request(&json!({ "jsonrpc": "2.0", "id": 4, "method": "ping" })),
+            Some(ServerRequest::Ping { id: json!(4) })
+        );
+        // A response and a notification are not requests.
+        assert!(parse_server_request(&json!({ "jsonrpc": "2.0", "id": 3, "result": {} })).is_none());
+        assert!(parse_server_request(
+            &json!({ "jsonrpc": "2.0", "method": "notifications/progress" })
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sampling_is_refused_with_method_not_found() {
+        let sampling = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "sampling/createMessage",
+            "params": { "messages": [] }
+        });
+        let parsed = parse_server_request(&sampling).expect("a request");
+        assert!(matches!(parsed, ServerRequest::Unsupported { ref method, .. } if method == "sampling/createMessage"));
+        let reply = build_method_not_found(parsed.id());
+        assert_eq!(reply["id"], 9);
+        assert_eq!(reply["error"]["code"], METHOD_NOT_FOUND);
+        assert!(reply.get("result").is_none());
+    }
+
+    #[test]
+    fn elicitation_result_carries_content_only_on_accept() {
+        let accept = build_elicitation_result(&json!(2), "accept", Some(&json!({ "a": 1 })));
+        assert_eq!(accept["result"], json!({ "action": "accept", "content": { "a": 1 } }));
+        let cancel = build_elicitation_result(&json!("x"), "cancel", None);
+        assert_eq!(cancel["result"], json!({ "action": "cancel" }));
+        assert_eq!(cancel["id"], "x");
     }
 }

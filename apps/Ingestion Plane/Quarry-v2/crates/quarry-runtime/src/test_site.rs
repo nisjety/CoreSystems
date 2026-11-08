@@ -8,6 +8,15 @@
 //! - `POST /login` — accepts `username=alice&password=secret`, sets `auth=alice`
 //! - `GET /dashboard` — gated; requires `auth` cookie, otherwise redirects to /login
 //! - `GET /search?q=...` — returns structured results echoing the query
+//! - `GET /otp-login` — E3.1-d one-time-code step: exactly one visible required
+//!   non-password input; `POST /otp-login` accepts [`FIXTURE_OTP_CODE`]
+//! - `GET /otp-login/ambiguous` — two code inputs, so the E3.1-c preconditions refuse it
+//! - `GET /downloads` — W3-E3.4-6: one `download` link ("Get report") to `report.txt`
+//! - `GET /downloads/unsolicited` — the same link, clicked by the page itself on load
+//!   (an unsolicited download a governed browser must deny)
+//! - `GET /downloads/report.txt` — [`FIXTURE_DOWNLOAD_TEXT`] as an attachment
+//! - `GET /downloads/report.docx` — an Office (OOXML zip) attachment the download
+//!   admission policy refuses
 //!
 //! Used by integration tests to drive an `AgentLoop` against a deterministic
 //! local site (avoiding the live-network flakiness of using example.com).
@@ -49,6 +58,23 @@ struct LoginForm {
     username: String,
     password: String,
 }
+
+#[derive(Debug, Deserialize)]
+struct OtpForm {
+    code: String,
+}
+
+/// E3.1-d: the one-time code the `/otp-login` fixture accepts. Pair it with
+/// `otp_source::StubOtpSource` in tests; it is a fixture value, not a secret.
+pub const FIXTURE_OTP_CODE: &str = "482915";
+
+/// W3-E3.4-6: the bytes of `/downloads/report.txt`. The Chromium proof in
+/// quarry-browser (`governed_download_*`) serves the same bytes from a `data:`
+/// link, since the driver's egress guard refuses loopback navigation.
+pub const FIXTURE_DOWNLOAD_TEXT: &[u8] = b"quarry download fixture\n";
+
+/// W3-E3.4-6: the accessible name of the fixture's download link.
+pub const FIXTURE_DOWNLOAD_LINK: &str = "Get report";
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
@@ -104,6 +130,26 @@ impl TestSite {
         format!("http://{}/dashboard", self.addr)
     }
 
+    /// E3.1-d one-time-code step of the login fixture.
+    pub fn otp_login_url(&self) -> String {
+        format!("http://{}/otp-login", self.addr)
+    }
+
+    /// W3-E3.4-6: the page with one governed download link.
+    pub fn downloads_url(&self) -> String {
+        format!("http://{}/downloads", self.addr)
+    }
+
+    /// W3-E3.4-6: the page that starts a download by itself on load.
+    pub fn unsolicited_download_url(&self) -> String {
+        format!("http://{}/downloads/unsolicited", self.addr)
+    }
+
+    /// W3-E3.4-6: one of the fixture files (`report.txt`, `report.docx`).
+    pub fn download_file_url(&self, name: &str) -> String {
+        format!("http://{}/downloads/{}", self.addr, name)
+    }
+
     pub fn search_url(&self, q: &str) -> String {
         format!("http://{}/search?q={}", self.addr, urlencoding_simple(q))
     }
@@ -130,6 +176,12 @@ impl TestSite {
             .route("/secrets-lab", get(secrets_lab))
             .route("/secrets-lab/frame", get(secrets_lab_frame))
             .route("/secrets-lab/scrolled", get(secrets_lab_scrolled))
+            .route("/otp-login", get(otp_login_page).post(otp_login_submit))
+            .route("/otp-login/ambiguous", get(otp_login_ambiguous))
+            .route("/downloads", get(downloads_page))
+            .route("/downloads/unsolicited", get(downloads_unsolicited))
+            .route("/downloads/report.txt", get(download_report_text))
+            .route("/downloads/report.docx", get(download_report_docx))
             .with_state(state)
     }
 }
@@ -274,6 +326,122 @@ async fn secrets_lab_scrolled(State(state): State<SiteState>) -> Html<String> {
 <div style="height:600px"></div>
 </body></html>"#
     ))
+}
+
+/// E3.1-d login fixture, one-time-code step: exactly one visible, required,
+/// non-password input (`autocomplete="one-time-code"`), no options and no QR, so
+/// the E3.1-c preconditions accept it as a fill target.
+async fn otp_login_page(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /otp-login").await;
+    Html(
+        r#"<!doctype html><html lang="en"><head><title>Verify sign-in</title></head>
+<body><h1>Enter the code we emailed you</h1>
+<form method="post" action="/otp-login">
+  <label for="code">Verification code</label>
+  <input name="code" id="code" required inputmode="numeric" autocomplete="one-time-code">
+  <button type="submit" id="verify">Verify</button>
+</form>
+</body></html>"#
+            .to_string(),
+    )
+}
+
+/// E3.1-d: the same step with two code inputs; the preconditions must refuse it.
+async fn otp_login_ambiguous(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /otp-login/ambiguous").await;
+    Html(
+        r#"<!doctype html><html lang="en"><head><title>Verify sign-in</title></head>
+<body><h1>Enter the code</h1>
+<form method="post" action="/otp-login">
+  <input name="code" id="code-a" required autocomplete="one-time-code">
+  <input name="code" id="code-b" required autocomplete="one-time-code">
+  <button type="submit" id="verify">Verify</button>
+</form>
+</body></html>"#
+            .to_string(),
+    )
+}
+
+/// The submitted code is compared and never echoed or logged.
+async fn otp_login_submit(
+    State(state): State<SiteState>,
+    Form(form): Form<OtpForm>,
+) -> impl IntoResponse {
+    record(&state, "POST /otp-login").await;
+    if form.code == FIXTURE_OTP_CODE {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::SET_COOKIE,
+            "auth=alice; Path=/; HttpOnly".parse().unwrap(),
+        );
+        (
+            StatusCode::SEE_OTHER,
+            headers,
+            [(header::LOCATION, "/dashboard")],
+            "",
+        )
+            .into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, Html("<h1>Invalid code</h1>")).into_response()
+    }
+}
+
+/// W3-E3.4-6: one download link. A governed browser saves it only for a verified
+/// `download_ref` on this link, once.
+async fn downloads_page(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /downloads").await;
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Downloads</title></head>
+<body><h1>Downloads</h1>
+<p><a id="report" href="/downloads/report.txt" download="report.txt">{FIXTURE_DOWNLOAD_LINK}</a></p>
+</body></html>"#
+    ))
+}
+
+/// W3-E3.4-6: the same link, clicked by the page on load: a download no action
+/// asked for, which a governed browser must deny.
+async fn downloads_unsolicited(State(state): State<SiteState>) -> Html<String> {
+    record(&state, "GET /downloads/unsolicited").await;
+    Html(format!(
+        r#"<!doctype html><html lang="en"><head><title>Unsolicited download</title></head>
+<body><h1>Unsolicited download</h1>
+<p><a id="report" href="/downloads/report.txt" download="report.txt">{FIXTURE_DOWNLOAD_LINK}</a></p>
+<script>window.addEventListener('load', () => document.getElementById('report').click());</script>
+</body></html>"#
+    ))
+}
+
+async fn download_report_text(State(state): State<SiteState>) -> impl IntoResponse {
+    record(&state, "GET /downloads/report.txt").await;
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"report.txt\"",
+            ),
+        ],
+        FIXTURE_DOWNLOAD_TEXT,
+    )
+}
+
+/// An OOXML file is a zip: the local-file-header magic is enough for the type
+/// check, which refuses Office documents by bytes as well as by name.
+async fn download_report_docx(State(state): State<SiteState>) -> impl IntoResponse {
+    record(&state, "GET /downloads/report.docx").await;
+    (
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"report.docx\"",
+            ),
+        ],
+        &b"PK\x03\x04fixture"[..],
+    )
 }
 
 fn html_escape(s: &str) -> String {
@@ -421,6 +589,144 @@ mod tests {
         assert_ne!(s1.addr, s2.addr);
         s1.shutdown().await;
         s2.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn otp_login_page_has_exactly_one_code_input() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(site.otp_login_url())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.matches("autocomplete=\"one-time-code\"").count(), 1);
+        assert!(!body.contains("type=\"password\""));
+        assert!(body.contains("required"));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn otp_login_accepts_the_fixture_code_and_refuses_others() {
+        let site = TestSite::start().await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let ok = client
+            .post(site.otp_login_url())
+            .form(&[("code", FIXTURE_OTP_CODE)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), 303);
+        let bad = client
+            .post(site.otp_login_url())
+            .form(&[("code", "000000")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 401);
+        assert!(!bad.text().await.unwrap().contains("000000"));
+        let log = site.request_log().await;
+        assert!(log.iter().all(|l| !l.contains(FIXTURE_OTP_CODE)));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_ambiguous_otp_page_has_two_code_inputs() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(format!("{}/ambiguous", site.otp_login_url()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.matches("autocomplete=\"one-time-code\"").count(), 2);
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_downloads_page_has_one_download_link_to_the_report() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(site.downloads_url())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body.matches(" download=").count(), 1);
+        assert!(body.contains("href=\"/downloads/report.txt\""));
+        assert!(body.contains(FIXTURE_DOWNLOAD_LINK));
+        assert!(
+            !body.contains("<script"),
+            "the governed page starts nothing by itself"
+        );
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_unsolicited_page_clicks_its_own_download_link() {
+        let site = TestSite::start().await;
+        let body = reqwest::get(site.unsolicited_download_url())
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("getElementById('report').click()"));
+        assert!(body.contains("href=\"/downloads/report.txt\""));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_report_is_served_as_an_attachment_with_the_fixture_bytes() {
+        let site = TestSite::start().await;
+        let resp = reqwest::get(site.download_file_url("report.txt"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let disposition = resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(disposition.starts_with("attachment"));
+        assert!(disposition.contains("report.txt"));
+        assert_eq!(&resp.bytes().await.unwrap()[..], FIXTURE_DOWNLOAD_TEXT);
+        let log = site.request_log().await;
+        assert!(log.contains(&"GET /downloads/report.txt".to_string()));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn the_office_report_is_a_zip_attachment() {
+        let site = TestSite::start().await;
+        let resp = reqwest::get(site.download_file_url("report.docx"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert!(resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("report.docx"));
+        assert!(resp.bytes().await.unwrap().starts_with(b"PK\x03\x04"));
+        site.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_download_is_not_found() {
+        let site = TestSite::start().await;
+        let resp = reqwest::get(site.download_file_url("other.pdf"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        site.shutdown().await;
     }
 
     #[test]

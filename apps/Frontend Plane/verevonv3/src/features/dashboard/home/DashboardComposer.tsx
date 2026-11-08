@@ -1,3 +1,9 @@
+import {
+	PASTE_TEXT_ATTACHMENT_THRESHOLD,
+	pastedImageFiles,
+	pastedPlainText,
+	pastedTextAttachmentFile,
+} from "@/shared/composer/paste-attachments";
 import { registerReloadGuard } from "@/app/chunk-recovery";
 import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
 import {
@@ -75,10 +81,12 @@ import { dictateAudioBlob } from "@/shared/api/audio-client";
 import {
 	actionKey,
 	BUILTIN_ACTIONS,
+	loadSlashTemplates,
 	loadSpecializedActions,
 	type SpecializedAction,
 	type SpecializedActionKind,
 } from "@/shared/api/chat-actions-client";
+import { fillTemplate, type AuthoredBehaviour } from "@/shared/api/authored-kinds-client";
 import {
 	loadComposerSettingsItems,
 	type ComposerSettingsItem,
@@ -116,6 +124,8 @@ import {
 	getModelEntitlementMeta,
 	groupChatModels,
 	catalogueAdvertisesConnectorScope,
+	filterModels,
+	formatModelListPrice,
 	hasZeroRetentionModel,
 	isExpensiveModel,
 	listChatThreads,
@@ -128,12 +138,15 @@ import {
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
 	VEREVON_MODES,
+	type AgentModeId,
 	type ChatThreadSession,
 	type EffortLevel,
 	type EffortProfile,
 	type ModelGroup,
 	type ModelInfo,
 } from "@/shared/api/chat-client";
+import { ModelSearchField } from "@/shared/components/ModelSearchField";
+import { agentModeLabel, agentModesWithinCap } from "@/features/customize/AgentModesSection";
 import {
 	browseConnection,
 	fetchConnectionContent,
@@ -149,7 +162,22 @@ import {
 	toggleConnectorScope,
 	type ConnectorScopeBlock,
 } from "@/shared/actions/chat-connector-scope";
+import {
+	catalogueAdvertisesContextRefs,
+	contextRefsBlocked,
+	normalizeContextRefs,
+	type ChatContextRef,
+} from "@/shared/actions/chat-context-refs";
+import { ComposerContextChips } from "./ComposerContextChips";
+import { createSlashCommandRegistry, type RegisteredSlashCommand } from "./composer-slash-registry";
 import { zdrRefusalPresentation } from "@/shared/api/zdr-refusals";
+import type { BrowserTab } from "@/shared/api/browser-client";
+import {
+	parseTabMentions,
+	resolveTabMentions,
+	type TabMentionResolution,
+	type TabMentionUnresolvedReason,
+} from "@/features/browser/page-context/tab-mention";
 import {
 	listChatGptSubscriptions,
 	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
@@ -307,6 +335,8 @@ export type ComposerCommand = {
 	label: string;
 	/** Canonical token after "/", lowercase and space-free. */
 	name: string;
+	/** A command a composer piece registered (`composer-slash-registry`); picking it runs its own `run`. */
+	registered?: RegisteredSlashCommand;
 	specialized?: SpecializedAction;
 };
 
@@ -356,6 +386,62 @@ export type ComposerActiveAction = {
 	kind: "skill" | "capability" | "connector";
 };
 
+/** One `@tab` token as sent (E3.3-c): the token text and the tab id it names. */
+export type DashboardComposerTabMention = {
+	token: string;
+	tabId: string | null;
+};
+
+/** The browser page context a turn asks for (E3.3-c). Mention-only, never a grant. */
+export type DashboardComposerBrowserContext = {
+	sessionId: string;
+	tabMentions: DashboardComposerTabMention[];
+};
+
+/**
+ * Build-time switch for the `@tab` chip and its payload field (E3.3-c).
+ * Only `1` turns it on, like VITE_BROWSER_OMNIBOX_SEARCH.
+ */
+export function tabMentionChipsEnabled(): boolean {
+	return import.meta.env.VITE_BROWSER_TAB_MENTIONS === "1";
+}
+
+/**
+ * The `browserContext` a send carries, or undefined when it carries none:
+ * no session, a zero-retention turn, or no `@tab` token in the text.
+ */
+export function composerBrowserContext(
+	text: string,
+	sessionId: string | null | undefined,
+	zeroRetention: boolean,
+): DashboardComposerBrowserContext | undefined {
+	const id = sessionId?.trim();
+	if (!id || zeroRetention) return undefined;
+	const tabMentions = parseTabMentions(text).map((mention) => ({
+		token: text.slice(mention.start, mention.end),
+		tabId: mention.tabId,
+	}));
+	return tabMentions.length > 0 ? { sessionId: id, tabMentions } : undefined;
+}
+
+function tabMentionReasonText(
+	reason: TabMentionUnresolvedReason,
+	tr: (noText: string, enText: string) => string,
+): string {
+	switch (reason) {
+		case "zero-retention":
+			return tr("ikke i midlertidig samtale", "not in a temporary chat");
+		case "no-tabs":
+			return tr("ingen åpne faner", "no open tabs");
+		case "no-active-tab":
+			return tr("ingen aktiv fane", "no active tab");
+		case "ambiguous-tab":
+			return tr("flere faner passer", "more than one tab matches");
+		case "unknown-tab":
+			return tr("ukjent fane", "unknown tab");
+	}
+}
+
 export type DashboardComposerSubmitPayload = {
     sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
     /**
@@ -370,6 +456,27 @@ export type DashboardComposerSubmitPayload = {
      * without connected apps is unchanged on the wire.
      */
     connectorScope?: string[];
+    /**
+     * The context chips attached to this send (EP-3 S5). Omitted when none were attached, so a turn
+     * without references is unchanged on the wire.
+     */
+    contextRefs?: ChatContextRef[];
+    /**
+     * The agent mode the person picked for this send (WS25-S11). Omitted unless they picked one, so an
+     * unchanged send is byte-identical. The server resolves it strictest-wins against the org cap.
+     */
+    agentMode?: AgentModeId;
+	/**
+	 * `@tab` mentions in the sent text (E3.3-c), with the browser session they
+	 * name. Each entry carries the token exactly as typed and the tab id it
+	 * spells (null for the bare `@tab`, the active tab). This is a hint only:
+	 * the gateway re-resolves every mention against Quarry's live tabs
+	 * (`POST /api/v1/browser/sessions/{id}/context/tab-mentions`) and fails
+	 * closed before anything reaches a model. Never carries page content or a
+	 * grant. Omitted unless VITE_BROWSER_TAB_MENTIONS is on, a session is
+	 * known, the turn is not zero-retention and the text has a mention.
+	 */
+	browserContext?: DashboardComposerBrowserContext;
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -647,17 +754,9 @@ export function matchDraftCommand(
 
 const TEXTAREA_AUTO_MAX_PX = 240;
 
-/**
- * ChatGPT and Claude both convert a sufficiently long paste into a "pasted
- * text" attachment instead of dumping it inline into the composer
- * (CHAT_PARITY_AUDIT_2026-09-15.md §3.6 / F-... "long paste"). This is the
- * length, in `string.length` code units, above which Verevon does the same.
- * It sits in the "a few thousand characters" range those products use: short
- * enough that a genuine document-scale paste (a log dump, an article, a long
- * spec) becomes a tidy attachment chip, long enough that an ordinary
- * paragraph-or-two paste still lands inline exactly as before.
- */
-export const PASTE_TEXT_ATTACHMENT_THRESHOLD = 4000;
+// The threshold and the paste helpers live in `@/shared/composer/paste-attachments` (WS15-S3); the
+// threshold is re-exported here because Home's tests and callers import it from this module.
+export { PASTE_TEXT_ATTACHMENT_THRESHOLD };
 
 // Inline rather than in global.css: `.dashboard-composer-autocomplete-menu
 // button span` there sets every span in a row to 14px/600, which is right for a
@@ -862,34 +961,6 @@ function droppedFiles(event: DragEvent) {
 	return Array.from(event.dataTransfer?.files ?? []);
 }
 
-function pastedImageFiles(event: ClipboardEvent) {
-	return Array.from(event.clipboardData?.files ?? []).filter((file) =>
-		file.type.startsWith("image/"),
-	);
-}
-
-function pastedPlainText(event: ClipboardEvent) {
-	return event.clipboardData?.getData("text/plain") ?? "";
-}
-
-/** A short, readable name for a paste-generated text attachment, e.g. "Limt inn tekst: some preview text….txt". */
-function pastedTextAttachmentName(text: string, label: string): string {
-	const trimmed = text.trim();
-	const preview = trimmed.replace(/\s+/g, " ").slice(0, 60);
-	if (preview.length === 0) {
-		return `${label} ${new Date().toLocaleTimeString()}.txt`;
-	}
-	const truncated = trimmed.length > preview.length ? "…" : "";
-	return `${label}: ${preview}${truncated}.txt`;
-}
-
-/** Wraps pasted text as a `.txt`-equivalent File so it flows through the existing attachment pipeline (`addFiles`). */
-function pastedTextAttachmentFile(text: string, label: string): File {
-	return new File([text], pastedTextAttachmentName(text, label), {
-		type: "text/plain",
-	});
-}
-
 export function DashboardComposer(props: {
     sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
     onSourceScopeChange?: (value: import('@/shared/actions/chat-source-scope').ChatSourceScope) => void;
@@ -921,6 +992,14 @@ export function DashboardComposer(props: {
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
 	/**
+	 * The strictest agent mode the organisation allows (WS25-S11), read from the org agent policy. Present only
+	 * where that policy is on: the picker then offers this mode and every stricter one, and no other.
+	 */
+	agentModeCap?: AgentModeId;
+	/** The agent mode the parent holds for the next send. The composer keeps its own choice when unset. */
+	agentMode?: AgentModeId;
+	onAgentModeChange?: (value: AgentModeId | undefined) => void;
+	/**
 	 * A plan the person approved is waiting to run (WS14 S2a). Present only
 	 * then: the chat appearance shows a third "Kjør plan" pill beside Ask and Do.
 	 * `rungLabel` says what the agent may now do; `selected` is whether the next
@@ -931,6 +1010,10 @@ export function DashboardComposer(props: {
 	onApprovedPlanSelect?: () => void;
 	onStop?: () => void;
 	onLaunchStart?: () => void;
+	/** Handle a plain local command before model or provider validation. */
+	onBeforeSubmit?: (text: string) => boolean;
+	/** Pure check for a locally handled command, used while the provider loads. */
+	canHandleBeforeSubmit?: (text: string) => boolean;
 	onSubmit?: (
 		payload: DashboardComposerSubmitPayload,
 	) => Promise<void> | void;
@@ -954,6 +1037,14 @@ export function DashboardComposer(props: {
 	/** "Midlertidig samtale" (ChatGPT's Temporary Chat) — maps to the request's ZDR flag. */
 	temporaryChat?: boolean;
 	onTemporaryChatChange?: (value: boolean) => void;
+	/**
+	 * The Quarry browser session `@tab` mentions name, and the tab list the
+	 * caller holds for it (E3.3-c). The list only drives the chips; the
+	 * gateway re-resolves against the live tabs. Both are ignored unless
+	 * VITE_BROWSER_TAB_MENTIONS is on.
+	 */
+	browserSessionId?: string | null;
+	browserTabs?: readonly BrowserTab[] | null;
 	/** Once a message has been sent in a temporary thread, the toggle can no longer be turned off mid-conversation. */
 	temporaryChatLocked?: boolean;
 	/**
@@ -1011,6 +1102,20 @@ export function DashboardComposer(props: {
 	// switch to "Kun samtalen" — mirrors the `temporaryChat()` reset pattern
 	// used elsewhere in this file.
 	createEffect(() => conversationOnly(), (restricted) => { if (restricted) setInternalRetrievalScope('auto'); });
+	// The agent mode the person picked, kept here unless the parent holds it. A choice the org cap no longer
+	// admits is dropped, so a stale mode is never offered or sent.
+	const [internalAgentMode, setInternalAgentMode] = createSignal<AgentModeId | undefined>(undefined);
+	const agentMode = () => props.agentMode ?? internalAgentMode();
+	const setAgentMode = (value: AgentModeId | undefined) => {
+		setInternalAgentMode(value);
+		props.onAgentModeChange?.(value);
+	};
+	const agentModeNotAdmitted = () => {
+		const mode = agentMode();
+		const cap = props.agentModeCap;
+		return mode !== undefined && cap !== undefined && !agentModesWithinCap(cap).includes(mode);
+	};
+	createEffect(() => agentModeNotAdmitted(), (notAdmitted) => { if (notAdmitted) setAgentMode(undefined); });
 	const browseWeb = () =>
 		!subscriptionBacked() && !zeroRetentionTurn() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
@@ -1054,6 +1159,8 @@ export function DashboardComposer(props: {
 		null,
 	);
 	const [modelOpen, setModelOpen] = createSignal(false);
+	const [modelQuery, setModelQuery] = createSignal("");
+	const modelCatalogId = `composer-model-catalog-${createUniqueId()}`;
 	const [contextScopeOpen, setContextScopeOpen] = createSignal(false);
 	const [responseMode, setResponseMode] = createSignal<ResponseMode>("auto");
 	// The picker pins three first-class Verevon intent modes (Budget/Balance/Genius)
@@ -1181,6 +1288,15 @@ export function DashboardComposer(props: {
 	);
 	const zeroRetentionTurn = () =>
 		Boolean(props.temporaryChatLocked || props.temporaryChat) || orgZeroRetention() === true;
+	// `@tab` chips (E3.3-c, D9): one per token in the draft, resolved against
+	// the caller's tab list as a preview only. Empty with the flag off or no
+	// session, so nothing renders.
+	const tabMentionResolutions = createMemo<TabMentionResolution[]>(() => {
+		if (!tabMentionChipsEnabled() || !props.browserSessionId?.trim()) return [];
+		return resolveTabMentions(parseTabMentions(props.message), props.browserTabs, {
+			zeroRetention: zeroRetentionTurn(),
+		});
+	});
 	const zeroRetentionWebTitle = () =>
 		i18n.tr(
 			"Nettsøk er ikke tilgjengelig med nullagring ennå",
@@ -1209,6 +1325,13 @@ export function DashboardComposer(props: {
 	);
 	const flatChatModels = createMemo<ModelInfo[]>(() =>
 		chatModelGroups().flatMap((group) => group.models),
+	);
+	const activeModelQuery = () =>
+		flatChatModels().length > 6 ? modelQuery().trim() : "";
+	const shownChatModelGroups = createMemo<ModelGroup[]>(() =>
+		activeModelQuery() === ""
+			? chatModelGroups()
+			: groupChatModels(filterModels(flatChatModels(), modelQuery())),
 	);
 	const selectedCatalogModel = createMemo(() => {
 		// No truthiness guard on the provider: plenty of real catalog models have
@@ -1300,6 +1423,43 @@ export function DashboardComposer(props: {
 	);
 	createEffect(() => connectorScopeBlockReason(), (reason) => {
 		if (reason) setConnectorScope([]);
+	});
+	// This composer's slash-command registry (C-B10): pieces that bring their own `/` command register it here.
+	const slashRegistry = createSlashCommandRegistry();
+	// The person's `/` templates (EP-11 S6), by registered command id. A template only fills the
+	// draft: picking it from the menu, or sending a typed `/name rest`, puts the text in the draft
+	// with `{{input}}` taken from the rest of the line, and the person sends it themselves.
+	const slashTemplates = new Map<string, AuthoredBehaviour>();
+	const applySlashTemplate = (template: AuthoredBehaviour, input: string) => {
+		const text = fillTemplate(template.content, input);
+		props.onMessageChange(text);
+		focusTextareaAtNextFrame(text.length);
+	};
+	// Registered once, after the first `/`; the registry lives and dies with this composer.
+	const registerSlashTemplates = (templates: AuthoredBehaviour[]) => {
+		for (const template of templates) {
+			const id = `template:${template.id}`;
+			slashTemplates.set(id, template);
+			slashRegistry.register({
+				id,
+				name: slugifyCommandName(template.name),
+				aliases: [],
+				label: template.name,
+				description: { no: template.description || "Mal", en: template.description || "Template" },
+				icon: FileText,
+				// The menu has already cleared the typed `/name`; what is left is the input.
+				run: () => applySlashTemplate(template, props.message),
+			});
+		}
+	};
+	// Context chips for this turn (EP-3 S5). They exist only where the catalogue says the gateway resolves
+	// references and the turn may carry them; like connected apps, they are cleared once the turn is sent.
+	const [contextRefs, setContextRefs] = createSignal<ChatContextRef[]>([]);
+	const contextRefsAvailable = createMemo(() =>
+		catalogueAdvertisesContextRefs(models() ?? [])
+		&& !contextRefsBlocked({ zeroRetention: zeroRetentionTurn(), subscriptionBacked: subscriptionBacked() }));
+	createEffect(() => contextRefsAvailable(), (available) => {
+		if (!available) setContextRefs([]);
 	});
 	const selectedModelLabel = () => {
 		const id = selectedModel();
@@ -1458,6 +1618,15 @@ export function DashboardComposer(props: {
 					name: slugifyCommandName(action.name),
 					specialized: action,
 				})),
+			...slashRegistry.commands().map((command) => ({
+				aliases: command.aliases,
+				description: command.description,
+				icon: command.icon,
+				id: command.id,
+				label: command.label,
+				name: command.name,
+				registered: command,
+			})),
 		];
 	});
 	// The draft's leading `/name`, when it resolves to a real command. Null for
@@ -1618,10 +1787,18 @@ export function DashboardComposer(props: {
 	const showTextareaExpand = createMemo(() =>
 		shouldShowTextareaExpandButton(hasOverflow(), textareaExpanded()),
 	);
+	const canInterceptLocalDraft = () => {
+		const body = commandBody().trim();
+		const browsing = browseWeb();
+		return Boolean(body && !draftCommand() && files().length === 0 && activeActions().length === 0 &&
+			!browsing && !deepSearch() && !shouldResearchLinkedProducts({ browseWeb: browsing, message: body }) &&
+			!imageMode() && !agentMode() && retrievalScope() === 'auto' && connectorScope().length === 0 &&
+			!(tabMentionChipsEnabled() && composerBrowserContext(body, props.browserSessionId, zeroRetentionTurn() || temporaryChat())));
+	};
 	const submitEnabled = createMemo(() =>
 		isComposerSubmitEnabled({
 			hasContent: hasContent(),
-			submitting: handoffPending() || subscriptionConnectionPending() || (props.submitting && !props.allowMidRunSubmit),
+			submitting: handoffPending() || (subscriptionConnectionPending() && !(props.onBeforeSubmit && props.canHandleBeforeSubmit && canInterceptLocalDraft() && props.canHandleBeforeSubmit(props.message.trim()))) || (props.submitting && !props.allowMidRunSubmit),
 			voiceMode: voiceMode(),
 			voiceRecording: voiceRecording(),
 		}),
@@ -1650,6 +1827,7 @@ export function DashboardComposer(props: {
 	const ensureActionsLoaded = () => {
 		if (actionsLoadStarted) return;
 		actionsLoadStarted = true;
+		void loadSlashTemplates().then(registerSlashTemplates);
 		void loadSpecializedActions()
 			.then((items) => {
 				setSpecializedActions(
@@ -1736,6 +1914,10 @@ export function DashboardComposer(props: {
 	};
 
 	const runCommand = (command: ComposerCommand) => {
+		if (command.registered) {
+			command.registered.run();
+			return;
+		}
 		if (command.builtin === "file") {
 			openFileDialog();
 			return;
@@ -2614,14 +2796,6 @@ export function DashboardComposer(props: {
 		fromVoiceMode?: boolean;
 	}): Promise<ComposerSubmitResult> => {
 		if (props.disabled || handoffPending()) return { ok: false };
-		if (subscriptionConnectionPending())
-			return {
-				ok: false,
-				message: i18n.tr(
-					"Kontrollerer ChatGPT-abonnementet … Prøv igjen om et øyeblikk.",
-					"Checking your ChatGPT subscription … Try again in a moment.",
-				),
-			};
 		// A deliberately-opened menu (slash commands / actions) still blocks a
 		// send — the user is mid-command. The ambient "date" suggestion must
 		// NOT: it is the other half of the F-03 fix above. Without this, Enter
@@ -2645,6 +2819,15 @@ export function DashboardComposer(props: {
 		const pendingCommand = draftCommand();
 		if (pendingCommand?.command.argument?.required && !pendingCommand.argument)
 			return { ok: false };
+		// A typed `/template rest` is never sent as typed: it becomes the template's text in the
+		// draft, `{{input}}` filled from the rest, and the person reads it and sends it (EP-11 S6).
+		const pendingTemplate = pendingCommand?.command.registered
+			? slashTemplates.get(pendingCommand.command.registered.id)
+			: undefined;
+		if (pendingTemplate) {
+			applySlashTemplate(pendingTemplate, pendingCommand?.argument ?? "");
+			return { ok: false };
+		}
 		// Typed commands apply even when the menu was never opened: "/image en
 		// rød katt" straight off the keyboard must carry the image tool, and
 		// "/kvalitet rapport uke 12" must carry the skill.
@@ -2691,6 +2874,25 @@ export function DashboardComposer(props: {
 		});
 		const initialEffectiveDeepSearch =
 			deepSearch() || productResearch || commandBuiltin === "deep_research";
+		// Local navigation does not need a model connection. Only intercept an
+		// unqualified text turn so explicit tools, context and attachments retain
+		// their usual submission semantics.
+		if (
+			props.onBeforeSubmit && canInterceptLocalDraft() &&
+			props.onBeforeSubmit(initialSnapshot.submittedText)
+		) {
+			setSubmitError(null);
+			resetComposerDraft();
+			return { ok: true };
+		}
+		if (subscriptionConnectionPending())
+			return {
+				ok: false,
+				message: i18n.tr(
+					"Kontrollerer ChatGPT-abonnementet … Prøv igjen om et øyeblikk.",
+					"Checking your ChatGPT subscription … Try again in a moment.",
+				),
+			};
 		const subscriptionRoute = selectedSubscriptionRoute();
 		if (subscriptionBacked() && !subscriptionRoute) {
 			setStaleSubscriptionNotice(true);
@@ -2730,9 +2932,21 @@ export function DashboardComposer(props: {
 		const submittedSourceScope = sourceScope();
 		const submittedConversationOnly = conversationOnly();
 		const submittedRetrievalScope = retrievalScope();
+		const submittedBrowserContext = tabMentionChipsEnabled()
+			? composerBrowserContext(
+					initialSnapshot.submittedText,
+					props.browserSessionId,
+					zeroRetentionTurn() || temporaryChat(),
+				)
+			: undefined;
 		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
 			? normalizeConnectorScope(connectorScope())
 			: [];
+		const submittedContextRefs = contextRefsAvailable() ? normalizeContextRefs(contextRefs()) : [];
+
+		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
+		// turn, which runs no agent.
+		const submittedAgentMode = conversationOnly() ? undefined : agentMode();
 
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
@@ -2753,6 +2967,12 @@ export function DashboardComposer(props: {
 			}
 			// Omitted when nothing was picked, like `retrievalScope` above.
 			if (submittedConnectorScope.length > 0) payload.connectorScope = submittedConnectorScope;
+			// Omitted when no chip was attached, like `connectorScope` above.
+			if (submittedContextRefs.length > 0) payload.contextRefs = submittedContextRefs;
+			// Omitted when nothing was picked, like `connectorScope` above.
+			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
+			// Omitted unless the text has a mention; a conversation-only turn reads no page.
+			if (submittedBrowserContext && !submittedConversationOnly) payload.browserContext = submittedBrowserContext;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -2762,6 +2982,7 @@ export function DashboardComposer(props: {
 			else await writePendingChatLaunch(payload);
 			// The picks were consent for this turn, so they go with it. A failed send keeps them for a retry.
 			if (submittedConnectorScope.length > 0) setConnectorScope([]);
+			if (submittedContextRefs.length > 0) setContextRefs([]);
 		} catch (error) {
 			const message = error instanceof PendingChatLaunchError
 				? error.reason === 'unreadable'
@@ -3074,7 +3295,15 @@ export function DashboardComposer(props: {
 									<summary>
 										{i18n.tr('Velg modell selv', 'Choose a model yourself')}
 									</summary>
+									<Show when={flatChatModels().length > 6}>
+										<ModelSearchField
+											value={modelQuery()}
+											controlsId={modelCatalogId}
+											onChange={setModelQuery}
+										/>
+									</Show>
 									<div
+										id={modelCatalogId}
 										class="dashboard-composer-model-catalog"
 										role="region"
 										aria-label={i18n.tr(
@@ -3083,7 +3312,7 @@ export function DashboardComposer(props: {
 										)}
 										tabindex={0}
 									>
-										<For each={chatModelGroups()}>
+										<For each={shownChatModelGroups()}>
 											{(group) => (
 												<div class="dashboard-composer-model-group">
 													<p class="dashboard-composer-model-group__label">
@@ -3113,6 +3342,13 @@ export function DashboardComposer(props: {
 															</span>
 															<span>
 																{model.name}
+																<Show when={model.price}>
+																	{(price) => (
+																		<span class="dashboard-composer-model-price">
+																			{formatModelListPrice(price(), i18n.locale())}
+																		</span>
+																	)}
+																</Show>
 															</span>
 														</span>
 														<span class="dashboard-composer-model-menu__right">
@@ -3166,6 +3402,11 @@ export function DashboardComposer(props: {
 												</div>
 											)}
 										</For>
+										<Show when={activeModelQuery() !== "" && shownChatModelGroups().length === 0}>
+											<p class="dashboard-composer-model-empty" role="status">
+												{i18n.tr("Ingen modeller passer", "No models match")}
+											</p>
+										</Show>
 									</div>
 								</details>
 								<Show when={selectedPrivacyTier() === "sovereign"}>
@@ -3414,6 +3655,26 @@ export function DashboardComposer(props: {
 								</Show>
 							</div>
 						</Show>
+					</Show>
+					<Show when={props.agentModeCap}>
+						{(cap) => (
+							<label
+								class="dashboard-composer-agent-mode"
+								style={{ display: "inline-flex", "align-items": "center", gap: "6px", "font-size": "12px" }}
+							>
+								<span>{i18n.tr("Agentmodus", "Agent mode")}</span>
+								<select
+									aria-label={i18n.tr("Agentmodus", "Agent mode")}
+									value={agentMode() ?? cap()}
+									disabled={conversationOnly()}
+									onChange={(event) => setAgentMode(event.currentTarget.value as AgentModeId)}
+								>
+									<For each={agentModesWithinCap(cap())}>
+										{(mode) => <option value={mode}>{agentModeLabel(mode, i18n)}</option>}
+									</For>
+								</select>
+							</label>
+						)}
 					</Show>
 					<Show when={props.onTemporaryChatChange}>
 						<ComposerIconButton
@@ -3760,6 +4021,61 @@ export function DashboardComposer(props: {
 						</Show>
 					</div>
 
+					<ComposerContextChips available={contextRefsAvailable()} refs={contextRefs()} onChange={setContextRefs} registry={slashRegistry} orgId={activeOrgId() || undefined} disabled={props.submitting} />
+
+					<Show when={tabMentionResolutions().length > 0}>
+						<div
+							class="dashboard-composer-tab-mentions"
+							role="list"
+							aria-label={i18n.tr("Faner nevnt i meldingen", "Tabs mentioned in the message")}
+							style={{ display: "flex", "flex-wrap": "wrap", gap: "4px", padding: "2px 12px" }}
+						>
+							<For each={tabMentionResolutions()}>
+								{(resolution) => (
+									<span
+										role="listitem"
+										class="dashboard-composer-tab-chip"
+										data-status={resolution.status}
+										title={
+											resolution.status === "resolved"
+												? i18n.tr(
+														"Fanetittelen kommer fra nettsiden og er ikke kontrollert. Gir ingen tilgang til å handle.",
+														"The tab title comes from the web page and is not verified. Grants no permission to act.",
+													)
+												: i18n.tr("Denne fanen legges ikke ved.", "This tab will not be attached.")
+										}
+										style={{
+											display: "inline-flex",
+											"align-items": "center",
+											gap: "4px",
+											"max-width": "240px",
+											padding: "1px 8px",
+											"border-radius": "999px",
+											"font-size": "12px",
+											border: "1px solid currentColor",
+											opacity: resolution.status === "resolved" ? "1" : "0.7",
+										}}
+									>
+										<span aria-hidden="true">@tab</span>
+										{resolution.status === "resolved" ? (
+											<>
+												<span
+													style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}
+												>
+													{resolution.ref.label}
+												</span>
+												<span class="sr-only">
+													{i18n.tr("(sideinnhold, ikke kontrollert)", "(page content, not verified)")}
+												</span>
+											</>
+										) : (
+											<span>{tabMentionReasonText(resolution.reason, i18n.tr)}</span>
+										)}
+									</span>
+								)}
+							</For>
+						</div>
+					</Show>
 					<Show when={voiceRecording()}>
 						<div class="dashboard-composer-loading-bar">
 							<span />

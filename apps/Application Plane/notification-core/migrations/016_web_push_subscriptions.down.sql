@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS notification_web_push_subscriptions_recipient_idx;
+DROP TABLE IF EXISTS notification_web_push_subscriptions;

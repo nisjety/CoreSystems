@@ -13,7 +13,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { parseYamlSubset } from '../yaml-subset.mjs';
-import { documentedPaths, registeredPaths } from '../openapi-routes.mjs';
+import { controlInternalRoutes, documentedPaths, normalize, registeredPaths } from '../openapi-routes.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8').replace(/\r\n/g, '\n');
@@ -131,10 +131,14 @@ test('docs/openapi-internal.yaml parses as one YAML document with no duplicate k
   }
 });
 
-test('the internal spec documents exactly the /v1/internal routes the edge registers', () => {
-  const registered = registeredPaths(root).paths.filter((route) => route.startsWith('/v1/internal/'));
+test('the internal spec documents exactly the /v1/internal routes the edge and the Go control service register', () => {
+  const control = controlInternalRoutes(root).map((entry) => entry.split(' ')[1]);
+  const registered = [...new Set([
+    ...registeredPaths(root).paths.filter((route) => route.startsWith('/v1/internal/')),
+    ...control,
+  ])];
   const documented = documentedPaths(internalText).filter((route) => route.startsWith('/v1/internal/'));
-  assert.ok(registered.length >= 9, `only ${registered.length} internal routes registered`);
+  assert.ok(registered.length >= 17, `only ${registered.length} internal routes registered`);
   assert.deepEqual(
     [...documented].sort(),
     [...registered].sort(),
@@ -142,6 +146,46 @@ test('the internal spec documents exactly the /v1/internal routes the edge regis
   );
   const outside = documentedPaths(internalText).filter((route) => !route.startsWith('/v1/internal/'));
   assert.deepEqual(outside, [], `the internal spec documents a path outside /v1/internal: ${outside.join(', ')}`);
+});
+
+test('the control routes are documented with their methods, and each names the secret that verifies it', () => {
+  const routes = controlInternalRoutes(root);
+  assert.equal(routes.length, 8, `the Go control service registers ${routes.length} /v1/internal routes, expected 8: ${routes.join(', ')}`);
+  const spec = parseSpec(internalText);
+  const byPath = new Map(Object.entries(spec.paths ?? {}).map(([route, item]) => [normalize(route), item]));
+
+  // The orchestrator-only prefixes come from the Go source that splits the secrets, so a change there fails here.
+  const split = fs.readFileSync(path.join(root, 'services/quarry-control/internal/httpx/hmac_split.go'), 'utf8').replace(/\r\n/g, '\n');
+  const block = split.match(/orchestratorOnlyPrefixes = \[\]string\{([^}]*)\}/);
+  assert.ok(block, 'orchestratorOnlyPrefixes not found in httpx/hmac_split.go');
+  const prefixes = [...block[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(prefixes.length >= 2, `orchestrator-only prefixes: ${prefixes.join(', ')}`);
+
+  const documentedPairs = [];
+  for (const [route, item] of byPath) {
+    if (!route.startsWith('/v1/internal/')) continue;
+    for (const method of HTTP_METHODS) if (item?.[method]) documentedPairs.push(`${method.toUpperCase()} ${route}`);
+  }
+  for (const entry of routes) {
+    const [method, route] = entry.split(' ');
+    const op = byPath.get(route)?.[method.toLowerCase()];
+    assert.ok(op, `${entry} is registered by quarry-control and not documented`);
+    const rawRoute = [...Object.keys(spec.paths)].find((candidate) => normalize(candidate) === route);
+    const orchestratorOnly = prefixes.some((prefix) => rawRoute.startsWith(prefix));
+    const scheme = Object.keys(op.security?.[0] ?? {})[0];
+    assert.equal(scheme, orchestratorOnly ? 'controlInternalHmac' : 'edgeInternalHmac', `${entry} names the wrong secret`);
+  }
+  // Nothing under the orchestrator-only prefixes is documented unless control or the edge registers it.
+  const controlPaths = new Set([
+    ...routes.map((entry) => entry.split(' ')[1]),
+    ...registeredPaths(root).paths, // the edge's own /v1/internal/schedules/preflight is under a control prefix
+  ]);
+  const strayOrchestrator = documentedPairs.filter((pair) => {
+    const route = pair.split(' ')[1];
+    const raw = [...Object.keys(spec.paths)].find((candidate) => normalize(candidate) === route);
+    return prefixes.some((prefix) => raw.startsWith(prefix)) && !controlPaths.has(route);
+  });
+  assert.deepEqual(strayOrchestrator, [], `documented orchestrator-only routes nobody registers: ${strayOrchestrator.join(', ')}`);
 });
 
 test('every internal operation has a unique operationId and the internal tag', () => {

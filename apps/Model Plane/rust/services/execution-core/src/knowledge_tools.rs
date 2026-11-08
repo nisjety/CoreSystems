@@ -32,6 +32,41 @@ use tonic::transport::{Channel, Endpoint};
 const MAX_TOP_K: i32 = 20;
 const MAX_CHUNK_CHARS: usize = 600;
 
+/// The Data Plane metadata a Space-scoped search carries: the Control decision that restricts the
+/// search to the Space's documents. The same name model-gateway's own retrieval sends.
+const SPACE_DECISION_HEADER: &str = "x-space-decision";
+
+/// The header a `RunAgent` request carries for the Space retrieval the gateway authorised for it
+/// (WS18-S5). Its value is the Control decision token, or empty for a Space-scoped run that holds
+/// none. It is absent when the run is not Space-scoped or the gateway's switch is off.
+pub(crate) const SPACE_RETRIEVAL_HEADER: &str = "x-space-retrieval-authorization";
+
+/// How one run's `knowledge_search` is scoped to its Space (build plan WS18-S5). The gateway decides
+/// it and forwards it in [`SPACE_RETRIEVAL_HEADER`], so this process never reads the switch behind
+/// it: an absent header is the organisation's own search, as it has always been.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpaceRetrieval<'a> {
+    /// No Space retrieval was authorised: the search is the organisation's own.
+    Organisation,
+    /// The run's Control decision, which restricts the search to the Space's documents.
+    Scoped(&'a str),
+    /// The run is Space-scoped and holds no decision. The search is refused, never run
+    /// organisation-wide.
+    Withheld,
+}
+
+impl<'a> SpaceRetrieval<'a> {
+    /// Read the header a `RunAgent` request carried, or its absence.
+    #[must_use]
+    pub(crate) fn from_header(header: Option<&'a str>) -> Self {
+        match header.map(str::trim) {
+            None => Self::Organisation,
+            Some("") => Self::Withheld,
+            Some(decision) => Self::Scoped(decision),
+        }
+    }
+}
+
 /// The Data Plane retrieval gRPC endpoint, as configured for this process.
 ///
 /// The ONE resolver for everything that talks to retrieval: dispatch
@@ -95,9 +130,12 @@ impl KnowledgeClient {
         // `mp_contracts::dataplane_posture::sovereign_required_from_privacy_tier`.
         min_privacy_tier: i32,
         bearer: &str,
+        // The Control decision a Space-scoped run searches under (WS18-S5). `None` is the
+        // organisation's own search, exactly as before.
+        space_decision: Option<&str>,
     ) -> Result<String, String> {
         let top_k = top_k.clamp(1, MAX_TOP_K);
-        let request = build_request(
+        let mut request = build_request(
             org_id,
             user_id,
             query,
@@ -107,6 +145,13 @@ impl KnowledgeClient {
             min_privacy_tier,
             bearer,
         )?;
+        if let Some(decision) = space_decision {
+            let decision = MetadataValue::try_from(decision)
+                .map_err(|_| "knowledge retrieval decision is malformed".to_owned())?;
+            request
+                .metadata_mut()
+                .insert(SPACE_DECISION_HEADER, decision);
+        }
         let response = self
             .client
             .clone()
@@ -581,6 +626,7 @@ pub(crate) mod tests {
                 false,
                 0,
                 "signed-token",
+                None,
             )
             .await
             .expect("the stub answers");
@@ -594,6 +640,7 @@ pub(crate) mod tests {
                 true,
                 0,
                 "signed-token",
+                None,
             )
             .await
             .expect("the stub answers");
@@ -601,6 +648,92 @@ pub(crate) mod tests {
         assert_eq!(seen.len(), 2, "one Retrieve per search");
         assert_eq!(seen[0].zdr_mode.as_deref(), Some("disabled"));
         assert_eq!(seen[1].zdr_mode.as_deref(), Some("reject"));
+    }
+
+    /// The Space decision rides as `x-space-decision` on the one search it scopes, and an
+    /// organisation's own search carries none (WS18-S5). A decision that is not valid metadata is
+    /// refused before anything is sent, never sent without the decision.
+    #[tokio::test]
+    async fn a_space_decision_reaches_the_data_plane_only_on_the_search_it_scopes() {
+        let (endpoint, seen) = spawn_stub(Answer::Success).await;
+        let client = KnowledgeClient {
+            client: RetrievalServiceClient::new(
+                Endpoint::from_shared(endpoint)
+                    .expect("stub endpoint")
+                    .connect_lazy(),
+            ),
+        };
+        client
+            .search(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                false,
+                false,
+                0,
+                "signed-token",
+                Some("decision-1"),
+            )
+            .await
+            .expect("the stub answers");
+        client
+            .search(
+                "org-a",
+                "user-a",
+                "query",
+                5,
+                false,
+                false,
+                0,
+                "signed-token",
+                None,
+            )
+            .await
+            .expect("the stub answers");
+        assert!(
+            client
+                .search(
+                    "org-a",
+                    "user-a",
+                    "query",
+                    5,
+                    false,
+                    false,
+                    0,
+                    "signed-token",
+                    Some("bad\ndecision"),
+                )
+                .await
+                .is_err(),
+            "a decision that is not valid metadata is refused"
+        );
+        let seen = seen.lock().expect("seen lock").clone();
+        assert_eq!(seen.len(), 2, "the refused decision sent no Retrieve");
+        assert_eq!(seen[0].space_decision.as_deref(), Some("decision-1"));
+        assert_eq!(seen[1].space_decision, None);
+    }
+
+    /// The header reads absent, empty and decided runs apart: absent is the organisation's own
+    /// search, empty is a Space-scoped run with no decision, and anything else is the decision.
+    #[test]
+    fn the_space_retrieval_header_reads_absent_empty_and_decided_runs_apart() {
+        assert_eq!(
+            SpaceRetrieval::from_header(None),
+            SpaceRetrieval::Organisation
+        );
+        assert_eq!(
+            SpaceRetrieval::from_header(Some("")),
+            SpaceRetrieval::Withheld
+        );
+        assert_eq!(
+            SpaceRetrieval::from_header(Some("  ")),
+            SpaceRetrieval::Withheld
+        );
+        assert_eq!(
+            SpaceRetrieval::from_header(Some(" decision-1 ")),
+            SpaceRetrieval::Scoped("decision-1")
+        );
     }
 
     /// The gap this module used to name in a comment: a run pinned to
@@ -689,6 +822,8 @@ pub(crate) mod tests {
         user_id: Option<String>,
         /// The `zdr_mode` the request carried on the wire (Z-18).
         zdr_mode: Option<String>,
+        /// The `x-space-decision` the request carried, if it scoped the search to a Space.
+        space_decision: Option<String>,
     }
 
     struct StubRetrieval {
@@ -717,6 +852,11 @@ pub(crate) mod tests {
                 query: request.get_ref().query.clone(),
                 user_id: request.get_ref().user_id.clone(),
                 zdr_mode: request.get_ref().zdr_mode.clone(),
+                space_decision: request
+                    .metadata()
+                    .get(SPACE_DECISION_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned),
             });
             match self.answer {
                 Answer::Unauthenticated => {

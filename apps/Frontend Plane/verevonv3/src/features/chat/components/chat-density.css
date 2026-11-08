@@ -1,0 +1,102 @@
+/*
+ * Transcript density (EP-14 S2). The menu sits in the row under the chat header, and its trigger takes the settled
+ * fold's tokens so it reads as the same kind of control. The page sets `data-transcript-process="hidden"` on the
+ * workspace for a level that hides the process trail, so no rule here names a level.
+ */
+
+.verevon-chat-density {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 8px;
+}
+
+.verevon-chat-density__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-density__trigger:hover {
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-density__trigger svg {
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: transform 140ms ease;
+}
+
+.verevon-chat-density__trigger[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.verevon-chat-density__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  display: grid;
+  gap: 4px;
+  width: min(280px, calc(100vw - 32px));
+  padding: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface-soft);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.verevon-chat-density__option {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.verevon-chat-density__option:hover {
+  color: var(--verevon-j-text);
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, transparent);
+}
+
+.verevon-chat-density__option[aria-pressed='true'] {
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-density__option strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-chat-density__option span {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.verevon-chat-section[data-transcript-process='hidden'] .verevon-chat-tool-chips,
+.verevon-chat-section[data-transcript-process='hidden'] .verevon-chat-reasoning {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-chat-density__trigger,
+  .verevon-chat-density__trigger svg {
+    transition: none;
+  }
+}

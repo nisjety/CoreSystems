@@ -19,12 +19,15 @@ use std::collections::HashMap;
 use crate::{config::AppState, envelope::unwrap_data, middleware::AuthenticatedUser};
 
 use super::shared::{
-    array_at, cookie_header, created, date_millis, first_num, first_str, forward,
+    array_at, bad_request, cookie_header, created, date_millis, first_num, first_str, forward,
     normalize_batch_urls, normalize_target, obj_or_empty, okay, quarry_call, quarry_token, str_at,
     str_or_null, validation,
 };
 
-const RUN_KINDS: [&str; 5] = ["crawl", "extract", "search", "agent", "batch"];
+// `scrape` is listed since WS15.L5: a single-page fetch is a job of its own in
+// quarry-control's registry (`/v1/scrape/jobs`) and carries the same origin and
+// phase as the other kinds.
+const RUN_KINDS: [&str; 6] = ["crawl", "extract", "search", "agent", "batch", "scrape"];
 
 // ── List ────────────────────────────────────────────────────────────────────
 
@@ -133,7 +136,7 @@ fn to_run_item(job: &Value) -> Value {
         query.map(Value::String).unwrap_or(Value::Null),
     );
 
-    json!({
+    let mut row = json!({
         "id": str_at(job, "job_id"),
         // The Temporal run id, stamped once the job starts. The evidence
         // endpoint (`/api/ingestions/evidence?runId=…`) proxies quarry-edge's
@@ -148,8 +151,84 @@ fn to_run_item(job: &Value) -> Value {
         "completedAt": str_or_null(job, "completed_at"),
         "target": target,
         "progress": Value::Object(progress),
+        // Who started the job (`{type, ref}`) and which schedule fired it,
+        // so a run can say "manual" or "schedule X" instead of guessing. The
+        // actor behind the origin is an internal identity and stays inside.
+        "origin": origin_view(job),
+        "scheduleId": str_or_null(job, "schedule_id"),
+        "phase": str_or_null(job, "phase"),
         "stats": stats,
-    })
+        // WS15.L5: what was last asked of the job (`pause`, `resume`, `cancel`).
+        // Null when quarry does not send it (older rows, a flag that is off).
+        "desiredState": desired_state(job),
+    });
+    if let Some(credits) = job.get("credits").and_then(to_credits) {
+        row["credits"] = credits;
+    }
+    row
+}
+
+/// Reshapes Quarry's `JobCredits` (`used`, `unit`, `basis`, `price_per_page`,
+/// `estimated`, `final`) into the SPA's camelCase. `None` when the edge sent no object.
+/// Quarry sends the field only while QUARRY_CONTROL__JOB_CREDITS is on, so a row
+/// without it stays as it was.
+pub(super) fn to_credits(credits: &Value) -> Option<Value> {
+    let object = credits.as_object()?;
+    Some(json!({
+        "used": object.get("used").cloned().unwrap_or(json!(0)),
+        "unit": object.get("unit").cloned().unwrap_or(json!("credit")),
+        "basis": object.get("basis").cloned().unwrap_or(json!("pages_fetched")),
+        "pricePerPage": object.get("price_per_page").cloned().unwrap_or(json!(0)),
+        "estimated": object.get("estimated").cloned().unwrap_or(json!(true)),
+        "final": object.get("final").cloned().unwrap_or(json!(false)),
+    }))
+}
+
+/// The extraction prompt of a run body, trimmed. Blank means none; a prompt over
+/// 10,000 characters is refused here, the same limit quarry-edge applies.
+fn extract_prompt(body: &Value) -> Result<Option<String>, String> {
+    let Some(raw) = body.get("prompt").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 10_000 {
+        return Err("The extraction prompt must be at most 10,000 characters.".to_owned());
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// The job's origin as the SPA reads it: `{ type, ref }`. Quarry sends
+/// `{ type, actor?, ref? }` (or a bare type string); the actor is an internal
+/// identity and does not cross to the browser. Null when there is no type.
+pub(super) fn origin_view(job: &Value) -> Value {
+    let (label, reference) = match job.get("origin") {
+        Some(Value::String(s)) => (s.trim(), None),
+        Some(Value::Object(o)) => (
+            o.get("type").and_then(Value::as_str).unwrap_or("").trim(),
+            o.get("ref").and_then(Value::as_str).map(str::trim).filter(|r| !r.is_empty()),
+        ),
+        _ => ("", None),
+    };
+    if label.is_empty() {
+        return Value::Null;
+    }
+    json!({ "type": label, "ref": reference })
+}
+
+/// What was last asked of the job (`pause`, `resume`, `cancel`), from the job row or
+/// from the lifecycle `control` block; null when nothing was asked.
+fn desired_state(job: &Value) -> Value {
+    ["desired_state", "desiredState"]
+        .iter()
+        .filter_map(|key| job.get(*key).and_then(Value::as_str))
+        .chain(job.pointer("/control/desired").and_then(Value::as_str))
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(|s| Value::String(s.to_owned()))
+        .unwrap_or(Value::Null)
 }
 
 // ── Create ────────────────────────────────────────────────────────────────
@@ -265,6 +344,35 @@ async fn create_batch(
     }))
 }
 
+/// The typed code for a structured-extraction refusal, read from the `error` text that
+/// quarry-edge sets. Quarry gives these refusals no `details.reason`, so the text is the only
+/// signal it sends. A text that matches none of the four keeps Quarry's own `UNSUPPORTED`.
+fn extract_refusal_code(text: &str) -> Option<&'static str> {
+    if text.contains("QUARRY_EDGE__AI_FORMATS is off") {
+        Some("extract_ai_formats_off")
+    } else if text.contains("QUARRY_EDGE__MODEL_PLANE_URL is not set") {
+        Some("extract_model_plane_not_configured")
+    } else if text.contains("holds no model credential") {
+        Some("extract_model_lane_not_granted")
+    } else if text.contains("refused this service") {
+        Some("extract_model_plane_refused")
+    } else {
+        None
+    }
+}
+
+/// The 501 body with the typed code at its top level, where the SPA reads it.
+fn with_extract_refusal_code(status: StatusCode, mut body: Value) -> Value {
+    if status != StatusCode::NOT_IMPLEMENTED {
+        return body;
+    }
+    let text = body.get("error").and_then(Value::as_str).unwrap_or_default();
+    if let Some(code) = extract_refusal_code(text) {
+        body["code"] = json!(code);
+    }
+    body
+}
+
 async fn create_extract(
     state: &AppState,
     body: &Value,
@@ -279,9 +387,21 @@ async fn create_extract(
         Err(message) => return validation(&message),
     };
 
+    // quarry-edge's `/v1/extract` reads both: a `schema` makes the extraction
+    // structured, and a `prompt` steers it (inside the schema) or asks for one
+    // free-form JSON object when it stands alone. With neither, the sources come
+    // back as markdown.
     let mut request = json!({ "urls": [url.clone()] });
-    if let Some(prompt) = first_str(body, &["prompt"]) {
-        request["prompt"] = Value::String(prompt);
+    match extract_schema(body) {
+        Ok(Some(schema)) => request["schema"] = schema,
+        Ok(None) => {}
+        // Present but not a JSON object: malformed, so a 400, and nothing reaches quarry-edge.
+        Err(message) => return bad_request("invalid_schema", &message),
+    }
+    match extract_prompt(body) {
+        Ok(Some(prompt)) => request["prompt"] = Value::String(prompt),
+        Ok(None) => {}
+        Err(message) => return validation(&message),
     }
     let (status, resp) = quarry_call(
         state,
@@ -293,7 +413,7 @@ async fn create_extract(
     )
     .await;
     if !status.is_success() {
-        return forward(status, resp);
+        return forward(status, with_extract_refusal_code(status, resp));
     }
 
     let data = unwrap_data(&resp);
@@ -307,13 +427,12 @@ async fn create_extract(
         .filter(|s| !s.is_empty())
         .unwrap_or(&url)
         .to_owned();
-    let run_status = first
-        .get("status")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("completed")
-        .to_owned();
+    // quarry-edge reports per source: "ok" (structured), "fetched" (markdown only)
+    // or "error". A failed source is a failed run; the other two are completed.
+    let run_status = match first.get("status").and_then(Value::as_str).map(str::trim) {
+        Some("error") => "failed",
+        _ => "completed",
+    };
 
     okay(json!({
         "run": {
@@ -406,6 +525,23 @@ async fn create_scrape(
 
 // ── Small helpers ───────────────────────────────────────────────────────────
 
+/// The extraction schema of a run body: a JSON object, or the same document sent
+/// as text. `Ok(None)` when none was sent or the text is blank. A schema that is not a
+/// JSON object is an `Err`, which `create_extract` answers with a 400.
+fn extract_schema(body: &Value) -> Result<Option<Value>, String> {
+    match body.get("schema") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if text.trim().is_empty() => Ok(None),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .map(Some)
+            .ok_or_else(|| "The extraction schema must be a JSON object.".to_owned()),
+        Some(value) if value.is_object() => Ok(Some(value.clone())),
+        Some(_) => Err("The extraction schema must be a JSON object.".to_owned()),
+    }
+}
+
 fn handoff_id(data: &Value) -> String {
     first_str(data, &["job_id", "jobId", "id", "run_id", "runId"]).unwrap_or_default()
 }
@@ -421,6 +557,63 @@ fn handoff_accepted_at(data: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// INNH-1 / INNH-9: the job's credits pass through in camelCase, and a row without
+    /// them (the flag is off) has no `credits` key at all, not a null one.
+    #[test]
+    fn run_rows_carry_credits_only_when_quarry_sends_them() {
+        let with = json!({
+            "job_id": "job-2", "kind": "crawl", "status": "running", "created_at": "t",
+            "credits": { "used": 12.0, "unit": "credit", "basis": "pages_fetched",
+                         "price_per_page": 1.0, "estimated": true, "final": false }
+        });
+        let row = to_run_item(&with);
+        assert_eq!(row["credits"]["used"], 12.0);
+        assert_eq!(row["credits"]["pricePerPage"], 1.0);
+        assert_eq!(row["credits"]["final"], false);
+        let without = json!({ "job_id": "job-3", "kind": "crawl", "status": "running", "created_at": "t" });
+        assert!(to_run_item(&without).get("credits").is_none());
+    }
+
+    /// INNH-2: a prompt is trimmed; blank means none; over 10,000 characters is refused.
+    #[test]
+    fn extract_prompt_is_trimmed_and_bounded() {
+        assert_eq!(extract_prompt(&json!({ "prompt": "  Find the price  " })).unwrap().as_deref(), Some("Find the price"));
+        assert_eq!(extract_prompt(&json!({ "prompt": "   " })).unwrap(), None);
+        assert_eq!(extract_prompt(&json!({})).unwrap(), None);
+        let long = "x".repeat(10_001);
+        assert!(extract_prompt(&json!({ "prompt": long })).is_err());
+        assert!(extract_prompt(&json!({ "prompt": "y".repeat(10_000) })).is_ok());
+    }
+
+    /// WS16.S7: a schema is a JSON object, or the same object as text. Blank text means none;
+    /// anything else is refused before it can reach quarry-edge.
+    #[test]
+    fn extract_schema_accepts_an_object_or_its_text_and_refuses_the_rest() {
+        let object = json!({ "type": "object" });
+        assert_eq!(extract_schema(&json!({})).unwrap(), None);
+        assert_eq!(extract_schema(&json!({ "schema": null })).unwrap(), None);
+        assert_eq!(extract_schema(&json!({ "schema": "  " })).unwrap(), None);
+        assert_eq!(
+            extract_schema(&json!({ "schema": object.clone() })).unwrap(),
+            Some(object.clone())
+        );
+        assert_eq!(
+            extract_schema(&json!({ "schema": "{\"type\":\"object\"}" })).unwrap(),
+            Some(object)
+        );
+        for malformed in [
+            json!("not json"),
+            json!("[1, 2]"),
+            json!("\"text\""),
+            json!(["type"]),
+            json!(42),
+            json!(true),
+        ] {
+            let refused = extract_schema(&json!({ "schema": malformed.clone() }));
+            assert!(refused.is_err(), "{malformed}");
+        }
+    }
 
     #[test]
     fn to_run_item_derives_target_and_progress() {
@@ -459,5 +652,385 @@ mod tests {
         let item = to_run_item(&job);
         assert_eq!(item["target"], "crawl target");
         assert_eq!(item["progress"]["pages"], 5);
+    }
+
+    #[test]
+    fn each_of_the_four_extract_refusals_gets_its_own_code() {
+        let texts = [
+            (
+                "structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment",
+                "extract_model_plane_not_configured",
+            ),
+            (
+                "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential",
+                "extract_model_lane_not_granted",
+            ),
+            (
+                "structured extraction needs a granted Model Plane lane, and the Model Plane refused this service",
+                "extract_model_plane_refused",
+            ),
+            (
+                "structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off",
+                "extract_ai_formats_off",
+            ),
+        ];
+        for (text, code) in texts {
+            assert_eq!(extract_refusal_code(text), Some(code), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_extract_refusal_keeps_quarry_s_own_code() {
+        assert_eq!(extract_refusal_code("a refusal this gateway has not seen"), None);
+        let body = json!({ "error": "a refusal this gateway has not seen", "code": "UNSUPPORTED" });
+        let kept = with_extract_refusal_code(StatusCode::NOT_IMPLEMENTED, body);
+        assert_eq!(kept["code"], "UNSUPPORTED");
+    }
+
+    #[test]
+    fn the_code_is_set_only_on_a_501_refusal() {
+        let body = json!({ "error": "QUARRY_EDGE__AI_FORMATS is off", "code": "UNSUPPORTED" });
+        let other_status = with_extract_refusal_code(StatusCode::BAD_REQUEST, body.clone());
+        assert_eq!(other_status["code"], "UNSUPPORTED");
+        let refused = with_extract_refusal_code(StatusCode::NOT_IMPLEMENTED, body);
+        assert_eq!(refused["code"], "extract_ai_formats_off");
+    }
+}
+
+#[cfg(test)]
+mod job_control_field_tests {
+    use super::*;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn a_run_item_carries_origin_phase_and_desired_state() {
+        let item = to_run_item(&json!({
+            "job_id": "job-1", "kind": "crawl", "status": "running", "created_at": "x",
+            "origin": { "type": "knowledge", "actor": "user-9", "ref": "r1" },
+            "phase": "fetching", "desired_state": "pause"
+        }));
+        assert_eq!(item["origin"]["type"], "knowledge");
+        assert_eq!(item["origin"]["ref"], "r1");
+        assert_eq!(item["phase"], "fetching");
+        assert_eq!(item["desiredState"], "pause");
+        // The actor behind the origin stays inside the platform.
+        assert!(!item.to_string().contains("user-9"));
+    }
+
+    #[test]
+    fn the_new_fields_are_null_when_quarry_sends_none() {
+        let item = to_run_item(&json!({ "job_id": "j", "kind": "scrape", "status": "completed", "created_at": "x" }));
+        assert_eq!(item["origin"], Value::Null);
+        assert_eq!(item["phase"], Value::Null);
+        assert_eq!(item["desiredState"], Value::Null);
+        let blank = to_run_item(&json!({
+            "job_id": "j", "kind": "crawl", "status": "x", "created_at": "x",
+            "origin": { "type": "  " }, "phase": 7, "desired_state": ""
+        }));
+        assert_eq!(blank["origin"], Value::Null);
+        assert_eq!(blank["phase"], Value::Null);
+        assert_eq!(blank["desiredState"], Value::Null);
+    }
+
+    #[test]
+    fn desired_state_reads_the_control_block_and_prefers_the_row() {
+        assert_eq!(desired_state(&json!({ "control": { "desired": "resume", "pending": true } })), "resume");
+        assert_eq!(
+            desired_state(&json!({ "desired_state": "cancel", "control": { "desired": "resume" } })),
+            "cancel"
+        );
+        assert_eq!(desired_state(&json!({ "desiredState": "pause" })), "pause");
+        assert_eq!(origin_view(&json!({ "origin": "schedule" }))["type"], "schedule");
+    }
+
+    #[test]
+    fn scrape_is_a_listed_run_kind() {
+        assert!(RUN_KINDS.contains(&"scrape"));
+        assert_eq!(RUN_KINDS.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn the_list_reads_the_scrape_registry_and_keeps_its_rows() {
+        let quarry = MockServer::start().await;
+        for kind in ["crawl", "extract", "search", "agent", "batch"] {
+            Mock::given(wm_method("GET"))
+                .and(wm_path(format!("/v1/{kind}/jobs")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+                .expect(1)
+                .mount(&quarry)
+                .await;
+        }
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/scrape/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "items": [{
+                    "job_id": "job_s1", "kind": "scrape", "status": "completed",
+                    "created_at": "2026-11-01T10:00:00Z", "stats": { "url": "https://example.com/a" },
+                    "origin": { "type": "api" }, "phase": "completed"
+                }] }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        let response = list_runs(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = body["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "job_s1");
+        assert_eq!(rows[0]["kind"], "scrape");
+        assert_eq!(rows[0]["origin"]["type"], "api");
+        assert_eq!(rows[0]["phase"], "completed");
+    }
+
+    #[tokio::test]
+    async fn a_kind_filter_of_scrape_reads_only_that_registry() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/scrape/jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+        let mut params = HashMap::new();
+        params.insert("kind".to_owned(), "scrape".to_owned());
+        let response = list_runs(State(state), Extension(user), HeaderMap::new(), Query(params)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod extract_forward_tests {
+    use super::*;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A quarry-edge double for `POST /v1/extract`: it answers `status` with `body`, and
+    /// expects `calls` requests.
+    async fn quarry_answering(status: u16, body: Value, calls: u64) -> MockServer {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(calls)
+            .mount(&quarry)
+            .await;
+        quarry
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    /// The JSON bodies the double received, in arrival order.
+    async fn sent_bodies(quarry: &MockServer) -> Vec<Value> {
+        quarry
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| serde_json::from_slice::<Value>(&request.body).expect("a JSON body"))
+            .collect()
+    }
+
+    async fn json_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn structured_answer() -> Value {
+        json!({ "data": { "results": [{
+            "url": "https://vg.no/a",
+            "status": "ok",
+            "data": { "price": 10 },
+            "schema_valid": true
+        }], "count": 1, "requested": 1 } })
+    }
+
+    fn markdown_answer() -> Value {
+        json!({ "data": { "results": [{
+            "url": "https://vg.no/a",
+            "status": "fetched",
+            "markdown": "# Price"
+        }], "count": 1, "requested": 1 } })
+    }
+
+    /// WS16.S7: a schema and a prompt reach `POST /v1/extract` beside the URL, and the
+    /// prompt arrives trimmed. The gateway adds nothing else to the request.
+    #[tokio::test]
+    async fn extract_forwards_the_schema_and_the_trimmed_prompt() {
+        let quarry = quarry_answering(200, structured_answer(), 1).await;
+        let schema = json!({
+            "type": "object",
+            "properties": { "price": { "type": "number" } }
+        });
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": schema.clone(),
+            "prompt": "  Find the price in NOK  ",
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({
+                "urls": ["https://vg.no/a"],
+                "schema": schema,
+                "prompt": "Find the price in NOK",
+            })]
+        );
+    }
+
+    /// A schema sent as text is read as the object it spells, and forwarded as one.
+    #[tokio::test]
+    async fn a_schema_sent_as_text_is_forwarded_as_an_object() {
+        let quarry = quarry_answering(200, structured_answer(), 1).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": "{\"type\":\"object\"}",
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({ "urls": ["https://vg.no/a"], "schema": { "type": "object" } })]
+        );
+    }
+
+    /// A null schema and a blank prompt are not forwarded: the markdown route is unchanged.
+    #[tokio::test]
+    async fn extract_sends_only_the_urls_when_no_schema_or_prompt_is_given() {
+        let quarry = quarry_answering(200, markdown_answer(), 1).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": null,
+            "prompt": "   ",
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({ "urls": ["https://vg.no/a"] })]
+        );
+    }
+
+    /// WS16.S7: a schema that is not a JSON object is a 400 with the `invalid_schema` code,
+    /// and nothing reaches quarry-edge.
+    #[tokio::test]
+    async fn a_malformed_schema_is_a_400_and_nothing_reaches_quarry() {
+        let quarry = quarry_answering(200, structured_answer(), 0).await;
+        let state = state_for(&quarry);
+        for schema in [
+            json!("not json"),
+            json!("[1, 2]"),
+            json!(["type", "object"]),
+            json!(42),
+            json!(true),
+        ] {
+            let body = json!({
+                "kind": "extract",
+                "url": "https://vg.no/a",
+                "schema": schema.clone(),
+            });
+
+            let response = create_extract(&state, &body, None, "user-1").await;
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{schema}");
+            let refusal = json_of(response).await;
+            assert_eq!(refusal["error"]["code"], "invalid_schema", "{schema}");
+        }
+        assert!(sent_bodies(&quarry).await.is_empty());
+    }
+
+    /// The prompt limit is refused here, as a 422 validation error, before any upstream call.
+    #[tokio::test]
+    async fn an_over_long_prompt_is_refused_before_quarry() {
+        let quarry = quarry_answering(200, structured_answer(), 0).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "prompt": "x".repeat(10_001),
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let refusal = json_of(response).await;
+        assert_eq!(refusal["error"]["code"], "validation_error");
+        assert!(sent_bodies(&quarry).await.is_empty());
+    }
+
+    /// INNH-2: quarry-edge's AI-formats refusal keeps its 501, and the gateway sets the typed
+    /// code it reads from that refusal's text at the top level.
+    #[tokio::test]
+    async fn an_ai_formats_refusal_keeps_its_typed_code_through_the_forward() {
+        let refused = json!({
+            "error": concat!(
+                "structured extraction is not available on this edge: ",
+                "QUARRY_EDGE__AI_FORMATS is off"
+            ),
+            "code": "UNSUPPORTED",
+        });
+        let quarry = quarry_answering(501, refused, 1).await;
+        let body = json!({
+            "kind": "extract",
+            "url": "https://vg.no/a",
+            "schema": { "type": "object" },
+        });
+
+        let response = create_extract(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let refusal = json_of(response).await;
+        assert_eq!(refusal["code"], "extract_ai_formats_off");
+        let sent = sent_bodies(&quarry).await;
+        assert_eq!(sent[0]["schema"], json!({ "type": "object" }));
     }
 }

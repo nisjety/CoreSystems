@@ -114,4 +114,84 @@ describe('PersonaSection', () => {
 
     expect(await screen.findByText('Kunne ikke laste persona-instruksene dine.')).toBeTruthy()
   })
+
+  it('hides the tone selector unless user-core offers tone presets', async () => {
+    const fetchMock = vi.fn(async (input: unknown) => {
+      if (String(input).includes('/api/v1/settings/ai')) {
+        return jsonResponse({ ...aiSettings(), tonePresetsAvailable: false })
+      }
+      return jsonResponse({ data: { instructions: '', enabled: true } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <PersonaSection />)
+    await screen.findByRole('textbox', { name: /instrukser/i })
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/api/v1/settings/ai'))).toBe(true)
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(screen.queryByRole('radio', { name: /direkte/i })).toBeNull()
+  })
+
+  it('saves the chosen tone and leaves the other AI settings as they were', async () => {
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes('/api/v1/settings/ai')) {
+        if (init?.method === 'PUT') {
+          return jsonResponse({ ...aiSettings(), tonePreset: 'direct' })
+        }
+        return jsonResponse({ ...aiSettings(), tonePresetsAvailable: true })
+      }
+      return jsonResponse({ data: { instructions: '', enabled: true } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <PersonaSection />)
+    fireEvent.click(await screen.findByRole('radio', { name: /direkte/i }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /lagre tone/i }))
+    flush()
+
+    await waitFor(() => {
+      const putCall = fetchMock.mock.calls.find(
+        ([input, init]) =>
+          String(input).includes('/api/v1/settings/ai') && (init as RequestInit | undefined)?.method === 'PUT',
+      )
+      expect(putCall).toBeTruthy()
+      const [, init] = putCall as unknown as [string, RequestInit]
+      expect(JSON.parse(String(init.body))).toEqual({ ...aiSettings(), tonePreset: 'direct' })
+    })
+  })
+
+  it('keeps the chosen tone and shows a translated error when the save fails', async () => {
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes('/api/v1/settings/ai')) {
+        if (init?.method === 'PUT') {
+          return errorResponse(503, 'tone_unavailable')
+        }
+        return jsonResponse({ ...aiSettings(), tonePresetsAvailable: true })
+      }
+      return jsonResponse({ data: { instructions: '', enabled: true } })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(() => <PersonaSection />)
+    fireEvent.click(await screen.findByRole('radio', { name: /varm/i }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /lagre tone/i }))
+    flush()
+
+    expect(await screen.findByText('Kunne ikke lagre tonen.')).toBeTruthy()
+    expect((screen.getByRole('radio', { name: /varm/i }) as HTMLInputElement).checked).toBe(true)
+  })
 })
+
+function aiSettings() {
+  return {
+    aiEnabled: true,
+    modelPreference: 'auto',
+    dataCollectionEnabled: false,
+    personalizationEnabled: true,
+    tonePreset: 'default',
+  }
+}

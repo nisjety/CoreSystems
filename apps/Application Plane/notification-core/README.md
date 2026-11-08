@@ -68,6 +68,42 @@ Do not enable ZDR content delivery until that downstream contract is established
 Standard mode persists payload/feed content according to the normal product
 contract.
 
+Attention notifications (`modelplane.needs_approval`, `modelplane.needs_input`,
+`modelplane.plan_ready`, WS16-S4) and scheduled-run outcome notices
+(`modelplane.scheduled_run_outcome`, WS20-S7) are delivered without a provider.
+With `NOTIFICATION_NATIVE_TYPES_ENABLED=true` (default `false`, literal `true`
+only) they go to the native adapter in `internal/runtime/native.go`, which writes
+the in-app feed row from the same dispatch and makes no outbound call. This works
+with `NOTIFICATION_DELIVERY_MODE=disabled`. The adapter accepts only these types,
+refuses zero-retention requests, and refuses any payload field outside the
+content-free set (fixed copy, a deep link and opaque ids), so the native path
+persists no run content. Every other type keeps the provider path. Turn the switch
+on before capability-core's `CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED`: with it off,
+the attention types take the provider path and fail while delivery is disabled.
+For these types the preference gate reads the in-app channel alone: an email or
+push opt-out does not suppress the in-app row, and an in-app opt-out suppresses
+the request, because native delivery is the only channel they have in this build.
+Readiness counts native delivery as available, so `/ready` is 200 with native
+types on even while the provider is disabled.
+
+Web Push (WS16-S6) is off unless `NOTIFICATION_WEB_PUSH_ENABLED=true` (literal
+`true` only). It needs `NOTIFICATION_VAPID_PUBLIC_KEY`,
+`NOTIFICATION_VAPID_PRIVATE_KEY`, a `mailto:` or `https://` contact in
+`NOTIFICATION_VAPID_SUBJECT`, and `NOTIFICATION_PUSH_SUBSCRIPTION_KEY` (32 bytes,
+hex). `scripts/run-application-plane.sh` mints the VAPID pair and the subscription
+key, so no key is typed by hand, and only this service receives the private VAPID
+key. A push goes only for a waiting native type: an attention
+type, or a scheduled-run outcome that waits on its owner (`needs_review`,
+`paused_expired` or `paused_failures`). It goes only to a recipient whose push
+channel is not switched off, and never for a zero-retention request. Each push is
+an encrypted wake-up whose only content is the constant `{"v":1,"k":"attention"}`,
+so no thread, run, title or tool text leaves the service. Endpoints are accepted
+only from the Google, Mozilla, Apple and Windows push hosts on the default port,
+and the sender never follows a redirect. A push service that answers 404 or 410
+revokes that subscription. Endpoints and keys are sealed with AES-256-GCM, bound to
+their row. The gateway proxies `GET /api/v1/push/config`,
+`POST /api/v1/push/subscriptions` and `DELETE /api/v1/push/subscriptions/{id}`.
+
 ## Production blockers
 
 This source is not deployed. The running July 13 image predates these changes.
@@ -80,6 +116,11 @@ dependency readiness, and a multi-replica replay/candidate proof are absent
 from the deployed service.
 Support automation remains disabled because current workflows do not supply
 authoritative organization/user mapping.
+
+Web Push is not ready to switch on. The queued delivery worker never sends a push,
+subscriptions outlive a purged organisation until Control publishes a purge event,
+and whether Chrome shows a notice for each push while a window is visible is not
+verified.
 
 Measured race-suite coverage is 81.4% for delegation, 59.1% for notification,
 32.6% for HTTP, and 41.0% for database. This does not meet the 80% critical-module

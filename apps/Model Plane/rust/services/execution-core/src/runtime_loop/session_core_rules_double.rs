@@ -462,9 +462,8 @@ pub(crate) fn caller_of<T>(request: &Request<T>) -> Result<Caller, Status> {
 /// `auth::authorize_operation`.
 fn authorize_operation(caller: &Caller, service_scope: &str) -> Result<(), Status> {
     if caller.zdr && !service_scope.ends_with(":read") {
-        return Err(Status::failed_precondition(
-            "ZDR credentials cannot access durable session writes",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     if caller.service {
         caller.require_service_scope(service_scope)
@@ -893,9 +892,8 @@ impl SessionCoreRules {
             }
             if caller.zdr {
                 if !req.thread_id.is_empty() {
-                    return Err(Status::failed_precondition(
-                        "ZDR managed runs require a fresh metadata-only thread",
-                    ));
+                    return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run")
+                        .grpc_status(tonic::Code::FailedPrecondition));
                 }
                 // A ZDR start names no parent: its lineage is never recorded
                 // (session-core's `managed_start_persistence`, Z-18).
@@ -1032,9 +1030,8 @@ impl SessionCoreRules {
     ) -> Result<pb::RecordRunOutputResponse, Status> {
         self.recorded("record_run_output", |state| {
             if caller.zdr {
-                return Err(Status::permission_denied(
-                    "a zero-retention run has no durable output",
-                ));
+                return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::PermissionDenied));
             }
             authorize_operation(caller, "session:write")?;
             Self::authorize_run_owner(state, caller, &req.run_id)?;
@@ -1182,6 +1179,7 @@ mod tests {
 
     fn start_request() -> pb::StartManagedRunRequest {
         pb::StartManagedRunRequest {
+            wake: None,
             thread_id: "thread-1".to_owned(),
             parent_run_id: "run-1".to_owned(),
             agent_id: "task".to_owned(),
@@ -1191,6 +1189,7 @@ mod tests {
             user_id: "user-1".to_owned(),
             start_key: "run-1_tool_1".to_owned(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            ..Default::default()
         }
     }
 
@@ -1403,6 +1402,7 @@ mod tests {
     /// A root run of the gateway's own start, as a user starts it in `thread_id`.
     fn root_request(thread_id: &str, start_key: &str) -> pb::StartManagedRunRequest {
         pb::StartManagedRunRequest {
+            wake: None,
             thread_id: thread_id.to_owned(),
             parent_run_id: String::new(),
             agent_id: "execution-agent".to_owned(),
@@ -1412,6 +1412,7 @@ mod tests {
             user_id: "user-1".to_owned(),
             start_key: start_key.to_owned(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            ..Default::default()
         }
     }
 

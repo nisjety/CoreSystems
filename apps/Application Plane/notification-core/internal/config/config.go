@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -21,6 +22,16 @@ type Config struct {
 	NovuSecretKey  string // optional — activates real Novu delivery when set
 	NovuBaseURL    string // optional — override for EU region
 	DeliveryMode   string // "novu" or explicit fail-closed "disabled"
+	// NativeTypesEnabled routes the content-free attention types to the native in-app adapter. It is
+	// false by default and needs no provider, so it works with DeliveryMode=disabled.
+	NativeTypesEnabled bool
+	// WebPushEnabled turns on the Web Push subscriptions and the VAPID sender. It is off by default and read as
+	// the literal "true". When it is on, the VAPID pair, its subject and the subscription key are required.
+	WebPushEnabled      bool
+	VAPIDPublicKey      string
+	VAPIDPrivateKey     string
+	VAPIDSubject        string
+	PushSubscriptionKey string
 	// DeliveryWorkerEnabled opts the durable provider-attempt worker into the
 	// server process. It is deliberately false by default; enabling it requires
 	// an explicit provider mode and callback verifier so an operator cannot
@@ -60,6 +71,12 @@ func Load() (*Config, error) {
 		NovuSecretKey:              strings.TrimSpace(getEnv("NOVU_SECRET_KEY", "")),
 		NovuBaseURL:                strings.TrimSpace(getEnv("NOVU_BASE_URL", "")),
 		DeliveryMode:               strings.ToLower(strings.TrimSpace(getEnv("NOTIFICATION_DELIVERY_MODE", "disabled"))),
+		NativeTypesEnabled:         os.Getenv("NOTIFICATION_NATIVE_TYPES_ENABLED") == "true",
+		WebPushEnabled:             os.Getenv("NOTIFICATION_WEB_PUSH_ENABLED") == "true",
+		VAPIDPublicKey:             strings.TrimSpace(getEnv("NOTIFICATION_VAPID_PUBLIC_KEY", "")),
+		VAPIDPrivateKey:            strings.TrimSpace(getEnv("NOTIFICATION_VAPID_PRIVATE_KEY", "")),
+		VAPIDSubject:               strings.TrimSpace(getEnv("NOTIFICATION_VAPID_SUBJECT", "")),
+		PushSubscriptionKey:        strings.TrimSpace(getEnv("NOTIFICATION_PUSH_SUBSCRIPTION_KEY", "")),
 		DeliveryWorkerEnabled:      getEnvBool("NOTIFICATION_DELIVERY_WORKER_ENABLED", false),
 		DeliveryWorkerPollInterval: getEnvDuration("NOTIFICATION_DELIVERY_WORKER_POLL_INTERVAL", 5*time.Second),
 		DeliveryWorkerLease:        getEnvDuration("NOTIFICATION_DELIVERY_WORKER_LEASE", 30*time.Second),
@@ -71,6 +88,8 @@ func Load() (*Config, error) {
 			"verevon-gateway": strings.TrimSpace(getEnv("NOTIFICATION_GATEWAY_SERVICE_TOKEN", "")),
 			"support-worker":  strings.TrimSpace(getEnv("NOTIFICATION_SUPPORT_WORKER_SERVICE_TOKEN", "")),
 			"capability-core": strings.TrimSpace(getEnv("NOTIFICATION_CAPABILITY_CORE_SERVICE_TOKEN", "")),
+			"space-attention": strings.TrimSpace(getEnv("NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN", "")),
+			"quarry-control":  strings.TrimSpace(getEnv("NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN", "")),
 		},
 	}
 
@@ -106,7 +125,26 @@ func Load() (*Config, error) {
 		}
 	}
 
+	if cfg.WebPushEnabled {
+		if err := validateWebPushConfig(cfg); err != nil {
+			return nil, err
+		}
+	}
+
 	return cfg, nil
+}
+
+func validateWebPushConfig(cfg *Config) error {
+	if cfg.VAPIDPublicKey == "" || cfg.VAPIDPrivateKey == "" {
+		return fmt.Errorf("NOTIFICATION_WEB_PUSH_ENABLED requires NOTIFICATION_VAPID_PUBLIC_KEY and NOTIFICATION_VAPID_PRIVATE_KEY")
+	}
+	if !strings.HasPrefix(cfg.VAPIDSubject, "mailto:") && !strings.HasPrefix(cfg.VAPIDSubject, "https://") {
+		return fmt.Errorf("NOTIFICATION_VAPID_SUBJECT must be a mailto: or https:// contact")
+	}
+	if key, err := hex.DecodeString(cfg.PushSubscriptionKey); err != nil || len(key) != 32 {
+		return fmt.Errorf("NOTIFICATION_PUSH_SUBSCRIPTION_KEY must be 32 bytes in hex when web push is enabled")
+	}
+	return nil
 }
 
 func validateDelegationKeys(keys map[string]string) error {

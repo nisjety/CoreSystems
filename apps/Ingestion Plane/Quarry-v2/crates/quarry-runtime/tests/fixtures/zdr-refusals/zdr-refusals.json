@@ -174,6 +174,14 @@
       "label_en": "browser run controls"
     },
     {
+      "key": "browser_tool",
+      "label_en": "browser tools"
+    },
+    {
+      "key": "browser_human_assist",
+      "label_en": "browser help requests"
+    },
+    {
       "key": "translation",
       "label_en": "translation"
     },
@@ -192,6 +200,62 @@
     {
       "key": "video_generation",
       "label_en": "video generation"
+    },
+    {
+      "key": "connector_read",
+      "label_en": "connected-app reads"
+    },
+    {
+      "key": "message_versions",
+      "label_en": "message versions"
+    },
+    {
+      "key": "sandbox_workspace",
+      "label_en": "files kept between calls in a thread workspace"
+    },
+    {
+      "key": "user_profile",
+      "label_en": "the standing profile"
+    },
+    {
+      "key": "agent_api",
+      "label_en": "the Agent API"
+    },
+    {
+      "key": "conversation_export",
+      "label_en": "conversation export and replay"
+    },
+    {
+      "key": "conversation_share",
+      "label_en": "conversation sharing"
+    },
+    {
+      "key": "conversation_import",
+      "label_en": "conversation import"
+    },
+    {
+      "key": "run_inspection",
+      "label_en": "run timing and request inspection"
+    },
+    {
+      "key": "context_references",
+      "label_en": "references to documents, threads or selections"
+    },
+    {
+      "key": "thread_goal",
+      "label_en": "persistent goals"
+    },
+    {
+      "key": "legal_hold",
+      "label_en": "a legal hold on a thread"
+    },
+    {
+      "key": "learn_command",
+      "label_en": "learning from this conversation"
+    },
+    {
+      "key": "skill_authoring",
+      "label_en": "saving or editing skills"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

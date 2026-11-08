@@ -1,18 +1,22 @@
 package resources
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store/pg"
 )
 
 func newSchedulesServer(t *testing.T) (http.Handler, store.DB) {
@@ -658,34 +662,157 @@ func TestInternalDesired_ReturnsAllOrgs(t *testing.T) {
 	}
 }
 
-// TestListSchedules_WithoutOrgIsLegacyUnlessRequired: the transitional unscoped
-// list still answers in the wire shape, and QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG=1
-// turns it into a 400. Not parallel: it sets an environment variable.
-func TestListSchedules_WithoutOrgIsLegacyUnlessRequired(t *testing.T) {
+// TestListSchedules_WithoutOrgIsRefused (D2-042): GET /v1/schedules without an
+// org is a 400 whatever the environment says, and never an all-orgs list. The
+// old QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG switch is retired, so the answer is
+// the same unset, 1 and 0. Not parallel: it sets an environment variable.
+func TestListSchedules_WithoutOrgIsRefused(t *testing.T) {
 	h, _ := newSchedulesServer(t)
-	if code, env := postScheduleAs(t, h, "org_a", crawlScheduleBody); code != http.StatusCreated {
-		t.Fatalf("create: status=%d env=%v", code, env)
+	for _, org := range []string{"org_a", "org_b"} {
+		if code, env := postScheduleAs(t, h, org, crawlScheduleBody); code != http.StatusCreated {
+			t.Fatalf("%s create: status=%d env=%v", org, code, env)
+		}
 	}
-	code, raw := callAs(t, h, http.MethodGet, "/v1/schedules")
-	if code != http.StatusOK {
-		t.Fatalf("legacy list: status=%d body=%s", code, raw)
+	for _, setting := range []string{"", "1", "0"} {
+		t.Setenv(EnvSchedulesRequireOrg, setting)
+		for _, target := range []string{"/v1/schedules", "/v1/schedules?org_id=", "/v1/schedules?limit=50"} {
+			code, raw := callAs(t, h, http.MethodGet, target)
+			if code != http.StatusBadRequest {
+				t.Fatalf("%s=%q GET %s: status=%d, want 400 (body=%s)", EnvSchedulesRequireOrg, setting, target, code, raw)
+			}
+			if strings.Contains(string(raw), "org_a") || strings.Contains(string(raw), "org_b") {
+				t.Fatalf("the refusal must not carry any org's rows: %s", raw)
+			}
+		}
 	}
-	rows, _ := decodeEnvelope(t, raw)["data"].([]any)
-	if len(rows) != 1 {
-		t.Fatalf("legacy list rows=%d, want 1", len(rows))
+	// The orchestrator reconciles from the internal desired read, so removing the
+	// branch cannot take its input away.
+	if rows := desiredRows(t, h); len(rows) != 2 || rows[0]["args"] == nil {
+		t.Fatalf("the desired read must still answer both orgs in the wire shape: %v", rows)
 	}
-	if row, _ := rows[0].(map[string]any); row["args"] == nil {
-		t.Fatalf("legacy list must keep the wire shape (args): %v", row)
-	}
+}
 
-	t.Setenv(EnvSchedulesRequireOrg, "1")
-	if code, _ := callAs(t, h, http.MethodGet, "/v1/schedules"); code != http.StatusBadRequest {
-		t.Fatalf("with %s=1 an unscoped list must be 400, got %d", EnvSchedulesRequireOrg, code)
+// TestListSchedules_NeverCrossesOrgs (D2-042): with several rows per org, each
+// org lists only its own, across pages, and an org with no rows gets an empty
+// page rather than somebody else's.
+func TestListSchedules_NeverCrossesOrgs(t *testing.T) {
+	t.Parallel()
+	h, db := newSchedulesServer(t)
+	body := func(n string) string {
+		return `{"name":"` + n + `","cron":"*/5 * * * *","target_kind":"scrape","config":{"url":"https://` + n + `.example.com"}}`
 	}
-	// D2-042: the orchestrator reconciles from the internal desired read, so the
-	// switch cannot take the reconciler's input away. This is what makes it safe
-	// to set after the deploy.
-	if rows := desiredRows(t, h); len(rows) != 1 || rows[0]["args"] == nil {
-		t.Fatalf("with %s=1 the desired read must still answer the wire shape: %v", EnvSchedulesRequireOrg, rows)
+	want := map[string]map[string]bool{"org_a": {}, "org_b": {}}
+	for org, names := range map[string][]string{"org_a": {"a1", "a2", "a3"}, "org_b": {"b1", "b2"}} {
+		for _, n := range names {
+			if code, env := postScheduleAs(t, h, org, body(n)); code != http.StatusCreated {
+				t.Fatalf("%s create %s: status=%d env=%v", org, n, code, env)
+			}
+			want[org][n] = true
+		}
+	}
+	for org, names := range want {
+		got := map[string]bool{}
+		cursor := ""
+		for page := 0; page < 10; page++ {
+			target := "/v1/schedules?org_id=" + org + "&limit=2"
+			if cursor != "" {
+				target += "&cursor=" + url.QueryEscape(cursor)
+			}
+			code, raw := callAs(t, h, http.MethodGet, target)
+			if code != http.StatusOK {
+				t.Fatalf("%s list: status=%d body=%s", org, code, raw)
+			}
+			data, _ := decodeEnvelope(t, raw)["data"].(map[string]any)
+			items, _ := data["items"].([]any)
+			for _, it := range items {
+				row, _ := it.(map[string]any)
+				if row["org_id"] != nil && row["org_id"] != org {
+					t.Fatalf("%s page carries a row of %v: %v", org, row["org_id"], row)
+				}
+				n, _ := row["name"].(string)
+				if !names[n] {
+					t.Fatalf("%s sees %q, which belongs to the other org", org, n)
+				}
+				got[n] = true
+			}
+			next, _ := data["next_cursor"].(string)
+			if next == "" {
+				break
+			}
+			cursor = next
+		}
+		if len(got) != len(names) {
+			t.Fatalf("%s paged through %v, want exactly %v", org, got, names)
+		}
+	}
+	code, raw := callAs(t, h, http.MethodGet, "/v1/schedules?org_id=org_empty")
+	if code != http.StatusOK {
+		t.Fatalf("empty org list: status=%d body=%s", code, raw)
+	}
+	data, _ := decodeEnvelope(t, raw)["data"].(map[string]any)
+	if items, _ := data["items"].([]any); len(items) != 0 {
+		t.Fatalf("an org with no schedules must get an empty page, got %v", items)
+	}
+	_ = db
+}
+
+// TestPgListSchedules_NeverCrossesOrgs is the same guarantee against Postgres.
+// It skips unless QUARRY_TEST_DSN is set, and fails instead when
+// QUARRY_REQUIRE_DB=1 (the CI database lane), like the store/pg tests.
+func TestPgListSchedules_NeverCrossesOrgs(t *testing.T) {
+	dsn := os.Getenv("QUARRY_TEST_DSN")
+	if dsn == "" {
+		if os.Getenv("QUARRY_REQUIRE_DB") == "1" {
+			t.Fatalf("QUARRY_TEST_DSN is unset but QUARRY_REQUIRE_DB=1: the postgres tests must run here")
+		}
+		t.Skip("QUARRY_TEST_DSN unset: skipping the postgres schedule scoping test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	db, err := pg.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pg.New: %v", err)
+	}
+	suffix := strings.ToLower(string(quarrycontracts.NewID(quarrycontracts.KindSchedule)))
+	orgA, orgB := "org_scope_a_"+suffix, "org_scope_b_"+suffix
+	var made []quarrycontracts.ID
+	for _, org := range []string{orgA, orgB} {
+		for i := 0; i < 2; i++ {
+			sc := store.Schedule{
+				ID: quarrycontracts.NewID(quarrycontracts.KindSchedule), OrgID: org,
+				Cron: "0 9 * * *", TargetKind: store.TargetKindChangeMonitor, TargetRef: "https://x.example/" + org,
+				Enabled: false, CreatedAt: time.Now().UnixMilli(),
+			}
+			if err := db.Schedules().Create(sc); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			made = append(made, sc.ID)
+		}
+	}
+	t.Cleanup(func() {
+		for _, id := range made {
+			_ = db.Schedules().Delete(id)
+		}
+	})
+	r := chi.NewRouter()
+	r.Use(httpx.RequestID)
+	MountSchedules(r, db)
+
+	if code, raw := callAs(t, r, http.MethodGet, "/v1/schedules"); code != http.StatusBadRequest {
+		t.Fatalf("no org: status=%d, want 400 (body=%s)", code, raw)
+	}
+	for org, other := range map[string]string{orgA: orgB, orgB: orgA} {
+		code, raw := callAs(t, r, http.MethodGet, "/v1/schedules?org_id="+org+"&limit=100")
+		if code != http.StatusOK {
+			t.Fatalf("%s list: status=%d body=%s", org, code, raw)
+		}
+		data, _ := decodeEnvelope(t, raw)["data"].(map[string]any)
+		items, _ := data["items"].([]any)
+		if len(items) != 2 {
+			t.Fatalf("%s sees %d rows, want its own 2: %s", org, len(items), raw)
+		}
+		if strings.Contains(string(raw), other) {
+			t.Fatalf("%s page carries the other org %s: %s", org, other, raw)
+		}
 	}
 }

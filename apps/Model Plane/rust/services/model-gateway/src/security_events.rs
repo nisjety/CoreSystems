@@ -92,6 +92,7 @@ pub fn envelope_for(
             "flags": provenance.screening.rule_ids,
         }),
         zdr,
+        ..Default::default()
     })
 }
 
@@ -148,6 +149,7 @@ pub fn shadow_envelope_for(
             "content_hash": provenance.screening.content_hash,
         }),
         zdr,
+        ..Default::default()
     })
 }
 
@@ -214,6 +216,7 @@ pub fn enforced_envelope_for(
             "content_hash": screen.screening.content_hash,
         }),
         zdr,
+        ..Default::default()
     })
 }
 

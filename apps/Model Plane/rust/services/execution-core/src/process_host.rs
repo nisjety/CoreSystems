@@ -407,6 +407,10 @@ impl ProcessHost {
         program: &str,
         args: &[String],
     ) -> std::io::Result<SpawnedChild> {
+        // WS06-S7 spawn admission: bounded wait, transient "busy" refusal. Held
+        // for the spawn itself, not the process's lifetime (a background process
+        // would otherwise starve one-shot spawns; see the depth file).
+        let _permit = crate::executor::acquire_spawn_permit().await?;
         let scratch = scratch_dir(request.space_id, process_id);
         tokio::fs::create_dir_all(&scratch).await?;
         if let Some(staged) = &request.staged {
@@ -420,15 +424,26 @@ impl ProcessHost {
             network: MpNetworkPolicy::Disabled,
         };
         let env = crate::code_interpreter::child_env_for(request.workspace);
+        // WS06-S8: a background process's CPU budget is sized from its TTL.
+        let limits = crate::policy::limits_for(request.ttl.unwrap_or(DEFAULT_TTL).min(MAX_TTL));
         let options = crate::sandbox::LaunchOptions {
             cwd: Some(request.workspace),
             env: crate::sandbox::SandboxEnv::Only(&env),
+            limits: limits.as_ref(),
             ..crate::sandbox::LaunchOptions::default()
         };
         let wrapped = crate::sandbox::wrap_command_with(&policy, program, args, options);
         // Identical fail-closed gate to every other sandboxed spawn: a host
         // that cannot isolate does not run model-authored code at all.
-        crate::executor::require_requested_isolation_for(&policy, wrapped.sandboxed)?;
+        crate::executor::require_spawn_admission(
+            &policy,
+            wrapped.sandboxed,
+            &crate::executor::SpawnAdmission {
+                space_scoped: true,
+                lease_id: Some(request.lease_id),
+            },
+        )?;
+        crate::executor::require_limits_applied_for(limits.as_ref(), &wrapped)?;
 
         let mut command = tokio::process::Command::new(&wrapped.program);
         command
@@ -605,6 +620,22 @@ impl Supervisor {
         self.live.remove(&self.fence.process_id);
         let _ = pump_handle.await;
         let _ = tokio::fs::remove_dir_all(&self.scratch).await;
+
+        // WS06-S8: a process that ended on its own may have died of a limit.
+        // Counted only; the process state below stays as it was.
+        if end_reason == "exited" {
+            if let Ok(exit) = status.as_ref() {
+                let limits = crate::policy::limits_for(self.ttl);
+                if let Some(hit) = crate::executor::classify_exit(
+                    crate::executor::exit_signal(exit),
+                    exit.code(),
+                    true,
+                    limits.as_ref(),
+                ) {
+                    crate::executor::record_limit_hit(hit.kind());
+                }
+            }
+        }
 
         let exit_code = status
             .as_ref()
@@ -996,5 +1027,58 @@ mod tests {
         let pending =
             tokio::time::timeout(Duration::from_millis(20), sleep_until_maybe(None)).await;
         assert!(pending.is_err(), "a missing deadline must never fire");
+    }
+
+    // ---- WS06-S7: spawn admission ------------------------------------------------------------
+
+    fn host_for_test() -> ProcessHost {
+        ProcessHost {
+            backend_id: Arc::from("backend-test"),
+            host_epoch: Arc::from("epoch-test"),
+            client: SandboxManagerClient::new(
+                tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                    .expect("valid endpoint")
+                    .connect_lazy(),
+            ),
+            tokens: Arc::new(SandboxManagerTokenProvider::new_for_test(
+                "http://127.0.0.1:1",
+                "execution-core",
+                "cccccccccccccccc",
+            )),
+            live: Arc::new(DashMap::new()),
+            reconciled: Arc::new(OnceCell::new()),
+        }
+    }
+
+    /// With every spawn permit taken, a background spawn is refused with the transient `WouldBlock`
+    /// ("sandbox is busy, retry later") before it touches the scratch directory or the OS.
+    #[tokio::test(start_paused = true)]
+    async fn spawn_refuses_with_would_block_when_the_gate_is_full() {
+        let host = host_for_test();
+        let workspace = std::env::temp_dir().join("verevon-ws06s7-never-created");
+        let request = StartRequest {
+            org_id: "org-test",
+            space_id: "space-ws06s7-gate",
+            lease_id: "lease-test",
+            run_id: "run-test",
+            step_id: "step-test",
+            subject_id: "subject-test",
+            workspace: &workspace,
+            program: "sh",
+            args: &[],
+            staged: None,
+            ttl: None,
+            stdin: false,
+        };
+        let _held = crate::executor::hold_every_spawn_permit_for_test().await;
+        let Err(err) = host.spawn(&request, "proc-ws06s7-gate", "sh", &[]).await else {
+            panic!("a full gate must refuse the spawn");
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(err.to_string(), "sandbox is busy, retry later");
+        assert!(
+            !scratch_dir("space-ws06s7-gate", "proc-ws06s7-gate").exists(),
+            "the refusal comes before any scratch directory is created"
+        );
     }
 }

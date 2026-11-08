@@ -1,0 +1,68 @@
+name: Convex Core
+
+# Gate for apps/Application Plane/convex-core (slice M0-CI, plan 4.5.5). Nothing ran convex-core's
+# tests, typecheck or lint before this file: no workflow was path-filtered to the Application Plane's
+# Convex functions, and Space adds Convex tables and functions (the P-CX1 schema split and the
+# presence, read-state and draft features that follow it).
+#
+# pull_request has no `branches` filter, so a pull request based on `space` or on a feature branch is
+# gated too, not only one aimed at main or develop. Convex is a hosted runtime: this gate checks what
+# can be checked without a deployment (the node:test suite, tsc and eslint). `convex codegen` and a
+# schema push need a running backend and are a flag-flip / milestone step, not a merge gate.
+#
+# Typecheck, lint and tests are compared as failing SETS against the stored baseline
+# (scripts/gates/space-baseline-compare.sh): a new failing id fails, a pre-existing one does not. With
+# no stored baseline, a clean run passes and a run with failures fails until one is captured.
+
+on:
+  pull_request:
+    paths:
+      - "apps/Application Plane/convex-core/**"
+      - "scripts/gates/space-baseline-compare.sh"
+      - "scripts/tests/baseline-capture.mjs"
+      - "scripts/tests/baseline-diff.mjs"
+      - ".github/workflows/convex-core.yml"
+  push:
+    branches: [main, develop, space, "space/**"]
+    paths:
+      - "apps/Application Plane/convex-core/**"
+      - "scripts/gates/space-baseline-compare.sh"
+      - "scripts/tests/baseline-capture.mjs"
+      - "scripts/tests/baseline-diff.mjs"
+      - ".github/workflows/convex-core.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: convex-core-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  convex:
+    name: Convex functions (test, typecheck, lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
+        with:
+          version: "11.3.0"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: "apps/Application Plane/convex-core/pnpm-lock.yaml"
+
+      - name: Install dependencies
+        working-directory: "apps/Application Plane/convex-core"
+        run: pnpm install --frozen-lockfile
+
+      # A gate that cannot fail reads as coverage: prove the failing-set comparison goes red on a new
+      # failing id and stays green on an unchanged set before trusting it below.
+      - name: Prove the failing-set comparison can fail
+        run: bash scripts/gates/space-baseline-compare.sh --self-test
+
+      - name: Tests, typecheck and lint against the baseline
+        run: bash scripts/gates/space-baseline-compare.sh convex-test,convex-typecheck,convex-lint

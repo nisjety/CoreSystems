@@ -218,10 +218,5 @@
     "no-restricted-syntax": {
       "count": 5
     }
-  },
-  "src/features/chat/lib/stream-activity.ts": {
-    "no-restricted-syntax": {
-      "count": 3
-    }
   }
 }

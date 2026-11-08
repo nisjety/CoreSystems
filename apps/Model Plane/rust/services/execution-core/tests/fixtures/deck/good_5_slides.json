@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "title": "Kvartalsrapport",
+  "locale": "nb-NO",
+  "slides": [
+    {
+      "id": "s1",
+      "layout": "title",
+      "title": "Kvartalsrapport 2026",
+      "bullets": ["Ledelsen, november"],
+      "notes": "Rapporten dekker tredje kvartal 2026."
+    },
+    {
+      "id": "s2",
+      "layout": "title_bullets",
+      "title": "Omsetningen økte",
+      "bullets": [
+        "Omsetningen steg 12 prosent",
+        "Eksporten holdt stabil til tross for lavere priser",
+        "Kundetilfredsheten ligger over målet"
+      ],
+      "notes": "Kilde: regnskapet for tredje kvartal, linje 4."
+    },
+    {
+      "id": "s3",
+      "layout": "two_column",
+      "title": "Før og etter",
+      "left": ["Manuelle rutiner", "Lange ledetider"],
+      "right": ["Automatiske rutiner", "Korte ledetider"]
+    },
+    {
+      "id": "s4",
+      "layout": "section",
+      "title": "Veien videre",
+      "bullets": ["Planen for neste halvår"]
+    },
+    {
+      "id": "s5",
+      "layout": "title_bullets",
+      "title": "Beslutninger",
+      "bullets": [
+        "Godkjenne budsjettet",
+        "Starte pilotprosjektet i Bergen",
+        "Oppnevne en prosjektleder"
+      ]
+    }
+  ]
+}

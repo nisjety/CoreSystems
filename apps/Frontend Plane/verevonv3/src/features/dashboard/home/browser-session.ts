@@ -127,15 +127,10 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     ?? resolveVisualObservationUrl(session?.id, visualObservationArtifactId)
 
   return {
-    capabilities: session?.capabilities ?? ['annotate', 'dom_select', 'knowledge_ingest'],
-    commentAnchors: [
-      {
-        id: 'comment-1',
-        label: '1',
-        x: 0.07,
-        y: 0.18,
-      },
-    ],
+    // No session: the gateway advertised no capability, so the fallback claims none.
+    capabilities: session?.capabilities ?? [],
+    // No placeholder anchor: the annotate capability is not built.
+    commentAnchors: [],
     consoleEntries: observation?.console_summary ?? [],
     domNodes: observation?.dom_summary
       ? domNodesFromObservation(observation)
@@ -172,7 +167,9 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     tabsUrl: resolveBrowserArtifactUrl(session?.tabsUrl),
     timeline,
     title: observation?.title || session?.title || preview.title,
-    url: observation?.url || session?.url || preview.url,
+    // A tab selection can arrive without a new page observation. Its active
+    // tab is authoritative for the address shown in the chrome.
+    url: tabs.find((tab) => tab.active)?.url || observation?.url || session?.url || preview.url,
     visualObservationArtifactId,
     visualObservationUrl,
     viewport: session?.viewport ?? fallbackViewport,
@@ -211,9 +208,10 @@ export function attachBrowserSession(
     devtools: session.devtools?.events?.length
       ? session.devtools
       : previous?.devtools ?? { events: [], eventCount: 0, lastSequence: null },
-    tabs: session.tabs?.length
-      ? session.tabs
-      : previous?.tabs ?? [],
+    tabs: (session.tabs?.length ? session.tabs : previous?.tabs ?? []).map((tab) =>
+      tab.active && browserSession.observation
+        ? { ...tab, url: browserSession.observation.url || tab.url, title: browserSession.observation.title || tab.title }
+        : tab),
     tabsUrl: session.tabsUrl ?? previous?.tabsUrl ?? null,
     control: session.control ?? previous?.control ?? { mode: 'agent_control' },
     profile: {
@@ -485,6 +483,8 @@ function normalizeBrowserTabs(
         title: tab.title?.trim() || null,
         url: tab.url?.trim() || null,
         ...(tab.openedBy === 'agent' || tab.openedBy === 'human' ? { openedBy: tab.openedBy } : {}),
+        ...(typeof tab.tabEpoch === 'number' && Number.isSafeInteger(tab.tabEpoch) && tab.tabEpoch >= 0 ? { tabEpoch: tab.tabEpoch } : {}),
+        ...(tab.holder === 'agent' || tab.holder === 'human' ? { holder: tab.holder } : {}),
       },
     ]
   }, [])
@@ -497,8 +497,8 @@ function normalizeBrowserTabs(
   return [{
     active: true,
     tabId: 'tab-1',
-    title: session.title || preview.title,
-    url: session.url || preview.url,
+    title: preview.title || session.title,
+    url: preview.url || session.url,
   }]
 }
 

@@ -51,6 +51,13 @@ type publisherRow struct {
 	source string
 	needle string
 
+	// external marks a publisher that lives outside the Model Plane tree (Quarry). Its
+	// publish call cannot be found here, so for such a row source is the Model Plane file that
+	// CONSUMES the subject, and needle is the durable consumer's name in it: the evidence that
+	// the contract is real on this side. TestEveryJetStreamPublishCallSiteIsRegistered does not
+	// look for a publish call in an external row's source.
+	external bool
+
 	// gap is a defect that is KNOWN and NOT fixed by the change that introduced
 	// this registry. The ACL test requires the gap to still be real (so fixing
 	// deploy/nats.conf forces this row to be updated) and reports it.
@@ -98,6 +105,13 @@ func publisherRegistry() []publisherRow {
 			stream: "MODEL_PLANE_RUN_EVENTS",
 			source: "rust/services/session-core/src/audit_publisher.rs",
 			needle: `RUN_EVENT_SUBJECT_PREFIX: &str = "mp.v1.run."`,
+		},
+		{
+			service: "session-core", natsUser: sessionCoreUser, inbox: sessionCoreBox,
+			subject: "mp.v1.space.x.event", transport: jetStreamAck,
+			stream: "MODEL_PLANE_SPACE_EVENTS",
+			source: "rust/services/session-core/src/audit_publisher.rs",
+			needle: `SPACE_EVENT_SUBJECT_PREFIX: &str = "mp.v1.space."`,
 		},
 
 		// ---- model-gateway: core NATS through mp-events' EventPublisher. ----
@@ -215,6 +229,18 @@ func publisherRegistry() []publisherRow {
 			gap: orchestratorGrant,
 		},
 
+		// ---- quarry-edge: the run trace (WS10.S5/S6), published by Quarry, consumed here. ----
+		// The principal can publish mp.v1.trace.run.* and nothing else (run_trace_test.go proves
+		// the refusals); the stream MODEL_PLANE_RUN_TRACE captures it; session-core's durable
+		// consumer `session-core-trace` reads it into run_trace_events.
+		{
+			service: "quarry-edge", natsUser: quarryTraceUser, inbox: quarryTraceBox,
+			subject: "mp.v1.trace.run.x", transport: jetStreamAck, stream: "MODEL_PLANE_RUN_TRACE",
+			source:   "rust/services/session-core/src/trace_nats.rs",
+			needle:   `DURABLE_NAME: &str = "session-core-trace"`,
+			external: true,
+		},
+
 		// ---- capability-core: core NATS through pkg/publisher -> pkg/natsx. ----
 		{
 			service: "capability-core", natsUser: capabilityUser, inbox: capabilityBox,
@@ -251,6 +277,7 @@ func unusedSubjectBuilders() map[string]string {
 // then forces a look at what it publishes.
 func natsClientModules() map[string]string {
 	return map[string]string{
+		"go/services/browser-broker":   "consumer only (the api_key_revoked durable on the shared broker, INNH-10 MP-2d); publishes nothing",
 		"go/services/capability-core":   "publisher (core NATS, registry above) and JetStream consumer",
 		"go/services/cost-core":         "consumer only (mp.v1.usage.* core subscription, shared-broker GDPR consumer)",
 		"go/services/nats-provisioner":  "provisioner",

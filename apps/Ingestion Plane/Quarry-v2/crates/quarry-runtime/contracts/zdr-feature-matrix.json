@@ -39,13 +39,15 @@
       "treatment": "honored"
     },
     {
-      "basis": "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+      "basis": "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass, no cached_at and no cache_age_ms, and a fetched_at that is the time of that fetch. The decision is made in scrape_cache::eligibility before any key exists. A hit carries the original fetched_at, cached_at (the same instant) and cache_age_ms. An entry lives for cache.max_age_s (default 3600 s), so a max_age longer than that behaves as the TTL, and the response does not say so yet. Monitors never reach the cache: a change monitor fetches through /v1/internal/run_page and records through /v1/internal/change/record, and only scrape_with calls result_key, get_result or put_result",
       "detail": {
         "warning": "max_age_ignored_zdr"
       },
       "enforced_by": [
         "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
-        "scrape_cache::tests::zdr_wins_over_everything_else"
+        "scrape_cache::tests::zdr_wins_over_everything_else",
+        "scrape_cache::tests::a_zdr_response_carries_no_cache_freshness_fields",
+        "scrape_cache::tests::monitor_paths_never_reach_the_url_cache"
       ],
       "id": "scrape_max_age",
       "issue": null,
@@ -250,6 +252,22 @@
       "log_canary": null,
       "routes": [
         "/v1/audit/page"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "browser_redirect::probe uses credentialless pinned transport and touches no cache, artifact store, index or event sink",
+      "detail": {
+        "reason": "checks one public HTTP response header for a redirect and stores nothing"
+      },
+      "enforced_by": [],
+      "id": "browser_redirect_probe",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/browser/redirect-hop"
       ],
       "status": "enforced",
       "treatment": "inert"
@@ -683,6 +701,24 @@
       "treatment": "inert"
     },
     {
+      "basis": "agent_routes::hit_test::hit_test_point (E3.3-h, dark behind QUARRY_EDGE__HIT_TEST: 403 hit_test_disabled when off, and 501 unsupported when on until the driver trait gains its point method) reads DOM.getNodeForLocation and the partial accessibility tree, maps the hit to the person's lane's last observed @e ref, and answers the run's zdr flag with it. The AX name it returns is page text the same caller's observation already carries under ZDR; no backend node id or frame id is on the wire. Nothing is stored, so ZDR has nothing to suppress and the route is not refused",
+      "detail": {
+        "reason": "a read-only point lookup on the caller's own live run; it writes no receipt, timeline row, artifact or cache entry, and logs no page text"
+      },
+      "enforced_by": [
+        "hit_test::hit_test_tests::the_wire_answer_carries_refs_and_no_browser_handles"
+      ],
+      "id": "agent_hit_test",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}/hit-test"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
       "basis": "fleet_routes keep fleets in the process (new_fleet_state)",
       "detail": {
         "reason": "an in-memory registry; nothing is persisted, and the console is hidden (WS2.E)"
@@ -797,6 +833,25 @@
       "log_canary": null,
       "routes": [
         "/v1/internal/orgs/{org}/profiles"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "internal_routes::purge_user_receipts (W2-U49, X-19 condition c) checks the shared internal token and both path ids, deletes the rows whose org_id and actor_id match (Postgres over the queue pool when present, else the receipt store's purge_for_actor) and reports one counts-only step_receipts family. quarry-control calls it for a user or user_anonymize erasure event only when QUARRY_CONTROL_GDPR_USER_RECEIPTS is on (default off). A ZDR run writes no receipts, so there is nothing of it to find; like the org purge it is how erasure is carried out, so it is never refused",
+      "detail": {
+        "reason": "erases one user's step receipts and browser timeline events in one organization and answers counts only; it stores nothing"
+      },
+      "enforced_by": [
+        "internal_routes::tests::the_user_report_is_one_counts_only_family",
+        "step_receipts::user_erasure_tests::purge_for_actor_removes_only_that_user_in_that_org_and_is_idempotent"
+      ],
+      "id": "internal_user_receipt_purge",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/internal/orgs/{org}/users/{user}/receipts"
       ],
       "status": "enforced",
       "treatment": "inert"

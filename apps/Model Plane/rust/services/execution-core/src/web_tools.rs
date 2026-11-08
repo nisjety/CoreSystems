@@ -24,7 +24,10 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use mp_contracts::model_plane::v1 as pb;
+
 use crate::quarry_auth::TokenSource;
+use crate::site_policy_client::SitePolicy;
 
 const MAX_SEARCH_RESULTS: usize = 8;
 // Second-stage snippet cap. The SERP providers already hand back ~150-char
@@ -36,8 +39,21 @@ const MAX_SEARCH_RESULTS: usize = 8;
 // window, not to summarize. Keep it well clear of real snippet lengths.
 const MAX_SNIPPET_CHARS: usize = 900;
 const MAX_FETCH_CHARS: usize = 8000;
+/// The deployment switch for the long-page reader (EP-2-S10): a fetched page is held for reading rather
+/// than cut to its head, and `read_page` and `find_in_page` are offered. Default OFF. Only the literal
+/// `true` enables it, and it takes effect only in a run that holds results (`EXECUTION_RESULT_HANDLES`).
+pub const WEB_READER_ENV: &str = "EXECUTION_WEB_READER";
+/// The reader's two model-facing tools, answered from the pages the run holds.
+pub const READ_PAGE_TOOL: &str = "read_page";
+pub const FIND_IN_PAGE_TOOL: &str = "find_in_page";
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 const EXTRACT_SCOPES: &[&str] = &["extract:read"];
+/// The tool name a page fetch is refused under: the org's domain rules name it in the refusal (EP-9 W3).
+const WEB_FETCH_TOOL: &str = "web_fetch";
+/// E3.7.10: the scopes of Quarry's site map and its durable crawl/batch jobs. The
+/// service principal's grant of these is a Control Plane registry row (MP-ASKS).
+const MAP_SCOPES: &[&str] = &["map:read"];
+const CRAWL_SCOPES: &[&str] = &["crawl:write"];
 /// Ceiling on the public `GET /ready` probe — short on purpose so a hung edge
 /// cannot stall the 60 s health heartbeat for the other attestations.
 const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -48,6 +64,8 @@ pub struct WebToolsClient {
     base_url: String,
     auth: TokenSource,
     http: reqwest::Client,
+    /// The org's domain rules, checked before a host is reached (EP-9 W3). Off reads nothing and changes nothing.
+    site: SitePolicy,
 }
 
 impl WebToolsClient {
@@ -72,6 +90,7 @@ impl WebToolsClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             auth,
             http,
+            site: SitePolicy::from_env(),
         }))
     }
 
@@ -137,21 +156,82 @@ impl WebToolsClient {
         // so this IS the edge's contract. The `data: {...}` envelope some
         // callers expect is added by the BFF in front of the chat path, not by
         // the edge — do not "harmonise" this reader toward `data.results`.
-        let results = value
+        let mut results = value
             .get("results")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        // The org's domain rules drop a hit on a host the org does not allow, before any hit is shown (EP-9 W3).
+        self.site.drop_denied_results(org_id, &mut results).await;
         Ok(format_search_results(query, &value, &results))
     }
 
     /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
     pub async fn fetch(&self, url: &str, org_id: &str, zdr: bool) -> Result<String, String> {
+        // The org's domain rules come before the call: a host the org does not allow is refused by name, and nothing is read.
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], WEB_FETCH_TOOL).await {
+            return Err(refusal);
+        }
         let body = extract_body(url, zdr);
         let value = self
             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
             .await?;
-        extract_markdown(url, &value)
+        let markdown = extract_markdown(url, &value)?;
+        // With the reader on, the complete page comes back so the loop can hold it for reading. The loop
+        // cuts it to the head itself when it holds nothing (`result_handles::inline_text`).
+        Ok(if reader_enabled() { markdown } else { fetch_head(&markdown) })
+    }
+
+    /// `knowledge.map` -> POST `/v1/map`: the URLs of a site (sitemaps and robots), optionally
+    /// ranked by `search`. Nothing is fetched into the corpus and nothing is stored.
+    pub async fn map_site(
+        &self,
+        url: &str,
+        search: Option<&str>,
+        limit: u32,
+        include_subdomains: bool,
+        org_id: &str,
+    ) -> Result<String, String> {
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], MAP_TOOL).await {
+            return Err(refusal);
+        }
+        let body = map_body(url, search, limit, include_subdomains);
+        let value = self.post("/v1/map", &body, org_id, MAP_SCOPES).await?;
+        Ok(format_map_result(url, &value))
+    }
+
+    /// `knowledge.crawl_site` -> POST `/v1/crawl`: starts a background crawl job. The answer is
+    /// the job's handoff (id and the bounds Quarry will actually run with), not the pages.
+    pub async fn start_crawl(
+        &self,
+        url: &str,
+        max_pages: u32,
+        max_depth: Option<u32>,
+        ingest: bool,
+        org_id: &str,
+    ) -> Result<String, String> {
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_SITE_TOOL).await {
+            return Err(refusal);
+        }
+        let body = crawl_body(url, max_pages, max_depth, ingest);
+        let value = self.post("/v1/crawl", &body, org_id, CRAWL_SCOPES).await?;
+        Ok(format_handoff("crawl", &value))
+    }
+
+    /// `knowledge.batch` -> POST `/v1/batch`: starts a background scrape job over a fixed list.
+    pub async fn start_batch(
+        &self,
+        urls: &[String],
+        ingest: bool,
+        org_id: &str,
+    ) -> Result<String, String> {
+        let every_url: Vec<&str> = urls.iter().map(String::as_str).collect();
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &every_url, BATCH_TOOL).await {
+            return Err(refusal);
+        }
+        let body = batch_body(urls, ingest);
+        let value = self.post("/v1/batch", &body, org_id, CRAWL_SCOPES).await?;
+        Ok(format_handoff("batch", &value))
     }
 
     /// Health probe behind the `cap.tool.http` attestation: `Ok(())` only when
@@ -234,8 +314,231 @@ impl WebToolsClient {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("test HTTP client"),
+            site: SitePolicy::disabled(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// E3.7.10: the agent's bulk-acquisition tools (`knowledge.crawl_site`, `knowledge.map`,
+// `knowledge.batch`), governed as `cap.web.crawl|map|batch`.
+// ---------------------------------------------------------------------------------------------
+
+/// The deployment switch for the three tools. Default OFF: only `1`, `true` or `on` enables it.
+pub const CRAWL_TOOLS_ENV: &str = "EXECUTION_CORE_WEB_CRAWL_TOOLS";
+/// Tighten-only page-count approval threshold: a value above [`DEFAULT_APPROVAL_PAGES`], zero or
+/// a non-number leaves the default; a smaller one lowers it.
+pub const CRAWL_APPROVAL_PAGES_ENV: &str = "EXECUTION_CORE_WEB_CRAWL_APPROVAL_PAGES";
+/// A crawl or a batch over this many pages needs a person's approval (decision 2).
+pub const DEFAULT_APPROVAL_PAGES: u32 = 50;
+/// The most pages execution-core ever asks Quarry for, whatever the model writes. Quarry's own
+/// limits resolver still applies on top.
+pub const MAX_CRAWL_PAGES: u32 = 1000;
+/// The most URLs one batch call may carry.
+pub const MAX_BATCH_URLS: usize = 100;
+const MAX_MAP_LINKS: usize = 100;
+const MAX_MAP_LIMIT: u32 = 500;
+pub const DEFAULT_MAP_LIMIT: u32 = 100;
+
+pub const CRAWL_SITE_TOOL: &str = "knowledge.crawl_site";
+pub const MAP_TOOL: &str = "knowledge.map";
+pub const BATCH_TOOL: &str = "knowledge.batch";
+
+/// Whether the deployment has switched the three tools on.
+#[must_use]
+pub fn crawl_tools_enabled() -> bool {
+    crawl_tools_enabled_from(std::env::var(CRAWL_TOOLS_ENV).ok().as_deref())
+}
+
+#[must_use]
+pub fn crawl_tools_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on")
+    )
+}
+
+/// The effective approval threshold: [`DEFAULT_APPROVAL_PAGES`], or a smaller configured value.
+/// Configuration can only tighten it.
+#[must_use]
+pub fn crawl_approval_pages() -> u32 {
+    approval_pages_from(std::env::var(CRAWL_APPROVAL_PAGES_ENV).ok().as_deref())
+}
+
+#[must_use]
+pub fn approval_pages_from(value: Option<&str>) -> u32 {
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|pages| *pages >= 1)
+        .map_or(DEFAULT_APPROVAL_PAGES, |pages| pages.min(DEFAULT_APPROVAL_PAGES))
+}
+
+/// Whether `name` is one of the three tools.
+#[must_use]
+pub fn is_crawl_tool(name: &str) -> bool {
+    matches!(name, CRAWL_SITE_TOOL | MAP_TOOL | BATCH_TOOL)
+}
+
+/// Whether `name` starts a durable Quarry job (a crawl or a batch): refused under ZDR, as
+/// Quarry's own `durable_jobs` matrix row refuses it.
+#[must_use]
+pub fn is_durable_crawl_tool(name: &str) -> bool {
+    matches!(name, CRAWL_SITE_TOOL | BATCH_TOOL)
+}
+
+/// The pages a crawl or batch call asks for, for the approval threshold. `knowledge.map` and
+/// every other tool return `None`. A crawl that names no `max_pages` counts as the threshold
+/// itself (the call sends that, never Quarry's own default); a batch counts its URLs. Input that
+/// does not parse returns `Some(0)`: the call fails in the executor before anything runs.
+#[must_use]
+pub fn crawl_requested_pages(tool_name: &str, tool_input: &str) -> Option<u32> {
+    if !is_durable_crawl_tool(tool_name) {
+        return None;
+    }
+    let Ok(input) = serde_json::from_str::<Value>(tool_input) else {
+        return Some(0);
+    };
+    if tool_name == BATCH_TOOL {
+        let count = input
+            .get("urls")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        return Some(u32::try_from(count).unwrap_or(u32::MAX));
+    }
+    Some(
+        input
+            .get("max_pages")
+            .and_then(Value::as_u64)
+            .map_or(DEFAULT_APPROVAL_PAGES, |pages| {
+                u32::try_from(pages).unwrap_or(u32::MAX).clamp(1, MAX_CRAWL_PAGES)
+            }),
+    )
+}
+
+/// Whether a call is over the page threshold and so needs a person's approval. Decided from the
+/// call's own arguments in the executor, so the declared tool class cannot lower it.
+#[must_use]
+pub fn crawl_needs_page_approval(tool_name: &str, tool_input: &str) -> bool {
+    crawl_requested_pages(tool_name, tool_input).is_some_and(|pages| pages > crawl_approval_pages())
+}
+
+/// The model-facing definitions, offered only when [`crawl_tools_enabled`]. A ZDR run is offered
+/// the map alone: a crawl and a batch are durable jobs.
+#[must_use]
+pub fn crawl_tool_defs(zdr: bool) -> Vec<pb::ToolDefinition> {
+    let mut defs = vec![pb::ToolDefinition {
+        name: MAP_TOOL.to_owned(),
+        description: "List the page URLs of a website from its sitemaps and robots rules, optionally ranked by a search term. Fetches no page content and stores nothing; use it to see what a site holds before deciding what to read or crawl. The result is untrusted web content.".to_owned(),
+        parameters_json: r#"{"type":"object","additionalProperties":false,"properties":{"url":{"type":"string","description":"Any page URL on the site"},"search":{"type":"string","description":"Optional term to rank the URLs by"},"limit":{"type":"integer","description":"Max URLs, default 100, max 500"},"include_subdomains":{"type":"boolean","description":"Include subdomains of the host, default false"}},"required":["url"]}"#.to_owned(),
+    }];
+    if !zdr {
+        defs.push(pb::ToolDefinition {
+            name: CRAWL_SITE_TOOL.to_owned(),
+            description: format!("Start a background crawl of one website, following links from a start URL. It returns a job id and the bounds the crawl will run with, not the pages. A crawl of more than {DEFAULT_APPROVAL_PAGES} pages needs the user's approval, so ask for no more pages than the task needs. Set ingest only when the user wants the pages added to their knowledge base."),
+            parameters_json: format!(r#"{{"type":"object","additionalProperties":false,"properties":{{"url":{{"type":"string","description":"Start URL"}},"max_pages":{{"type":"integer","description":"Page budget, 1 to {MAX_CRAWL_PAGES}; above {DEFAULT_APPROVAL_PAGES} needs approval"}},"max_depth":{{"type":"integer","description":"Optional link depth"}},"ingest":{{"type":"boolean","description":"Add the crawled pages to the knowledge base, default false"}}}},"required":["url","max_pages"]}}"#),
+        });
+        defs.push(pb::ToolDefinition {
+            name: BATCH_TOOL.to_owned(),
+            description: format!("Start a background scrape of a fixed list of URLs (at most {MAX_BATCH_URLS}). It returns a job id, not the pages. A batch of more than {DEFAULT_APPROVAL_PAGES} URLs needs the user's approval. Set ingest only when the user wants the pages added to their knowledge base."),
+            parameters_json: format!(r#"{{"type":"object","additionalProperties":false,"properties":{{"urls":{{"type":"array","items":{{"type":"string"}},"maxItems":{MAX_BATCH_URLS},"description":"The URLs to scrape"}},"ingest":{{"type":"boolean","description":"Add the pages to the knowledge base, default false"}}}},"required":["urls"]}}"#),
+        });
+    }
+    defs
+}
+
+/// Body for `POST /v1/map` (pure).
+fn map_body(url: &str, search: Option<&str>, limit: u32, include_subdomains: bool) -> Value {
+    let mut body = json!({
+        "url": url,
+        "limit": limit.clamp(1, MAX_MAP_LIMIT),
+        "include_subdomains": include_subdomains,
+    });
+    if let Some(term) = search.map(str::trim).filter(|term| !term.is_empty()) {
+        body["search"] = json!(term);
+    }
+    body
+}
+
+/// Body for `POST /v1/crawl` (pure). `max_pages` is always sent, clamped, so Quarry's own
+/// default never decides how many pages an approved-or-not call fetches. No `zdr` key: a ZDR
+/// run never reaches this (dispatch refuses it), and Quarry reads the caller's claim anyway.
+fn crawl_body(url: &str, max_pages: u32, max_depth: Option<u32>, ingest: bool) -> Value {
+    let mut body = json!({
+        "url": url,
+        "max_pages": max_pages.clamp(1, MAX_CRAWL_PAGES),
+        "ingest": ingest,
+    });
+    if let Some(depth) = max_depth.filter(|depth| *depth >= 1) {
+        body["max_depth"] = json!(depth);
+    }
+    body
+}
+
+/// Body for `POST /v1/batch` (pure).
+fn batch_body(urls: &[String], ingest: bool) -> Value {
+    json!({ "urls": urls, "ingest": ingest })
+}
+
+/// The `data` object of Quarry's `Envelope`, or the value itself when it is not wrapped.
+fn envelope_data(value: &Value) -> &Value {
+    value.get("data").filter(|data| !data.is_null()).unwrap_or(value)
+}
+
+/// Format a `/v1/map` answer into agent-readable text (pure).
+fn format_map_result(url: &str, value: &Value) -> String {
+    let data = envelope_data(value);
+    let links = data
+        .get("links")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if links.is_empty() {
+        return format!("No URLs found for {url}.");
+    }
+    let total = data
+        .get("count")
+        .and_then(Value::as_u64)
+        .map_or(links.len(), |count| usize::try_from(count).unwrap_or(links.len()));
+    let mut out = format!("{total} URLs found for {url} (showing {}):\n", links.len().min(MAX_MAP_LINKS));
+    for link in links.iter().take(MAX_MAP_LINKS) {
+        let href = link.get("url").and_then(Value::as_str).unwrap_or("");
+        match link.get("title").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            Some(title) => {
+                let _ = writeln!(out, "- {href} ({})", truncate_chars(title, 120));
+            }
+            None => {
+                let _ = writeln!(out, "- {href}");
+            }
+        }
+    }
+    if data
+        .get("coverage")
+        .and_then(|coverage| coverage.get("truncated"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        out.push_str("(the site has more URLs than were returned)\n");
+    }
+    out
+}
+
+/// Format a crawl or batch handoff into agent-readable text (pure): the job id and the bounds.
+fn format_handoff(kind: &str, value: &Value) -> String {
+    let data = envelope_data(value);
+    let job_id = data.get("job_id").and_then(Value::as_str).unwrap_or("");
+    if job_id.is_empty() {
+        return format!("The {kind} job was not accepted: no job id came back.");
+    }
+    let mut out = format!("Started {kind} job {job_id}; it runs in the background.");
+    if let Some(limits) = data.get("limits").filter(|limits| !limits.is_null()) {
+        let _ = write!(out, " Bounds: {limits}.");
+    }
+    if let Some(rejected) = data.get("rejected").and_then(Value::as_array) {
+        if !rejected.is_empty() {
+            let _ = write!(out, " {} URL(s) were refused before the job started.", rejected.len());
+        }
+    }
+    out
 }
 
 /// Body for `POST /v1/search` (pure; keeps the wire shape assertable in tests).
@@ -310,7 +613,59 @@ fn extract_markdown(url: &str, value: &Value) -> Result<String, String> {
             "fetched {url} (status={status}) but no extractable content"
         ));
     }
-    Ok(truncate_chars(markdown, MAX_FETCH_CHARS))
+    Ok(markdown.to_owned())
+}
+
+/// Whether the long-page reader is switched on in this process.
+#[must_use]
+pub fn reader_enabled() -> bool {
+    reader_enabled_from(std::env::var(WEB_READER_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn reader_enabled_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
+}
+
+/// Whether a tool is a page fetch: the one result kind the reader holds for reading.
+#[must_use]
+pub fn is_page_fetch(tool_name: &str) -> bool {
+    matches!(tool_name, "web_fetch" | "web.read")
+}
+
+/// The head of a fetched page the loop shows when it does not hold the page: the cut every fetch has
+/// always made, so a page the reader cannot hold reads exactly as it did before the reader existed.
+#[must_use]
+pub fn fetch_head(markdown: &str) -> String {
+    truncate_chars(markdown, MAX_FETCH_CHARS)
+}
+
+/// The model-facing definitions of `read_page` and `find_in_page`, offered only while the reader is on.
+#[must_use]
+pub fn reader_tool_definitions() -> Vec<pb::ToolDefinition> {
+    if reader_enabled() {
+        reader_definitions()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The two definitions as the chat reader offers them (model-gateway's `web_reader_tool_definitions`),
+/// so the model meets the same names and arguments in either loop.
+fn reader_definitions() -> Vec<pb::ToolDefinition> {
+    vec![
+        pb::ToolDefinition {
+            name: READ_PAGE_TOOL.to_owned(),
+            description: "Read one section of a long web page that web_fetch held for reading. The section ids come from the page's outline. Each read returns up to 4000 characters, and the result says whether the section continues and the offset to continue from. Read a section you have not read yet rather than fetching the page again. Only pages fetched in this run can be read, and only while their ref is live.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a web_fetch result"},"section":{"type":"string","description":"A section id from the outline, such as s3. Omit to read the outline and the start of the page."},"offset":{"type":"integer","minimum":0,"description":"Characters into the section to start from: the next_offset of the previous read. Defaults to 0."}},"required":["ref"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: FIND_IN_PAGE_TOOL.to_owned(),
+            description: "Search a long web page that web_fetch held for reading. Returns the passages that best match the query, each with the section it is in, most relevant first (at most two). Use it when the outline does not show where the answer is, or to check one specific fact on the page. Read the surrounding section with read_page when a passage is not enough.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"ref":{"type":"string","description":"The ref from a web_fetch result"},"query":{"type":"string","description":"The words to look for on the page"}},"required":["ref","query"]}"#.to_owned(),
+        },
+    ]
 }
 
 /// Char-boundary-safe truncation (never panics on multibyte input).
@@ -713,5 +1068,311 @@ pub(crate) mod tests {
             started.elapsed() < Duration::from_secs(3),
             "the probe must give up at its own timeout, not the stub's delay"
         );
+    }
+}
+
+/// E3.7.10: the bulk-acquisition tools' pure rules.
+#[cfg(test)]
+mod crawl_tool_tests {
+    use super::*;
+
+    #[test]
+    fn the_crawl_tools_are_off_unless_explicitly_switched_on() {
+        assert_eq!(CRAWL_TOOLS_ENV, "EXECUTION_CORE_WEB_CRAWL_TOOLS");
+        assert!(!crawl_tools_enabled_from(None));
+        for off in ["", "0", "false", "off", "no", "2", "yes"] {
+            assert!(!crawl_tools_enabled_from(Some(off)), "{off:?}");
+        }
+        for on in ["1", "true", "TRUE", "on", " on "] {
+            assert!(crawl_tools_enabled_from(Some(on)), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn the_page_threshold_defaults_to_fifty_and_configuration_can_only_lower_it() {
+        assert_eq!(DEFAULT_APPROVAL_PAGES, 50);
+        assert_eq!(approval_pages_from(None), 50);
+        for unchanged in ["", "abc", "0", "-3", "51", "5000"] {
+            assert_eq!(approval_pages_from(Some(unchanged)), 50, "{unchanged:?}");
+        }
+        assert_eq!(approval_pages_from(Some("10")), 10);
+        assert_eq!(approval_pages_from(Some(" 1 ")), 1);
+        assert_eq!(approval_pages_from(Some("50")), 50);
+    }
+
+    #[test]
+    fn only_a_crawl_or_a_batch_over_the_threshold_needs_approval() {
+        let crawl = |pages: u32| format!(r#"{{"url":"https://example.com","max_pages":{pages}}}"#);
+        assert!(!crawl_needs_page_approval(CRAWL_SITE_TOOL, &crawl(50)));
+        assert!(crawl_needs_page_approval(CRAWL_SITE_TOOL, &crawl(51)));
+        // A crawl naming no budget counts as the threshold, never more; zero is raised to one.
+        assert!(!crawl_needs_page_approval(CRAWL_SITE_TOOL, r#"{"url":"https://example.com"}"#));
+        assert_eq!(crawl_requested_pages(CRAWL_SITE_TOOL, &crawl(0)), Some(1));
+        // The ceiling clamps a huge number rather than overflowing.
+        assert_eq!(
+            crawl_requested_pages(CRAWL_SITE_TOOL, &crawl(4_000_000_000)),
+            Some(MAX_CRAWL_PAGES)
+        );
+        let urls = |count: usize| {
+            let list: Vec<String> = (0..count).map(|i| format!("https://example.com/{i}")).collect();
+            serde_json::json!({ "urls": list }).to_string()
+        };
+        assert!(!crawl_needs_page_approval(BATCH_TOOL, &urls(50)));
+        assert!(crawl_needs_page_approval(BATCH_TOOL, &urls(51)));
+        // The map, and any other tool, never asks; unparseable input asks nothing (it fails).
+        assert_eq!(crawl_requested_pages(MAP_TOOL, &crawl(900)), None);
+        assert_eq!(crawl_requested_pages("web_fetch", &crawl(900)), None);
+        assert_eq!(crawl_requested_pages(CRAWL_SITE_TOOL, "not json"), Some(0));
+        assert!(!crawl_needs_page_approval(CRAWL_SITE_TOOL, "not json"));
+    }
+
+    #[test]
+    fn the_definitions_are_valid_and_a_zdr_run_is_offered_the_map_alone() {
+        let all = crawl_tool_defs(false);
+        let names: Vec<&str> = all.iter().map(|def| def.name.as_str()).collect();
+        assert_eq!(names, [MAP_TOOL, CRAWL_SITE_TOOL, BATCH_TOOL]);
+        for def in &all {
+            let schema: Value = serde_json::from_str(&def.parameters_json)
+                .unwrap_or_else(|error| panic!("{}: {error}", def.name));
+            assert_eq!(schema["type"], "object", "{}", def.name);
+            assert!(is_crawl_tool(&def.name));
+        }
+        let zdr: Vec<String> = crawl_tool_defs(true).into_iter().map(|def| def.name).collect();
+        assert_eq!(zdr, [MAP_TOOL]);
+        assert!(!is_durable_crawl_tool(MAP_TOOL));
+        assert!(is_durable_crawl_tool(CRAWL_SITE_TOOL) && is_durable_crawl_tool(BATCH_TOOL));
+    }
+
+    #[test]
+    fn the_wire_bodies_are_bounded() {
+        let map = map_body("https://example.com", Some("  pricing "), 9_999, true);
+        assert_eq!(map["limit"], MAX_MAP_LIMIT);
+        assert_eq!(map["search"], "pricing");
+        assert_eq!(map["include_subdomains"], true);
+        assert!(map_body("https://example.com", Some("  "), 0, false).get("search").is_none());
+        assert_eq!(map_body("https://example.com", None, 0, false)["limit"], 1);
+
+        let crawl = crawl_body("https://example.com", 5_000, Some(0), false);
+        assert_eq!(crawl["max_pages"], MAX_CRAWL_PAGES);
+        assert_eq!(crawl["ingest"], false);
+        assert!(crawl.get("max_depth").is_none(), "a zero depth is left to Quarry");
+        assert_eq!(crawl_body("https://example.com", 3, Some(2), true)["max_depth"], 2);
+
+        let batch = batch_body(&["https://a.example".to_owned()], true);
+        assert_eq!(batch["urls"][0], "https://a.example");
+        assert_eq!(batch["ingest"], true);
+    }
+
+    #[test]
+    fn answers_are_formatted_from_the_envelope_or_the_bare_object() {
+        let wrapped = serde_json::json!({"data": {"links": [
+            {"url": "https://example.com/a", "title": "A"},
+            {"url": "https://example.com/b"}
+        ], "count": 2, "coverage": {"truncated": true}}});
+        let text = format_map_result("https://example.com", &wrapped);
+        assert!(text.contains("2 URLs found"), "{text}");
+        assert!(text.contains("- https://example.com/a (A)"), "{text}");
+        assert!(text.contains("- https://example.com/b\n"), "{text}");
+        assert!(text.contains("more URLs"), "{text}");
+        assert!(format_map_result("https://x.example", &serde_json::json!({"links": []}))
+            .starts_with("No URLs found"));
+
+        let ack = serde_json::json!({"data": {"job_id": "job_1", "limits": {"max_pages": 20},
+            "rejected": ["ftp://x"]}});
+        let text = format_handoff("crawl", &ack);
+        assert!(text.contains("Started crawl job job_1"), "{text}");
+        assert!(text.contains("max_pages"), "{text}");
+        assert!(text.contains("1 URL(s) were refused"), "{text}");
+        assert!(format_handoff("batch", &serde_json::json!({"data": {}})).contains("not accepted"));
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+
+    #[test]
+    fn the_reader_switch_is_read_only_from_the_literal_true() {
+        assert!(reader_enabled_from(Some("true")));
+        assert!(reader_enabled_from(Some(" true ")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some("on"), Some("yes")] {
+            assert!(!reader_enabled_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_definitions_name_the_ref_they_read_by_and_match_the_chat_reader() {
+        let defs = reader_definitions();
+        let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
+        assert_eq!(names, ["read_page", "find_in_page"]);
+        let read: Value = serde_json::from_str(&defs[0].parameters_json).expect("json schema");
+        assert_eq!(read["required"], json!(["ref"]));
+        assert!(read["properties"]["section"].is_object());
+        let find: Value = serde_json::from_str(&defs[1].parameters_json).expect("json schema");
+        assert_eq!(find["required"], json!(["ref", "query"]));
+    }
+
+    #[test]
+    fn the_head_of_a_page_is_the_cut_every_fetch_has_always_made() {
+        let long = "x".repeat(MAX_FETCH_CHARS + 25);
+        assert_eq!(fetch_head(&long), truncate_chars(&long, MAX_FETCH_CHARS));
+        assert!(fetch_head(&long).ends_with("[truncated 25 chars]"));
+        assert_eq!(fetch_head("short page"), "short page");
+    }
+
+    #[test]
+    fn only_a_page_fetch_is_held_for_reading() {
+        assert!(is_page_fetch("web_fetch"));
+        assert!(is_page_fetch("web.read"));
+        assert!(!is_page_fetch("web_search"));
+        assert!(!is_page_fetch(READ_PAGE_TOOL));
+    }
+
+    #[test]
+    fn an_extracted_page_comes_back_whole_for_the_loop_to_cut_or_hold() {
+        let markdown = "y".repeat(MAX_FETCH_CHARS + 10);
+        let value = json!({
+            "results": [{"url": "https://x", "status": "fetched", "markdown": markdown}]
+        });
+        let whole = extract_markdown("https://x", &value).expect("markdown");
+        assert_eq!(whole.chars().count(), MAX_FETCH_CHARS + 10);
+    }
+}
+
+// ---- EP-9 W3: the org's domain rules before a web call (see `site_policy_client`) ---------------------------
+
+#[cfg(test)]
+mod site_policy_tests {
+    use std::sync::Arc;
+
+    use mp_contracts::site_policy::WebDomainPolicyMode;
+    use serde_json::{json, Value};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::tests::{mint_mock, minted, quarry_client};
+    use crate::site_policy_client::{SiteChecker, SiteOwner, SitePolicy};
+
+    const ORG: &str = "org-a";
+
+    /// org-core's resolve route for `ORG`, answering with `decisions`.
+    async fn org_core(decisions: Value) -> MockServer {
+        let org = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org-a/browser-sites/resolve"))
+            .and(header("x-service-id", "execution-core"))
+            .and(header("x-service-token", "org-core-test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "organization_id": ORG,
+                "revision": 3,
+                "decisions": decisions,
+            })))
+            .mount(&org)
+            .await;
+        org
+    }
+
+    /// The policy in enforcement against `org`, with a fresh cache.
+    fn enforcing(org: &MockServer) -> SitePolicy {
+        SitePolicy::new(
+            WebDomainPolicyMode::Enforce,
+            SiteOwner::new(&org.uri(), "execution-core", "org-core-test-token"),
+            Arc::new(SiteChecker::default()),
+        )
+    }
+
+    fn blocked_and_open() -> Value {
+        json!([
+            {"host": "example.org", "effective": "deny", "cap": "none", "source": "org_block"},
+            {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"}
+        ])
+    }
+
+    #[tokio::test]
+    async fn a_fetch_of_a_blocked_host_is_refused_before_quarry_is_called() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        // The extract route must never be reached: the refusal comes before any call to the edge.
+        Mock::given(method("POST"))
+            .and(path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&edge)
+            .await;
+        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
+        client.site = enforcing(&org);
+
+        let refusal = client
+            .fetch("https://example.org/page", ORG, false)
+            .await
+            .expect_err("a blocked host is refused");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert!(refusal.contains("'example.org'"), "{refusal}");
+        assert!(refusal.contains("'web_fetch'"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn a_search_shows_no_hit_on_a_host_the_org_does_not_allow() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "norge",
+                "provider": "brave",
+                "results": [
+                    {"url": "https://example.org/a", "title": "Blocked hit", "snippet": "s", "rank": 1},
+                    {"url": "https://example.com/b", "title": "Open hit", "snippet": "t", "rank": 2}
+                ],
+                "count": 2
+            })))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock(ORG, "search:read", minted("search-token"))
+            .mount(&auth)
+            .await;
+        let mut client = quarry_client(&edge.uri(), &auth.uri());
+        client.site = enforcing(&org);
+
+        let shown = client
+            .search("norge", 5, ORG, false)
+            .await
+            .expect("the search answers");
+        assert!(shown.contains("https://example.com/b"), "{shown}");
+        assert!(!shown.contains("example.org"), "{shown}");
+    }
+
+    #[tokio::test]
+    async fn a_map_or_a_crawl_of_a_blocked_start_host_is_refused_before_quarry_is_called() {
+        let org = org_core(blocked_and_open()).await;
+        let edge = MockServer::start().await;
+        for route in ["/v1/map", "/v1/crawl", "/v1/batch"] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(0)
+                .mount(&edge)
+                .await;
+        }
+        let mut client = quarry_client(&edge.uri(), "http://auth.invalid");
+        client.site = enforcing(&org);
+
+        assert!(client
+            .map_site("https://example.org/", None, 10, false, ORG)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_crawl("https://example.org/", 10, None, false, ORG)
+            .await
+            .is_err_and(|refusal| refusal.starts_with("org_site_blocked: ")));
+        assert!(client
+            .start_batch(
+                &["https://example.com/a".to_owned(), "https://example.org/b".to_owned()],
+                false,
+                ORG,
+            )
+            .await
+            .is_err_and(|refusal| refusal.contains("'example.org'")));
     }
 }

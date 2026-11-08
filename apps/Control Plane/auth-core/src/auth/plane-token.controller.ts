@@ -20,6 +20,10 @@
  *   POST /api/application-plane/internal-token → ...
  *   POST /api/control-policy/internal-token → Data policy caller (service only)
  *
+ * `POST /api/:audience/api-key-exchange` (INNH-10 CP-1, EP-12 S2) lives on
+ * `ApiKeyExchangeController` (api-key-exchange.controller.ts), the one route
+ * that mints an `api_key` token.
+ *
  * The path slug is parsed back into a `PlaneAudience` and validated
  * against the configured set in `ConvexTokenService.isKnownPlaneAudience`
  * — unknown audiences surface as 404 so a typo on the verevon side never
@@ -61,6 +65,7 @@ import {
 } from './convex-token.service';
 import {
   assertServiceOrganizationBinding,
+  resolveFreshExecutionRetentionProof,
   resolveInteractiveRetentionPosture,
   resolveTenantServiceRetentionPosture,
 } from './interactive-retention-policy';
@@ -71,12 +76,14 @@ import {
   ServicePrincipalConfigurationError,
   type AuthorizedPlaneServicePrincipal,
   type AuthorizedPlaneServiceTokenExchange,
+  webPolicyPostureFor,
 } from './plane-service-principal';
 import {
   resolveCanonicalTokenContext,
   type CanonicalTokenContext,
 } from './plane-token-membership';
 import { planeScopesForRole } from './plane-token-scopes';
+import { webPolicyClaimFor } from './web-policy';
 
 function toWebHeaders(
   source: Record<string, string | string[] | undefined>,
@@ -256,6 +263,16 @@ export class PlaneTokenController {
     const retentionPosture = await resolveInteractiveRetentionPosture(
       sessionContext.orgId,
     );
+    const executionRetentionProof = audience === 'execution-core' && !retentionPosture.zdr
+      ? await resolveFreshExecutionRetentionProof(sessionContext.orgId)
+      : undefined;
+
+    // WS7.I: the org web policy for `quarry` and `browser-broker` (undefined
+    // for every other audience). With WEB_POLICY_CLAIM_ENABLED off it is
+    // `{"v":1,"rev":"0"}` and org-core is not asked; on, an unreadable policy
+    // with nothing usable remembered is a 503 (web_policy_unavailable) and NO
+    // token. Let it propagate, like the posture above.
+    const webPolicy = await webPolicyClaimFor(audience, sessionContext.orgId);
 
     const bundle = this.convexTokenService.issuePlaneToken(audience, {
       userId: session.user.id,
@@ -263,6 +280,8 @@ export class PlaneTokenController {
       email: session.user.email ?? undefined,
       scopes,
       retentionPosture,
+      executionRetentionProof,
+      webPolicy,
     });
 
     return {
@@ -305,9 +324,11 @@ export class PlaneTokenController {
     const scopes = Array.isArray(body.scopes) ? body.scopes : [];
     const reason = (body.reason ?? '').trim();
     let principal: AuthorizedPlaneServicePrincipal;
+    let registry: string;
     try {
+      registry = loadPlaneServicePrincipalRegistry();
       principal = authorizePlaneServicePrincipal(
-        loadPlaneServicePrincipalRegistry(),
+        registry,
         {
           serviceId: serviceId ?? '',
           credential: credential ?? '',
@@ -347,6 +368,16 @@ export class PlaneTokenController {
       principal.retention === 'tenant'
         ? await resolveTenantServiceRetentionPosture(principal)
         : { zdr: principal.zdr, authority: 'service-principal-policy' };
+    // WS7.I: a principal whose registry row says `webPolicyByAudience[audience]
+    // = 'tenant'` (execution-core and model-gateway on quarry) acts for the org,
+    // so its token carries the ORG's web policy, resolved here after the caller
+    // is authorized. Independent of the retention posture above: it never
+    // changes what a retention row means. Every other principal carries none.
+    // Same failure rule: 503 (web_policy_unavailable) and NO token.
+    const webPolicy =
+      webPolicyPostureFor(registry, principal.serviceId, audience) === 'tenant'
+        ? await webPolicyClaimFor(audience, principal.orgId)
+        : undefined;
     const response = this.convexTokenService.issuePlaneToken(audience, {
       userId: principal.subject,
       orgId: principal.orgId,
@@ -355,6 +386,7 @@ export class PlaneTokenController {
       serviceId: principal.serviceId,
       reason: principal.reason,
       retentionPosture,
+      webPolicy,
     });
     const event = 'plane_service_token_issued';
     let audited = false;
@@ -383,6 +415,11 @@ export class PlaneTokenController {
             zdr: retentionPosture.zdr,
             zdr_source: retentionPosture.source ?? 'registry',
             org_binding: principal.orgBinding,
+            // Only on tokens that carry the claim: the org policy's revision
+            // digest ("0" for none), never its content.
+            ...(webPolicy !== undefined
+              ? { web_policy_rev: webPolicy.rev }
+              : {}),
           },
         },
       );

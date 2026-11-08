@@ -1,4 +1,13 @@
 import type { SpaceThread } from '@/shared/api/spaces-client'
+import { isQueuedRunStatus, isStoppedRunStatus, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
+import { formatDay, formatMoment, isValidTimeZone, type SpaceFormatter } from '@/shared/i18n/format'
+import { localeIntl } from '@/shared/i18n/locales'
+import { COPY, say, type Tr } from './space-copy'
+
+export type { SpaceFormatter } from '@/shared/i18n/format'
+
+/** The formatter every date helper below uses when a caller passes none: Norwegian, no preferences. */
+const NORWEGIAN: SpaceFormatter = { locale: 'no' }
 
 /**
  * Presentation vocabulary for a Space thread, shared by the room timeline,
@@ -6,44 +15,31 @@ import type { SpaceThread } from '@/shared/api/spaces-client'
  * different words in two corners of the same room.
  */
 
-/** Session Core's own token for a run paused on a human decision. Named once
- * so the pulse count, the post's approval surface, and the composer guard all
- * agree on what "waiting" means. */
-export const AWAITING_APPROVAL_RUN_STATUS = 'awaiting_approval'
+// The run-status sets live in the thread-status module, so the Space classifies a run the same way
+// as the sidebar and the console; they stay exported here for the room's own consumers.
+export { ACTIVE_RUN_STATUSES, AWAITING_APPROVAL_RUN_STATUS, FAILED_RUN_STATUSES, LIVE_RUN_STATUSES } from '@/shared/chat/thread-status'
 
-export const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', AWAITING_APPROVAL_RUN_STATUS])
-
-/**
- * Statuses under which an agent is actually producing output right now.
- *
- * Distinct from `ACTIVE_RUN_STATUSES` on purpose: a run paused for approval is
- * active in the sense that it has not finished, but nobody is working — a
- * person is being waited for. The "working" indicator (item 1b) must say the
- * first thing and not the second, or a room stalled on a decision would look
- * busy instead of blocked.
- */
-export const LIVE_RUN_STATUSES = new Set(['queued', 'running'])
-
-export const FAILED_RUN_STATUSES = new Set(['failed'])
-
-export function threadTitle(thread: SpaceThread, tr: (no: string, en: string) => string): string {
-  return thread.title?.trim() || thread.preview?.trim() || tr('Samtale uten tittel', 'Untitled conversation')
+export function threadTitle(thread: SpaceThread, tr: Tr): string {
+  return thread.title?.trim() || thread.preview?.trim() || say(tr, COPY.thread.untitled)
 }
 
-export function threadStatus(thread: SpaceThread, tr: (no: string, en: string) => string): string {
+export function threadStatus(thread: SpaceThread, tr: Tr): string {
   const status = thread.latest_run_status
-  if (!status) return tr('Samtale åpen', 'Conversation open')
-  if (status === 'awaiting_approval') return tr('Venter på godkjenning', 'Needs approval')
-  if (status === 'running') return tr('Arbeider', 'Working')
-  if (status === 'queued') return tr('I kø', 'Queued')
-  if (status === 'completed') return tr('Fullført', 'Completed')
-  if (status === 'failed') return tr('Feilet', 'Failed')
+  if (!status) return say(tr, COPY.thread.open)
   // A recorded stop. Session Core writes `cancelled` when a member presses Stop
   // (model-gateway cancels the direct-inference run rather than letting it
   // finish), and until this line existed the room rendered that as the
   // untranslated enum token "Cancelled" — so a stop the room itself caused read
   // as a foreign word.
-  if (status === 'cancelled') return tr('Stoppet', 'Stopped')
+  if (isStoppedRunStatus(status)) return say(tr, COPY.thread.stopped)
+  // The attention vocabulary reads a queued run as working; the room keeps the
+  // word "queued" so a run waiting for a worker does not look busy.
+  if (isQueuedRunStatus(status)) return say(tr, COPY.thread.queued)
+  const state = legacyStateFromRunStatus(status)
+  if (state === 'needs_approval') return say(tr, COPY.thread.awaitingApproval)
+  if (state === 'working') return say(tr, COPY.thread.running)
+  if (state === 'completed') return say(tr, COPY.thread.completed)
+  if (state === 'failed') return say(tr, COPY.thread.failed)
   return formatLabel(status)
 }
 
@@ -68,12 +64,32 @@ export { stripMarkdownPreview } from '@/shared/lib/markdown-plain-text'
  * the SAME name in different files, which is how one surface can quietly start
  * disagreeing with the other about what a timestamp means.
  */
-export function formatWhen(value: string): string {
-  try {
-    return new Date(value).toLocaleDateString('nb-NO', { day: 'numeric', month: 'short' })
-  } catch {
-    return value
-  }
+export function formatWhen(value: string, fmt: SpaceFormatter = NORWEGIAN): string {
+  return formatDay(value, fmt.locale, fmt.prefs)
+}
+
+/**
+ * How long ago something happened, for a reply summary: "for 4 min. siden", "i går", and the plain
+ * date from a week on. `now` is a parameter so the wording is testable. An unreadable value reads as
+ * empty rather than as a wrong time.
+ */
+export function formatRelativeWhen(
+  value: string | undefined,
+  now: number = Date.now(),
+  fmt: SpaceFormatter = NORWEGIAN,
+): string {
+  if (!value) return ''
+  const at = new Date(value).getTime()
+  if (!Number.isFinite(at)) return ''
+  // A time ahead of this browser's clock (skew between the server and the reader) is "now", not "in 1 t".
+  const seconds = Math.min(0, Math.round((at - now) / 1000))
+  const abs = Math.abs(seconds)
+  const rtf = new Intl.RelativeTimeFormat(localeIntl(fmt.locale), { numeric: 'auto', style: 'short' })
+  if (abs < 45) return rtf.format(0, 'second')
+  if (abs < 3600) return rtf.format(Math.round(seconds / 60), 'minute')
+  if (abs < 86_400) return rtf.format(Math.round(seconds / 3600), 'hour')
+  if (abs < 7 * 86_400) return rtf.format(Math.round(seconds / 86_400), 'day')
+  return formatWhen(value, fmt)
 }
 
 /**
@@ -84,11 +100,71 @@ export function formatWhen(value: string): string {
  * from the order. Falls back to the raw value rather than dropping it: an
  * unparseable timestamp is still evidence something happened then.
  */
-export function formatWhenWithTime(value?: string): string {
-  if (!value) return ''
-  try {
-    return new Date(value).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' })
-  } catch {
-    return value
+export function formatWhenWithTime(value?: string, fmt: SpaceFormatter = NORWEGIAN): string {
+  return formatMoment(value, fmt.locale, fmt.prefs)
+}
+
+/** The explicit time format and zone of a viewer, as `Intl` options (nothing when none was chosen). */
+function turnTimeOptions(fmt: SpaceFormatter): { hour12?: boolean; timeZone?: string } {
+  const zone = fmt.prefs?.timeZone?.trim()
+  const timeZone = zone && isValidTimeZone(zone) ? zone : undefined
+  return {
+    ...(fmt.prefs?.timeFormat ? { hour12: fmt.prefs.timeFormat === '12h' } : {}),
+    ...(timeZone ? { timeZone } : {}),
   }
+}
+
+/**
+ * A turn's time, for the header beside the author: "14:32" in the reader's local time, with the full
+ * date and time for the tooltip and the machine-readable `datetime`. Undefined when the server sent no
+ * time (or one that is not a time): a row then renders without one rather than with an invented one.
+ */
+export function formatTurnTime(
+  value: string | undefined,
+  fmt: SpaceFormatter = NORWEGIAN,
+): { iso: string; short: string; full: string } | undefined {
+  if (!value) return undefined
+  const at = new Date(value)
+  if (!Number.isFinite(at.getTime())) return undefined
+  return {
+    iso: at.toISOString(),
+    short: at.toLocaleTimeString(localeIntl(fmt.locale), { hour: '2-digit', minute: '2-digit', ...turnTimeOptions(fmt) }),
+    full: at.toLocaleString(localeIntl(fmt.locale), { dateStyle: 'long', timeStyle: 'short', ...turnTimeOptions(fmt) }),
+  }
+}
+
+/** Consecutive turns by the same author within this window share one avatar and name (Slack's grouping). */
+export const TURN_GROUP_WINDOW_MS = 5 * 60_000
+
+/** The fields of a turn that decide who wrote it and when. */
+export type GroupableTurn = {
+  readonly role: 'user' | 'assistant'
+  readonly agentName?: string
+  readonly authorSubjectId?: string
+  readonly createdAt?: string
+}
+
+/**
+ * Whether `turn` continues the group that `previous` started: the same author, close enough in time.
+ *
+ * "Same author" is what the server recorded, never a guess: a member turn needs the same recorded
+ * `authorSubjectId` (two unattributed turns are two unknown authors, not one), an agent turn needs the
+ * same persona name (the room-level `fallbackAgentName` stands in for an unrecorded one). A member and
+ * an agent never group. Both turns need a time and the gap must be 0 to 5 minutes, so a turn without a
+ * time starts its own group: the grouping never claims something the record does not show.
+ */
+export function continuesTurnGroup(
+  previous: GroupableTurn | undefined,
+  turn: GroupableTurn,
+  fallbackAgentName: string,
+): boolean {
+  if (!previous || previous.role !== turn.role) return false
+  if (turn.role === 'assistant') {
+    if ((previous.agentName ?? fallbackAgentName) !== (turn.agentName ?? fallbackAgentName)) return false
+  } else if (!turn.authorSubjectId || previous.authorSubjectId !== turn.authorSubjectId) {
+    return false
+  }
+  if (!previous.createdAt || !turn.createdAt) return false
+  const gap = new Date(turn.createdAt).getTime() - new Date(previous.createdAt).getTime()
+  return Number.isFinite(gap) && gap >= 0 && gap <= TURN_GROUP_WINDOW_MS
 }

@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::contracts::ElementRect;
 use crate::ids::kinds;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,4 +119,139 @@ pub struct Event {
     pub seq: u64,
     pub payload: serde_json::Value,
     pub idempotency_key: String,
+}
+
+/// Payload of an `action.started` event (`EventType::ActionStarted`). `step` and
+/// `action` are the shape every consumer reads. `rect` is additive: the target
+/// element's box in CSS pixels, when the browser reported one before the action
+/// ran. It is for presentation only; no resolver, action or receipt reads it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionStartedPayload {
+    pub step: u32,
+    /// The action as the event may carry it. `None` serializes as `null`.
+    #[serde(default)]
+    pub action: Option<serde_json::Value>,
+    /// Left out of the JSON when absent, so an event without a box has the same
+    /// payload as before this field existed. A payload without the key reads
+    /// back as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rect: Option<ElementRect>,
+    /// Correlation for an admitted attached-agent step, omitted for other lanes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+}
+
+impl ActionStartedPayload {
+    /// The JSON payload for the event. Every field is a plain value, so this
+    /// cannot fail; should a derive ever break, the event carries `null` rather
+    /// than panicking on the emit path.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+    }
+}
+
+#[cfg(test)]
+mod action_started_payload_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn payload(rect: Option<ElementRect>) -> ActionStartedPayload {
+        ActionStartedPayload {
+            step: 3,
+            action: Some(json!({ "kind": "click_ref" })),
+            rect,
+            attach_id: None,
+            tab_id: None,
+        }
+    }
+
+    #[test]
+    fn without_a_box_the_payload_is_the_same_as_before() {
+        let value = payload(None).to_value();
+        assert_eq!(
+            value,
+            json!({ "step": 3, "action": { "kind": "click_ref" } })
+        );
+        assert!(value.get("rect").is_none());
+    }
+
+    #[test]
+    fn a_box_is_added_beside_step_and_action() {
+        let rect = ElementRect {
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 30.0,
+        };
+        let value = payload(Some(rect)).to_value();
+        assert_eq!(value["step"], json!(3));
+        assert_eq!(
+            value["rect"],
+            json!({ "x": 10.0, "y": 20.0, "width": 100.0, "height": 30.0 })
+        );
+    }
+
+    #[test]
+    fn a_missing_action_stays_null_on_the_wire() {
+        let value = ActionStartedPayload {
+            step: 1,
+            action: None,
+            rect: None,
+            attach_id: None,
+            tab_id: None,
+        }
+        .to_value();
+        assert_eq!(value, json!({ "step": 1, "action": null }));
+    }
+
+    #[test]
+    fn a_payload_written_before_the_rect_reads_back_with_none() {
+        let legacy = json!({ "step": 2, "action": { "kind": "press" } });
+        let read: ActionStartedPayload = serde_json::from_value(legacy).unwrap();
+        assert_eq!(read.step, 2);
+        assert_eq!(read.rect, None);
+        assert_eq!(read.attach_id, None);
+        assert_eq!(read.tab_id, None);
+    }
+
+    #[test]
+    fn a_payload_with_a_box_round_trips() {
+        let original = payload(Some(ElementRect {
+            x: 0.5,
+            y: 1.5,
+            width: 2.0,
+            height: 3.0,
+        }));
+        let read: ActionStartedPayload = serde_json::from_value(original.to_value()).unwrap();
+        assert_eq!(read, original);
+    }
+
+    #[test]
+    fn attached_agent_identity_round_trips_with_target() {
+        let mut original = payload(Some(ElementRect { x: 1.0, y: 2.0, width: 4.0, height: 6.0 }));
+        original.attach_id = Some("attach-1".into());
+        original.tab_id = Some("tab-1".into());
+        let value = original.to_value();
+        assert_eq!(value["attach_id"], "attach-1");
+        assert_eq!(value["tab_id"], "tab-1");
+        assert_eq!(serde_json::from_value::<ActionStartedPayload>(value).unwrap(), original);
+    }
+
+    #[test]
+    fn attached_event_envelope_exposes_session_run_and_time_for_live_correlation() {
+        let session_run = crate::ids::Id::new();
+        let mut started = payload(Some(ElementRect { x: 1.0, y: 2.0, width: 4.0, height: 6.0 }));
+        started.attach_id = Some("attach-1".into());
+        started.tab_id = Some("tab-1".into());
+        let event = Event { event_id: crate::ids::Id::new(), run_id: Some(session_run.clone()), job_id: None,
+            event_type: EventType::ActionStarted, ts: chrono::Utc::now(), seq: 1,
+            payload: started.to_value(), idempotency_key: "event-1".into() };
+        let wire = serde_json::to_value(event).unwrap();
+        assert_eq!(wire["run_id"], session_run.to_string());
+        assert!(wire["ts"].as_str().is_some());
+        assert_eq!(wire["payload"]["attach_id"], "attach-1");
+        assert_eq!(wire["payload"]["tab_id"], "tab-1");
+    }
 }

@@ -64,6 +64,13 @@ describe('BrowserBlockedNotice in the browser chrome', () => {
     expect(notice(view.container)!.textContent).toContain(ERROR_COPY.browser_site_blocked!.no)
   })
 
+  it('offers to open the current address externally in personal Nett after a verified challenge', () => {
+    const view = render(() => <BrowserChrome personalBrowsing session={session({ challenge: strong, mode: 'human_takeover' })} />)
+    const link = notice(view.container)?.querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://example.test/')
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer')
+  })
+
   // The DoD: a login or consent page renders none.
   it.each([
     ['login', 'non_signal'],

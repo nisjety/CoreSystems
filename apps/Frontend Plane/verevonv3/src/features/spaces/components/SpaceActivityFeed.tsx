@@ -6,7 +6,9 @@ import {
   type SpaceActivityItem,
   type ThreadLikeActivitySource,
 } from '@/features/spaces/lib/activity-grammar'
+import { COPY, say } from '@/features/spaces/lib/space-copy'
 import { formatWhenWithTime } from '@/features/spaces/lib/space-thread-presentation'
+import { useI18n } from '@/shared/i18n'
 
 /**
  * A Space's activity feed, rendered with the Verb/Object/Outcome grammar.
@@ -56,14 +58,15 @@ function rowClass(item: SpaceActivityItem): string {
 }
 
 export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
-  const items = createMemo(() => props.items ?? buildSpaceActivity(props.threads))
+  const i18n = useI18n()
+  const items = createMemo(() => props.items ?? buildSpaceActivity(props.threads, i18n.tr))
 
   return (
     <Show
       when={items().length > 0}
       fallback={
         <p class="verevon-activity-empty">
-          {props.emptyLabel ?? 'Ingen aktivitet i dette rommet ennå.'}
+          {props.emptyLabel ?? say(i18n.tr, COPY.feed.empty)}
         </p>
       }
     >
@@ -96,7 +99,7 @@ export function SpaceActivityFeed(props: SpaceActivityFeedProps) {
                 </span>
               </Dynamic>
               <Show when={item.at}>
-                {(at) => <span class="verevon-activity-when">{formatWhenWithTime(at())}</span>}
+                {(at) => <span class="verevon-activity-when">{formatWhenWithTime(at(), { locale: i18n.locale() })}</span>}
               </Show>
               {/* Progressive disclosure without a second component: the
                   sentence stays one line and the evidence a supervisor asks

@@ -6,15 +6,26 @@ ARG SOURCE_REVISION=unverified
 ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
-WORKDIR /app
+WORKDIR /workspace/verevonv3
+# CI=true also in the dev image: `pnpm dev` re-installs before it runs, and a
+# fresh anonymous node_modules volume makes pnpm want to purge and reinstall,
+# which it refuses without a TTY (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
 ENV COREPACK_ENABLE_PROJECT_SPEC=0 \
     COREPACK_DEFAULT_TO_LATEST=0 \
-    COREPACK_HOME=/usr/local/share/corepack
+    COREPACK_HOME=/usr/local/share/corepack \
+    CI=true
 
+# The app sits two levels below / so `file:../../Ingestion Plane/...` keeps the
+# same spelling here as on the host; at /app, pnpm normalised it to
+# `../Ingestion Plane/...` and rewrote the bind-mounted lockfile. The mount
+# points compose covers with anonymous volumes are created here, owned by node,
+# because Docker gives a new anonymous volume the image directory's owner.
 RUN apk add --no-cache curl \
     && corepack enable \
     && corepack prepare pnpm@11.3.0 --activate \
-    && chown node:node /app
+    && mkdir -p node_modules packages/remote-core/node_modules apps/remote-dev/node_modules \
+       .next dist .claude/worktrees apps/gateway/target \
+    && chown -R node:node /workspace
 
 USER node
 # The SDK is a local file dependency outside the SPA build context. Copy only
@@ -25,6 +36,12 @@ COPY --from=quarry-sdk --chown=node:node ["src", "/Ingestion Plane/Quarry-v2/sdk
 # instead of the package.json "pnpm" field; without it `--frozen-lockfile` fails
 # with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH against the lockfile's recorded overrides.
 COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# The workspace packages' manifests, so the image installs all three projects.
+# With only the root manifest, the image's node_modules did not match the
+# workspace that `pnpm dev` checks at start, and its re-install then purged and
+# rebuilt every anonymous node_modules volume on the first run.
+COPY --chown=node:node packages/remote-core/package.json packages/remote-core/
+COPY --chown=node:node apps/remote-dev/package.json apps/remote-dev/
 # The browser uses the generated Quarry client for typed source/browser
 # contracts.  It is intentionally kept in the Ingestion Plane and is supplied
 # as a BuildKit named context by compose/CI; copying it to the path encoded by
@@ -80,6 +97,13 @@ ENV CI=true
 # find module '@verevon/remote-core'" instead of a legible build error.
 # Mirrors the same fix in the `spa-verify` CI job's workflow step.
 RUN pnpm --filter @verevon/remote-core run build
+# Build id (WS07-S2): vite.config.ts reads these to define __VEREVON_BUILD_ID__
+# and to emit dist/version.json plus <meta name="verevon-build">. ARGs do not
+# cross stages, so they are declared again here, before `pnpm build`. Without
+# them the build id is `dev` and the "new version" banner never shows.
+ARG SOURCE_REVISION=
+ARG BUILD_DATE=
+ENV SOURCE_REVISION=${SOURCE_REVISION}     BUILD_DATE=${BUILD_DATE}
 RUN pnpm build
 
 # Static production image. nginx-unprivileged runs as UID 101 and listens on a
@@ -91,7 +115,8 @@ LABEL org.opencontainers.image.revision="${SOURCE_REVISION}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build --chown=101:101 /app/dist/ /usr/share/nginx/html/
+COPY nginx-security-headers.conf /etc/nginx/snippets/verevon-security-headers.conf
+COPY --from=build --chown=101:101 /workspace/verevonv3/dist/ /usr/share/nginx/html/
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

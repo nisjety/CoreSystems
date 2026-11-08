@@ -9,17 +9,31 @@ use mp_contracts::dataplane::{
     wiki_v1::wiki_service_client::WikiServiceClient,
 };
 use mp_contracts::model_plane::v1::{
+    artifact_revision_service_client::ArtifactRevisionServiceClient,
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
+    event_log_client::EventLogClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
     learning_governance_service_client::LearningGovernanceServiceClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
+    message_revision_service_client::MessageRevisionServiceClient,
     message_search_client::MessageSearchClient,
     memory_service_client::MemoryServiceClient,
     message_tree_service_client::MessageTreeServiceClient,
+    thread_export_service_client::ThreadExportServiceClient,
+    thread_share_service_client::ThreadShareServiceClient,
+    thread_fork_service_client::ThreadForkServiceClient,
+    thread_goal_service_client::ThreadGoalServiceClient,
+    thread_reference_service_client::ThreadReferenceServiceClient,
+    attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
+    run_ledger_service_client::RunLedgerServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
-    session_core_client::SessionCoreClient,
+    session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
+    skill_version_service_client::SkillVersionServiceClient,
+    space_events_client::SpaceEventsClient,
+    space_history_service_client::SpaceHistoryServiceClient,
+    space_room_read_service_client::SpaceRoomReadServiceClient,
 };
 use mp_events::envelope::Envelope;
 use mp_events::publisher::{EventPublisher, InMemoryPublisher, PublishError};
@@ -89,6 +103,7 @@ mod zdr_publisher_tests {
             resource_ref: "request/test".into(),
             payload: serde_json::json!({"content": "must-not-persist"}),
             zdr: true,
+            ..Default::default()
         };
         publisher.publish("subject", &envelope).await.unwrap();
         assert!(publisher.drain().is_empty());
@@ -104,10 +119,58 @@ pub struct AppState {
     pub session_client: SessionCoreClient<Channel>,
     /// Session Core's MessageSearch service, on the same endpoint as `session_client` (WS17-S3).
     pub message_search_client: MessageSearchClient<Channel>,
+    /// Session Core's MessageRevisionService (edit and delete one message), on the same endpoint as
+    /// `session_client` (WS12-S6).
+    pub message_revision_client: MessageRevisionServiceClient<Channel>,
+    /// Session Core's EventLog (the run trace read path, WS10.S6) on the `session_client` endpoint.
+    pub event_log_client: EventLogClient<Channel>,
+    /// Session Core's RunLedgerService (EP-14 S5 run timing write and read) on the session_client endpoint.
+    pub run_ledger_client: RunLedgerServiceClient<Channel>,
+    /// Session Core's ArtifactRevisionService (EP-3 S2 revision store) on the session_client endpoint.
+    pub artifact_revision_client: ArtifactRevisionServiceClient<Channel>,
+    /// Session Core's SkillVersionService (EP-11 S3: recovery reads a run's pinned skill version) on the session_client endpoint.
+    pub skill_version_client: SkillVersionServiceClient<Channel>,
+    /// `MODEL_GATEWAY_ARTIFACT_REVISIONS`, read once at startup (EP-3 S2). Off writes nothing.
+    pub artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode,
+    /// `MODEL_GATEWAY_ARTIFACT_EDITING`, read once at startup after the revision mode (EP-3 S4). Off answers the edit routes 404.
+    pub artifact_editing_enabled: bool,
     /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).
     pub message_tree_client: MessageTreeServiceClient<Channel>,
+    /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).
+    pub thread_fork_client: ThreadForkServiceClient<Channel>,
+    /// Session Core's ThreadGoalService on the session_client endpoint (EP-7 S1).
+    pub thread_goal_client: ThreadGoalServiceClient<Channel>,
+    /// Session Core's ThreadExportService on the session_client endpoint (EP-12 S10).
+    pub thread_export_client: ThreadExportServiceClient<Channel>,
+    /// Session Core's ThreadShareService on the session_client endpoint (EP-12 S14).
+    pub thread_share_client: ThreadShareServiceClient<Channel>,
+    /// Session Core's ThreadReference service on the session_client endpoint (EP-3 S7): the
+    /// read-only thread reference tools read the threads the person attached through it.
+    pub thread_reference_client: ThreadReferenceServiceClient<Channel>,
+    /// Session Core's Attention service on the session_client endpoint (WS16-S1).
+    pub attention_client: AttentionServiceClient<Channel>,
     /// Session Core's LearningGovernance service on the same endpoint as `session_client` (WS07-S9).
     pub learning_client: LearningGovernanceServiceClient<Channel>,
+    /// Session Core's SpaceEvents service (the Space event tail), on the same endpoint as
+    /// `session_client` (WS02-S3).
+    pub space_events_client: SpaceEventsClient<Channel>,
+    /// Session Core's SpaceRoomReadService (the room's read aggregates), on the same endpoint as
+    /// `session_client` (WS07-S9).
+    pub space_room_read_client: SpaceRoomReadServiceClient<Channel>,
+    /// Session Core's SpaceHistoryService (message search and resolve), on the same endpoint as
+    /// `session_client` (WS13-S2).
+    pub space_history_client: SpaceHistoryServiceClient<Channel>,
+    /// `SPACE_MESSAGE_SEARCH_API`, read once at startup (WS13-S2). A rollout control, never an
+    /// authorization input.
+    pub space_message_search_api_enabled: bool,
+    /// Session Core's SpaceAttention service (the cross-room attention aggregate), on the same
+    /// endpoint as `session_client` (WS11-S2).
+    pub space_attention_client: SpaceAttentionClient<Channel>,
+    /// `SPACE_ATTENTION_SUMMARY`, read once at startup. A rollout control, never an authorization input.
+    pub space_attention_enabled: bool,
+    /// `SPACE_TIMELINE_API`, read once at startup (WS15-S6). A rollout control, never an
+    /// authorization input.
+    pub space_timeline_enabled: bool,
     /// Additive managed-run terminalization service hosted by Session Core on
     /// the same gRPC endpoint. It deliberately remains separate from the
     /// legacy `SessionCore` client so existing callers retain their contracts.
@@ -185,6 +248,10 @@ pub struct AppState {
     /// test sets it so the route does not depend on the process environment,
     /// which parallel tests share.
     pub browser_budget_claim: Option<bool>,
+    /// `MODEL_GATEWAY_BROWSER_KEY_GRANTS` (INNH-10 MP-3) pinned for this state. `None`
+    /// (production) reads the variable on each key-grant request (default off: both key-grant
+    /// routes answer 404); a test sets it so the route does not depend on the process environment.
+    pub browser_key_grants: Option<bool>,
     pub insight_core_base_url: String,
     /// Base URL of social-core's HTTP API (Application Plane social accounts,
     /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
@@ -329,6 +396,8 @@ pub struct AppState {
     /// Resumable chat-stream delta buffer (`HARNESS_PHASE1` §3b). Process-local;
     /// powers `/v1/invoke/{request_id}/resume`. Swap for Redis in multi-replica.
     pub stream_buffers: crate::stream_buffer::StreamBufferStore,
+    /// Room run policy (WS09-S3), read from the environment once at startup.
+    pub space_run_policy: crate::room_run::SpaceRunPolicy,
     /// Wave 10d — skill catalogue (per-org markdown skills).
     pub skills: crate::skills::SkillStore,
     /// Wave 10g — MCP server registry + tool proxy client.
@@ -394,6 +463,12 @@ fn lazy_static_channel(uri: &'static str) -> Channel {
         .connect_lazy()
 }
 
+/// The largest `ExecuteStep` response the gateway decodes. tonic's default is 4 MiB, which a `code_interpreter`
+/// result exceeds within its own caps: up to 16 MiB of delivered files, a preview PDF (8 MiB at most when
+/// configured) and up to 3 MiB of thumbnails, each carried as base64 (a third larger) in the one frame. 40 MiB holds
+/// the largest such frame with headroom for the JSON around it (EP-5 S9).
+const EXECUTE_STEP_DECODE_LIMIT_BYTES: usize = 40 * 1024 * 1024;
+
 impl AppState {
     /// Create a new `AppState` with an in-memory publisher.
     #[must_use]
@@ -423,8 +498,28 @@ impl AppState {
             rate_limiter: RateLimiter::from_env(),
             inference_client: InferenceCoreClient::new(inference_channel),
             message_search_client: MessageSearchClient::new(session_channel.clone()),
+            message_revision_client: MessageRevisionServiceClient::new(session_channel.clone()),
+            event_log_client: EventLogClient::new(session_channel.clone()),
+            run_ledger_client: RunLedgerServiceClient::new(session_channel.clone()),
+            artifact_revision_client: ArtifactRevisionServiceClient::new(session_channel.clone()),
+            skill_version_client: SkillVersionServiceClient::new(session_channel.clone()),
+            artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode::Off,
+            artifact_editing_enabled: false,
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
+            thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
+            thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
+            thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),
+            thread_share_client: ThreadShareServiceClient::new(session_channel.clone()),
+            thread_reference_client: ThreadReferenceServiceClient::new(session_channel.clone()),
+            attention_client: AttentionServiceClient::new(session_channel.clone()),
             learning_client: LearningGovernanceServiceClient::new(session_channel.clone()),
+            space_events_client: SpaceEventsClient::new(session_channel.clone()),
+            space_room_read_client: SpaceRoomReadServiceClient::new(session_channel.clone()),
+            space_history_client: SpaceHistoryServiceClient::new(session_channel.clone()),
+            space_message_search_api_enabled: false,
+            space_attention_client: SpaceAttentionClient::new(session_channel.clone()),
+            space_attention_enabled: false,
+            space_timeline_enabled: false,
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
@@ -434,7 +529,8 @@ impl AppState {
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             consume_client: OrchestrationCoreServiceClient::new(consume_channel),
-            execution_client: ExecutionCoreClient::new(execution_channel),
+            execution_client: ExecutionCoreClient::new(execution_channel)
+                .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
             browser_client: BrowserBrokerClient::new(browser_channel),
             memory_client: MemoryServiceClient::new(memory_channel),
@@ -447,6 +543,7 @@ impl AppState {
             org_core_service_id: "model-gateway".to_owned(),
             org_core_service_token: String::new(),
             browser_budget_claim: None,
+            browser_key_grants: None,
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
             conversation_core_base_url: "http://localhost:3160".to_owned(),
@@ -487,6 +584,7 @@ impl AppState {
             tool_results: crate::tool_result_handles::ToolResultStore::new(),
             trajectories: crate::trajectory::TrajectoryStore::new(),
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
+            space_run_policy: crate::room_run::SpaceRunPolicy::OFF,
             skills: crate::skills::SkillStore::new(),
             mcp: crate::runtime_registries::McpRegistry::new(),
             ownership: crate::ownership::OwnershipStore::new(),
@@ -587,12 +685,91 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let message_revision_client = MessageRevisionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let event_log_client = EventLogClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let run_ledger_client = RunLedgerServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let artifact_revision_client = ArtifactRevisionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let skill_version_client = SkillVersionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        // A typo in the revision switch fails the boot rather than silently writing nothing.
+        let artifact_revisions_mode = crate::artifact_revisions::ArtifactRevisionsMode::from_env()?;
+        // Editing over a shadow or absent revision table would save text no turn reads: refuse the boot.
+        let artifact_editing_enabled = crate::artifact_edit_routes::editing_from_env(artifact_revisions_mode)?;
         let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let thread_fork_client = ThreadForkServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_goal_client = ThreadGoalServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_export_client = ThreadExportServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_share_client = ThreadShareServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let thread_reference_client = ThreadReferenceServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let attention_client = AttentionServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let learning_client = LearningGovernanceServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_events_client = SpaceEventsClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_room_read_client = SpaceRoomReadServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_history_client = SpaceHistoryServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let space_attention_client = SpaceAttentionClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -622,7 +799,8 @@ impl AppState {
             "EXECUTION_CORE_URL",
             "EXECUTION_CORE_ADDR",
             "http://localhost:9093",
-        )?);
+        )?)
+        .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES);
         let sandbox_client = SandboxManagerClient::new(Self::lazy_channel(
             "SANDBOX_MANAGER_URL",
             "SANDBOX_MANAGER_ADDR",
@@ -797,8 +975,29 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.message_revision_client = message_revision_client;
+            state.event_log_client = event_log_client;
+            state.run_ledger_client = run_ledger_client;
+            state.artifact_revision_client = artifact_revision_client;
+            state.skill_version_client = skill_version_client;
+            state.artifact_revisions_mode = artifact_revisions_mode;
+            state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
+            state.thread_fork_client = thread_fork_client;
+            state.thread_goal_client = thread_goal_client;
+            state.thread_export_client = thread_export_client;
+            state.thread_share_client = thread_share_client;
+            state.thread_reference_client = thread_reference_client;
+            state.attention_client = attention_client;
             state.learning_client = learning_client;
+            state.space_events_client = space_events_client;
+            state.space_room_read_client = space_room_read_client;
+            state.space_history_client = space_history_client;
+            state.space_message_search_api_enabled =
+                mp_contracts::space_history::api_enabled();
+            state.space_attention_client = space_attention_client;
+            state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
@@ -839,6 +1038,7 @@ impl AppState {
             state.lsp = lsp_client.clone();
             // Redis-backed resume buffer when REDIS_URL is set (multi-replica).
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.space_run_policy = crate::room_run::SpaceRunPolicy::from_env();
             // Off unless the switch is `true`; a failed boot check degrades it, never the boot.
             state.run_control = crate::run_control::RunControl::from_env(Some(url.as_str())).await;
             // plan_mode + team_workers default to empty stores —
@@ -851,8 +1051,29 @@ impl AppState {
             state.inference_client = inference_client;
             state.session_client = session_client;
             state.message_search_client = message_search_client;
+            state.message_revision_client = message_revision_client;
+            state.event_log_client = event_log_client;
+            state.run_ledger_client = run_ledger_client;
+            state.artifact_revision_client = artifact_revision_client;
+            state.skill_version_client = skill_version_client;
+            state.artifact_revisions_mode = artifact_revisions_mode;
+            state.artifact_editing_enabled = artifact_editing_enabled;
             state.message_tree_client = message_tree_client;
+            state.thread_fork_client = thread_fork_client;
+            state.thread_goal_client = thread_goal_client;
+            state.thread_export_client = thread_export_client;
+            state.thread_share_client = thread_share_client;
+            state.thread_reference_client = thread_reference_client;
+            state.attention_client = attention_client;
             state.learning_client = learning_client;
+            state.space_events_client = space_events_client;
+            state.space_room_read_client = space_room_read_client;
+            state.space_history_client = space_history_client;
+            state.space_message_search_api_enabled =
+                mp_contracts::space_history::api_enabled();
+            state.space_attention_client = space_attention_client;
+            state.space_attention_enabled = mp_contracts::space_attention::summary_enabled();
+            state.space_timeline_enabled = mp_contracts::space_timeline::api_enabled();
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;
@@ -894,6 +1115,7 @@ impl AppState {
             // disabled in dev mode even when LSP_BRIDGE_URL is configured.
             state.lsp = lsp_client;
             state.stream_buffers = crate::stream_buffer::StreamBufferStore::from_env().await;
+            state.space_run_policy = crate::room_run::SpaceRunPolicy::from_env();
             state.run_control = crate::run_control::RunControl::from_env(None).await;
             Ok(state)
         }

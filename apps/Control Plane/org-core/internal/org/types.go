@@ -1,6 +1,9 @@
 package org
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // MaxSafeAuthRevision is the largest integer represented exactly by every
 // Control contract runtime, including JavaScript producers.
@@ -284,6 +287,59 @@ const InteractiveZdrEntitlementKey = "feature.zero_data_retention"
 var zeroDataRetentionPlans = map[string]bool{
 	"pro":        true,
 	"enterprise": true,
+}
+
+// The computed web entitlements (WS7.H, keys in web_policy.go) are derived from the
+// plan like feature.zero_data_retention and are never stored. They gate what an
+// organization's web policy may UNLOCK: an org can always tighten.
+//
+// The lines are product input, assumed here and changed in these three maps:
+//   - web.robots_override (a ceiling above "respect"): enterprise only. Who may
+//     actually be granted the override is a separate decision (OQ-11, platform
+//     operators only by default) enforced by Quarry, not by this plan check.
+//   - web.proxy_pool (a ceiling above "none"): pro and enterprise.
+//   - web.paid_search (search.paid_provider stays allowed): every paid or trial
+//     plan; free is the only plan without it.
+var webRobotsOverridePlans = map[string]bool{
+	"enterprise": true,
+}
+
+var webProxyPoolPlans = map[string]bool{
+	"pro":        true,
+	"enterprise": true,
+}
+
+var webPaidSearchPlans = map[string]bool{
+	"trial":      true,
+	"hobby":      true,
+	"standard":   true,
+	"pro":        true,
+	"enterprise": true,
+}
+
+// PlanAllowsWebCapability reports whether a plan carries one of the computed web
+// entitlement keys (WebRobotsOverrideEntitlementKey and its two siblings). An
+// unknown key is not allowed.
+func PlanAllowsWebCapability(plan, key string) bool {
+	plan = strings.ToLower(strings.TrimSpace(plan))
+	switch key {
+	case WebRobotsOverrideEntitlementKey:
+		return webRobotsOverridePlans[plan]
+	case WebProxyPoolEntitlementKey:
+		return webProxyPoolPlans[plan]
+	case WebPaidSearchEntitlementKey:
+		return webPaidSearchPlans[plan]
+	}
+	return false
+}
+
+// WebEntitlementsForPlan derives the three web entitlements from a plan.
+func WebEntitlementsForPlan(plan string) WebEntitlements {
+	return WebEntitlements{
+		RobotsOverride: PlanAllowsWebCapability(plan, WebRobotsOverrideEntitlementKey),
+		ProxyPool:      PlanAllowsWebCapability(plan, WebProxyPoolEntitlementKey),
+		PaidSearch:     PlanAllowsWebCapability(plan, WebPaidSearchEntitlementKey),
+	}
 }
 
 // RetentionPosture is the minimal, server-computed view of an organization's

@@ -25,6 +25,9 @@ const (
 	goldenOrchSubagentStoppedWithParentHex        = "0a060880e2cfaa0672220a0972756e2d6368696c641209636f6d706c657465641a0a72756e2d706172656e74"
 	goldenOrchRunPausedForApprovalHex             = "0a060880e2cfaa067a0f0a0572756e2d311206617070722d31"
 	goldenOrchRunResumedAfterApprovalHex          = "0a060880e2cfaa0682010f0a0572756e2d311206617070722d31"
+	// Do-run usage progress (WS27 S9, tag 29): the run's totals so far and the route of the
+	// round that just finished. Counts and ids only.
+	goldenOrchRunUsageProgressHex = "0a060880e2cfaa06ea01370a0572756e2d311002180320043a0d6770742d352e362d746572726142196f70656e61692d636f6465782d737562736372697074696f6e"
 )
 
 const expectedAtSeconds int64 = 1_700_000_000
@@ -168,6 +171,21 @@ func TestOrchestrationEventDecodeRunResumedAfterApproval(t *testing.T) {
 	}
 }
 
+func TestOrchestrationEventDecodeRunUsageProgress(t *testing.T) {
+	ev := decodeOrchHex(t, goldenOrchRunUsageProgressHex)
+	v, ok := ev.GetEvent().(*OrchestrationEvent_RunUsageProgress_)
+	if !ok {
+		t.Fatalf("variant = %T", ev.GetEvent())
+	}
+	p := v.RunUsageProgress
+	if p.GetRunId() != "run-1" || p.GetRound() != 2 || p.GetInputTokens() != 3 || p.GetOutputTokens() != 4 {
+		t.Fatalf("counts = %q/%d/%d/%d", p.GetRunId(), p.GetRound(), p.GetInputTokens(), p.GetOutputTokens())
+	}
+	if p.GetModelUsed() != "gpt-5.6-terra" || p.GetProviderUsed() != "openai-codex-subscription" {
+		t.Fatalf("route = %q/%q", p.GetModelUsed(), p.GetProviderUsed())
+	}
+}
+
 func TestOrchestrationEventRoundTripReencodesIdentically(t *testing.T) {
 	cases := []string{
 		goldenOrchPlanTransitionedHex,
@@ -179,6 +197,7 @@ func TestOrchestrationEventRoundTripReencodesIdentically(t *testing.T) {
 		goldenOrchSubagentStoppedWithParentHex,
 		goldenOrchRunPausedForApprovalHex,
 		goldenOrchRunResumedAfterApprovalHex,
+		goldenOrchRunUsageProgressHex,
 	}
 	for _, h := range cases {
 		raw, err := hex.DecodeString(h)

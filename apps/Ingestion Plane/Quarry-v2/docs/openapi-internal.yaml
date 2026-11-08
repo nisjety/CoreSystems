@@ -8,8 +8,10 @@ info:
     This file is repository documentation only: it is never served, and no SDK is generated
     from it. Internal routes never appear in docs/openapi.yaml or in the generated SDKs
     (decision 3.13, OPENAPI-INTERNAL, 2026-10-28). Who can reach these routes is decided by
-    gateway routing, not by this file (D2-312). The eight internal routes of the Go control
-    service are not described here yet; they follow the D2-050 internal secret split.
+    gateway routing, not by this file (D2-312). The last eight paths are quarry-control's (Go,
+    default port 8081, not the edge): seven are called by the orchestrator and verified with
+    QUARRY_CONTROL_INTERNAL_SECRET, one (zdr-tombstones) is called by the edge and verified with
+    QUARRY_INTERNAL_SECRET (D2-050).
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -614,6 +616,399 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/jobs/claim:
+    post:
+      operationId: controlInternalJobsClaim
+      summary: Claim accepted jobs (orchestrator â†’ control)
+      description: >-
+        quarry-control (Go, QUARRY_CONTROL_ADDR, default :8081), not the edge. The dispatcher's
+        replacement for listing the newest jobs: leases up to `limit` accepted jobs, oldest first
+        within each organization and round-robin across organizations, within each organization's
+        cap. A job whose lease expired is claimable again. Answers 404 NOT_FOUND while job
+        admission is off (QUARRY_JOB_ADMISSION is not on), so a dispatcher that speaks the claim
+        protocol falls back to its old list during a rolling deploy. Verified with the
+        control-internal HMAC (see the controlInternalHmac scheme).
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit:
+                  type: integer
+                  description: 1 to 200. A value outside that range (or absent) means 200.
+      responses:
+        '200':
+          description: The claimed jobs (an empty array when nothing is claimable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlJobListEnvelope'
+        '400':
+          description: BAD_REQUEST when the body is not JSON.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: >-
+            The request is not signed, is signed with a different secret (the edge secret
+            included), is outside the 300 second skew, or replays a nonce. The body is plain text,
+            not an envelope.
+        '404':
+          description: NOT_FOUND while job admission is off.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '500':
+          description: INTERNAL when the claim fails.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/jobs/pending-control:
+    get:
+      operationId: controlInternalJobsPendingControl
+      summary: Jobs with an unapplied control request (orchestrator â†’ control)
+      description: >-
+        quarry-control. The jobs whose desired_seq is ahead of applied_seq, across organizations,
+        for the orchestrator's control loop (pause, resume, cancel). The loop signals each
+        workflow, then acknowledges at the sequence it applied. Verified with the control-internal
+        HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: limit
+        in: query
+        required: false
+        description: 1 to 500; an absent or invalid value means 100.
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: The pending jobs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlJobListEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+  /v1/internal/jobs/{id}/control-ack:
+    post:
+      operationId: controlInternalJobsControlAck
+      summary: Acknowledge an applied control request (orchestrator â†’ control)
+      description: >-
+        quarry-control. Raises applied_seq of the job; a lower value is accepted and ignored. It
+        names no org: the job id is the key. Verified with the control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: id
+        in: path
+        required: true
+        description: The job id.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - applied_seq
+              properties:
+                applied_seq:
+                  type: integer
+                  format: int64
+      responses:
+        '200':
+          description: The job id and the applied_seq that was sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlAckEnvelope'
+        '400':
+          description: BAD_REQUEST when the body is not JSON.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+        '404':
+          description: NOT_FOUND when no job has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/jobs/running:
+    get:
+      operationId: controlInternalJobsRunning
+      summary: Running or paused jobs that have a workflow (orchestrator â†’ control)
+      description: >-
+        quarry-control. For the orchestrator's sweep: it asks Temporal how each workflow closed and
+        finalizes the jobs whose workflow ended without telling control. Verified with the
+        control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: limit
+        in: query
+        required: false
+        description: 1 to 500; an absent or invalid value means 200.
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: The running jobs, across organizations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlJobListEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+  /v1/internal/jobs/{id}/finalize:
+    post:
+      operationId: controlInternalJobsFinalize
+      summary: End a job whose workflow ended (orchestrator â†’ control)
+      description: >-
+        quarry-control. The orchestrator sends the terminal status it observed. Only a job that has
+        not ended changes (changed is true); a job that already ended is returned with changed
+        false, and no second event is written. The call names the org it believes owns the job
+        (body org_id, or the org_id query parameter): a job of another org answers 404, exactly
+        like a missing job, and is not changed (D2-050). A call that names no org is accepted
+        unless QUARRY_CONTROL__FINALIZE_ORG_REQUIRED is on (default off, so an orchestrator that
+        has not been redeployed keeps working); with it on the answer is 400. Verified with the
+        control-internal HMAC: the edge's secret does not open this route.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: id
+        in: path
+        required: true
+        description: The job id.
+        schema:
+          type: string
+      - name: org_id
+        in: query
+        required: false
+        description: The org that owns the job. The body's org_id wins when both are sent.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalControlFinalizeRequest'
+      responses:
+        '200':
+          description: The job after the call, and whether this call changed it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlFinalizeEnvelope'
+        '400':
+          description: >-
+            BAD_REQUEST when the body is not JSON, when status is not timed_out, cancelled or
+            failed, or when no org is named and QUARRY_CONTROL__FINALIZE_ORG_REQUIRED is on.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: >-
+            The request is not signed with the control-internal secret (signed with the edge
+            secret, unsigned, outside the skew, or a replayed nonce). The body is plain text.
+        '404':
+          description: NOT_FOUND when no job has that id, or when the job belongs to another org.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '500':
+          description: INTERNAL when the finalize or the event write fails.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/schedules/desired:
+    get:
+      operationId: controlInternalSchedulesDesired
+      summary: The all-orgs schedule set to reconcile (orchestrator â†’ control)
+      description: >-
+        quarry-control. The orchestrator's reconciler reads this to materialize Temporal schedules.
+        It is the only all-orgs schedule read: GET /v1/schedules always requires org_id. Verified
+        with the control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: limit
+        in: query
+        required: false
+        description: Page size; the store's default and cap apply.
+        schema:
+          type: integer
+      - name: cursor
+        in: query
+        required: false
+        description: The keyset cursor of the previous page.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The desired schedules, in the orchestrator's wire shape.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlScheduleListEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+  /v1/internal/schedules/{id}/runs:
+    post:
+      operationId: controlInternalSchedulesRegisterRun
+      summary: Register one scheduled fire as a job (orchestrator â†’ control)
+      description: >-
+        quarry-control. Called by the orchestrator's RegisterScheduledRun activity. Creates the
+        fire's job: running (a workflow starts it) or terminal skipped (the edge denied the fire,
+        and a schedule_skipped event records why). Org, kind and params come from the schedule row,
+        never from the body. The same run_key answers the job the first attempt created (200)
+        instead of a second one (201). The schedule must exist, be enabled and have a kind that
+        runs as a job. Verified with the control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: id
+        in: path
+        required: true
+        description: The schedule id (a schedule-kind id).
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalControlRegisterRunRequest'
+      responses:
+        '200':
+          description: The fire was already registered; the job the first attempt created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlRegisterRunEnvelope'
+        '201':
+          description: The job created for this fire.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlRegisterRunEnvelope'
+        '400':
+          description: >-
+            BAD_REQUEST when the id is not a schedule id, the body is not JSON, run_key or run_id
+            is empty or over 128 characters, status is not running or skipped, or reason is over 64
+            characters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+        '404':
+          description: NOT_FOUND when no schedule has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '409':
+          description: CONFLICT when the schedule is disabled, its kind does not run as a job, or the job cannot be created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/zdr-tombstones:
+    post:
+      operationId: controlInternalZdrTombstone
+      summary: Record a ZDR run tombstone (edge â†’ control)
+      description: >-
+        quarry-control, called by the EDGE (crates/quarry-edge/src/zdr_tombstone.rs), not the
+        orchestrator, so it is verified with the edge secret (QUARRY_INTERNAL_SECRET,
+        edgeInternalHmac), not the control-internal one. Mounted only when control has an HMAC
+        secret and QUARRY_ZDR_TOMBSTONE_RECEIVER is on (default off); otherwise the path is 404. A
+        tombstone is metadata only: the body is read through a 4 KiB cap, must match
+        crates/quarry-runtime/contracts/zdr-tombstone.schema.json exactly (unknown fields are
+        refused), and any string containing :// is refused. The answer is 204 for an insert and for
+        a duplicate run_id alike (first write wins), so the route is not an existence oracle. An
+        unsigned request is refused even in rollout mode. No route reads tombstones.
+      tags:
+      - internal
+      security:
+      - edgeInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalControlZdrTombstone'
+      responses:
+        '204':
+          description: Stored, or a row with this run_id already existed. No body.
+        '400':
+          description: >-
+            BAD_REQUEST when the body is too large, unreadable, not an allowlisted tombstone, holds
+            a value that looks like a URL, or fails validation. The message names a field and never
+            echoes a value.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: The request is unsigned or signed with another secret (the control-internal one included).
+        '404':
+          description: The receiver is not mounted (QUARRY_ZDR_TOMBSTONE_RECEIVER is off, or control has no HMAC secret).
+        '500':
+          description: INTERNAL when the tombstone cannot be stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
 components:
   securitySchemes:
     runtimeToken:
@@ -630,6 +1025,26 @@ components:
         The shared internal service token, QUARRY_EDGE_INTERNAL_TOKEN, sent as Authorization:
         Bearer. The edge's dev bypass (QUARRY_EDGE_AUTH_DEV_BYPASS) skips this check; it is for
         local runs only.
+    controlInternalHmac:
+      type: apiKey
+      in: header
+      name: X-Quarry-Sig
+      description: >-
+        The orchestrator-only HMAC group of quarry-control (D2-050), keyed by
+        QUARRY_CONTROL_INTERNAL_SECRET. Three headers: X-Quarry-Sig (sig_v1= plus the base64
+        HMAC-SHA256), X-Quarry-Sig-TS (unix seconds, 300 s skew) and X-Quarry-Sig-Nonce (random hex,
+        used once). The signed string is the method, the path with its query, the SHA-256 hex of
+        the body, the timestamp and the nonce, each on its own line. The edge does not hold this
+        secret and a request signed with QUARRY_INTERNAL_SECRET is refused 401. While the variable is
+        unset control and the orchestrator fall back to QUARRY_INTERNAL_SECRET and log one warning
+        (the fallback is removed after the soak).
+    edgeInternalHmac:
+      type: apiKey
+      in: header
+      name: X-Quarry-Sig
+      description: >-
+        The same header triple and canonical string, keyed by QUARRY_INTERNAL_SECRET, which the edge
+        and control share. Used by the routes the edge calls on control.
   parameters:
     QueueName:
       name: queue_name
@@ -644,6 +1059,20 @@ components:
       in: header
       required: true
       description: The queue binding over org_id and the queue name, keyed by the edge's internal secret.
+      schema:
+        type: string
+    ControlSigTimestamp:
+      name: X-Quarry-Sig-TS
+      in: header
+      required: true
+      description: Unix seconds. Refused when more than 300 seconds from control's clock.
+      schema:
+        type: string
+    ControlSigNonce:
+      name: X-Quarry-Sig-Nonce
+      in: header
+      required: true
+      description: A random hex nonce, used once inside the skew window. A repeat is refused as a replay.
       schema:
         type: string
   schemas:
@@ -1465,6 +1894,340 @@ components:
           $ref: '#/components/schemas/InternalMeta'
         error:
           description: Always null on success.
+    InternalControlJob:
+      description: >-
+        Control's job record (services/quarry-control internal/store Job, its MarshalJSON). Times are
+        RFC 3339 strings. Optional fields are omitted when empty.
+      type: object
+      required:
+      - id
+      - org_id
+      - kind
+      - status
+      - policy
+      - created_at
+      - origin
+      - desired_seq
+      - applied_seq
+      properties:
+        id:
+          type: string
+        org_id:
+          type: string
+          description: The org that created the job, stamped by control from the verified caller.
+        kind:
+          type: string
+          description: crawl, search, extract, research, agent, batch or scrape.
+        status:
+          type: string
+          description: accepted, running, paused, completed, failed, cancelled, timed_out or skipped.
+        policy:
+          type: object
+          additionalProperties: true
+          description: The run policy.
+        params:
+          type: object
+          additionalProperties: true
+        schedule_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        run_id:
+          type: string
+        idempotency_key:
+          type: string
+        statistics:
+          type: object
+          additionalProperties: true
+        origin:
+          type: object
+          description: Who started the job. type is user, agent, schedule, webhook, api or unknown.
+          required:
+          - type
+          properties:
+            type:
+              type: string
+            actor:
+              type: string
+            ref:
+              type: string
+            created_by:
+              type: string
+        desired_state:
+          type: string
+          description: paused, running or cancelled. Empty when no control request was made.
+        desired_seq:
+          type: integer
+          format: int64
+        applied_seq:
+          type: integer
+          format: int64
+        workflow_id:
+          type: string
+        deadline_at:
+          type: string
+          format: date-time
+        terminal_reason:
+          type: string
+        finished_at:
+          type: string
+          format: date-time
+    InternalControlJobListEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/InternalControlJob'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalControlAckEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: object
+          required:
+          - id
+          - applied_seq
+          properties:
+            id:
+              type: string
+            applied_seq:
+              type: integer
+              format: int64
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalControlFinalizeRequest:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - timed_out
+          - cancelled
+          - failed
+        org_id:
+          type: string
+          description: >-
+            The org the caller believes owns the job. A job of another org answers 404 and is not
+            changed. Optional unless QUARRY_CONTROL__FINALIZE_ORG_REQUIRED is on.
+        forced:
+          type: boolean
+          description: For cancelled. True when the workflow was terminated, not cancelled.
+        timeout_type:
+          type: string
+          description: For timed_out. Which Temporal timeout fired, for example execution.
+        limit_s:
+          type: integer
+          format: int64
+          description: For timed_out. The limit that was exceeded, in seconds.
+        finished_at:
+          type: integer
+          format: int64
+          description: Unix milliseconds. Control uses its own clock when this is zero or absent.
+    InternalControlFinalizeEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: object
+          required:
+          - job
+          - changed
+          properties:
+            job:
+              $ref: '#/components/schemas/InternalControlJob'
+            changed:
+              type: boolean
+              description: False when the job had already ended; nothing was written.
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalControlSchedule:
+      description: The schedule row in the shape the orchestrator's reconciler reads.
+      type: object
+      required:
+      - id
+      - org_id
+      - cron
+      - enabled
+      - workflow
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        org_id:
+          type: string
+        cron:
+          type: string
+        target_kind:
+          type: string
+        target_ref:
+          type: string
+        enabled:
+          type: boolean
+        created_at:
+          type: integer
+          format: int64
+          description: Unix milliseconds.
+        workflow:
+          type: string
+          description: The Temporal workflow to start on each fire.
+        args:
+          type: array
+          description: The workflow arguments.
+          items:
+            description: Any JSON value.
+        paused:
+          type: boolean
+        overlap:
+          type: string
+        timezone:
+          type: string
+        jitter_s:
+          type: integer
+          format: int64
+        catchup_window_s:
+          type: integer
+          format: int64
+        pause_on_failure:
+          type: boolean
+    InternalControlScheduleListEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/InternalControlSchedule'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalControlRegisterRunRequest:
+      type: object
+      required:
+      - run_key
+      - run_id
+      - status
+      properties:
+        run_key:
+          type: string
+          maxLength: 128
+          description: Names the fire. The same key registers one job.
+        run_id:
+          type: string
+          maxLength: 128
+        status:
+          type: string
+          enum:
+          - running
+          - skipped
+        reason:
+          type: string
+          maxLength: 64
+          description: For skipped. Why the edge denied the fire.
+        workflow_id:
+          type: string
+    InternalControlRegisterRunEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: object
+          required:
+          - job_id
+          - status
+          properties:
+            job_id:
+              type: string
+            status:
+              type: string
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalControlZdrTombstone:
+      description: >-
+        The only fields a ZDR run tombstone may carry. The authority is
+        crates/quarry-runtime/contracts/zdr-tombstone.schema.json; this copy is a summary and a test
+        compares the control handler's keys to that schema, not to this file.
+      type: object
+      additionalProperties: false
+      required:
+      - run_id
+      - org_id
+      - kind
+      - retention_class
+      - outcome
+      - ended_at
+      properties:
+        run_id:
+          type: string
+        org_id:
+          type: string
+        kind:
+          type: string
+          enum:
+          - scrape
+          - search
+          - answer
+          - extract
+          - agent_run
+        retention_class:
+          type: string
+          enum:
+          - zdr
+        outcome:
+          type: string
+          enum:
+          - ok
+          - error
+          - refused
+          - cancelled
+          - timeout
+        driver:
+          type: string
+          enum:
+          - static
+          - browser
+          - tls
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        step_count:
+          type: integer
+          minimum: 0
+        cost_units:
+          type: number
+          minimum: 0
+        error_class:
+          type: string
+          description: A wire error code or a closed driver error class (see the schema file).
 tags:
 - name: internal
   description: Plane-to-plane endpoints on the trusted bus. Never public, never in the SDKs.

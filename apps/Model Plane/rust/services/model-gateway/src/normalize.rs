@@ -566,6 +566,7 @@ mod tests {
 
     fn make_request(content: &str, model: Option<&str>) -> InvokeRequest {
         InvokeRequest {
+            wake_context: None,
             effort: None,
             pinned_message_ids: Vec::new(),
             regenerated: false,
@@ -586,11 +587,14 @@ mod tests {
             browse_web: false,
             skill_ids: Vec::new(),
             deep_research: false,
+            research_phase: None,
+            research_plan: None,
             retrieval_scope: None,
             connector_scope: None,
             max_cost_usd: None,
             max_tokens: None,
             profile: None,
+            agent_mode: None,
             verbosity: None,
             features: Vec::new(),
             idempotency_key: None,
@@ -598,6 +602,7 @@ mod tests {
             generate_image: false,
             plan_mode: false,
             execute_granted: false,
+            approved_plan_id: None,
             tools: Vec::new(),
             org_name: None,
             user_name: None,
@@ -606,6 +611,22 @@ mod tests {
             org_instructions: None,
             space_instructions: None,
             persona_instructions: None,
+            persona_tone: None,
+            locale: None,
+            client_timezone: None,
+            client_utc_offset_minutes: None,
+            ui_locale: None,
+            agent_roles: None,
+            agent_ref: None,
+            agent_version: None,
+            agent_digest: None,
+            agent_tool_capability_ids: None,
+            agent_autonomy_cap: None,
+            wide_research: None,
+            context_refs: None,
+            deck_template: None,
+            goal_id: None,
+            goal_auto: false,
         }
     }
 

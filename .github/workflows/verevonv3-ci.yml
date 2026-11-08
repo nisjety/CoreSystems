@@ -48,7 +48,7 @@ jobs:
     name: Fabrication guard (no fake "live" state)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Assert no fabricated state was re-introduced
         run: |
           set -uo pipefail
@@ -120,13 +120,13 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3/apps/gateway'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: 'apps/Frontend Plane/verevonv3/apps/gateway -> target'
           # One-time cache-buster (2026-09-08): a restored target/ directory's
@@ -155,15 +155,15 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: '11.3.0'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -284,18 +284,18 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The new-file scan diffs against the base commit, so it needs history.
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: '11.3.0'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -341,15 +341,15 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: '11.3.0'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           cache: 'pnpm'
@@ -394,7 +394,7 @@ jobs:
     # that the frontend context can consume the generated Ingestion Plane SDK,
     # not merely that a prior workspace install happened to create it.
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Generate and build the Quarry TypeScript SDK
         working-directory: 'apps/Ingestion Plane/Quarry-v2/sdks'
@@ -405,7 +405,7 @@ jobs:
           pnpm install --ignore-scripts
           pnpm run build
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build production image with the named SDK context
         working-directory: 'apps/Frontend Plane/verevonv3'
@@ -413,9 +413,34 @@ jobs:
           docker buildx build
           --target production
           --build-context 'quarry-client=../../Ingestion Plane/Quarry-v2/sdks/typescript'
+          --build-arg SOURCE_REVISION=${{ github.sha }}
+          --build-arg BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
           --tag verevonv3-ci:${{ github.sha }}
           --load
           .
+
+      # WS07-S2: the nginx config (with the shared security-headers snippet) must
+      # parse in the image that ships, and the cache/header rules must hold.
+      - name: nginx config test in the built image
+        run: docker run --rm --entrypoint nginx verevonv3-ci:${{ github.sha }} -t
+
+      - name: Header smoke (version.json, index.html, assets)
+        run: |
+          cid=$(docker run -d -p 8080:8080 verevonv3-ci:${{ github.sha }})
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          curl --silent --fail --retry 20 --retry-connrefused --retry-delay 1 --output /dev/null http://localhost:8080/index.html
+          vj=$(curl -sI http://localhost:8080/version.json)
+          echo "$vj"
+          echo "$vj" | grep -i '^cache-control: no-store'
+          echo "$vj" | grep -i '^content-type: application/json'
+          echo "$vj" | grep -i '^content-security-policy:'
+          ix=$(curl -sI http://localhost:8080/index.html)
+          echo "$ix" | grep -i '^cache-control: no-cache'
+          echo "$ix" | grep -i '^x-content-type-options: nosniff'
+          wd=$(curl -sI http://localhost:8080/boot-watchdog.js)
+          echo "$wd" | grep -i '^cache-control: no-cache'
+          asset=$(curl -s http://localhost:8080/index.html | grep -o '/assets/[^"]*\.js' | head -1)
+          curl -sI "http://localhost:8080$asset" | grep -i 'immutable'
 
   # Interactive demo (stage 04). The committed bundle must equal a fresh build, and the built demo
   # must pass its privacy probe. Scripts and budgets: scripts/build-product-demo.mjs and
@@ -427,15 +452,15 @@ jobs:
       run:
         working-directory: 'apps/Frontend Plane/verevonv3'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6
         with:
           version: '11.3.0'
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
           cache: 'pnpm'

@@ -320,3 +320,90 @@ describe('rememberMemory', () => {
     await expect(rememberMemory('thread-1', 'x')).rejects.toThrow('memory_not_enabled')
   })
 })
+
+describe('listMemories withheld legacy rows (WS17-S2)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('maps withheld_reason and origin_space_ref from a withheld row', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          memories: [
+            {
+              memory_id: 'm1',
+              topic: 'USER',
+              content: 'learned in a room',
+              withheld_reason: 'room_origin_unverified',
+              origin_space_ref: 'space-room-1',
+            },
+          ],
+        }),
+      ),
+    )
+
+    const result = await listMemories()
+
+    expect(result.memories[0]).toMatchObject({
+      memoryId: 'm1',
+      withheldReason: 'room_origin_unverified',
+      originSpaceRef: 'space-room-1',
+    })
+  })
+
+  it('reads an unrecognised withheld reason as unknown, never as a known value', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          memories: [{ memory_id: 'm1', withheld_reason: 'some_future_reason' }],
+        }),
+      ),
+    )
+
+    const result = await listMemories()
+
+    expect(result.memories[0]?.withheldReason).toBe('unknown')
+    // No Space was named, so none is invented.
+    expect(result.memories[0]).not.toHaveProperty('originSpaceRef')
+  })
+
+  it('accepts the camelCase spelling too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          memories: [{ memoryId: 'm1', withheldReason: 'room_origin_unverified', originSpaceRef: 'space-2' }],
+        }),
+      ),
+    )
+
+    const result = await listMemories()
+
+    expect(result.memories[0]).toMatchObject({ withheldReason: 'room_origin_unverified', originSpaceRef: 'space-2' })
+  })
+
+  it('leaves both fields absent for an ordinary row and for an older gateway', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          memories: [
+            { memory_id: 'old', topic: 'USER', content: 'from an older gateway' },
+            { memory_id: 'blank', withheld_reason: '', origin_space_ref: '' },
+          ],
+        }),
+      ),
+    )
+
+    const result = await listMemories()
+
+    for (const entry of result.memories) {
+      expect(entry).not.toHaveProperty('withheldReason')
+      expect(entry).not.toHaveProperty('originSpaceRef')
+    }
+    expect(result.memories).toHaveLength(2)
+  })
+})

@@ -599,6 +599,10 @@ services:
       # facade (reached over inter-plane-bus). HTTP/facade port is 3012, NOT 8080.
       USER_CORE_HTTP_URL: ${USER_CORE_HTTP_URL:-http://user-core:3012}
       USER_CORE_SERVICE_TOKEN: ${USER_CORE_RETRIEVAL_TOKEN:-}
+      # WS14-S5: honour the owner's Space-subject grants (room files) inside a
+      # verified Space read. Off unless the literal "true"; a rollout switch
+      # only, never an authorization input. Needs CONTROL_SPACE_SUBJECT_GRANTS.
+      RETRIEVAL_SPACE_GRANTS: ${RETRIEVAL_SPACE_GRANTS:-false}
       # Org-axis membership and per-user ownership are both enforced. Only an
       # explicitly gated insecure development posture can select the no-op:
       # setting CONTROL_PLANE_ENFORCEMENT=off ALSO requires
@@ -1416,6 +1420,17 @@ services:
       # Per-user ownership: filter-at-source needs the viewer's granted doc-set
       # from user-core's resource_grants facade. HTTP/facade port is 3012, NOT 8080.
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
+      # WS14-S3 room files: off unless explicitly the literal "true" (dev
+      # override turns it on). A rollout switch only, never an authorization
+      # input. The decision key vars let the Space import verifier trust Control.
+      DOCUMENTS_SPACE_FILES: ${DOCUMENTS_SPACE_FILES:-false}
+      # WS14-S4: owner share routes (list/add/remove user shares). A rollout
+      # switch only, never an authorization input. Enable only after the
+      # gateway share actions are re-pointed, then CONTROL_OWNER_ASSERTED_GRANTS.
+      DOCUMENTS_SHARE_WRITES: ${DOCUMENTS_SHARE_WRITES:-false}
+      SPACE_FILES_MAX_PER_ROOM: ${SPACE_FILES_MAX_PER_ROOM:-500}
+      SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM: ${SPACE_FILES_MAX_TEXT_BYTES_PER_ROOM:-209715200}
+      CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON: ${CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON:-}
       HTTP_PORT: "8010"
       # Auth is enforced by default; tenant and user identity come only from the
       # verified Control Plane token. JWKS unavailability fails closed.

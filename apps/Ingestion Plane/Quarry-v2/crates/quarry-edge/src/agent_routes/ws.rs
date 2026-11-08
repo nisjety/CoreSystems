@@ -12,6 +12,7 @@ pub async fn live_frame_ws(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
     Query(query): Query<FrameStreamQuery>,
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, ApiErr> {
     let request_id = crate::request_id::current();
@@ -48,6 +49,13 @@ pub async fn live_frame_ws(
             entry.zdr,
         )
     };
+    // W3-E3.4-5: read after the owner check, so a caller who does not own the run gets the
+    // plain 404 above; a view-only share of a ZDR run is refused here (403).
+    let scope = owner_live_scope(&headers, zdr, &request_id)?;
+    let session = frame_session(&state, &session, query.frame.tab_id.as_deref(), &request_id).await?;
+    // A tab-addressed stream is an observer surface; it must not execute
+    // socket input against the run's separately selected tab.
+    let scope = if query.frame.tab_id.is_some() { LiveScope::ViewOnly } else { scope };
     let viewer = handle.live.viewer_guard();
     let options = live_frame_options(&query.frame, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;
@@ -58,6 +66,7 @@ pub async fn live_frame_ws(
     Ok(ws.on_upgrade(move |socket| {
         browser_ws_loop(
             socket, state, handle, claims, viewer, session, options, interval, max_frames, zdr_active,
+            scope,
         )
     }))
 }
@@ -77,6 +86,7 @@ pub(super) async fn browser_ws_loop(
     interval: Duration,
     max_frames: u64,
     zdr_active: bool,
+    scope: LiveScope,
 ) {
     // Held for as long as the socket is open.
     let _viewer = viewer;
@@ -145,6 +155,15 @@ pub(super) async fn browser_ws_loop(
                 match message {
                     Some(Ok(Message::Text(text))) => {
                         match serde_json::from_str::<BrowserWsClientMessage>(&text) {
+                            // W3-E3.4-5: a view-only connection answers an input frame with an
+                            // error frame and keeps the socket open; the frame is not executed.
+                            Ok(client_message) if !scope.accepts_client_message(&client_message) => {
+                                if let Some(frame) = view_only_ws_refusal(scope, &client_message) {
+                                    if send_ws_json(&mut socket, frame).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
                             Ok(BrowserWsClientMessage::Ping) => {
                                 if send_ws_json(&mut socket, serde_json::json!({ "type": "pong" })).await.is_err() {
                                     break;

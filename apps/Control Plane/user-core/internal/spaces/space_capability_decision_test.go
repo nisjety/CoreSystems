@@ -58,25 +58,29 @@ func TestIssueSpaceCapabilityDecisionBindsOneBackendClaim(t *testing.T) {
 	}
 }
 
-func TestIssueSpaceCapabilityDecisionGrantsEgressPermissionOnlyWhenClaimed(t *testing.T) {
+// WS06-S5 closed the egress vocabulary to the single bottom tier, so no claim
+// can earn space:egress today: an unrecognized tier is refused before signing
+// and the only signable claim grants no egress permission.
+func TestIssueSpaceCapabilityDecisionNeverGrantsEgressPermissionToday(t *testing.T) {
 	now := time.Now().UTC()
 	evidence := validPersonalThreadEvidence()
 	evidence.SandboxCapabilityEntitled = true
+
 	intent := validSpaceCapabilityIntent()
 	intent.Egress = "allow_domains"
+	if _, err := IssueSpaceCapabilityDecision(evidence, intent, "decision-1", "nonce-1", now); err == nil {
+		t.Fatal("an egress tier outside the closed vocabulary was signed")
+	}
 
+	intent.Egress = EgressDisabledByDefault
 	decision, err := IssueSpaceCapabilityDecision(evidence, intent, "decision-1", "nonce-1", now)
 	if err != nil {
 		t.Fatalf("IssueSpaceCapabilityDecision: %v", err)
 	}
-	found := false
 	for _, permission := range decision.Permissions {
 		if permission == "space:egress" {
-			found = true
+			t.Fatalf("the disabled_by_default tier granted space:egress: %#v", decision.Permissions)
 		}
-	}
-	if !found {
-		t.Fatalf("egress-capable claim did not grant space:egress: %#v", decision.Permissions)
 	}
 }
 
@@ -231,4 +235,61 @@ func TestTheProcessesClaimIsBoundIntoThePayloadDigest(t *testing.T) {
 
 func hasPermissionInDecision(decision Decision, permission string) bool {
 	return slices.Contains(decision.Permissions, permission)
+}
+
+// WS06-S5: the egress vocabulary is closed. Validate refuses every claim but
+// the bottom tier, so Control never widens network reach from a string it
+// does not recognize.
+func TestSpaceCapabilityIntentRejectsAnUnrecognizedEgressClaim(t *testing.T) {
+	for _, claim := range []string{"allow_domains", "allow_all", "DISABLED_BY_DEFAULT", "tunnel", "open", " "} {
+		intent := validSpaceCapabilityIntent()
+		intent.Egress = claim
+		if err := intent.Validate(); err == nil {
+			t.Fatalf("egress claim %q was accepted", claim)
+		}
+	}
+	empty := validSpaceCapabilityIntent()
+	empty.Egress = ""
+	if err := empty.Validate(); err == nil {
+		t.Fatal("an empty egress claim was accepted")
+	}
+	ok := validSpaceCapabilityIntent()
+	ok.Egress = EgressDisabledByDefault
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("disabled_by_default was rejected: %v", err)
+	}
+}
+
+// WS06-S5: under zero data retention a background process registry would
+// persist output past the call, so space:processes is withheld while the
+// lease decision itself is still issued with space:sandbox:use.
+func TestProcessesPermissionIsWithheldUnderSpaceZDR(t *testing.T) {
+	now := time.Date(2026, time.October, 27, 10, 0, 0, 0, time.UTC)
+	intent := validSpaceCapabilityIntent()
+	intent.Processes = ProcessesBackgroundRegistry
+
+	evidence := validPersonalThreadEvidence()
+	evidence.SandboxCapabilityEntitled = true
+	evidence.ProcessRegistryEntitled = true
+
+	evidence.Privacy.ZeroDataRetention = true
+	decision, err := IssueSpaceCapabilityDecision(evidence, intent, "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("a ZDR Space must still get a capability decision: %v", err)
+	}
+	if hasPermissionInDecision(decision, "space:processes") {
+		t.Fatalf("space:processes was granted under ZDR: %#v", decision.Permissions)
+	}
+	if !hasPermissionInDecision(decision, "space:sandbox:use") {
+		t.Fatalf("space:sandbox:use missing under ZDR: %#v", decision.Permissions)
+	}
+
+	evidence.Privacy.ZeroDataRetention = false
+	decision, err = IssueSpaceCapabilityDecision(evidence, intent, "decision-1", "nonce-1", now)
+	if err != nil {
+		t.Fatalf("IssueSpaceCapabilityDecision: %v", err)
+	}
+	if !hasPermissionInDecision(decision, "space:processes") {
+		t.Fatalf("space:processes was withheld without ZDR: %#v", decision.Permissions)
+	}
 }

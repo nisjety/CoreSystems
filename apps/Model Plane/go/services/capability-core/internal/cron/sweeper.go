@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 )
 
 // Sweeper fires due cron_schedules. It computes each schedule's next fire from a
@@ -23,7 +25,33 @@ type Sweeper struct {
 	pool       *pgxpool.Pool
 	interval   time.Duration
 	authorizer FireAuthorizer
+	// contractGuards is CRON_CONTRACT_GUARDS_ENABLED. Off, the sweeper never reads a
+	// schedule's approval_contract, so every schedule fires exactly as before WS20-S8.
+	contractGuards bool
+	pauseNotifier  PauseNotifier
 }
+
+// PauseNotifier sends a notification-core request. *notifyclient.Client satisfies it.
+type PauseNotifier interface {
+	Accept(context.Context, notifyclient.Request) error
+}
+
+const (
+	// fireStatusPaused is a fire the guards declined to make. Its outcome says why.
+	fireStatusPaused      = "paused"
+	outcomePausedExpired  = "paused_expired"
+	outcomePausedFailures = "paused_failures"
+	// consecutiveFailureLimit is how many failed fires in a row pause a schedule.
+	consecutiveFailureLimit = 3
+	// legacyPendingFireAge is how old a pending fire with no fire key must be before
+	// it is marked unknown. No run can ever match such a fire.
+	legacyPendingFireAge = time.Hour
+	// scheduledRunOutcomeNotifyType and scheduleNoticeRetention mirror the WS20-S7
+	// notice that runwatch owns. Each sender keeps its own copy, as the run-watch
+	// subjects do.
+	scheduledRunOutcomeNotifyType = "modelplane.scheduled_run_outcome"
+	scheduleNoticeRetention       = "standard"
+)
 
 // FireIntent is the non-secret record view an authorization implementation
 // must reauthorize just before a scheduler creates its owner effect. It is
@@ -51,6 +79,19 @@ func NewSweeper(pool *pgxpool.Pool, authorizers ...FireAuthorizer) *Sweeper {
 		authorizer = authorizers[0]
 	}
 	return &Sweeper{pool: pool, interval: time.Minute, authorizer: authorizer}
+}
+
+// WithContractGuards turns the approval-contract guards on or off (WS20-S8). Only
+// the literal "true" from CRON_CONTRACT_GUARDS_ENABLED turns them on.
+func (s *Sweeper) WithContractGuards(enabled bool) *Sweeper {
+	s.contractGuards = enabled
+	return s
+}
+
+// WithPauseNotifier sets the sender of the notice each guard pause produces.
+func (s *Sweeper) WithPauseNotifier(notifier PauseNotifier) *Sweeper {
+	s.pauseNotifier = notifier
+	return s
 }
 
 // Start runs the sweep loop until ctx is cancelled. Errors are logged, not fatal.
@@ -90,6 +131,25 @@ type dueSchedule struct {
 	tz             string
 	template       json.RawMessage
 	nextFire       *time.Time
+}
+
+// DueSchedule is the part of a schedule a fire is made from. The sweeper and Run now
+// (EP-6-S2) both hand it to InsertFire, so a manual fire writes the same task and fire
+// rows a cron slot does.
+type DueSchedule struct {
+	ID             string
+	OrgID          string
+	SpaceRef       string
+	SubjectID      string
+	TemplateDigest string
+	Template       json.RawMessage
+}
+
+func (d dueSchedule) fireView() DueSchedule {
+	return DueSchedule{
+		ID: d.id, OrgID: d.orgID, SpaceRef: d.spaceRef, SubjectID: d.subjectID,
+		TemplateDigest: d.templateDigest, Template: d.template,
+	}
 }
 
 // RunOnce scans due schedules and fires each exactly once. It returns the number
@@ -149,8 +209,16 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 
 	fired := 0
 	var failed []error
+	var pauses []pauseNotice
+	if s.contractGuards {
+		if err := inSavepoint(ctx, tx, func(sp pgx.Tx) error {
+			return sweepLegacyPendingFires(ctx, sp, now)
+		}); err != nil {
+			failed = append(failed, fmt.Errorf("sweep legacy pending fires: %w", err))
+		}
+	}
 	for _, d := range dues {
-		committed, err := s.sweepDue(ctx, tx, d, now)
+		committed, err := s.sweepDue(ctx, tx, d, now, &pauses)
 		if err != nil {
 			failed = append(failed, fmt.Errorf("cron schedule %s (org %s): %w", d.id, d.orgID, err))
 			continue
@@ -162,6 +230,8 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	if err := tx.Commit(ctx); err != nil {
 		return 0, errors.Join(err, errors.Join(failed...))
 	}
+	// Notices follow the commit, so a notice never reports a pause that was rolled back.
+	s.sendPauseNotices(ctx, pauses)
 	return fired, errors.Join(failed...)
 }
 
@@ -169,8 +239,8 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 // its task fired. An error means the schedule's writes were undone. A failed fire is
 // then recorded as failed and the schedule advances past its slot; any other failure,
 // or a failed fire whose record cannot be written either, leaves the schedule due for
-// the next tick.
-func (s *Sweeper) sweepDue(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time) (bool, error) {
+// the next tick. A guard pause is appended to pauses and noticed after the batch commits.
+func (s *Sweeper) sweepDue(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time, pauses *[]pauseNotice) (bool, error) {
 	next, nerr := NextFrom(d.expr, d.tz, now)
 	if nerr != nil {
 		// A malformed expression can never fire; disable it so the sweep does
@@ -182,6 +252,15 @@ func (s *Sweeper) sweepDue(ctx context.Context, tx pgx.Tx, d dueSchedule, now ti
 			return err
 		})
 	}
+	present, lapsed := false, false
+	if s.contractGuards {
+		present, lapsed = approvalContract(d.template, now)
+	}
+	if lapsed {
+		// An expired approval never fires: the schedule pauses instead, and a
+		// renewal is the only way back.
+		return false, pauseSchedule(ctx, tx, d, now, outcomePausedExpired, pauses)
+	}
 	if d.nextFire == nil {
 		// First observation: initialize next_fire_at only; do not fire on the
 		// tick that discovers the schedule.
@@ -189,6 +268,15 @@ func (s *Sweeper) sweepDue(ctx context.Context, tx pgx.Tx, d dueSchedule, now ti
 			_, err := sp.Exec(ctx, `UPDATE cron_schedules SET next_fire_at=$1, updated_at=$2 WHERE id=$3`, next, now, d.id)
 			return err
 		})
+	}
+	if present {
+		tripped, err := tripsFailureLimit(ctx, tx, d.id)
+		if err != nil {
+			return false, err
+		}
+		if tripped {
+			return false, pauseSchedule(ctx, tx, d, now, outcomePausedFailures, pauses)
+		}
 	}
 	fireKey := d.nextFire.UTC().Format(time.RFC3339Nano)
 	if err := s.authorizer.AuthorizeFire(ctx, FireIntent{
@@ -310,6 +398,18 @@ func taskConfigJSON(template []byte, intent *FireIntent) []byte {
 // caller rolls the fire's savepoint back, so a failed fire leaves no task or pending
 // row behind.
 func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time) error {
+	// The fire key is the schedule's slot. Session Core matches a scheduled run
+	// back to this fire through it (build plan WS20 S1).
+	_, _, err := InsertFire(ctx, tx, d.fireView(), d.nextFire.UTC().Format(time.RFC3339Nano), now)
+	return err
+}
+
+// InsertFire creates a task from the schedule's template and records a pending
+// cron_fires row under fireKey. The task carries the non-secret fire intent, so the
+// workflow dispatcher asks Control again before the Temporal handoff whatever made the
+// fire. It stops at the first failed statement and returns that error, because
+// Postgres rejects every later statement on the aborted transaction.
+func InsertFire(ctx context.Context, tx pgx.Tx, d DueSchedule, fireKey string, now time.Time) (fireID, taskID string, err error) {
 	var tpl struct {
 		Kind        string `json:"kind"`
 		Title       string `json:"title"`
@@ -317,33 +417,193 @@ func (s *Sweeper) fireOne(ctx context.Context, tx pgx.Tx, d dueSchedule, now tim
 		Assignee    string `json:"assignee"`
 		Priority    int    `json:"priority"`
 	}
-	_ = json.Unmarshal(d.template, &tpl)
+	_ = json.Unmarshal(d.Template, &tpl)
 	if tpl.Kind == "" {
 		tpl.Kind = "cron"
 	}
 	if tpl.Title == "" {
 		tpl.Title = "Scheduled task"
 	}
-	taskID := "task_" + uuid.New().String()
-	fireID := "cronfire_" + uuid.New().String()
-	// The fire key is the schedule's slot. Session Core matches a scheduled run
-	// back to this fire through it (build plan WS20 S1).
-	fireKey := d.nextFire.UTC().Format(time.RFC3339Nano)
+	taskID = "task_" + uuid.New().String()
+	fireID = "cronfire_" + uuid.New().String()
 	_, terr := tx.Exec(ctx, `
 		INSERT INTO tasks (id, org_id, kind, title, description, assignee, status,
 		    priority, config_json, scheduled_at, created_at, updated_at)
 		VALUES ($1,$2,$3,$4,$5,$6,'created',$7,$8,$9,$9,$9)
-	`, taskID, d.orgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
-		taskConfigJSON(d.template, &FireIntent{
-			OrgID: d.orgID, SpaceRef: d.spaceRef, SubjectID: d.subjectID,
-			ScheduleID: d.id, FireKey: d.nextFire.UTC().Format(time.RFC3339Nano),
-			TemplateDigest: d.templateDigest, IdempotencyKey: d.id + ":" + d.nextFire.UTC().Format(time.RFC3339Nano),
+	`, taskID, d.OrgID, tpl.Kind, tpl.Title, tpl.Description, tpl.Assignee, tpl.Priority,
+		taskConfigJSON(d.Template, &FireIntent{
+			OrgID: d.OrgID, SpaceRef: d.SpaceRef, SubjectID: d.SubjectID,
+			ScheduleID: d.ID, FireKey: fireKey,
+			TemplateDigest: d.TemplateDigest, IdempotencyKey: d.ID + ":" + fireKey,
 		}), now)
 	if terr != nil {
-		return terr
+		return "", "", terr
 	}
-	_, err := tx.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO cron_fires (id, schedule_id, task_id, fired_at, status, fire_key) VALUES ($1,$2,$3,$4,'pending',$5)`,
-		fireID, d.id, taskID, now, fireKey)
+		fireID, d.ID, taskID, now, fireKey); err != nil {
+		return "", "", err
+	}
+	return fireID, taskID, nil
+}
+
+// pauseNotice is one guard pause, noticed once its batch has committed.
+type pauseNotice struct {
+	orgID      string
+	subjectID  string
+	scheduleID string
+	outcome    string
+	pausedAt   time.Time
+}
+
+// pauseSchedule takes a schedule out of the sweep and records the decision as a
+// paused fire, never a fired one. Its owner is noticed once the batch commits.
+func pauseSchedule(ctx context.Context, tx pgx.Tx, d dueSchedule, now time.Time, outcome string, pauses *[]pauseNotice) error {
+	fireKey := ""
+	if d.nextFire != nil {
+		fireKey = d.nextFire.UTC().Format(time.RFC3339Nano)
+	}
+	reason := "approval has expired or cannot be read"
+	if outcome == outcomePausedFailures {
+		reason = "three consecutive fires failed"
+	}
+	err := inSavepoint(ctx, tx, func(sp pgx.Tx) error {
+		if _, err := sp.Exec(ctx, `UPDATE cron_schedules SET enabled=false, updated_at=$1 WHERE id=$2`, now, d.id); err != nil {
+			return err
+		}
+		_, err := sp.Exec(ctx,
+			`INSERT INTO cron_fires (id, schedule_id, fired_at, status, error, fire_key, outcome) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			"cronfire_"+uuid.New().String(), d.id, now, fireStatusPaused, reason, fireKey, outcome)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	slog.Warn("paused cron schedule under its approval guard", "schedule", d.id, "outcome", outcome)
+	*pauses = append(*pauses, pauseNotice{orgID: d.orgID, subjectID: d.subjectID, scheduleID: d.id, outcome: outcome, pausedAt: now})
+	return nil
+}
+
+// tripsFailureLimit reports whether a schedule's most recent consecutiveFailureLimit
+// fires all failed. A fire that is still pending, unknown or paused breaks the run, so
+// renewing a schedule starts its count again.
+func tripsFailureLimit(ctx context.Context, tx pgx.Tx, scheduleID string) (bool, error) {
+	tripped := false
+	err := inSavepoint(ctx, tx, func(sp pgx.Tx) error {
+		rows, err := sp.Query(ctx, `
+			SELECT status FROM cron_fires
+			WHERE schedule_id=$1
+			ORDER BY fired_at DESC, id DESC
+			LIMIT $2
+		`, scheduleID, consecutiveFailureLimit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var statuses []string
+		for rows.Next() {
+			var status string
+			if err := rows.Scan(&status); err != nil {
+				return err
+			}
+			statuses = append(statuses, status)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		tripped = len(statuses) == consecutiveFailureLimit
+		for _, status := range statuses {
+			if status != "failed" {
+				tripped = false
+			}
+		}
+		return nil
+	})
+	return tripped, err
+}
+
+// approvalContract reads the consent contract a schedule's template carries (WS20-S4).
+// present is false for a draft-only schedule. lapsed is true for a present contract
+// that cannot be read or whose expiry has passed; such a schedule is paused, never fired.
+func approvalContract(template json.RawMessage, now time.Time) (present, lapsed bool) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(template, &fields); err != nil {
+		return false, false
+	}
+	raw, ok := fields["approval_contract"]
+	if !ok {
+		return false, false
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return true, true
+	}
+	contract, err := ParseScheduleContract(text)
+	if err != nil {
+		return true, true
+	}
+	expires, err := parseContractTime(contract.ExpiresAt)
+	if err != nil {
+		return true, true
+	}
+	return true, !expires.After(now)
+}
+
+// ApprovalContractLapsed reports whether a template's consent contract can no longer
+// authorise a fire, because it has expired or cannot be read. The PATCH that re-enables
+// a schedule refuses a lapsed contract, so a bare enable never revives an expired
+// approval (WS20-S8).
+func ApprovalContractLapsed(template json.RawMessage, now time.Time) bool {
+	_, lapsed := approvalContract(template, now)
+	return lapsed
+}
+
+// sweepLegacyPendingFires marks as unknown the pending fires that no run can ever
+// settle. A fire written before WS20-S1 has no fire key, so nothing can match it to a
+// run. Once it is older than legacyPendingFireAge, unknown is the honest status.
+func sweepLegacyPendingFires(ctx context.Context, tx pgx.Tx, now time.Time) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE cron_fires SET status='unknown', completed_at=$1
+		WHERE status='pending' AND fire_key='' AND fired_at < $2
+	`, now, now.Add(-legacyPendingFireAge))
 	return err
+}
+
+// sendPauseNotices sends each paused schedule's owner the WS20-S7 outcome notice. A
+// failed send is logged and not retried: the pause stands, and its fire row shows it.
+func (s *Sweeper) sendPauseNotices(ctx context.Context, pauses []pauseNotice) {
+	for _, p := range pauses {
+		if s.pauseNotifier == nil {
+			slog.Warn("cron pause notice not sent: no notifier is configured", "schedule", p.scheduleID, "outcome", p.outcome)
+			continue
+		}
+		err := s.pauseNotifier.Accept(ctx, notifyclient.Request{
+			OrganizationID: p.orgID,
+			IdempotencyKey: fmt.Sprintf("scheduled-pause:%s:%s:%s:%s", p.orgID, p.scheduleID, p.outcome, p.pausedAt.Format(time.RFC3339Nano)),
+			Recipient:      notifyclient.Recipient{Kind: notifyclient.RecipientKindUser, ID: p.subjectID},
+			Type:           scheduledRunOutcomeNotifyType,
+			Payload:        pauseNoticePayload(p.scheduleID, p.outcome),
+			RetentionMode:  scheduleNoticeRetention,
+		})
+		if err != nil {
+			slog.Warn("cron pause notice not delivered", "org_id", p.orgID, "schedule", p.scheduleID, "outcome", p.outcome, "error", err)
+		}
+	}
+}
+
+// pauseNoticePayload is the notice for a guard pause: fixed copy, the closed outcome
+// token and the schedule id. Nothing the schedule's goal or any run produced is in it.
+func pauseNoticePayload(scheduleID, outcome string) map[string]any {
+	body := "A schedule in one of your chats paused because its approval expired."
+	if outcome == outcomePausedFailures {
+		body = "A schedule in one of your chats paused after repeated failures."
+	}
+	return map[string]any{
+		"title":       "Schedule paused",
+		"body":        body,
+		"message_key": scheduledRunOutcomeNotifyType + "." + outcome,
+		"cta_href":    "/chat",
+		"schedule_id": scheduleID,
+		"outcome":     outcome,
+	}
 }

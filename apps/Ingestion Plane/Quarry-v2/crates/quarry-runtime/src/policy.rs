@@ -20,6 +20,8 @@
 //! downstream consumer can detect "same URL + same content but
 //! different policy" and decide whether to trust the cache.
 
+use std::time::Duration;
+
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
 
@@ -95,13 +97,38 @@ pub struct FetchPolicy {
     pub headers: Vec<(String, String)>,
 }
 
+/// The `timeout_s` a default fetch policy carries: the caller's whole fetch
+/// deadline, every driver tier included (E3.8.2).
+pub const DEFAULT_FETCH_TIMEOUT_S: u64 = 30;
+
+/// The longest fetch deadline a policy can ask for (E3.8.2). A larger
+/// `timeout_s` is clamped to this, so a typo cannot hold a fetch slot for an
+/// hour. Ten minutes is above every route deadline the edge sets today.
+pub const MAX_FETCH_TIMEOUT_S: u64 = 600;
+
 impl Default for FetchPolicy {
     fn default() -> Self {
         Self {
             user_agent: "Quarry/2.0".into(),
             driver_kind: "static".into(),
-            timeout_s: 30,
+            timeout_s: DEFAULT_FETCH_TIMEOUT_S,
             headers: Vec::new(),
+        }
+    }
+}
+
+impl FetchPolicy {
+    /// The caller's single fetch deadline, split by the fallback driver across
+    /// its tiers (E3.8.2, `QUARRY_EDGE__FETCH_DEADLINE`). `timeout_s == 0` means
+    /// no deadline of the policy's own (each tier keeps its own timeout, as
+    /// before); anything above [`MAX_FETCH_TIMEOUT_S`] is clamped to it.
+    ///
+    /// Reading the deadline changes nothing the policy hashes: `timeout_s` was
+    /// already part of the fingerprint.
+    pub fn deadline(&self) -> Option<Duration> {
+        match self.timeout_s {
+            0 => None,
+            secs => Some(Duration::from_secs(secs.min(MAX_FETCH_TIMEOUT_S))),
         }
     }
 }
@@ -534,6 +561,49 @@ mod tests {
         let id_a = record_determinism_inputs("https://x/", &a);
         let id_b = record_determinism_inputs("https://x/", &b);
         assert_ne!(id_a.id, id_b.id);
+    }
+
+    #[test]
+    fn the_fetch_deadline_is_the_policy_timeout() {
+        let policy = FetchPolicy::default();
+        assert_eq!(
+            policy.deadline(),
+            Some(Duration::from_secs(DEFAULT_FETCH_TIMEOUT_S))
+        );
+        let custom = FetchPolicy {
+            timeout_s: 12,
+            ..FetchPolicy::default()
+        };
+        assert_eq!(custom.deadline(), Some(Duration::from_secs(12)));
+    }
+
+    #[test]
+    fn a_zero_timeout_is_no_deadline_and_a_huge_one_is_clamped() {
+        let none = FetchPolicy {
+            timeout_s: 0,
+            ..FetchPolicy::default()
+        };
+        assert_eq!(none.deadline(), None);
+        let huge = FetchPolicy {
+            timeout_s: 86_400,
+            ..FetchPolicy::default()
+        };
+        assert_eq!(
+            huge.deadline(),
+            Some(Duration::from_secs(MAX_FETCH_TIMEOUT_S))
+        );
+    }
+
+    #[test]
+    fn reading_the_deadline_leaves_the_fingerprint_alone() {
+        // The default timeout is still 30 s, so default fingerprints are unchanged.
+        assert_eq!(FetchPolicy::default().timeout_s, 30);
+        let a = RunPolicy::best_effort();
+        let _ = a.fetch.deadline();
+        assert_eq!(
+            policy_fingerprint(&a),
+            policy_fingerprint(&RunPolicy::best_effort())
+        );
     }
 
     #[test]

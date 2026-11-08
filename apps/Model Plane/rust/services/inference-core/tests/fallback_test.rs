@@ -4,13 +4,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use inference_core::config::InferenceConfig;
+use inference_core::config::{InferenceConfig, VertexGeminiConfig};
 use inference_core::provider::fallback::{FallbackChain, ProviderRouterDyn};
+use inference_core::provider::role::{RoleCall, RoleDecision, RoleSource, ROLE_MODEL_ID};
+use inference_core::provider::routing_policy::{RoleEntry, RolePurpose, RoutingPolicy};
+use inference_core::provider::{ModelFamily, ProviderCapabilities, Residency};
 use inference_core::provider::{
     ChatMessage, EmbedRequest, EmbedResponse, InferChunk, InferRequest, InferResponse, ModelInfo,
-    ProviderError,
+    PrivacyTier, ProviderError,
 };
 use tokio::sync::mpsc;
+use wiremock::matchers::{any, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A mock provider that fails a configurable number of times before succeeding.
 struct MockProvider {
@@ -704,4 +709,604 @@ fn cohere_registers_alongside_azure_openai_without_stealing_its_traffic() {
     let azure_models = chain.list_models("", "azure-openai");
     assert_eq!(azure_models.len(), 1);
     assert_eq!(azure_models[0].id, "gpt-4o-mini");
+}
+
+/// One RSA key for the whole test binary, since generating one per test is slow.
+fn vertex_key_pem() -> &'static str {
+    static PEM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PEM.get_or_init(|| {
+        let private = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("RSA key");
+        rsa::pkcs8::EncodePrivateKey::to_pkcs8_pem(&private, rsa::pkcs8::LineEnding::LF)
+            .expect("PKCS8 PEM")
+            .to_string()
+    })
+}
+
+/// Writes a service-account key file whose token exchange goes to `token_uri`.
+fn credentials_file(token_uri: &str) -> std::path::PathBuf {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        "vertex-gemini-fallback-{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    );
+    let path = std::env::temp_dir().join(name);
+    let key = serde_json::json!({
+        "type": "service_account",
+        "project_id": "test-project",
+        "private_key_id": "test-key-id",
+        "private_key": vertex_key_pem(),
+        "client_email": "gemini@test-project.iam.gserviceaccount.com",
+        "token_uri": token_uri,
+    });
+    std::fs::write(&path, key.to_string()).expect("write key fixture");
+    path
+}
+
+/// A token endpoint that refuses every exchange. A test that uses it never reaches a
+/// generation call, so nothing can leave for the real Vertex host.
+async fn refusing_token_endpoint() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// How many requests a mock server has received.
+async fn hits(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .map_or(0, |requests| requests.len())
+}
+
+/// A chain configuration with no provider configured except the ones a test names.
+fn chain_config(provider_order: &[&str]) -> InferenceConfig {
+    InferenceConfig {
+        provider_order: provider_order
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+        anthropic_api_key: None,
+        openai_api_base: None,
+        openai_api_key: None,
+        codex_subscription_integration_core_url: None,
+        codex_subscription_internal_api_key: None,
+        codex_subscription_models: vec![],
+        azure_openai_endpoint: None,
+        azure_openai_api_key: None,
+        azure_openai_api_version: "2025-01-01-preview".to_owned(),
+        openai_chat_models: vec![],
+        openai_embedding_models: vec![],
+        azure_openai_chat_deployments: vec![],
+        azure_openai_embedding_deployments: vec![],
+        azure_anthropic_endpoint: None,
+        azure_anthropic_api_key: None,
+        azure_anthropic_deployments: vec![],
+        azure_cohere_endpoint: None,
+        azure_cohere_api_key: None,
+        azure_cohere_api_version: "2024-05-01-preview".to_owned(),
+        azure_cohere_deployment: "cohere-command-a-plus".to_owned(),
+        azure_cohere_region: None,
+        max_retries_per_provider: 1,
+        cache_ttl_secs: 60,
+        verevon_intent_enabled: false,
+        cost_core_url: None,
+        verevon_intent_budget_usd: 50.0,
+        session_core_url: None,
+        router_policy_refresh_secs: 60,
+        azure_openai_region: None,
+        azure_anthropic_region: None,
+        azure_openai_zdr: None,
+        azure_anthropic_zdr: None,
+        azure_openai_deployment_type: None,
+        allow_global_deployment: false,
+        allow_global_residency_providers: true,
+        allow_non_eu_embedding: false,
+    }
+}
+
+/// Vertex settings for a chain under test, with the switch set by the caller.
+fn vertex_config(
+    enabled: bool,
+    location: &str,
+    credentials: &std::path::Path,
+) -> VertexGeminiConfig {
+    VertexGeminiConfig {
+        enabled,
+        project: "test-project".to_owned(),
+        location: location.to_owned(),
+        models: vec!["gemini-2.5-pro".to_owned()],
+        credentials_file: credentials.to_string_lossy().into_owned(),
+    }
+}
+
+fn gemini_request(model: &str) -> InferRequest {
+    InferRequest {
+        model: model.to_owned(),
+        ..sample_request()
+    }
+}
+
+#[tokio::test]
+async fn gemini_id_never_reaches_openai_family() {
+    // Azure is listed first, so before the family gate it would have taken the id.
+    let azure = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&azure)
+        .await;
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let mut cfg = chain_config(&["azure", "vertex-gemini"]);
+    cfg.azure_openai_endpoint = Some(azure.uri());
+    cfg.azure_openai_api_key = Some("test-key".to_owned());
+    cfg.azure_openai_chat_deployments = vec!["gpt-4o-mini".to_owned()];
+    let chain = FallbackChain::from_config_with_gemini(
+        &cfg,
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+
+    let _ = chain.infer(&gemini_request("gemini-2.5-pro")).await;
+
+    assert_eq!(
+        hits(&azure).await,
+        0,
+        "a Gemini id must not reach Azure OpenAI"
+    );
+    assert!(
+        hits(&token).await > 0,
+        "Vertex is the provider that should try it"
+    );
+}
+
+#[tokio::test]
+async fn claude_id_never_reaches_gemini() {
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+
+    assert!(chain
+        .infer(&gemini_request("claude-sonnet-5-5"))
+        .await
+        .is_err());
+    assert_eq!(hits(&token).await, 0, "a Claude id must not reach Vertex");
+}
+
+#[tokio::test]
+async fn auto_request_never_reaches_vertex_gemini() {
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+
+    assert!(chain.infer(&gemini_request("")).await.is_err());
+    assert_eq!(
+        hits(&token).await,
+        0,
+        "an Auto request must not leave for Vertex"
+    );
+}
+
+#[tokio::test]
+async fn zdr_request_never_reaches_vertex_gemini() {
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+    let mut req = gemini_request("gemini-2.5-pro");
+    req.zdr = true;
+
+    let error = chain.infer(&req).await.expect_err("Gemini is never ZDR");
+    assert!(
+        matches!(error, ProviderError::ZdrUnavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(hits(&token).await, 0, "a ZDR turn must not reach Vertex");
+}
+
+#[tokio::test]
+async fn zdr_contractual_floor_skips_vertex_gemini() {
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+    let mut req = gemini_request("gemini-2.5-pro");
+    req.min_privacy_tier = PrivacyTier::ZdrContractual;
+
+    let error = chain
+        .infer(&req)
+        .await
+        .expect_err("the floor is above Vertex");
+    assert!(
+        matches!(error, ProviderError::TierUnavailable(_)),
+        "{error:?}"
+    );
+    assert_eq!(
+        hits(&token).await,
+        0,
+        "a ZDR-contractual floor must skip Vertex"
+    );
+}
+
+#[tokio::test]
+async fn eu_floor_reaches_vertex_gemini_only_on_eu_location() {
+    // An EU location admits the EU floor, so Vertex is tried; its token exchange is refused here.
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+    let mut req = gemini_request("gemini-2.5-pro");
+    req.min_residency = "eu".to_owned();
+
+    let error = chain
+        .infer(&req)
+        .await
+        .expect_err("the exchange is refused");
+    assert!(
+        !matches!(
+            error,
+            ProviderError::TierUnavailable(_) | ProviderError::ZdrUnavailable(_)
+        ),
+        "{error:?}"
+    );
+    assert!(hits(&token).await > 0, "an EU location admits the EU floor");
+
+    // A non-EU location is refused at registration: no provider, and no exchange.
+    let token_global = refusing_token_endpoint().await;
+    let credentials_global = credentials_file(&format!("{}/token", token_global.uri()));
+    let chain_global = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "us-central1", &credentials_global),
+    );
+    let _ = std::fs::remove_file(&credentials_global);
+    assert_eq!(chain_global.provider_count(), 0);
+    assert!(chain_global.infer(&req).await.is_err());
+    assert_eq!(
+        hits(&token_global).await,
+        0,
+        "a non-EU location never registers"
+    );
+}
+
+#[tokio::test]
+async fn vertex_gemini_absent_without_enabled_switch() {
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(false, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+
+    assert_eq!(chain.provider_count(), 0);
+    assert!(chain.list_models("", "vertex-gemini").is_empty());
+}
+
+#[tokio::test]
+async fn vertex_gemini_registers_dark_in_an_eu_location_when_enabled() {
+    let token = refusing_token_endpoint().await;
+    let credentials = credentials_file(&format!("{}/token", token.uri()));
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &credentials),
+    );
+    let _ = std::fs::remove_file(&credentials);
+
+    assert_eq!(chain.provider_count(), 1);
+    let listed = chain.list_models("", "vertex-gemini");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, "gemini-2.5-pro");
+    assert_eq!(listed[0].residency_label, "eu");
+    assert_eq!(listed[0].privacy_tier, PrivacyTier::EuResident);
+    assert_eq!(hits(&token).await, 0, "registration makes no network call");
+}
+
+/// A provider that declares `caps`, serves `models`, and records each model it is asked for, so a test
+/// can see the candidate the chain actually sent.
+struct RoleRecorder {
+    caps: ProviderCapabilities,
+    models: Vec<&'static str>,
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RoleRecorder {
+    /// An OpenAI-family provider that serves only `models`.
+    fn exclusive(
+        models: &[&'static str],
+        supports_zdr: bool,
+        residency: Residency,
+        seen: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> Self {
+        Self {
+            caps: ProviderCapabilities {
+                model_family: ModelFamily::OpenAiCompatible,
+                exclusive_catalog: true,
+                supports_zdr,
+                residency,
+                ..ProviderCapabilities::default()
+            },
+            models: models.to_vec(),
+            seen: Arc::clone(seen),
+        }
+    }
+
+    /// An OpenAI-family provider with an open catalogue: it may be asked for any model id.
+    fn open(models: &[&'static str], seen: &Arc<std::sync::Mutex<Vec<String>>>) -> Self {
+        Self {
+            caps: ProviderCapabilities {
+                model_family: ModelFamily::OpenAiCompatible,
+                ..ProviderCapabilities::default()
+            },
+            models: models.to_vec(),
+            seen: Arc::clone(seen),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderRouterDyn for RoleRecorder {
+    async fn infer_dyn(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        self.seen
+            .lock()
+            .expect("the recorder lock")
+            .push(req.model.clone());
+        Ok(InferResponse {
+            request_id: req.request_id.clone(),
+            content: "answer".to_owned(),
+            model_used: req.model.clone(),
+            stop_reason: "end_turn".to_owned(),
+            ..Default::default()
+        })
+    }
+
+    async fn infer_stream_dyn(
+        &self,
+        _req: &InferRequest,
+    ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        Err(ProviderError::UnsupportedModel(
+            "streaming is not under test".to_owned(),
+        ))
+    }
+
+    async fn create_embedding_dyn(
+        &self,
+        _req: &EmbedRequest,
+    ) -> Result<EmbedResponse, ProviderError> {
+        Err(ProviderError::UnsupportedModel(
+            "embeddings are not under test".to_owned(),
+        ))
+    }
+
+    fn list_models_dyn(&self) -> Vec<ModelInfo> {
+        self.models
+            .iter()
+            .map(|id| ModelInfo {
+                id: (*id).to_owned(),
+                modality: "chat".to_owned(),
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn capabilities_dyn(&self) -> ProviderCapabilities {
+        self.caps.clone()
+    }
+}
+
+fn role_chain(providers: Vec<(&str, RoleRecorder)>) -> FallbackChain {
+    let providers: Vec<(String, Arc<dyn ProviderRouterDyn>)> = providers
+        .into_iter()
+        .map(|(name, provider)| {
+            (
+                name.to_owned(),
+                Arc::new(provider) as Arc<dyn ProviderRouterDyn>,
+            )
+        })
+        .collect();
+    FallbackChain::new_with_providers(providers, 1)
+}
+
+fn role_policy(purpose: RolePurpose, candidates: &[&str]) -> RoutingPolicy {
+    let mut policy = RoutingPolicy::default();
+    policy.roles.insert(
+        purpose,
+        RoleEntry {
+            candidates: candidates.iter().map(|id| (*id).to_owned()).collect(),
+            effort: None,
+        },
+    );
+    policy
+}
+
+fn role_call(purpose: RolePurpose, fallback_model: &str) -> RoleCall {
+    RoleCall {
+        purpose: Some(purpose),
+        fallback_model: fallback_model.to_owned(),
+    }
+}
+
+fn role_request() -> InferRequest {
+    InferRequest {
+        model: ROLE_MODEL_ID.to_owned(),
+        ..sample_request()
+    }
+}
+
+fn recorded(seen: &Arc<std::sync::Mutex<Vec<String>>>) -> Vec<String> {
+    seen.lock().expect("the recorder lock").clone()
+}
+
+#[tokio::test]
+async fn verevon_role_never_reaches_a_provider_verbatim() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![(
+        "openai",
+        RoleRecorder::exclusive(&["gpt-5-nano"], false, Residency::Global, &seen),
+    )]);
+    chain
+        .policy_handle()
+        .store(Arc::new(role_policy(RolePurpose::Title, &["gpt-5-nano"])));
+
+    let (response, note) = chain
+        .infer_role_noted(&role_request(), &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the role table serves the title");
+    assert_eq!(response.model_used, "gpt-5-nano");
+    assert_eq!(recorded(&seen), vec!["gpt-5-nano".to_owned()]);
+    assert_eq!(
+        note.and_then(|note| note.role),
+        Some(RoleDecision {
+            table_entry: Some(RolePurpose::Title),
+            source: RoleSource::Table,
+        })
+    );
+
+    // A role call that names no purpose is refused before any provider is asked.
+    let error = chain
+        .infer_noted(&role_request(), false)
+        .await
+        .expect_err("a role call without a role is refused");
+    assert!(
+        matches!(error, ProviderError::RequestRejected { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        recorded(&seen),
+        vec!["gpt-5-nano".to_owned()],
+        "the refused call reached no provider"
+    );
+}
+
+#[tokio::test]
+async fn zdr_request_skips_unattested_candidates() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![
+        (
+            "plain",
+            RoleRecorder::exclusive(&["gpt-5-nano"], false, Residency::Global, &seen),
+        ),
+        (
+            "attested",
+            RoleRecorder::exclusive(&["gpt-5-mini"], true, Residency::Global, &seen),
+        ),
+    ]);
+    chain.policy_handle().store(Arc::new(role_policy(
+        RolePurpose::Title,
+        &["gpt-5-nano", "gpt-5-mini"],
+    )));
+    let mut request = role_request();
+    request.zdr = true;
+
+    let (response, _) = chain
+        .infer_role_noted(&request, &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the attested candidate serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(recorded(&seen), vec!["gpt-5-mini".to_owned()]);
+}
+
+#[tokio::test]
+async fn eu_floor_skips_global_candidate() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![
+        (
+            "global",
+            RoleRecorder::exclusive(&["gpt-5-nano"], false, Residency::Global, &seen),
+        ),
+        (
+            "eu",
+            RoleRecorder::exclusive(&["gpt-5-mini"], false, Residency::Eu, &seen),
+        ),
+    ]);
+    chain.policy_handle().store(Arc::new(role_policy(
+        RolePurpose::Title,
+        &["gpt-5-nano", "gpt-5-mini"],
+    )));
+    let mut request = role_request();
+    request.min_residency = "eu".to_owned();
+
+    let (response, _) = chain
+        .infer_role_noted(&request, &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the EU candidate serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(recorded(&seen), vec!["gpt-5-mini".to_owned()]);
+}
+
+#[tokio::test]
+async fn candidate_absent_from_catalogue_is_skipped() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // An open catalogue would serve any id, so only the chain's own listing refuses the first candidate.
+    let chain = role_chain(vec![(
+        "openai",
+        RoleRecorder::open(&["gpt-5-mini"], &seen),
+    )]);
+    chain.policy_handle().store(Arc::new(role_policy(
+        RolePurpose::Title,
+        &["gpt-9-imaginary", "gpt-5-mini"],
+    )));
+
+    let (response, _) = chain
+        .infer_role_noted(&role_request(), &role_call(RolePurpose::Title, ""), false)
+        .await
+        .expect("the listed candidate serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(recorded(&seen), vec!["gpt-5-mini".to_owned()]);
+}
+
+#[tokio::test]
+async fn a_role_with_no_table_entry_runs_on_the_turn_model() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chain = role_chain(vec![(
+        "openai",
+        RoleRecorder::open(&["gpt-5-mini"], &seen),
+    )]);
+
+    let (response, note) = chain
+        .infer_role_noted(
+            &role_request(),
+            &role_call(RolePurpose::Title, "gpt-5-mini"),
+            false,
+        )
+        .await
+        .expect("the turn's own model serves the title");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    assert_eq!(
+        note.and_then(|note| note.role),
+        Some(RoleDecision {
+            table_entry: None,
+            source: RoleSource::TurnModel,
+        })
+    );
+}
+
+#[tokio::test]
+async fn missing_credentials_refuse_registration_not_boot() {
+    let missing = std::env::temp_dir().join("vertex-gemini-fallback-missing.json");
+    let chain = FallbackChain::from_config_with_gemini(
+        &chain_config(&["vertex-gemini"]),
+        &vertex_config(true, "europe-west4", &missing),
+    );
+    assert_eq!(chain.provider_count(), 0);
 }

@@ -1159,9 +1159,26 @@ type ExtractStructuredRequest struct {
 	Provider string `protobuf:"bytes,8,opt,name=provider,proto3" json:"provider,omitempty"`
 	// Zero Data Retention — no durable artifact or event on either the
 	// fetch path (Quarry zdr) or the inference path.
-	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Zdr bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// WS16.S8 additions (all optional; an unset request behaves as before).
+	//
+	// More than one page. When non-empty these are extracted (at most 5, three
+	// at a time, each isolated: one page failing does not fail the others) and
+	// `url` is ignored. Empty -> the single `url` above.
+	Urls []string `protobuf:"bytes,10,rep,name=urls,proto3" json:"urls,omitempty"`
+	// What to produce from each page: "json" (default when empty; fill
+	// `schema_json`), "question" (answer `question`, grounded by a verbatim
+	// quote) or "highlights" (up to `max_highlights` verbatim passages matching
+	// `question`).
+	Mode string `protobuf:"bytes,11,opt,name=mode,proto3" json:"mode,omitempty"`
+	// The question for mode "question", or the query for mode "highlights".
+	Question string `protobuf:"bytes,12,opt,name=question,proto3" json:"question,omitempty"`
+	// Upper bound on highlights for mode "highlights"; 0 -> 3, clamped to 10.
+	MaxHighlights int32 `protobuf:"varint,13,opt,name=max_highlights,json=maxHighlights,proto3" json:"max_highlights,omitempty"`
+	// Output-token ceiling for the extraction call; 0 -> 2048, clamped to 8192.
+	MaxOutputTokens int32 `protobuf:"varint,14,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ExtractStructuredRequest) Reset() {
@@ -1257,6 +1274,41 @@ func (x *ExtractStructuredRequest) GetZdr() bool {
 	return false
 }
 
+func (x *ExtractStructuredRequest) GetUrls() []string {
+	if x != nil {
+		return x.Urls
+	}
+	return nil
+}
+
+func (x *ExtractStructuredRequest) GetMode() string {
+	if x != nil {
+		return x.Mode
+	}
+	return ""
+}
+
+func (x *ExtractStructuredRequest) GetQuestion() string {
+	if x != nil {
+		return x.Question
+	}
+	return ""
+}
+
+func (x *ExtractStructuredRequest) GetMaxHighlights() int32 {
+	if x != nil {
+		return x.MaxHighlights
+	}
+	return 0
+}
+
+func (x *ExtractStructuredRequest) GetMaxOutputTokens() int32 {
+	if x != nil {
+		return x.MaxOutputTokens
+	}
+	return 0
+}
+
 // ExtractStructuredResponse — LLM output coerced to the requested schema.
 type ExtractStructuredResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1284,7 +1336,10 @@ type ExtractStructuredResponse struct {
 	// but the model could not satisfy the schema). Gateway returns
 	// gRPC OK in this case so callers see a structured failure rather
 	// than a generic Internal error.
-	ErrorMessage  string `protobuf:"bytes,10,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	ErrorMessage string `protobuf:"bytes,10,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// WS16.S8: one entry per requested page, in request order. The scalar
+	// fields above mirror results[0] so existing callers keep working.
+	Results       []*ExtractStructuredResult `protobuf:"bytes,11,rep,name=results,proto3" json:"results,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1389,6 +1444,258 @@ func (x *ExtractStructuredResponse) GetErrorMessage() string {
 	return ""
 }
 
+func (x *ExtractStructuredResponse) GetResults() []*ExtractStructuredResult {
+	if x != nil {
+		return x.Results
+	}
+	return nil
+}
+
+// One verbatim passage found on the page. Offsets are Unicode scalar (char)
+// offsets into the text the model was shown, end-exclusive.
+type ExtractStructuredHighlight struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Text  string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	// Character offset where the passage starts, in the text the model was shown.
+	Start uint64 `protobuf:"varint,2,opt,name=start,proto3" json:"start,omitempty"`
+	// Character offset just past the passage's last character (end-exclusive).
+	End           uint64 `protobuf:"varint,3,opt,name=end,proto3" json:"end,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExtractStructuredHighlight) Reset() {
+	*x = ExtractStructuredHighlight{}
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExtractStructuredHighlight) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExtractStructuredHighlight) ProtoMessage() {}
+
+func (x *ExtractStructuredHighlight) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExtractStructuredHighlight.ProtoReflect.Descriptor instead.
+func (*ExtractStructuredHighlight) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ExtractStructuredHighlight) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *ExtractStructuredHighlight) GetStart() uint64 {
+	if x != nil {
+		return x.Start
+	}
+	return 0
+}
+
+func (x *ExtractStructuredHighlight) GetEnd() uint64 {
+	if x != nil {
+		return x.End
+	}
+	return 0
+}
+
+// The outcome for one page of an ExtractStructured call. A failure of this
+// page is `error_message`; the RPC itself stays OK.
+type ExtractStructuredResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The page as requested, and after redirects.
+	Url string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
+	// URL the page was served from, after redirects.
+	FinalUrl string `protobuf:"bytes,2,opt,name=final_url,json=finalUrl,proto3" json:"final_url,omitempty"`
+	Title    string `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	// Fingerprint of the page source that was extracted.
+	SourceFingerprint string `protobuf:"bytes,4,opt,name=source_fingerprint,json=sourceFingerprint,proto3" json:"source_fingerprint,omitempty"`
+	// mode "json": the validated JSON object. Empty when the model could not
+	// produce one that conforms to the schema (see `error_message`).
+	ExtractedJson string `protobuf:"bytes,5,opt,name=extracted_json,json=extractedJson,proto3" json:"extracted_json,omitempty"`
+	// mode "question": the answer ("" when `found` is false).
+	Answer string `protobuf:"bytes,6,opt,name=answer,proto3" json:"answer,omitempty"`
+	// Question mode: true when the answer was found on the page.
+	Found bool `protobuf:"varint,7,opt,name=found,proto3" json:"found,omitempty"`
+	// True when the supporting quote was found verbatim on the page.
+	Grounded bool `protobuf:"varint,8,opt,name=grounded,proto3" json:"grounded,omitempty"`
+	// mode "highlights": the passages that are verbatim on the page.
+	Highlights []*ExtractStructuredHighlight `protobuf:"bytes,9,rep,name=highlights,proto3" json:"highlights,omitempty"`
+	// Quotes the model gave that are not on the page (dropped).
+	HighlightsDropped uint32 `protobuf:"varint,10,opt,name=highlights_dropped,json=highlightsDropped,proto3" json:"highlights_dropped,omitempty"`
+	// Model that served this page's extraction.
+	ModelUsed string `protobuf:"bytes,11,opt,name=model_used,json=modelUsed,proto3" json:"model_used,omitempty"`
+	// Input tokens used for this page.
+	InputTokens  int32 `protobuf:"varint,12,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens int32 `protobuf:"varint,13,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// mode "json": true when `extracted_json` validated against the schema.
+	SchemaValid bool `protobuf:"varint,14,opt,name=schema_valid,json=schemaValid,proto3" json:"schema_valid,omitempty"`
+	// True when one repair call was needed to get there.
+	Repaired bool `protobuf:"varint,15,opt,name=repaired,proto3" json:"repaired,omitempty"`
+	// Non-empty when this page failed. Never carries page text.
+	ErrorMessage  string `protobuf:"bytes,16,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExtractStructuredResult) Reset() {
+	*x = ExtractStructuredResult{}
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExtractStructuredResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExtractStructuredResult) ProtoMessage() {}
+
+func (x *ExtractStructuredResult) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExtractStructuredResult.ProtoReflect.Descriptor instead.
+func (*ExtractStructuredResult) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ExtractStructuredResult) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetFinalUrl() string {
+	if x != nil {
+		return x.FinalUrl
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetSourceFingerprint() string {
+	if x != nil {
+		return x.SourceFingerprint
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetExtractedJson() string {
+	if x != nil {
+		return x.ExtractedJson
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetAnswer() string {
+	if x != nil {
+		return x.Answer
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
+func (x *ExtractStructuredResult) GetGrounded() bool {
+	if x != nil {
+		return x.Grounded
+	}
+	return false
+}
+
+func (x *ExtractStructuredResult) GetHighlights() []*ExtractStructuredHighlight {
+	if x != nil {
+		return x.Highlights
+	}
+	return nil
+}
+
+func (x *ExtractStructuredResult) GetHighlightsDropped() uint32 {
+	if x != nil {
+		return x.HighlightsDropped
+	}
+	return 0
+}
+
+func (x *ExtractStructuredResult) GetModelUsed() string {
+	if x != nil {
+		return x.ModelUsed
+	}
+	return ""
+}
+
+func (x *ExtractStructuredResult) GetInputTokens() int32 {
+	if x != nil {
+		return x.InputTokens
+	}
+	return 0
+}
+
+func (x *ExtractStructuredResult) GetOutputTokens() int32 {
+	if x != nil {
+		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *ExtractStructuredResult) GetSchemaValid() bool {
+	if x != nil {
+		return x.SchemaValid
+	}
+	return false
+}
+
+func (x *ExtractStructuredResult) GetRepaired() bool {
+	if x != nil {
+		return x.Repaired
+	}
+	return false
+}
+
+func (x *ExtractStructuredResult) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
 // WebSearchRequest — proxy to Quarry's /v1/search SmartSearchRouter.
 type WebSearchRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -1420,7 +1727,7 @@ type WebSearchRequest struct {
 
 func (x *WebSearchRequest) Reset() {
 	*x = WebSearchRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[14]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1432,7 +1739,7 @@ func (x *WebSearchRequest) String() string {
 func (*WebSearchRequest) ProtoMessage() {}
 
 func (x *WebSearchRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[14]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1445,7 +1752,7 @@ func (x *WebSearchRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebSearchRequest.ProtoReflect.Descriptor instead.
 func (*WebSearchRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{14}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *WebSearchRequest) GetRequestId() string {
@@ -1513,7 +1820,7 @@ type WebSearchResult struct {
 
 func (x *WebSearchResult) Reset() {
 	*x = WebSearchResult{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[15]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1525,7 +1832,7 @@ func (x *WebSearchResult) String() string {
 func (*WebSearchResult) ProtoMessage() {}
 
 func (x *WebSearchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[15]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1538,7 +1845,7 @@ func (x *WebSearchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebSearchResult.ProtoReflect.Descriptor instead.
 func (*WebSearchResult) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{15}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *WebSearchResult) GetUrl() string {
@@ -1588,7 +1895,7 @@ type WebSearchResponse struct {
 
 func (x *WebSearchResponse) Reset() {
 	*x = WebSearchResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[16]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1600,7 +1907,7 @@ func (x *WebSearchResponse) String() string {
 func (*WebSearchResponse) ProtoMessage() {}
 
 func (x *WebSearchResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[16]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1613,7 +1920,7 @@ func (x *WebSearchResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WebSearchResponse.ProtoReflect.Descriptor instead.
 func (*WebSearchResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{16}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *WebSearchResponse) GetRequestId() string {
@@ -1652,7 +1959,7 @@ type SleepRequest struct {
 
 func (x *SleepRequest) Reset() {
 	*x = SleepRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[17]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1664,7 +1971,7 @@ func (x *SleepRequest) String() string {
 func (*SleepRequest) ProtoMessage() {}
 
 func (x *SleepRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[17]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1677,7 +1984,7 @@ func (x *SleepRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SleepRequest.ProtoReflect.Descriptor instead.
 func (*SleepRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{17}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SleepRequest) GetRequestId() string {
@@ -1718,7 +2025,7 @@ type SleepResponse struct {
 
 func (x *SleepResponse) Reset() {
 	*x = SleepResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[18]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1730,7 +2037,7 @@ func (x *SleepResponse) String() string {
 func (*SleepResponse) ProtoMessage() {}
 
 func (x *SleepResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[18]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1743,7 +2050,7 @@ func (x *SleepResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SleepResponse.ProtoReflect.Descriptor instead.
 func (*SleepResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{18}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SleepResponse) GetRequestId() string {
@@ -1782,7 +2089,7 @@ type RemoteTriggerRequest struct {
 
 func (x *RemoteTriggerRequest) Reset() {
 	*x = RemoteTriggerRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[19]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1794,7 +2101,7 @@ func (x *RemoteTriggerRequest) String() string {
 func (*RemoteTriggerRequest) ProtoMessage() {}
 
 func (x *RemoteTriggerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[19]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1807,7 +2114,7 @@ func (x *RemoteTriggerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteTriggerRequest.ProtoReflect.Descriptor instead.
 func (*RemoteTriggerRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{19}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RemoteTriggerRequest) GetRequestId() string {
@@ -1874,7 +2181,7 @@ type RemoteTriggerResponse struct {
 
 func (x *RemoteTriggerResponse) Reset() {
 	*x = RemoteTriggerResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[20]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1886,7 +2193,7 @@ func (x *RemoteTriggerResponse) String() string {
 func (*RemoteTriggerResponse) ProtoMessage() {}
 
 func (x *RemoteTriggerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[20]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1899,7 +2206,7 @@ func (x *RemoteTriggerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RemoteTriggerResponse.ProtoReflect.Descriptor instead.
 func (*RemoteTriggerResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{20}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *RemoteTriggerResponse) GetRequestId() string {
@@ -1955,7 +2262,7 @@ type SendMessageRequest struct {
 
 func (x *SendMessageRequest) Reset() {
 	*x = SendMessageRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[21]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1967,7 +2274,7 @@ func (x *SendMessageRequest) String() string {
 func (*SendMessageRequest) ProtoMessage() {}
 
 func (x *SendMessageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[21]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1980,7 +2287,7 @@ func (x *SendMessageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendMessageRequest.ProtoReflect.Descriptor instead.
 func (*SendMessageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{21}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *SendMessageRequest) GetRequestId() string {
@@ -2030,7 +2337,7 @@ type SendMessageResponse struct {
 
 func (x *SendMessageResponse) Reset() {
 	*x = SendMessageResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[22]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2042,7 +2349,7 @@ func (x *SendMessageResponse) String() string {
 func (*SendMessageResponse) ProtoMessage() {}
 
 func (x *SendMessageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[22]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2055,7 +2362,7 @@ func (x *SendMessageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SendMessageResponse.ProtoReflect.Descriptor instead.
 func (*SendMessageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{22}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *SendMessageResponse) GetRequestId() string {
@@ -2087,7 +2394,7 @@ type SyntheticOutputRequest struct {
 
 func (x *SyntheticOutputRequest) Reset() {
 	*x = SyntheticOutputRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[23]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2099,7 +2406,7 @@ func (x *SyntheticOutputRequest) String() string {
 func (*SyntheticOutputRequest) ProtoMessage() {}
 
 func (x *SyntheticOutputRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[23]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2112,7 +2419,7 @@ func (x *SyntheticOutputRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticOutputRequest.ProtoReflect.Descriptor instead.
 func (*SyntheticOutputRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{23}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *SyntheticOutputRequest) GetRequestId() string {
@@ -2153,7 +2460,7 @@ type SyntheticOutputResponse struct {
 
 func (x *SyntheticOutputResponse) Reset() {
 	*x = SyntheticOutputResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[24]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2165,7 +2472,7 @@ func (x *SyntheticOutputResponse) String() string {
 func (*SyntheticOutputResponse) ProtoMessage() {}
 
 func (x *SyntheticOutputResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[24]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2178,7 +2485,7 @@ func (x *SyntheticOutputResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyntheticOutputResponse.ProtoReflect.Descriptor instead.
 func (*SyntheticOutputResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{24}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *SyntheticOutputResponse) GetRequestId() string {
@@ -2217,7 +2524,7 @@ type EnterPlanModeRequest struct {
 
 func (x *EnterPlanModeRequest) Reset() {
 	*x = EnterPlanModeRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[25]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2229,7 +2536,7 @@ func (x *EnterPlanModeRequest) String() string {
 func (*EnterPlanModeRequest) ProtoMessage() {}
 
 func (x *EnterPlanModeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[25]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2242,7 +2549,7 @@ func (x *EnterPlanModeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnterPlanModeRequest.ProtoReflect.Descriptor instead.
 func (*EnterPlanModeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{25}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *EnterPlanModeRequest) GetRequestId() string {
@@ -2298,7 +2605,7 @@ type EnterPlanModeResponse struct {
 
 func (x *EnterPlanModeResponse) Reset() {
 	*x = EnterPlanModeResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[26]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2310,7 +2617,7 @@ func (x *EnterPlanModeResponse) String() string {
 func (*EnterPlanModeResponse) ProtoMessage() {}
 
 func (x *EnterPlanModeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[26]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2323,7 +2630,7 @@ func (x *EnterPlanModeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnterPlanModeResponse.ProtoReflect.Descriptor instead.
 func (*EnterPlanModeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{26}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *EnterPlanModeResponse) GetRequestId() string {
@@ -2363,7 +2670,7 @@ type ExitPlanModeRequest struct {
 
 func (x *ExitPlanModeRequest) Reset() {
 	*x = ExitPlanModeRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[27]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2375,7 +2682,7 @@ func (x *ExitPlanModeRequest) String() string {
 func (*ExitPlanModeRequest) ProtoMessage() {}
 
 func (x *ExitPlanModeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[27]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2388,7 +2695,7 @@ func (x *ExitPlanModeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExitPlanModeRequest.ProtoReflect.Descriptor instead.
 func (*ExitPlanModeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{27}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ExitPlanModeRequest) GetRequestId() string {
@@ -2445,7 +2752,7 @@ type ExitPlanModeResponse struct {
 
 func (x *ExitPlanModeResponse) Reset() {
 	*x = ExitPlanModeResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[28]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2457,7 +2764,7 @@ func (x *ExitPlanModeResponse) String() string {
 func (*ExitPlanModeResponse) ProtoMessage() {}
 
 func (x *ExitPlanModeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[28]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2470,7 +2777,7 @@ func (x *ExitPlanModeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExitPlanModeResponse.ProtoReflect.Descriptor instead.
 func (*ExitPlanModeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{28}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ExitPlanModeResponse) GetRequestId() string {
@@ -2500,7 +2807,7 @@ type IsPlanModeRequest struct {
 
 func (x *IsPlanModeRequest) Reset() {
 	*x = IsPlanModeRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[29]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2512,7 +2819,7 @@ func (x *IsPlanModeRequest) String() string {
 func (*IsPlanModeRequest) ProtoMessage() {}
 
 func (x *IsPlanModeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[29]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2525,7 +2832,7 @@ func (x *IsPlanModeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IsPlanModeRequest.ProtoReflect.Descriptor instead.
 func (*IsPlanModeRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{29}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *IsPlanModeRequest) GetRequestId() string {
@@ -2561,7 +2868,7 @@ type IsPlanModeResponse struct {
 
 func (x *IsPlanModeResponse) Reset() {
 	*x = IsPlanModeResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[30]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2573,7 +2880,7 @@ func (x *IsPlanModeResponse) String() string {
 func (*IsPlanModeResponse) ProtoMessage() {}
 
 func (x *IsPlanModeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[30]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2586,7 +2893,7 @@ func (x *IsPlanModeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IsPlanModeResponse.ProtoReflect.Descriptor instead.
 func (*IsPlanModeResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{30}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *IsPlanModeResponse) GetRequestId() string {
@@ -2636,7 +2943,7 @@ type TeamCreateRequest struct {
 
 func (x *TeamCreateRequest) Reset() {
 	*x = TeamCreateRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[31]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2648,7 +2955,7 @@ func (x *TeamCreateRequest) String() string {
 func (*TeamCreateRequest) ProtoMessage() {}
 
 func (x *TeamCreateRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[31]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2661,7 +2968,7 @@ func (x *TeamCreateRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamCreateRequest.ProtoReflect.Descriptor instead.
 func (*TeamCreateRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{31}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *TeamCreateRequest) GetRequestId() string {
@@ -2724,7 +3031,7 @@ type TeamWorker struct {
 
 func (x *TeamWorker) Reset() {
 	*x = TeamWorker{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[32]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2736,7 +3043,7 @@ func (x *TeamWorker) String() string {
 func (*TeamWorker) ProtoMessage() {}
 
 func (x *TeamWorker) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[32]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2749,7 +3056,7 @@ func (x *TeamWorker) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamWorker.ProtoReflect.Descriptor instead.
 func (*TeamWorker) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{32}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *TeamWorker) GetWorkerId() string {
@@ -2832,7 +3139,7 @@ type TeamCreateResponse struct {
 
 func (x *TeamCreateResponse) Reset() {
 	*x = TeamCreateResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[33]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2844,7 +3151,7 @@ func (x *TeamCreateResponse) String() string {
 func (*TeamCreateResponse) ProtoMessage() {}
 
 func (x *TeamCreateResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[33]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2857,7 +3164,7 @@ func (x *TeamCreateResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamCreateResponse.ProtoReflect.Descriptor instead.
 func (*TeamCreateResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{33}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *TeamCreateResponse) GetRequestId() string {
@@ -2889,7 +3196,7 @@ type TeamDeleteRequest struct {
 
 func (x *TeamDeleteRequest) Reset() {
 	*x = TeamDeleteRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[34]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2901,7 +3208,7 @@ func (x *TeamDeleteRequest) String() string {
 func (*TeamDeleteRequest) ProtoMessage() {}
 
 func (x *TeamDeleteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[34]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2914,7 +3221,7 @@ func (x *TeamDeleteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamDeleteRequest.ProtoReflect.Descriptor instead.
 func (*TeamDeleteRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{34}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *TeamDeleteRequest) GetRequestId() string {
@@ -2962,7 +3269,7 @@ type TeamDeleteResponse struct {
 
 func (x *TeamDeleteResponse) Reset() {
 	*x = TeamDeleteResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[35]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2974,7 +3281,7 @@ func (x *TeamDeleteResponse) String() string {
 func (*TeamDeleteResponse) ProtoMessage() {}
 
 func (x *TeamDeleteResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[35]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2987,7 +3294,7 @@ func (x *TeamDeleteResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamDeleteResponse.ProtoReflect.Descriptor instead.
 func (*TeamDeleteResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{35}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *TeamDeleteResponse) GetRequestId() string {
@@ -3019,7 +3326,7 @@ type TeamListRequest struct {
 
 func (x *TeamListRequest) Reset() {
 	*x = TeamListRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[36]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3031,7 +3338,7 @@ func (x *TeamListRequest) String() string {
 func (*TeamListRequest) ProtoMessage() {}
 
 func (x *TeamListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[36]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3044,7 +3351,7 @@ func (x *TeamListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamListRequest.ProtoReflect.Descriptor instead.
 func (*TeamListRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{36}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *TeamListRequest) GetRequestId() string {
@@ -3087,7 +3394,7 @@ type TeamListResponse struct {
 
 func (x *TeamListResponse) Reset() {
 	*x = TeamListResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[37]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3099,7 +3406,7 @@ func (x *TeamListResponse) String() string {
 func (*TeamListResponse) ProtoMessage() {}
 
 func (x *TeamListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[37]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3112,7 +3419,7 @@ func (x *TeamListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamListResponse.ProtoReflect.Descriptor instead.
 func (*TeamListResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{37}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *TeamListResponse) GetRequestId() string {
@@ -3156,7 +3463,7 @@ type LspQueryRequest struct {
 
 func (x *LspQueryRequest) Reset() {
 	*x = LspQueryRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[38]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3168,7 +3475,7 @@ func (x *LspQueryRequest) String() string {
 func (*LspQueryRequest) ProtoMessage() {}
 
 func (x *LspQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[38]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3181,7 +3488,7 @@ func (x *LspQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LspQueryRequest.ProtoReflect.Descriptor instead.
 func (*LspQueryRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{38}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *LspQueryRequest) GetRequestId() string {
@@ -3244,7 +3551,7 @@ type LspDiagnostic struct {
 
 func (x *LspDiagnostic) Reset() {
 	*x = LspDiagnostic{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[39]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3256,7 +3563,7 @@ func (x *LspDiagnostic) String() string {
 func (*LspDiagnostic) ProtoMessage() {}
 
 func (x *LspDiagnostic) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[39]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3269,7 +3576,7 @@ func (x *LspDiagnostic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LspDiagnostic.ProtoReflect.Descriptor instead.
 func (*LspDiagnostic) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{39}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *LspDiagnostic) GetSeverity() string {
@@ -3333,7 +3640,7 @@ type LspLocation struct {
 
 func (x *LspLocation) Reset() {
 	*x = LspLocation{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[40]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3345,7 +3652,7 @@ func (x *LspLocation) String() string {
 func (*LspLocation) ProtoMessage() {}
 
 func (x *LspLocation) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[40]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3358,7 +3665,7 @@ func (x *LspLocation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LspLocation.ProtoReflect.Descriptor instead.
 func (*LspLocation) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{40}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *LspLocation) GetFilePath() string {
@@ -3395,7 +3702,7 @@ type LspCompletion struct {
 
 func (x *LspCompletion) Reset() {
 	*x = LspCompletion{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[41]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3407,7 +3714,7 @@ func (x *LspCompletion) String() string {
 func (*LspCompletion) ProtoMessage() {}
 
 func (x *LspCompletion) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[41]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3420,7 +3727,7 @@ func (x *LspCompletion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LspCompletion.ProtoReflect.Descriptor instead.
 func (*LspCompletion) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{41}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *LspCompletion) GetLabel() string {
@@ -3466,7 +3773,7 @@ type LspQueryResponse struct {
 
 func (x *LspQueryResponse) Reset() {
 	*x = LspQueryResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[42]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3478,7 +3785,7 @@ func (x *LspQueryResponse) String() string {
 func (*LspQueryResponse) ProtoMessage() {}
 
 func (x *LspQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[42]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3491,7 +3798,7 @@ func (x *LspQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LspQueryResponse.ProtoReflect.Descriptor instead.
 func (*LspQueryResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{42}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{44}
 }
 
 func (x *LspQueryResponse) GetRequestId() string {
@@ -3570,7 +3877,7 @@ type GatewayApproval struct {
 
 func (x *GatewayApproval) Reset() {
 	*x = GatewayApproval{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[43]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3582,7 +3889,7 @@ func (x *GatewayApproval) String() string {
 func (*GatewayApproval) ProtoMessage() {}
 
 func (x *GatewayApproval) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[43]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3595,7 +3902,7 @@ func (x *GatewayApproval) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GatewayApproval.ProtoReflect.Descriptor instead.
 func (*GatewayApproval) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{43}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *GatewayApproval) GetApprovalId() string {
@@ -3705,7 +4012,7 @@ type RequestApprovalRequest struct {
 
 func (x *RequestApprovalRequest) Reset() {
 	*x = RequestApprovalRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[44]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3717,7 +4024,7 @@ func (x *RequestApprovalRequest) String() string {
 func (*RequestApprovalRequest) ProtoMessage() {}
 
 func (x *RequestApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[44]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3730,7 +4037,7 @@ func (x *RequestApprovalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestApprovalRequest.ProtoReflect.Descriptor instead.
 func (*RequestApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{44}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *RequestApprovalRequest) GetRequestId() string {
@@ -3799,7 +4106,7 @@ type RequestApprovalResponse struct {
 
 func (x *RequestApprovalResponse) Reset() {
 	*x = RequestApprovalResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[45]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3811,7 +4118,7 @@ func (x *RequestApprovalResponse) String() string {
 func (*RequestApprovalResponse) ProtoMessage() {}
 
 func (x *RequestApprovalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[45]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3824,7 +4131,7 @@ func (x *RequestApprovalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestApprovalResponse.ProtoReflect.Descriptor instead.
 func (*RequestApprovalResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{45}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *RequestApprovalResponse) GetRequestId() string {
@@ -3854,7 +4161,7 @@ type ApproveApprovalRequest struct {
 
 func (x *ApproveApprovalRequest) Reset() {
 	*x = ApproveApprovalRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[46]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3866,7 +4173,7 @@ func (x *ApproveApprovalRequest) String() string {
 func (*ApproveApprovalRequest) ProtoMessage() {}
 
 func (x *ApproveApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[46]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3879,7 +4186,7 @@ func (x *ApproveApprovalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproveApprovalRequest.ProtoReflect.Descriptor instead.
 func (*ApproveApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{46}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{48}
 }
 
 func (x *ApproveApprovalRequest) GetRequestId() string {
@@ -3927,7 +4234,7 @@ type ApproveApprovalResponse struct {
 
 func (x *ApproveApprovalResponse) Reset() {
 	*x = ApproveApprovalResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[47]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3939,7 +4246,7 @@ func (x *ApproveApprovalResponse) String() string {
 func (*ApproveApprovalResponse) ProtoMessage() {}
 
 func (x *ApproveApprovalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[47]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3952,7 +4259,7 @@ func (x *ApproveApprovalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ApproveApprovalResponse.ProtoReflect.Descriptor instead.
 func (*ApproveApprovalResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{47}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *ApproveApprovalResponse) GetRequestId() string {
@@ -3982,7 +4289,7 @@ type DenyApprovalRequest struct {
 
 func (x *DenyApprovalRequest) Reset() {
 	*x = DenyApprovalRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[48]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3994,7 +4301,7 @@ func (x *DenyApprovalRequest) String() string {
 func (*DenyApprovalRequest) ProtoMessage() {}
 
 func (x *DenyApprovalRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[48]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4007,7 +4314,7 @@ func (x *DenyApprovalRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DenyApprovalRequest.ProtoReflect.Descriptor instead.
 func (*DenyApprovalRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{48}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{50}
 }
 
 func (x *DenyApprovalRequest) GetRequestId() string {
@@ -4055,7 +4362,7 @@ type DenyApprovalResponse struct {
 
 func (x *DenyApprovalResponse) Reset() {
 	*x = DenyApprovalResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[49]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4067,7 +4374,7 @@ func (x *DenyApprovalResponse) String() string {
 func (*DenyApprovalResponse) ProtoMessage() {}
 
 func (x *DenyApprovalResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[49]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4080,7 +4387,7 @@ func (x *DenyApprovalResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DenyApprovalResponse.ProtoReflect.Descriptor instead.
 func (*DenyApprovalResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{49}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *DenyApprovalResponse) GetRequestId() string {
@@ -4110,7 +4417,7 @@ type ListPendingApprovalsRequest struct {
 
 func (x *ListPendingApprovalsRequest) Reset() {
 	*x = ListPendingApprovalsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[50]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4122,7 +4429,7 @@ func (x *ListPendingApprovalsRequest) String() string {
 func (*ListPendingApprovalsRequest) ProtoMessage() {}
 
 func (x *ListPendingApprovalsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[50]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4135,7 +4442,7 @@ func (x *ListPendingApprovalsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPendingApprovalsRequest.ProtoReflect.Descriptor instead.
 func (*ListPendingApprovalsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{50}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *ListPendingApprovalsRequest) GetRequestId() string {
@@ -4169,7 +4476,7 @@ type ListPendingApprovalsResponse struct {
 
 func (x *ListPendingApprovalsResponse) Reset() {
 	*x = ListPendingApprovalsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[51]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4181,7 +4488,7 @@ func (x *ListPendingApprovalsResponse) String() string {
 func (*ListPendingApprovalsResponse) ProtoMessage() {}
 
 func (x *ListPendingApprovalsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[51]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4194,7 +4501,7 @@ func (x *ListPendingApprovalsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPendingApprovalsResponse.ProtoReflect.Descriptor instead.
 func (*ListPendingApprovalsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{51}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ListPendingApprovalsResponse) GetRequestId() string {
@@ -4229,7 +4536,7 @@ type TrajectoryAction struct {
 
 func (x *TrajectoryAction) Reset() {
 	*x = TrajectoryAction{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[52]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4241,7 +4548,7 @@ func (x *TrajectoryAction) String() string {
 func (*TrajectoryAction) ProtoMessage() {}
 
 func (x *TrajectoryAction) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[52]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4254,7 +4561,7 @@ func (x *TrajectoryAction) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrajectoryAction.ProtoReflect.Descriptor instead.
 func (*TrajectoryAction) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{52}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *TrajectoryAction) GetName() string {
@@ -4319,7 +4626,7 @@ type Trajectory struct {
 
 func (x *Trajectory) Reset() {
 	*x = Trajectory{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[53]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4331,7 +4638,7 @@ func (x *Trajectory) String() string {
 func (*Trajectory) ProtoMessage() {}
 
 func (x *Trajectory) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[53]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4344,7 +4651,7 @@ func (x *Trajectory) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Trajectory.ProtoReflect.Descriptor instead.
 func (*Trajectory) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{53}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *Trajectory) GetTrajectoryId() string {
@@ -4448,7 +4755,7 @@ type RecordTrajectoryRequest struct {
 
 func (x *RecordTrajectoryRequest) Reset() {
 	*x = RecordTrajectoryRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[54]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4460,7 +4767,7 @@ func (x *RecordTrajectoryRequest) String() string {
 func (*RecordTrajectoryRequest) ProtoMessage() {}
 
 func (x *RecordTrajectoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[54]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4473,7 +4780,7 @@ func (x *RecordTrajectoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordTrajectoryRequest.ProtoReflect.Descriptor instead.
 func (*RecordTrajectoryRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{54}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *RecordTrajectoryRequest) GetRequestId() string {
@@ -4504,7 +4811,7 @@ type RecordTrajectoryResponse struct {
 
 func (x *RecordTrajectoryResponse) Reset() {
 	*x = RecordTrajectoryResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[55]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4516,7 +4823,7 @@ func (x *RecordTrajectoryResponse) String() string {
 func (*RecordTrajectoryResponse) ProtoMessage() {}
 
 func (x *RecordTrajectoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[55]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4529,7 +4836,7 @@ func (x *RecordTrajectoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecordTrajectoryResponse.ProtoReflect.Descriptor instead.
 func (*RecordTrajectoryResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{55}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *RecordTrajectoryResponse) GetRequestId() string {
@@ -4572,7 +4879,7 @@ type ListTrajectoriesRequest struct {
 
 func (x *ListTrajectoriesRequest) Reset() {
 	*x = ListTrajectoriesRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[56]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[58]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4584,7 +4891,7 @@ func (x *ListTrajectoriesRequest) String() string {
 func (*ListTrajectoriesRequest) ProtoMessage() {}
 
 func (x *ListTrajectoriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[56]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[58]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4597,7 +4904,7 @@ func (x *ListTrajectoriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTrajectoriesRequest.ProtoReflect.Descriptor instead.
 func (*ListTrajectoriesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{56}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{58}
 }
 
 func (x *ListTrajectoriesRequest) GetRequestId() string {
@@ -4653,7 +4960,7 @@ type ListTrajectoriesResponse struct {
 
 func (x *ListTrajectoriesResponse) Reset() {
 	*x = ListTrajectoriesResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[57]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4665,7 +4972,7 @@ func (x *ListTrajectoriesResponse) String() string {
 func (*ListTrajectoriesResponse) ProtoMessage() {}
 
 func (x *ListTrajectoriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[57]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4678,7 +4985,7 @@ func (x *ListTrajectoriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTrajectoriesResponse.ProtoReflect.Descriptor instead.
 func (*ListTrajectoriesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{57}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *ListTrajectoriesResponse) GetRequestId() string {
@@ -4716,7 +5023,7 @@ type ExportTrajectoriesRequest struct {
 
 func (x *ExportTrajectoriesRequest) Reset() {
 	*x = ExportTrajectoriesRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[58]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4728,7 +5035,7 @@ func (x *ExportTrajectoriesRequest) String() string {
 func (*ExportTrajectoriesRequest) ProtoMessage() {}
 
 func (x *ExportTrajectoriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[58]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4741,7 +5048,7 @@ func (x *ExportTrajectoriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportTrajectoriesRequest.ProtoReflect.Descriptor instead.
 func (*ExportTrajectoriesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{58}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ExportTrajectoriesRequest) GetRequestId() string {
@@ -4786,7 +5093,7 @@ type ExportTrajectoriesResponse struct {
 
 func (x *ExportTrajectoriesResponse) Reset() {
 	*x = ExportTrajectoriesResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[59]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4798,7 +5105,7 @@ func (x *ExportTrajectoriesResponse) String() string {
 func (*ExportTrajectoriesResponse) ProtoMessage() {}
 
 func (x *ExportTrajectoriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[59]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4811,7 +5118,7 @@ func (x *ExportTrajectoriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExportTrajectoriesResponse.ProtoReflect.Descriptor instead.
 func (*ExportTrajectoriesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{59}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ExportTrajectoriesResponse) GetRequestId() string {
@@ -4850,14 +5157,22 @@ type Skill struct {
 	// Source path on the bridge's filesystem. Empty for bundled skills.
 	SourcePath string `protobuf:"bytes,5,opt,name=source_path,json=sourcePath,proto3" json:"source_path,omitempty"`
 	// Relevance threshold (0.0-1.0) for auto-injection.
-	MinScore      float32 `protobuf:"fixed32,6,opt,name=min_score,json=minScore,proto3" json:"min_score,omitempty"`
+	MinScore float32 `protobuf:"fixed32,6,opt,name=min_score,json=minScore,proto3" json:"min_score,omitempty"`
+	// EP-11 S3: the immutable version of an authored skill this body is
+	// (session-core `agent_skills.version`); 0 for a proposal or a builtin skill.
+	// A run pins it so recovery inside the run reads the same text.
+	Version int32 `protobuf:"varint,7,opt,name=version,proto3" json:"version,omitempty"`
+	// EP-11 S3: sha256 hex digest of the skill version (session-core
+	// `agent_skills.digest`), or of the embedded SKILL.md for a builtin skill.
+	// Empty when the row predates versions.
+	Digest        string `protobuf:"bytes,8,opt,name=digest,proto3" json:"digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Skill) Reset() {
 	*x = Skill{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[60]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4869,7 +5184,7 @@ func (x *Skill) String() string {
 func (*Skill) ProtoMessage() {}
 
 func (x *Skill) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[60]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4882,7 +5197,7 @@ func (x *Skill) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Skill.ProtoReflect.Descriptor instead.
 func (*Skill) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{60}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *Skill) GetId() string {
@@ -4927,6 +5242,20 @@ func (x *Skill) GetMinScore() float32 {
 	return 0
 }
 
+func (x *Skill) GetVersion() int32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *Skill) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
 type ListSkillsRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -4937,7 +5266,7 @@ type ListSkillsRequest struct {
 
 func (x *ListSkillsRequest) Reset() {
 	*x = ListSkillsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[61]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4949,7 +5278,7 @@ func (x *ListSkillsRequest) String() string {
 func (*ListSkillsRequest) ProtoMessage() {}
 
 func (x *ListSkillsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[61]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4962,7 +5291,7 @@ func (x *ListSkillsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSkillsRequest.ProtoReflect.Descriptor instead.
 func (*ListSkillsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{61}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *ListSkillsRequest) GetRequestId() string {
@@ -4989,7 +5318,7 @@ type ListSkillsResponse struct {
 
 func (x *ListSkillsResponse) Reset() {
 	*x = ListSkillsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[62]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5001,7 +5330,7 @@ func (x *ListSkillsResponse) String() string {
 func (*ListSkillsResponse) ProtoMessage() {}
 
 func (x *ListSkillsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[62]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5014,7 +5343,7 @@ func (x *ListSkillsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSkillsResponse.ProtoReflect.Descriptor instead.
 func (*ListSkillsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{62}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *ListSkillsResponse) GetRequestId() string {
@@ -5042,7 +5371,7 @@ type GetSkillRequest struct {
 
 func (x *GetSkillRequest) Reset() {
 	*x = GetSkillRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[63]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5054,7 +5383,7 @@ func (x *GetSkillRequest) String() string {
 func (*GetSkillRequest) ProtoMessage() {}
 
 func (x *GetSkillRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[63]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5067,7 +5396,7 @@ func (x *GetSkillRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSkillRequest.ProtoReflect.Descriptor instead.
 func (*GetSkillRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{63}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *GetSkillRequest) GetRequestId() string {
@@ -5101,7 +5430,7 @@ type GetSkillResponse struct {
 
 func (x *GetSkillResponse) Reset() {
 	*x = GetSkillResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[64]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5113,7 +5442,7 @@ func (x *GetSkillResponse) String() string {
 func (*GetSkillResponse) ProtoMessage() {}
 
 func (x *GetSkillResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[64]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5126,7 +5455,7 @@ func (x *GetSkillResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSkillResponse.ProtoReflect.Descriptor instead.
 func (*GetSkillResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{64}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *GetSkillResponse) GetRequestId() string {
@@ -5160,7 +5489,7 @@ type MatchSkillsRequest struct {
 
 func (x *MatchSkillsRequest) Reset() {
 	*x = MatchSkillsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[65]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5172,7 +5501,7 @@ func (x *MatchSkillsRequest) String() string {
 func (*MatchSkillsRequest) ProtoMessage() {}
 
 func (x *MatchSkillsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[65]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5185,7 +5514,7 @@ func (x *MatchSkillsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MatchSkillsRequest.ProtoReflect.Descriptor instead.
 func (*MatchSkillsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{65}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *MatchSkillsRequest) GetRequestId() string {
@@ -5233,7 +5562,7 @@ type SkillMatch struct {
 
 func (x *SkillMatch) Reset() {
 	*x = SkillMatch{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[66]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5245,7 +5574,7 @@ func (x *SkillMatch) String() string {
 func (*SkillMatch) ProtoMessage() {}
 
 func (x *SkillMatch) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[66]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5258,7 +5587,7 @@ func (x *SkillMatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SkillMatch.ProtoReflect.Descriptor instead.
 func (*SkillMatch) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{66}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *SkillMatch) GetSkill() *Skill {
@@ -5285,7 +5614,7 @@ type MatchSkillsResponse struct {
 
 func (x *MatchSkillsResponse) Reset() {
 	*x = MatchSkillsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[67]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5297,7 +5626,7 @@ func (x *MatchSkillsResponse) String() string {
 func (*MatchSkillsResponse) ProtoMessage() {}
 
 func (x *MatchSkillsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[67]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5310,7 +5639,7 @@ func (x *MatchSkillsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MatchSkillsResponse.ProtoReflect.Descriptor instead.
 func (*MatchSkillsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{67}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *MatchSkillsResponse) GetRequestId() string {
@@ -5349,7 +5678,7 @@ type McpServer struct {
 
 func (x *McpServer) Reset() {
 	*x = McpServer{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[68]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5361,7 +5690,7 @@ func (x *McpServer) String() string {
 func (*McpServer) ProtoMessage() {}
 
 func (x *McpServer) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[68]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5374,7 +5703,7 @@ func (x *McpServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpServer.ProtoReflect.Descriptor instead.
 func (*McpServer) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{68}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *McpServer) GetServerId() string {
@@ -5437,7 +5766,7 @@ type RegisterMcpServerRequest struct {
 
 func (x *RegisterMcpServerRequest) Reset() {
 	*x = RegisterMcpServerRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[69]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5449,7 +5778,7 @@ func (x *RegisterMcpServerRequest) String() string {
 func (*RegisterMcpServerRequest) ProtoMessage() {}
 
 func (x *RegisterMcpServerRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[69]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5462,7 +5791,7 @@ func (x *RegisterMcpServerRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMcpServerRequest.ProtoReflect.Descriptor instead.
 func (*RegisterMcpServerRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{69}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *RegisterMcpServerRequest) GetRequestId() string {
@@ -5496,7 +5825,7 @@ type RegisterMcpServerResponse struct {
 
 func (x *RegisterMcpServerResponse) Reset() {
 	*x = RegisterMcpServerResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[70]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5508,7 +5837,7 @@ func (x *RegisterMcpServerResponse) String() string {
 func (*RegisterMcpServerResponse) ProtoMessage() {}
 
 func (x *RegisterMcpServerResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[70]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5521,7 +5850,7 @@ func (x *RegisterMcpServerResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterMcpServerResponse.ProtoReflect.Descriptor instead.
 func (*RegisterMcpServerResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{70}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *RegisterMcpServerResponse) GetRequestId() string {
@@ -5548,7 +5877,7 @@ type ListMcpServersRequest struct {
 
 func (x *ListMcpServersRequest) Reset() {
 	*x = ListMcpServersRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[71]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5560,7 +5889,7 @@ func (x *ListMcpServersRequest) String() string {
 func (*ListMcpServersRequest) ProtoMessage() {}
 
 func (x *ListMcpServersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[71]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5573,7 +5902,7 @@ func (x *ListMcpServersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMcpServersRequest.ProtoReflect.Descriptor instead.
 func (*ListMcpServersRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{71}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *ListMcpServersRequest) GetRequestId() string {
@@ -5600,7 +5929,7 @@ type ListMcpServersResponse struct {
 
 func (x *ListMcpServersResponse) Reset() {
 	*x = ListMcpServersResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[72]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5612,7 +5941,7 @@ func (x *ListMcpServersResponse) String() string {
 func (*ListMcpServersResponse) ProtoMessage() {}
 
 func (x *ListMcpServersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[72]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5625,7 +5954,7 @@ func (x *ListMcpServersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMcpServersResponse.ProtoReflect.Descriptor instead.
 func (*ListMcpServersResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{72}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *ListMcpServersResponse) GetRequestId() string {
@@ -5661,7 +5990,7 @@ type ListMcpToolsRequest struct {
 
 func (x *ListMcpToolsRequest) Reset() {
 	*x = ListMcpToolsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[73]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5673,7 +6002,7 @@ func (x *ListMcpToolsRequest) String() string {
 func (*ListMcpToolsRequest) ProtoMessage() {}
 
 func (x *ListMcpToolsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[73]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5686,7 +6015,7 @@ func (x *ListMcpToolsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMcpToolsRequest.ProtoReflect.Descriptor instead.
 func (*ListMcpToolsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{73}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *ListMcpToolsRequest) GetRequestId() string {
@@ -5739,7 +6068,7 @@ type McpToolMeta struct {
 
 func (x *McpToolMeta) Reset() {
 	*x = McpToolMeta{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[74]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5751,7 +6080,7 @@ func (x *McpToolMeta) String() string {
 func (*McpToolMeta) ProtoMessage() {}
 
 func (x *McpToolMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[74]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5764,7 +6093,7 @@ func (x *McpToolMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use McpToolMeta.ProtoReflect.Descriptor instead.
 func (*McpToolMeta) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{74}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *McpToolMeta) GetQualifiedName() string {
@@ -5818,7 +6147,7 @@ type ListMcpToolsResponse struct {
 
 func (x *ListMcpToolsResponse) Reset() {
 	*x = ListMcpToolsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[75]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5830,7 +6159,7 @@ func (x *ListMcpToolsResponse) String() string {
 func (*ListMcpToolsResponse) ProtoMessage() {}
 
 func (x *ListMcpToolsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[75]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5843,7 +6172,7 @@ func (x *ListMcpToolsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMcpToolsResponse.ProtoReflect.Descriptor instead.
 func (*ListMcpToolsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{75}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *ListMcpToolsResponse) GetRequestId() string {
@@ -5886,13 +6215,17 @@ type ProxyMcpToolRequest struct {
 	// gateway refuses the call with `tool_definition_changed` unless the server's
 	// current definition still hashes to it. Empty keeps today's behaviour.
 	ExpectedDigest string `protobuf:"bytes,7,opt,name=expected_digest,json=expectedDigest,proto3" json:"expected_digest,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// EP-4 S4: the caller allows the server to ask the run's owner a question
+	// during this call. False keeps today's protocol revision and empty
+	// capabilities. Ignored while the gateway's MCP_ELICITATION_ENABLED is off.
+	AllowElicitation bool `protobuf:"varint,8,opt,name=allow_elicitation,json=allowElicitation,proto3" json:"allow_elicitation,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ProxyMcpToolRequest) Reset() {
 	*x = ProxyMcpToolRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[76]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5904,7 +6237,7 @@ func (x *ProxyMcpToolRequest) String() string {
 func (*ProxyMcpToolRequest) ProtoMessage() {}
 
 func (x *ProxyMcpToolRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[76]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5917,7 +6250,7 @@ func (x *ProxyMcpToolRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyMcpToolRequest.ProtoReflect.Descriptor instead.
 func (*ProxyMcpToolRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{76}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *ProxyMcpToolRequest) GetRequestId() string {
@@ -5969,20 +6302,31 @@ func (x *ProxyMcpToolRequest) GetExpectedDigest() string {
 	return ""
 }
 
+func (x *ProxyMcpToolRequest) GetAllowElicitation() bool {
+	if x != nil {
+		return x.AllowElicitation
+	}
+	return false
+}
+
 type ProxyMcpToolResponse struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	// JSON-encoded tool output (provider-shaped).
 	OutputJson string `protobuf:"bytes,2,opt,name=output_json,json=outputJson,proto3" json:"output_json,omitempty"`
 	// Non-empty when the proxy or remote server returned an error.
-	ErrorMessage  string `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	ErrorMessage string `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// EP-4 S4: set when the server asked a question and the call is held;
+	// output_json and error_message are then empty. Answer it with
+	// McpElicitationService.AnswerMcpElicitation.
+	Elicitation   *McpElicitationPending `protobuf:"bytes,4,opt,name=elicitation,proto3" json:"elicitation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ProxyMcpToolResponse) Reset() {
 	*x = ProxyMcpToolResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[77]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5994,7 +6338,7 @@ func (x *ProxyMcpToolResponse) String() string {
 func (*ProxyMcpToolResponse) ProtoMessage() {}
 
 func (x *ProxyMcpToolResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[77]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6007,7 +6351,7 @@ func (x *ProxyMcpToolResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProxyMcpToolResponse.ProtoReflect.Descriptor instead.
 func (*ProxyMcpToolResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{77}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *ProxyMcpToolResponse) GetRequestId() string {
@@ -6029,6 +6373,13 @@ func (x *ProxyMcpToolResponse) GetErrorMessage() string {
 		return x.ErrorMessage
 	}
 	return ""
+}
+
+func (x *ProxyMcpToolResponse) GetElicitation() *McpElicitationPending {
+	if x != nil {
+		return x.Elicitation
+	}
+	return nil
 }
 
 // Plugin — third-party extension registered against an org. Each
@@ -6053,7 +6404,7 @@ type Plugin struct {
 
 func (x *Plugin) Reset() {
 	*x = Plugin{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[78]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6065,7 +6416,7 @@ func (x *Plugin) String() string {
 func (*Plugin) ProtoMessage() {}
 
 func (x *Plugin) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[78]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6078,7 +6429,7 @@ func (x *Plugin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Plugin.ProtoReflect.Descriptor instead.
 func (*Plugin) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{78}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *Plugin) GetPluginId() string {
@@ -6148,7 +6499,7 @@ type RegisterPluginRequest struct {
 
 func (x *RegisterPluginRequest) Reset() {
 	*x = RegisterPluginRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[79]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6160,7 +6511,7 @@ func (x *RegisterPluginRequest) String() string {
 func (*RegisterPluginRequest) ProtoMessage() {}
 
 func (x *RegisterPluginRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[79]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6173,7 +6524,7 @@ func (x *RegisterPluginRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterPluginRequest.ProtoReflect.Descriptor instead.
 func (*RegisterPluginRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{79}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *RegisterPluginRequest) GetRequestId() string {
@@ -6207,7 +6558,7 @@ type RegisterPluginResponse struct {
 
 func (x *RegisterPluginResponse) Reset() {
 	*x = RegisterPluginResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[80]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6219,7 +6570,7 @@ func (x *RegisterPluginResponse) String() string {
 func (*RegisterPluginResponse) ProtoMessage() {}
 
 func (x *RegisterPluginResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[80]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6232,7 +6583,7 @@ func (x *RegisterPluginResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterPluginResponse.ProtoReflect.Descriptor instead.
 func (*RegisterPluginResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{80}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *RegisterPluginResponse) GetRequestId() string {
@@ -6261,7 +6612,7 @@ type ListPluginsRequest struct {
 
 func (x *ListPluginsRequest) Reset() {
 	*x = ListPluginsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[81]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6273,7 +6624,7 @@ func (x *ListPluginsRequest) String() string {
 func (*ListPluginsRequest) ProtoMessage() {}
 
 func (x *ListPluginsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[81]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6286,7 +6637,7 @@ func (x *ListPluginsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPluginsRequest.ProtoReflect.Descriptor instead.
 func (*ListPluginsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{81}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *ListPluginsRequest) GetRequestId() string {
@@ -6320,7 +6671,7 @@ type ListPluginsResponse struct {
 
 func (x *ListPluginsResponse) Reset() {
 	*x = ListPluginsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[82]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6332,7 +6683,7 @@ func (x *ListPluginsResponse) String() string {
 func (*ListPluginsResponse) ProtoMessage() {}
 
 func (x *ListPluginsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[82]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6345,7 +6696,7 @@ func (x *ListPluginsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListPluginsResponse.ProtoReflect.Descriptor instead.
 func (*ListPluginsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{82}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *ListPluginsResponse) GetRequestId() string {
@@ -6374,7 +6725,7 @@ type SetPluginEnabledRequest struct {
 
 func (x *SetPluginEnabledRequest) Reset() {
 	*x = SetPluginEnabledRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[83]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6386,7 +6737,7 @@ func (x *SetPluginEnabledRequest) String() string {
 func (*SetPluginEnabledRequest) ProtoMessage() {}
 
 func (x *SetPluginEnabledRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[83]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6399,7 +6750,7 @@ func (x *SetPluginEnabledRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPluginEnabledRequest.ProtoReflect.Descriptor instead.
 func (*SetPluginEnabledRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{83}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *SetPluginEnabledRequest) GetRequestId() string {
@@ -6440,7 +6791,7 @@ type SetPluginEnabledResponse struct {
 
 func (x *SetPluginEnabledResponse) Reset() {
 	*x = SetPluginEnabledResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[84]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6452,7 +6803,7 @@ func (x *SetPluginEnabledResponse) String() string {
 func (*SetPluginEnabledResponse) ProtoMessage() {}
 
 func (x *SetPluginEnabledResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[84]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6465,7 +6816,7 @@ func (x *SetPluginEnabledResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPluginEnabledResponse.ProtoReflect.Descriptor instead.
 func (*SetPluginEnabledResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{84}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *SetPluginEnabledResponse) GetRequestId() string {
@@ -6502,7 +6853,7 @@ type Command struct {
 
 func (x *Command) Reset() {
 	*x = Command{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[85]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6514,7 +6865,7 @@ func (x *Command) String() string {
 func (*Command) ProtoMessage() {}
 
 func (x *Command) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[85]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6527,7 +6878,7 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Command.ProtoReflect.Descriptor instead.
 func (*Command) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{85}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *Command) GetCommandId() string {
@@ -6582,7 +6933,7 @@ type ListCommandsRequest struct {
 
 func (x *ListCommandsRequest) Reset() {
 	*x = ListCommandsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[86]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6594,7 +6945,7 @@ func (x *ListCommandsRequest) String() string {
 func (*ListCommandsRequest) ProtoMessage() {}
 
 func (x *ListCommandsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[86]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6607,7 +6958,7 @@ func (x *ListCommandsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCommandsRequest.ProtoReflect.Descriptor instead.
 func (*ListCommandsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{86}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *ListCommandsRequest) GetRequestId() string {
@@ -6634,7 +6985,7 @@ type ListCommandsResponse struct {
 
 func (x *ListCommandsResponse) Reset() {
 	*x = ListCommandsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[87]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6646,7 +6997,7 @@ func (x *ListCommandsResponse) String() string {
 func (*ListCommandsResponse) ProtoMessage() {}
 
 func (x *ListCommandsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[87]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6659,7 +7010,7 @@ func (x *ListCommandsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListCommandsResponse.ProtoReflect.Descriptor instead.
 func (*ListCommandsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{87}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *ListCommandsResponse) GetRequestId() string {
@@ -6689,7 +7040,7 @@ type ExecuteCommandRequest struct {
 
 func (x *ExecuteCommandRequest) Reset() {
 	*x = ExecuteCommandRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[88]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6701,7 +7052,7 @@ func (x *ExecuteCommandRequest) String() string {
 func (*ExecuteCommandRequest) ProtoMessage() {}
 
 func (x *ExecuteCommandRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[88]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6714,7 +7065,7 @@ func (x *ExecuteCommandRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteCommandRequest.ProtoReflect.Descriptor instead.
 func (*ExecuteCommandRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{88}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *ExecuteCommandRequest) GetRequestId() string {
@@ -6756,7 +7107,7 @@ type ExecuteCommandResponse struct {
 
 func (x *ExecuteCommandResponse) Reset() {
 	*x = ExecuteCommandResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[89]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6768,7 +7119,7 @@ func (x *ExecuteCommandResponse) String() string {
 func (*ExecuteCommandResponse) ProtoMessage() {}
 
 func (x *ExecuteCommandResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[89]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6781,7 +7132,7 @@ func (x *ExecuteCommandResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteCommandResponse.ProtoReflect.Descriptor instead.
 func (*ExecuteCommandResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{89}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *ExecuteCommandResponse) GetRequestId() string {
@@ -6827,20 +7178,29 @@ type Hook struct {
 	// Deprecated: Marked as deprecated in model_plane/v1/gateway.proto.
 	CallbackUrl string `protobuf:"bytes,4,opt,name=callback_url,json=callbackUrl,proto3" json:"callback_url,omitempty"`
 	Enabled     bool   `protobuf:"varint,5,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	// What this rule does when it matches: "deny" blocks the call outright,
-	// "ask" escalates it to human approval, "allow" (or anything unrecognised)
-	// permits it. Empty means allow — a rule with no decision must not silently
-	// become a block.
+	// What this rule does when it matches: "deny" blocks the call outright and
+	// "ask" escalates it to human approval. The registry stores only those two: an
+	// "allow" rule would add nothing, since allow never overrides a deny, and anything
+	// unrecognised is read as "ask", never as allow.
 	Decision string `protobuf:"bytes,6,opt,name=decision,proto3" json:"decision,omitempty"`
 	// Human-readable reason surfaced to the user on deny/ask.
-	Reason        string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	Reason string `protobuf:"bytes,7,opt,name=reason,proto3" json:"reason,omitempty"`
+	// Evaluation order of the rules the gateway forwards: higher first, then by hook_id.
+	// Strictest-wins makes the order irrelevant to the verdict; this fixes the serialised
+	// context, so one registry always sends the same bytes.
+	Priority int32 `protobuf:"varint,8,opt,name=priority,proto3" json:"priority,omitempty"`
+	// The org policy revision the rule was read at from capability-core's durable store (WS25-S8).
+	// Zero for a rule that lives only in the gateway's in-memory registry.
+	Revision int64 `protobuf:"varint,9,opt,name=revision,proto3" json:"revision,omitempty"`
+	// The person who created the durable rule, as capability-core recorded it (WS25-S8).
+	CreatedBy     string `protobuf:"bytes,10,opt,name=created_by,json=createdBy,proto3" json:"created_by,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Hook) Reset() {
 	*x = Hook{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[90]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6852,7 +7212,7 @@ func (x *Hook) String() string {
 func (*Hook) ProtoMessage() {}
 
 func (x *Hook) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[90]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6865,7 +7225,7 @@ func (x *Hook) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Hook.ProtoReflect.Descriptor instead.
 func (*Hook) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{90}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *Hook) GetHookId() string {
@@ -6918,6 +7278,27 @@ func (x *Hook) GetReason() string {
 	return ""
 }
 
+func (x *Hook) GetPriority() int32 {
+	if x != nil {
+		return x.Priority
+	}
+	return 0
+}
+
+func (x *Hook) GetRevision() int64 {
+	if x != nil {
+		return x.Revision
+	}
+	return 0
+}
+
+func (x *Hook) GetCreatedBy() string {
+	if x != nil {
+		return x.CreatedBy
+	}
+	return ""
+}
+
 type RegisterHookRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -6929,7 +7310,7 @@ type RegisterHookRequest struct {
 
 func (x *RegisterHookRequest) Reset() {
 	*x = RegisterHookRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[91]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -6941,7 +7322,7 @@ func (x *RegisterHookRequest) String() string {
 func (*RegisterHookRequest) ProtoMessage() {}
 
 func (x *RegisterHookRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[91]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -6954,7 +7335,7 @@ func (x *RegisterHookRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterHookRequest.ProtoReflect.Descriptor instead.
 func (*RegisterHookRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{91}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *RegisterHookRequest) GetRequestId() string {
@@ -6988,7 +7369,7 @@ type RegisterHookResponse struct {
 
 func (x *RegisterHookResponse) Reset() {
 	*x = RegisterHookResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[92]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7000,7 +7381,7 @@ func (x *RegisterHookResponse) String() string {
 func (*RegisterHookResponse) ProtoMessage() {}
 
 func (x *RegisterHookResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[92]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7013,7 +7394,7 @@ func (x *RegisterHookResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RegisterHookResponse.ProtoReflect.Descriptor instead.
 func (*RegisterHookResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{92}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *RegisterHookResponse) GetRequestId() string {
@@ -7042,7 +7423,7 @@ type ListHooksRequest struct {
 
 func (x *ListHooksRequest) Reset() {
 	*x = ListHooksRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[93]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7054,7 +7435,7 @@ func (x *ListHooksRequest) String() string {
 func (*ListHooksRequest) ProtoMessage() {}
 
 func (x *ListHooksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[93]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7067,7 +7448,7 @@ func (x *ListHooksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHooksRequest.ProtoReflect.Descriptor instead.
 func (*ListHooksRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{93}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *ListHooksRequest) GetRequestId() string {
@@ -7101,7 +7482,7 @@ type ListHooksResponse struct {
 
 func (x *ListHooksResponse) Reset() {
 	*x = ListHooksResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[94]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7113,7 +7494,7 @@ func (x *ListHooksResponse) String() string {
 func (*ListHooksResponse) ProtoMessage() {}
 
 func (x *ListHooksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[94]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7126,7 +7507,7 @@ func (x *ListHooksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListHooksResponse.ProtoReflect.Descriptor instead.
 func (*ListHooksResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{94}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *ListHooksResponse) GetRequestId() string {
@@ -7156,7 +7537,7 @@ type CheckPermissionRequest struct {
 
 func (x *CheckPermissionRequest) Reset() {
 	*x = CheckPermissionRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[95]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7168,7 +7549,7 @@ func (x *CheckPermissionRequest) String() string {
 func (*CheckPermissionRequest) ProtoMessage() {}
 
 func (x *CheckPermissionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[95]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7181,7 +7562,7 @@ func (x *CheckPermissionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPermissionRequest.ProtoReflect.Descriptor instead.
 func (*CheckPermissionRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{95}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *CheckPermissionRequest) GetRequestId() string {
@@ -7217,7 +7598,7 @@ type CheckPermissionResponse struct {
 
 func (x *CheckPermissionResponse) Reset() {
 	*x = CheckPermissionResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[96]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7229,7 +7610,7 @@ func (x *CheckPermissionResponse) String() string {
 func (*CheckPermissionResponse) ProtoMessage() {}
 
 func (x *CheckPermissionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[96]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7242,7 +7623,7 @@ func (x *CheckPermissionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CheckPermissionResponse.ProtoReflect.Descriptor instead.
 func (*CheckPermissionResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{96}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *CheckPermissionResponse) GetRequestId() string {
@@ -7280,7 +7661,7 @@ type SetPermissionRequest struct {
 
 func (x *SetPermissionRequest) Reset() {
 	*x = SetPermissionRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[97]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7292,7 +7673,7 @@ func (x *SetPermissionRequest) String() string {
 func (*SetPermissionRequest) ProtoMessage() {}
 
 func (x *SetPermissionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[97]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7305,7 +7686,7 @@ func (x *SetPermissionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPermissionRequest.ProtoReflect.Descriptor instead.
 func (*SetPermissionRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{97}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *SetPermissionRequest) GetRequestId() string {
@@ -7352,7 +7733,7 @@ type SetPermissionResponse struct {
 
 func (x *SetPermissionResponse) Reset() {
 	*x = SetPermissionResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[98]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[100]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7364,7 +7745,7 @@ func (x *SetPermissionResponse) String() string {
 func (*SetPermissionResponse) ProtoMessage() {}
 
 func (x *SetPermissionResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[98]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[100]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7377,7 +7758,7 @@ func (x *SetPermissionResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPermissionResponse.ProtoReflect.Descriptor instead.
 func (*SetPermissionResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{98}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{100}
 }
 
 func (x *SetPermissionResponse) GetRequestId() string {
@@ -7408,7 +7789,7 @@ type OrgPolicy struct {
 
 func (x *OrgPolicy) Reset() {
 	*x = OrgPolicy{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[99]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[101]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7420,7 +7801,7 @@ func (x *OrgPolicy) String() string {
 func (*OrgPolicy) ProtoMessage() {}
 
 func (x *OrgPolicy) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[99]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[101]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7433,7 +7814,7 @@ func (x *OrgPolicy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OrgPolicy.ProtoReflect.Descriptor instead.
 func (*OrgPolicy) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{99}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{101}
 }
 
 func (x *OrgPolicy) GetOrgId() string {
@@ -7488,7 +7869,7 @@ type GetPolicyRequest struct {
 
 func (x *GetPolicyRequest) Reset() {
 	*x = GetPolicyRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[100]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[102]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7500,7 +7881,7 @@ func (x *GetPolicyRequest) String() string {
 func (*GetPolicyRequest) ProtoMessage() {}
 
 func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[100]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[102]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7513,7 +7894,7 @@ func (x *GetPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPolicyRequest.ProtoReflect.Descriptor instead.
 func (*GetPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{100}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{102}
 }
 
 func (x *GetPolicyRequest) GetRequestId() string {
@@ -7540,7 +7921,7 @@ type GetPolicyResponse struct {
 
 func (x *GetPolicyResponse) Reset() {
 	*x = GetPolicyResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[101]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[103]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7552,7 +7933,7 @@ func (x *GetPolicyResponse) String() string {
 func (*GetPolicyResponse) ProtoMessage() {}
 
 func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[101]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[103]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7565,7 +7946,7 @@ func (x *GetPolicyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPolicyResponse.ProtoReflect.Descriptor instead.
 func (*GetPolicyResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{101}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{103}
 }
 
 func (x *GetPolicyResponse) GetRequestId() string {
@@ -7592,7 +7973,7 @@ type SetPolicyRequest struct {
 
 func (x *SetPolicyRequest) Reset() {
 	*x = SetPolicyRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[102]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[104]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7604,7 +7985,7 @@ func (x *SetPolicyRequest) String() string {
 func (*SetPolicyRequest) ProtoMessage() {}
 
 func (x *SetPolicyRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[102]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[104]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7617,7 +7998,7 @@ func (x *SetPolicyRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPolicyRequest.ProtoReflect.Descriptor instead.
 func (*SetPolicyRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{102}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{104}
 }
 
 func (x *SetPolicyRequest) GetRequestId() string {
@@ -7644,7 +8025,7 @@ type SetPolicyResponse struct {
 
 func (x *SetPolicyResponse) Reset() {
 	*x = SetPolicyResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[103]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[105]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7656,7 +8037,7 @@ func (x *SetPolicyResponse) String() string {
 func (*SetPolicyResponse) ProtoMessage() {}
 
 func (x *SetPolicyResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[103]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[105]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7669,7 +8050,7 @@ func (x *SetPolicyResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPolicyResponse.ProtoReflect.Descriptor instead.
 func (*SetPolicyResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{103}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{105}
 }
 
 func (x *SetPolicyResponse) GetRequestId() string {
@@ -7701,7 +8082,7 @@ type ThreadMessage struct {
 
 func (x *ThreadMessage) Reset() {
 	*x = ThreadMessage{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[104]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[106]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7713,7 +8094,7 @@ func (x *ThreadMessage) String() string {
 func (*ThreadMessage) ProtoMessage() {}
 
 func (x *ThreadMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[104]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[106]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7726,7 +8107,7 @@ func (x *ThreadMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ThreadMessage.ProtoReflect.Descriptor instead.
 func (*ThreadMessage) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{104}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{106}
 }
 
 func (x *ThreadMessage) GetMessageId() string {
@@ -7777,7 +8158,7 @@ type AppendThreadMessageRequest struct {
 
 func (x *AppendThreadMessageRequest) Reset() {
 	*x = AppendThreadMessageRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[105]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[107]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7789,7 +8170,7 @@ func (x *AppendThreadMessageRequest) String() string {
 func (*AppendThreadMessageRequest) ProtoMessage() {}
 
 func (x *AppendThreadMessageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[105]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[107]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7802,7 +8183,7 @@ func (x *AppendThreadMessageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendThreadMessageRequest.ProtoReflect.Descriptor instead.
 func (*AppendThreadMessageRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{105}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{107}
 }
 
 func (x *AppendThreadMessageRequest) GetRequestId() string {
@@ -7850,7 +8231,7 @@ type AppendThreadMessageResponse struct {
 
 func (x *AppendThreadMessageResponse) Reset() {
 	*x = AppendThreadMessageResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[106]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[108]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7862,7 +8243,7 @@ func (x *AppendThreadMessageResponse) String() string {
 func (*AppendThreadMessageResponse) ProtoMessage() {}
 
 func (x *AppendThreadMessageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[106]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[108]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7875,7 +8256,7 @@ func (x *AppendThreadMessageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AppendThreadMessageResponse.ProtoReflect.Descriptor instead.
 func (*AppendThreadMessageResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{106}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{108}
 }
 
 func (x *AppendThreadMessageResponse) GetRequestId() string {
@@ -7904,7 +8285,7 @@ type ListThreadMessagesRequest struct {
 
 func (x *ListThreadMessagesRequest) Reset() {
 	*x = ListThreadMessagesRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[107]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[109]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7916,7 +8297,7 @@ func (x *ListThreadMessagesRequest) String() string {
 func (*ListThreadMessagesRequest) ProtoMessage() {}
 
 func (x *ListThreadMessagesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[107]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[109]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7929,7 +8310,7 @@ func (x *ListThreadMessagesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListThreadMessagesRequest.ProtoReflect.Descriptor instead.
 func (*ListThreadMessagesRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{107}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{109}
 }
 
 func (x *ListThreadMessagesRequest) GetRequestId() string {
@@ -7970,7 +8351,7 @@ type ListThreadMessagesResponse struct {
 
 func (x *ListThreadMessagesResponse) Reset() {
 	*x = ListThreadMessagesResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[108]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[110]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -7982,7 +8363,7 @@ func (x *ListThreadMessagesResponse) String() string {
 func (*ListThreadMessagesResponse) ProtoMessage() {}
 
 func (x *ListThreadMessagesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[108]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[110]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -7995,7 +8376,7 @@ func (x *ListThreadMessagesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListThreadMessagesResponse.ProtoReflect.Descriptor instead.
 func (*ListThreadMessagesResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{108}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{110}
 }
 
 func (x *ListThreadMessagesResponse) GetRequestId() string {
@@ -8027,7 +8408,7 @@ type GetAnalyticsRequest struct {
 
 func (x *GetAnalyticsRequest) Reset() {
 	*x = GetAnalyticsRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[109]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[111]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8039,7 +8420,7 @@ func (x *GetAnalyticsRequest) String() string {
 func (*GetAnalyticsRequest) ProtoMessage() {}
 
 func (x *GetAnalyticsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[109]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[111]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8052,7 +8433,7 @@ func (x *GetAnalyticsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAnalyticsRequest.ProtoReflect.Descriptor instead.
 func (*GetAnalyticsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{109}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{111}
 }
 
 func (x *GetAnalyticsRequest) GetRequestId() string {
@@ -8086,7 +8467,7 @@ type ToolCallCount struct {
 
 func (x *ToolCallCount) Reset() {
 	*x = ToolCallCount{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[110]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[112]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8098,7 +8479,7 @@ func (x *ToolCallCount) String() string {
 func (*ToolCallCount) ProtoMessage() {}
 
 func (x *ToolCallCount) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[110]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[112]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8111,7 +8492,7 @@ func (x *ToolCallCount) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ToolCallCount.ProtoReflect.Descriptor instead.
 func (*ToolCallCount) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{110}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{112}
 }
 
 func (x *ToolCallCount) GetToolName() string {
@@ -8143,7 +8524,7 @@ type GetAnalyticsResponse struct {
 
 func (x *GetAnalyticsResponse) Reset() {
 	*x = GetAnalyticsResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[111]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[113]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8155,7 +8536,7 @@ func (x *GetAnalyticsResponse) String() string {
 func (*GetAnalyticsResponse) ProtoMessage() {}
 
 func (x *GetAnalyticsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[111]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[113]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8168,7 +8549,7 @@ func (x *GetAnalyticsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetAnalyticsResponse.ProtoReflect.Descriptor instead.
 func (*GetAnalyticsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{111}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{113}
 }
 
 func (x *GetAnalyticsResponse) GetRequestId() string {
@@ -8237,7 +8618,7 @@ type TextToSpeechRequest struct {
 
 func (x *TextToSpeechRequest) Reset() {
 	*x = TextToSpeechRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[112]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[114]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8249,7 +8630,7 @@ func (x *TextToSpeechRequest) String() string {
 func (*TextToSpeechRequest) ProtoMessage() {}
 
 func (x *TextToSpeechRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[112]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[114]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8262,7 +8643,7 @@ func (x *TextToSpeechRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextToSpeechRequest.ProtoReflect.Descriptor instead.
 func (*TextToSpeechRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{112}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{114}
 }
 
 func (x *TextToSpeechRequest) GetRequestId() string {
@@ -8312,7 +8693,7 @@ type TextToSpeechResponse struct {
 
 func (x *TextToSpeechResponse) Reset() {
 	*x = TextToSpeechResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[113]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[115]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8324,7 +8705,7 @@ func (x *TextToSpeechResponse) String() string {
 func (*TextToSpeechResponse) ProtoMessage() {}
 
 func (x *TextToSpeechResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[113]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[115]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8337,7 +8718,7 @@ func (x *TextToSpeechResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextToSpeechResponse.ProtoReflect.Descriptor instead.
 func (*TextToSpeechResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{113}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{115}
 }
 
 func (x *TextToSpeechResponse) GetRequestId() string {
@@ -8382,7 +8763,7 @@ type SpeechToTextRequest struct {
 
 func (x *SpeechToTextRequest) Reset() {
 	*x = SpeechToTextRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[114]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[116]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8394,7 +8775,7 @@ func (x *SpeechToTextRequest) String() string {
 func (*SpeechToTextRequest) ProtoMessage() {}
 
 func (x *SpeechToTextRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[114]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[116]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8407,7 +8788,7 @@ func (x *SpeechToTextRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpeechToTextRequest.ProtoReflect.Descriptor instead.
 func (*SpeechToTextRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{114}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{116}
 }
 
 func (x *SpeechToTextRequest) GetRequestId() string {
@@ -8457,7 +8838,7 @@ type SpeechToTextResponse struct {
 
 func (x *SpeechToTextResponse) Reset() {
 	*x = SpeechToTextResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[115]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[117]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8469,7 +8850,7 @@ func (x *SpeechToTextResponse) String() string {
 func (*SpeechToTextResponse) ProtoMessage() {}
 
 func (x *SpeechToTextResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[115]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[117]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8482,7 +8863,7 @@ func (x *SpeechToTextResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SpeechToTextResponse.ProtoReflect.Descriptor instead.
 func (*SpeechToTextResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{115}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{117}
 }
 
 func (x *SpeechToTextResponse) GetRequestId() string {
@@ -8530,7 +8911,7 @@ type CreateTaskRequest struct {
 
 func (x *CreateTaskRequest) Reset() {
 	*x = CreateTaskRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[116]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[118]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8542,7 +8923,7 @@ func (x *CreateTaskRequest) String() string {
 func (*CreateTaskRequest) ProtoMessage() {}
 
 func (x *CreateTaskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[116]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[118]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8555,7 +8936,7 @@ func (x *CreateTaskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateTaskRequest.ProtoReflect.Descriptor instead.
 func (*CreateTaskRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{116}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{118}
 }
 
 func (x *CreateTaskRequest) GetRequestId() string {
@@ -8608,7 +8989,7 @@ type TaskRecord struct {
 
 func (x *TaskRecord) Reset() {
 	*x = TaskRecord{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[117]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[119]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8620,7 +9001,7 @@ func (x *TaskRecord) String() string {
 func (*TaskRecord) ProtoMessage() {}
 
 func (x *TaskRecord) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[117]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[119]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8633,7 +9014,7 @@ func (x *TaskRecord) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskRecord.ProtoReflect.Descriptor instead.
 func (*TaskRecord) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{117}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{119}
 }
 
 func (x *TaskRecord) GetTaskId() string {
@@ -8695,7 +9076,7 @@ type CreateTaskResponse struct {
 
 func (x *CreateTaskResponse) Reset() {
 	*x = CreateTaskResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[118]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[120]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8707,7 +9088,7 @@ func (x *CreateTaskResponse) String() string {
 func (*CreateTaskResponse) ProtoMessage() {}
 
 func (x *CreateTaskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[118]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[120]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8720,7 +9101,7 @@ func (x *CreateTaskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateTaskResponse.ProtoReflect.Descriptor instead.
 func (*CreateTaskResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{118}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{120}
 }
 
 func (x *CreateTaskResponse) GetRequestId() string {
@@ -8750,7 +9131,7 @@ type ListTasksRequest struct {
 
 func (x *ListTasksRequest) Reset() {
 	*x = ListTasksRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[119]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[121]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8762,7 +9143,7 @@ func (x *ListTasksRequest) String() string {
 func (*ListTasksRequest) ProtoMessage() {}
 
 func (x *ListTasksRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[119]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[121]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8775,7 +9156,7 @@ func (x *ListTasksRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTasksRequest.ProtoReflect.Descriptor instead.
 func (*ListTasksRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{119}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{121}
 }
 
 func (x *ListTasksRequest) GetRequestId() string {
@@ -8816,7 +9197,7 @@ type ListTasksResponse struct {
 
 func (x *ListTasksResponse) Reset() {
 	*x = ListTasksResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[120]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[122]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8828,7 +9209,7 @@ func (x *ListTasksResponse) String() string {
 func (*ListTasksResponse) ProtoMessage() {}
 
 func (x *ListTasksResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[120]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[122]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8841,7 +9222,7 @@ func (x *ListTasksResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTasksResponse.ProtoReflect.Descriptor instead.
 func (*ListTasksResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{120}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{122}
 }
 
 func (x *ListTasksResponse) GetRequestId() string {
@@ -8865,8 +9246,9 @@ type ScreenContentRequest struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	OrgId     string                 `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
-	UserId    string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
-	RunId     string                 `protobuf:"bytes,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// Acting user identifier.
+	UserId string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	RunId  string `protobuf:"bytes,4,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	// The tool that produced the result, named as the shared trust table names it.
 	ToolName string `protobuf:"bytes,5,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
 	// The complete, untruncated tool output.
@@ -8879,7 +9261,7 @@ type ScreenContentRequest struct {
 
 func (x *ScreenContentRequest) Reset() {
 	*x = ScreenContentRequest{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[121]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[123]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8891,7 +9273,7 @@ func (x *ScreenContentRequest) String() string {
 func (*ScreenContentRequest) ProtoMessage() {}
 
 func (x *ScreenContentRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[121]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[123]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -8904,7 +9286,7 @@ func (x *ScreenContentRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScreenContentRequest.ProtoReflect.Descriptor instead.
 func (*ScreenContentRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{121}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{123}
 }
 
 func (x *ScreenContentRequest) GetRequestId() string {
@@ -8980,7 +9362,7 @@ type ScreenContentResponse struct {
 
 func (x *ScreenContentResponse) Reset() {
 	*x = ScreenContentResponse{}
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[122]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[124]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -8992,7 +9374,7 @@ func (x *ScreenContentResponse) String() string {
 func (*ScreenContentResponse) ProtoMessage() {}
 
 func (x *ScreenContentResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_gateway_proto_msgTypes[122]
+	mi := &file_model_plane_v1_gateway_proto_msgTypes[124]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -9005,7 +9387,7 @@ func (x *ScreenContentResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ScreenContentResponse.ProtoReflect.Descriptor instead.
 func (*ScreenContentResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{122}
+	return file_model_plane_v1_gateway_proto_rawDescGZIP(), []int{124}
 }
 
 func (x *ScreenContentResponse) GetRequestId() string {
@@ -9068,7 +9450,7 @@ var File_model_plane_v1_gateway_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/gateway.proto\x12\x0emodel_plane.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1emodel_plane/v1/inference.proto\x1a\x19model_plane/v1/runs.proto\"\xa0\a\n" +
+	"\x1cmodel_plane/v1/gateway.proto\x12\x0emodel_plane.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1emodel_plane/v1/inference.proto\x1a\x19model_plane/v1/runs.proto\x1a$model_plane/v1/mcp_elicitation.proto\"\xa0\a\n" +
 	"\rInvokeRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9168,7 +9550,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x04text\x18\b \x01(\tR\x04text\x12 \n" +
 	"\vfingerprint\x18\t \x01(\tR\vfingerprint\x12\x1a\n" +
 	"\blanguage\x18\n" +
-	" \x01(\tR\blanguage\"\xa0\x02\n" +
+	" \x01(\tR\blanguage\"\xb7\x03\n" +
 	"\x18ExtractStructuredRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9180,7 +9562,13 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x06render\x18\x06 \x01(\v2\x1b.model_plane.v1.RenderHintsR\x06render\x12\x14\n" +
 	"\x05model\x18\a \x01(\tR\x05model\x12\x1a\n" +
 	"\bprovider\x18\b \x01(\tR\bprovider\x12\x10\n" +
-	"\x03zdr\x18\t \x01(\bR\x03zdr\"\xe1\x02\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\x12\x12\n" +
+	"\x04urls\x18\n" +
+	" \x03(\tR\x04urls\x12\x12\n" +
+	"\x04mode\x18\v \x01(\tR\x04mode\x12\x1a\n" +
+	"\bquestion\x18\f \x01(\tR\bquestion\x12%\n" +
+	"\x0emax_highlights\x18\r \x01(\x05R\rmaxHighlights\x12*\n" +
+	"\x11max_output_tokens\x18\x0e \x01(\x05R\x0fmaxOutputTokens\"\xa4\x03\n" +
 	"\x19ExtractStructuredResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x10\n" +
@@ -9194,7 +9582,33 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\finput_tokens\x18\b \x01(\x05R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\t \x01(\x05R\foutputTokens\x12#\n" +
 	"\rerror_message\x18\n" +
-	" \x01(\tR\ferrorMessage\"\xd0\x01\n" +
+	" \x01(\tR\ferrorMessage\x12A\n" +
+	"\aresults\x18\v \x03(\v2'.model_plane.v1.ExtractStructuredResultR\aresults\"X\n" +
+	"\x1aExtractStructuredHighlight\x12\x12\n" +
+	"\x04text\x18\x01 \x01(\tR\x04text\x12\x14\n" +
+	"\x05start\x18\x02 \x01(\x04R\x05start\x12\x10\n" +
+	"\x03end\x18\x03 \x01(\x04R\x03end\"\xc4\x04\n" +
+	"\x17ExtractStructuredResult\x12\x10\n" +
+	"\x03url\x18\x01 \x01(\tR\x03url\x12\x1b\n" +
+	"\tfinal_url\x18\x02 \x01(\tR\bfinalUrl\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title\x12-\n" +
+	"\x12source_fingerprint\x18\x04 \x01(\tR\x11sourceFingerprint\x12%\n" +
+	"\x0eextracted_json\x18\x05 \x01(\tR\rextractedJson\x12\x16\n" +
+	"\x06answer\x18\x06 \x01(\tR\x06answer\x12\x14\n" +
+	"\x05found\x18\a \x01(\bR\x05found\x12\x1a\n" +
+	"\bgrounded\x18\b \x01(\bR\bgrounded\x12J\n" +
+	"\n" +
+	"highlights\x18\t \x03(\v2*.model_plane.v1.ExtractStructuredHighlightR\n" +
+	"highlights\x12-\n" +
+	"\x12highlights_dropped\x18\n" +
+	" \x01(\rR\x11highlightsDropped\x12\x1d\n" +
+	"\n" +
+	"model_used\x18\v \x01(\tR\tmodelUsed\x12!\n" +
+	"\finput_tokens\x18\f \x01(\x05R\vinputTokens\x12#\n" +
+	"\routput_tokens\x18\r \x01(\x05R\foutputTokens\x12!\n" +
+	"\fschema_valid\x18\x0e \x01(\bR\vschemaValid\x12\x1a\n" +
+	"\brepaired\x18\x0f \x01(\bR\brepaired\x12#\n" +
+	"\rerror_message\x18\x10 \x01(\tR\ferrorMessage\"\xd0\x01\n" +
 	"\x10WebSearchRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9518,7 +9932,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x14\n" +
 	"\x05jsonl\x18\x02 \x01(\fR\x05jsonl\x12\x14\n" +
-	"\x05count\x18\x03 \x01(\x05R\x05count\"\x91\x01\n" +
+	"\x05count\x18\x03 \x01(\x05R\x05count\"\xc3\x01\n" +
 	"\x05Skill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -9526,7 +9940,9 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x04tags\x18\x04 \x03(\tR\x04tags\x12\x1f\n" +
 	"\vsource_path\x18\x05 \x01(\tR\n" +
 	"sourcePath\x12\x1b\n" +
-	"\tmin_score\x18\x06 \x01(\x02R\bminScore\"I\n" +
+	"\tmin_score\x18\x06 \x01(\x02R\bminScore\x12\x18\n" +
+	"\aversion\x18\a \x01(\x05R\aversion\x12\x16\n" +
+	"\x06digest\x18\b \x01(\tR\x06digest\"I\n" +
 	"\x11ListSkillsRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9600,7 +10016,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x124\n" +
 	"\x05tools\x18\x02 \x03(\v2\x1e.model_plane.v1.ToolDefinitionR\x05tools\x12/\n" +
-	"\x04meta\x18\x03 \x03(\v2\x1b.model_plane.v1.McpToolMetaR\x04meta\"\xe6\x01\n" +
+	"\x04meta\x18\x03 \x03(\v2\x1b.model_plane.v1.McpToolMetaR\x04meta\"\x93\x02\n" +
 	"\x13ProxyMcpToolRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9610,13 +10026,15 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"input_json\x18\x05 \x01(\tR\tinputJson\x12\x17\n" +
 	"\auser_id\x18\x06 \x01(\tR\x06userId\x12'\n" +
-	"\x0fexpected_digest\x18\a \x01(\tR\x0eexpectedDigest\"{\n" +
+	"\x0fexpected_digest\x18\a \x01(\tR\x0eexpectedDigest\x12+\n" +
+	"\x11allow_elicitation\x18\b \x01(\bR\x10allowElicitation\"\xc4\x01\n" +
 	"\x14ProxyMcpToolResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\voutput_json\x18\x02 \x01(\tR\n" +
 	"outputJson\x12#\n" +
-	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xe8\x01\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\x12G\n" +
+	"\velicitation\x18\x04 \x01(\v2%.model_plane.v1.McpElicitationPendingR\velicitation\"\xe8\x01\n" +
 	"\x06Plugin\x12\x1b\n" +
 	"\tplugin_id\x18\x01 \x01(\tR\bpluginId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -9683,7 +10101,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
 	"\voutput_json\x18\x02 \x01(\tR\n" +
 	"outputJson\x12#\n" +
-	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xc9\x01\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\"\xa0\x02\n" +
 	"\x04Hook\x12\x17\n" +
 	"\ahook_id\x18\x01 \x01(\tR\x06hookId\x12\x14\n" +
 	"\x05event\x18\x02 \x01(\tR\x05event\x12\x1d\n" +
@@ -9692,7 +10110,12 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\fcallback_url\x18\x04 \x01(\tB\x02\x18\x01R\vcallbackUrl\x12\x18\n" +
 	"\aenabled\x18\x05 \x01(\bR\aenabled\x12\x1a\n" +
 	"\bdecision\x18\x06 \x01(\tR\bdecision\x12\x16\n" +
-	"\x06reason\x18\a \x01(\tR\x06reason\"u\n" +
+	"\x06reason\x18\a \x01(\tR\x06reason\x12\x1a\n" +
+	"\bpriority\x18\b \x01(\x05R\bpriority\x12\x1a\n" +
+	"\brevision\x18\t \x01(\x03R\brevision\x12\x1d\n" +
+	"\n" +
+	"created_by\x18\n" +
+	" \x01(\tR\tcreatedBy\"u\n" +
 	"\x13RegisterHookRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -9948,7 +10371,7 @@ func file_model_plane_v1_gateway_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_gateway_proto_rawDescData
 }
 
-var file_model_plane_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 123)
+var file_model_plane_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 125)
 var file_model_plane_v1_gateway_proto_goTypes = []any{
 	(*InvokeRequest)(nil),                // 0: model_plane.v1.InvokeRequest
 	(*ContentPart)(nil),                  // 1: model_plane.v1.ContentPart
@@ -9964,276 +10387,282 @@ var file_model_plane_v1_gateway_proto_goTypes = []any{
 	(*FetchResponse)(nil),                // 11: model_plane.v1.FetchResponse
 	(*ExtractStructuredRequest)(nil),     // 12: model_plane.v1.ExtractStructuredRequest
 	(*ExtractStructuredResponse)(nil),    // 13: model_plane.v1.ExtractStructuredResponse
-	(*WebSearchRequest)(nil),             // 14: model_plane.v1.WebSearchRequest
-	(*WebSearchResult)(nil),              // 15: model_plane.v1.WebSearchResult
-	(*WebSearchResponse)(nil),            // 16: model_plane.v1.WebSearchResponse
-	(*SleepRequest)(nil),                 // 17: model_plane.v1.SleepRequest
-	(*SleepResponse)(nil),                // 18: model_plane.v1.SleepResponse
-	(*RemoteTriggerRequest)(nil),         // 19: model_plane.v1.RemoteTriggerRequest
-	(*RemoteTriggerResponse)(nil),        // 20: model_plane.v1.RemoteTriggerResponse
-	(*SendMessageRequest)(nil),           // 21: model_plane.v1.SendMessageRequest
-	(*SendMessageResponse)(nil),          // 22: model_plane.v1.SendMessageResponse
-	(*SyntheticOutputRequest)(nil),       // 23: model_plane.v1.SyntheticOutputRequest
-	(*SyntheticOutputResponse)(nil),      // 24: model_plane.v1.SyntheticOutputResponse
-	(*EnterPlanModeRequest)(nil),         // 25: model_plane.v1.EnterPlanModeRequest
-	(*EnterPlanModeResponse)(nil),        // 26: model_plane.v1.EnterPlanModeResponse
-	(*ExitPlanModeRequest)(nil),          // 27: model_plane.v1.ExitPlanModeRequest
-	(*ExitPlanModeResponse)(nil),         // 28: model_plane.v1.ExitPlanModeResponse
-	(*IsPlanModeRequest)(nil),            // 29: model_plane.v1.IsPlanModeRequest
-	(*IsPlanModeResponse)(nil),           // 30: model_plane.v1.IsPlanModeResponse
-	(*TeamCreateRequest)(nil),            // 31: model_plane.v1.TeamCreateRequest
-	(*TeamWorker)(nil),                   // 32: model_plane.v1.TeamWorker
-	(*TeamCreateResponse)(nil),           // 33: model_plane.v1.TeamCreateResponse
-	(*TeamDeleteRequest)(nil),            // 34: model_plane.v1.TeamDeleteRequest
-	(*TeamDeleteResponse)(nil),           // 35: model_plane.v1.TeamDeleteResponse
-	(*TeamListRequest)(nil),              // 36: model_plane.v1.TeamListRequest
-	(*TeamListResponse)(nil),             // 37: model_plane.v1.TeamListResponse
-	(*LspQueryRequest)(nil),              // 38: model_plane.v1.LspQueryRequest
-	(*LspDiagnostic)(nil),                // 39: model_plane.v1.LspDiagnostic
-	(*LspLocation)(nil),                  // 40: model_plane.v1.LspLocation
-	(*LspCompletion)(nil),                // 41: model_plane.v1.LspCompletion
-	(*LspQueryResponse)(nil),             // 42: model_plane.v1.LspQueryResponse
-	(*GatewayApproval)(nil),              // 43: model_plane.v1.GatewayApproval
-	(*RequestApprovalRequest)(nil),       // 44: model_plane.v1.RequestApprovalRequest
-	(*RequestApprovalResponse)(nil),      // 45: model_plane.v1.RequestApprovalResponse
-	(*ApproveApprovalRequest)(nil),       // 46: model_plane.v1.ApproveApprovalRequest
-	(*ApproveApprovalResponse)(nil),      // 47: model_plane.v1.ApproveApprovalResponse
-	(*DenyApprovalRequest)(nil),          // 48: model_plane.v1.DenyApprovalRequest
-	(*DenyApprovalResponse)(nil),         // 49: model_plane.v1.DenyApprovalResponse
-	(*ListPendingApprovalsRequest)(nil),  // 50: model_plane.v1.ListPendingApprovalsRequest
-	(*ListPendingApprovalsResponse)(nil), // 51: model_plane.v1.ListPendingApprovalsResponse
-	(*TrajectoryAction)(nil),             // 52: model_plane.v1.TrajectoryAction
-	(*Trajectory)(nil),                   // 53: model_plane.v1.Trajectory
-	(*RecordTrajectoryRequest)(nil),      // 54: model_plane.v1.RecordTrajectoryRequest
-	(*RecordTrajectoryResponse)(nil),     // 55: model_plane.v1.RecordTrajectoryResponse
-	(*ListTrajectoriesRequest)(nil),      // 56: model_plane.v1.ListTrajectoriesRequest
-	(*ListTrajectoriesResponse)(nil),     // 57: model_plane.v1.ListTrajectoriesResponse
-	(*ExportTrajectoriesRequest)(nil),    // 58: model_plane.v1.ExportTrajectoriesRequest
-	(*ExportTrajectoriesResponse)(nil),   // 59: model_plane.v1.ExportTrajectoriesResponse
-	(*Skill)(nil),                        // 60: model_plane.v1.Skill
-	(*ListSkillsRequest)(nil),            // 61: model_plane.v1.ListSkillsRequest
-	(*ListSkillsResponse)(nil),           // 62: model_plane.v1.ListSkillsResponse
-	(*GetSkillRequest)(nil),              // 63: model_plane.v1.GetSkillRequest
-	(*GetSkillResponse)(nil),             // 64: model_plane.v1.GetSkillResponse
-	(*MatchSkillsRequest)(nil),           // 65: model_plane.v1.MatchSkillsRequest
-	(*SkillMatch)(nil),                   // 66: model_plane.v1.SkillMatch
-	(*MatchSkillsResponse)(nil),          // 67: model_plane.v1.MatchSkillsResponse
-	(*McpServer)(nil),                    // 68: model_plane.v1.McpServer
-	(*RegisterMcpServerRequest)(nil),     // 69: model_plane.v1.RegisterMcpServerRequest
-	(*RegisterMcpServerResponse)(nil),    // 70: model_plane.v1.RegisterMcpServerResponse
-	(*ListMcpServersRequest)(nil),        // 71: model_plane.v1.ListMcpServersRequest
-	(*ListMcpServersResponse)(nil),       // 72: model_plane.v1.ListMcpServersResponse
-	(*ListMcpToolsRequest)(nil),          // 73: model_plane.v1.ListMcpToolsRequest
-	(*McpToolMeta)(nil),                  // 74: model_plane.v1.McpToolMeta
-	(*ListMcpToolsResponse)(nil),         // 75: model_plane.v1.ListMcpToolsResponse
-	(*ProxyMcpToolRequest)(nil),          // 76: model_plane.v1.ProxyMcpToolRequest
-	(*ProxyMcpToolResponse)(nil),         // 77: model_plane.v1.ProxyMcpToolResponse
-	(*Plugin)(nil),                       // 78: model_plane.v1.Plugin
-	(*RegisterPluginRequest)(nil),        // 79: model_plane.v1.RegisterPluginRequest
-	(*RegisterPluginResponse)(nil),       // 80: model_plane.v1.RegisterPluginResponse
-	(*ListPluginsRequest)(nil),           // 81: model_plane.v1.ListPluginsRequest
-	(*ListPluginsResponse)(nil),          // 82: model_plane.v1.ListPluginsResponse
-	(*SetPluginEnabledRequest)(nil),      // 83: model_plane.v1.SetPluginEnabledRequest
-	(*SetPluginEnabledResponse)(nil),     // 84: model_plane.v1.SetPluginEnabledResponse
-	(*Command)(nil),                      // 85: model_plane.v1.Command
-	(*ListCommandsRequest)(nil),          // 86: model_plane.v1.ListCommandsRequest
-	(*ListCommandsResponse)(nil),         // 87: model_plane.v1.ListCommandsResponse
-	(*ExecuteCommandRequest)(nil),        // 88: model_plane.v1.ExecuteCommandRequest
-	(*ExecuteCommandResponse)(nil),       // 89: model_plane.v1.ExecuteCommandResponse
-	(*Hook)(nil),                         // 90: model_plane.v1.Hook
-	(*RegisterHookRequest)(nil),          // 91: model_plane.v1.RegisterHookRequest
-	(*RegisterHookResponse)(nil),         // 92: model_plane.v1.RegisterHookResponse
-	(*ListHooksRequest)(nil),             // 93: model_plane.v1.ListHooksRequest
-	(*ListHooksResponse)(nil),            // 94: model_plane.v1.ListHooksResponse
-	(*CheckPermissionRequest)(nil),       // 95: model_plane.v1.CheckPermissionRequest
-	(*CheckPermissionResponse)(nil),      // 96: model_plane.v1.CheckPermissionResponse
-	(*SetPermissionRequest)(nil),         // 97: model_plane.v1.SetPermissionRequest
-	(*SetPermissionResponse)(nil),        // 98: model_plane.v1.SetPermissionResponse
-	(*OrgPolicy)(nil),                    // 99: model_plane.v1.OrgPolicy
-	(*GetPolicyRequest)(nil),             // 100: model_plane.v1.GetPolicyRequest
-	(*GetPolicyResponse)(nil),            // 101: model_plane.v1.GetPolicyResponse
-	(*SetPolicyRequest)(nil),             // 102: model_plane.v1.SetPolicyRequest
-	(*SetPolicyResponse)(nil),            // 103: model_plane.v1.SetPolicyResponse
-	(*ThreadMessage)(nil),                // 104: model_plane.v1.ThreadMessage
-	(*AppendThreadMessageRequest)(nil),   // 105: model_plane.v1.AppendThreadMessageRequest
-	(*AppendThreadMessageResponse)(nil),  // 106: model_plane.v1.AppendThreadMessageResponse
-	(*ListThreadMessagesRequest)(nil),    // 107: model_plane.v1.ListThreadMessagesRequest
-	(*ListThreadMessagesResponse)(nil),   // 108: model_plane.v1.ListThreadMessagesResponse
-	(*GetAnalyticsRequest)(nil),          // 109: model_plane.v1.GetAnalyticsRequest
-	(*ToolCallCount)(nil),                // 110: model_plane.v1.ToolCallCount
-	(*GetAnalyticsResponse)(nil),         // 111: model_plane.v1.GetAnalyticsResponse
-	(*TextToSpeechRequest)(nil),          // 112: model_plane.v1.TextToSpeechRequest
-	(*TextToSpeechResponse)(nil),         // 113: model_plane.v1.TextToSpeechResponse
-	(*SpeechToTextRequest)(nil),          // 114: model_plane.v1.SpeechToTextRequest
-	(*SpeechToTextResponse)(nil),         // 115: model_plane.v1.SpeechToTextResponse
-	(*CreateTaskRequest)(nil),            // 116: model_plane.v1.CreateTaskRequest
-	(*TaskRecord)(nil),                   // 117: model_plane.v1.TaskRecord
-	(*CreateTaskResponse)(nil),           // 118: model_plane.v1.CreateTaskResponse
-	(*ListTasksRequest)(nil),             // 119: model_plane.v1.ListTasksRequest
-	(*ListTasksResponse)(nil),            // 120: model_plane.v1.ListTasksResponse
-	(*ScreenContentRequest)(nil),         // 121: model_plane.v1.ScreenContentRequest
-	(*ScreenContentResponse)(nil),        // 122: model_plane.v1.ScreenContentResponse
-	(*structpb.Struct)(nil),              // 123: google.protobuf.Struct
-	(PrivacyTier)(0),                     // 124: model_plane.v1.PrivacyTier
-	(AutonomyRung)(0),                    // 125: model_plane.v1.AutonomyRung
-	(*ToolDefinition)(nil),               // 126: model_plane.v1.ToolDefinition
+	(*ExtractStructuredHighlight)(nil),   // 14: model_plane.v1.ExtractStructuredHighlight
+	(*ExtractStructuredResult)(nil),      // 15: model_plane.v1.ExtractStructuredResult
+	(*WebSearchRequest)(nil),             // 16: model_plane.v1.WebSearchRequest
+	(*WebSearchResult)(nil),              // 17: model_plane.v1.WebSearchResult
+	(*WebSearchResponse)(nil),            // 18: model_plane.v1.WebSearchResponse
+	(*SleepRequest)(nil),                 // 19: model_plane.v1.SleepRequest
+	(*SleepResponse)(nil),                // 20: model_plane.v1.SleepResponse
+	(*RemoteTriggerRequest)(nil),         // 21: model_plane.v1.RemoteTriggerRequest
+	(*RemoteTriggerResponse)(nil),        // 22: model_plane.v1.RemoteTriggerResponse
+	(*SendMessageRequest)(nil),           // 23: model_plane.v1.SendMessageRequest
+	(*SendMessageResponse)(nil),          // 24: model_plane.v1.SendMessageResponse
+	(*SyntheticOutputRequest)(nil),       // 25: model_plane.v1.SyntheticOutputRequest
+	(*SyntheticOutputResponse)(nil),      // 26: model_plane.v1.SyntheticOutputResponse
+	(*EnterPlanModeRequest)(nil),         // 27: model_plane.v1.EnterPlanModeRequest
+	(*EnterPlanModeResponse)(nil),        // 28: model_plane.v1.EnterPlanModeResponse
+	(*ExitPlanModeRequest)(nil),          // 29: model_plane.v1.ExitPlanModeRequest
+	(*ExitPlanModeResponse)(nil),         // 30: model_plane.v1.ExitPlanModeResponse
+	(*IsPlanModeRequest)(nil),            // 31: model_plane.v1.IsPlanModeRequest
+	(*IsPlanModeResponse)(nil),           // 32: model_plane.v1.IsPlanModeResponse
+	(*TeamCreateRequest)(nil),            // 33: model_plane.v1.TeamCreateRequest
+	(*TeamWorker)(nil),                   // 34: model_plane.v1.TeamWorker
+	(*TeamCreateResponse)(nil),           // 35: model_plane.v1.TeamCreateResponse
+	(*TeamDeleteRequest)(nil),            // 36: model_plane.v1.TeamDeleteRequest
+	(*TeamDeleteResponse)(nil),           // 37: model_plane.v1.TeamDeleteResponse
+	(*TeamListRequest)(nil),              // 38: model_plane.v1.TeamListRequest
+	(*TeamListResponse)(nil),             // 39: model_plane.v1.TeamListResponse
+	(*LspQueryRequest)(nil),              // 40: model_plane.v1.LspQueryRequest
+	(*LspDiagnostic)(nil),                // 41: model_plane.v1.LspDiagnostic
+	(*LspLocation)(nil),                  // 42: model_plane.v1.LspLocation
+	(*LspCompletion)(nil),                // 43: model_plane.v1.LspCompletion
+	(*LspQueryResponse)(nil),             // 44: model_plane.v1.LspQueryResponse
+	(*GatewayApproval)(nil),              // 45: model_plane.v1.GatewayApproval
+	(*RequestApprovalRequest)(nil),       // 46: model_plane.v1.RequestApprovalRequest
+	(*RequestApprovalResponse)(nil),      // 47: model_plane.v1.RequestApprovalResponse
+	(*ApproveApprovalRequest)(nil),       // 48: model_plane.v1.ApproveApprovalRequest
+	(*ApproveApprovalResponse)(nil),      // 49: model_plane.v1.ApproveApprovalResponse
+	(*DenyApprovalRequest)(nil),          // 50: model_plane.v1.DenyApprovalRequest
+	(*DenyApprovalResponse)(nil),         // 51: model_plane.v1.DenyApprovalResponse
+	(*ListPendingApprovalsRequest)(nil),  // 52: model_plane.v1.ListPendingApprovalsRequest
+	(*ListPendingApprovalsResponse)(nil), // 53: model_plane.v1.ListPendingApprovalsResponse
+	(*TrajectoryAction)(nil),             // 54: model_plane.v1.TrajectoryAction
+	(*Trajectory)(nil),                   // 55: model_plane.v1.Trajectory
+	(*RecordTrajectoryRequest)(nil),      // 56: model_plane.v1.RecordTrajectoryRequest
+	(*RecordTrajectoryResponse)(nil),     // 57: model_plane.v1.RecordTrajectoryResponse
+	(*ListTrajectoriesRequest)(nil),      // 58: model_plane.v1.ListTrajectoriesRequest
+	(*ListTrajectoriesResponse)(nil),     // 59: model_plane.v1.ListTrajectoriesResponse
+	(*ExportTrajectoriesRequest)(nil),    // 60: model_plane.v1.ExportTrajectoriesRequest
+	(*ExportTrajectoriesResponse)(nil),   // 61: model_plane.v1.ExportTrajectoriesResponse
+	(*Skill)(nil),                        // 62: model_plane.v1.Skill
+	(*ListSkillsRequest)(nil),            // 63: model_plane.v1.ListSkillsRequest
+	(*ListSkillsResponse)(nil),           // 64: model_plane.v1.ListSkillsResponse
+	(*GetSkillRequest)(nil),              // 65: model_plane.v1.GetSkillRequest
+	(*GetSkillResponse)(nil),             // 66: model_plane.v1.GetSkillResponse
+	(*MatchSkillsRequest)(nil),           // 67: model_plane.v1.MatchSkillsRequest
+	(*SkillMatch)(nil),                   // 68: model_plane.v1.SkillMatch
+	(*MatchSkillsResponse)(nil),          // 69: model_plane.v1.MatchSkillsResponse
+	(*McpServer)(nil),                    // 70: model_plane.v1.McpServer
+	(*RegisterMcpServerRequest)(nil),     // 71: model_plane.v1.RegisterMcpServerRequest
+	(*RegisterMcpServerResponse)(nil),    // 72: model_plane.v1.RegisterMcpServerResponse
+	(*ListMcpServersRequest)(nil),        // 73: model_plane.v1.ListMcpServersRequest
+	(*ListMcpServersResponse)(nil),       // 74: model_plane.v1.ListMcpServersResponse
+	(*ListMcpToolsRequest)(nil),          // 75: model_plane.v1.ListMcpToolsRequest
+	(*McpToolMeta)(nil),                  // 76: model_plane.v1.McpToolMeta
+	(*ListMcpToolsResponse)(nil),         // 77: model_plane.v1.ListMcpToolsResponse
+	(*ProxyMcpToolRequest)(nil),          // 78: model_plane.v1.ProxyMcpToolRequest
+	(*ProxyMcpToolResponse)(nil),         // 79: model_plane.v1.ProxyMcpToolResponse
+	(*Plugin)(nil),                       // 80: model_plane.v1.Plugin
+	(*RegisterPluginRequest)(nil),        // 81: model_plane.v1.RegisterPluginRequest
+	(*RegisterPluginResponse)(nil),       // 82: model_plane.v1.RegisterPluginResponse
+	(*ListPluginsRequest)(nil),           // 83: model_plane.v1.ListPluginsRequest
+	(*ListPluginsResponse)(nil),          // 84: model_plane.v1.ListPluginsResponse
+	(*SetPluginEnabledRequest)(nil),      // 85: model_plane.v1.SetPluginEnabledRequest
+	(*SetPluginEnabledResponse)(nil),     // 86: model_plane.v1.SetPluginEnabledResponse
+	(*Command)(nil),                      // 87: model_plane.v1.Command
+	(*ListCommandsRequest)(nil),          // 88: model_plane.v1.ListCommandsRequest
+	(*ListCommandsResponse)(nil),         // 89: model_plane.v1.ListCommandsResponse
+	(*ExecuteCommandRequest)(nil),        // 90: model_plane.v1.ExecuteCommandRequest
+	(*ExecuteCommandResponse)(nil),       // 91: model_plane.v1.ExecuteCommandResponse
+	(*Hook)(nil),                         // 92: model_plane.v1.Hook
+	(*RegisterHookRequest)(nil),          // 93: model_plane.v1.RegisterHookRequest
+	(*RegisterHookResponse)(nil),         // 94: model_plane.v1.RegisterHookResponse
+	(*ListHooksRequest)(nil),             // 95: model_plane.v1.ListHooksRequest
+	(*ListHooksResponse)(nil),            // 96: model_plane.v1.ListHooksResponse
+	(*CheckPermissionRequest)(nil),       // 97: model_plane.v1.CheckPermissionRequest
+	(*CheckPermissionResponse)(nil),      // 98: model_plane.v1.CheckPermissionResponse
+	(*SetPermissionRequest)(nil),         // 99: model_plane.v1.SetPermissionRequest
+	(*SetPermissionResponse)(nil),        // 100: model_plane.v1.SetPermissionResponse
+	(*OrgPolicy)(nil),                    // 101: model_plane.v1.OrgPolicy
+	(*GetPolicyRequest)(nil),             // 102: model_plane.v1.GetPolicyRequest
+	(*GetPolicyResponse)(nil),            // 103: model_plane.v1.GetPolicyResponse
+	(*SetPolicyRequest)(nil),             // 104: model_plane.v1.SetPolicyRequest
+	(*SetPolicyResponse)(nil),            // 105: model_plane.v1.SetPolicyResponse
+	(*ThreadMessage)(nil),                // 106: model_plane.v1.ThreadMessage
+	(*AppendThreadMessageRequest)(nil),   // 107: model_plane.v1.AppendThreadMessageRequest
+	(*AppendThreadMessageResponse)(nil),  // 108: model_plane.v1.AppendThreadMessageResponse
+	(*ListThreadMessagesRequest)(nil),    // 109: model_plane.v1.ListThreadMessagesRequest
+	(*ListThreadMessagesResponse)(nil),   // 110: model_plane.v1.ListThreadMessagesResponse
+	(*GetAnalyticsRequest)(nil),          // 111: model_plane.v1.GetAnalyticsRequest
+	(*ToolCallCount)(nil),                // 112: model_plane.v1.ToolCallCount
+	(*GetAnalyticsResponse)(nil),         // 113: model_plane.v1.GetAnalyticsResponse
+	(*TextToSpeechRequest)(nil),          // 114: model_plane.v1.TextToSpeechRequest
+	(*TextToSpeechResponse)(nil),         // 115: model_plane.v1.TextToSpeechResponse
+	(*SpeechToTextRequest)(nil),          // 116: model_plane.v1.SpeechToTextRequest
+	(*SpeechToTextResponse)(nil),         // 117: model_plane.v1.SpeechToTextResponse
+	(*CreateTaskRequest)(nil),            // 118: model_plane.v1.CreateTaskRequest
+	(*TaskRecord)(nil),                   // 119: model_plane.v1.TaskRecord
+	(*CreateTaskResponse)(nil),           // 120: model_plane.v1.CreateTaskResponse
+	(*ListTasksRequest)(nil),             // 121: model_plane.v1.ListTasksRequest
+	(*ListTasksResponse)(nil),            // 122: model_plane.v1.ListTasksResponse
+	(*ScreenContentRequest)(nil),         // 123: model_plane.v1.ScreenContentRequest
+	(*ScreenContentResponse)(nil),        // 124: model_plane.v1.ScreenContentResponse
+	(*structpb.Struct)(nil),              // 125: google.protobuf.Struct
+	(PrivacyTier)(0),                     // 126: model_plane.v1.PrivacyTier
+	(AutonomyRung)(0),                    // 127: model_plane.v1.AutonomyRung
+	(*ToolDefinition)(nil),               // 128: model_plane.v1.ToolDefinition
+	(*McpElicitationPending)(nil),        // 129: model_plane.v1.McpElicitationPending
 }
 var file_model_plane_v1_gateway_proto_depIdxs = []int32{
-	123, // 0: model_plane.v1.InvokeRequest.metadata:type_name -> google.protobuf.Struct
+	125, // 0: model_plane.v1.InvokeRequest.metadata:type_name -> google.protobuf.Struct
 	1,   // 1: model_plane.v1.InvokeRequest.content_parts:type_name -> model_plane.v1.ContentPart
 	2,   // 2: model_plane.v1.InvokeRequest.tools:type_name -> model_plane.v1.ToolSpec
 	3,   // 3: model_plane.v1.InvokeRequest.attachments:type_name -> model_plane.v1.AttachmentRef
-	124, // 4: model_plane.v1.InvokeRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
-	123, // 5: model_plane.v1.ToolSpec.json_schema:type_name -> google.protobuf.Struct
+	126, // 4: model_plane.v1.InvokeRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	125, // 5: model_plane.v1.ToolSpec.json_schema:type_name -> google.protobuf.Struct
 	4,   // 6: model_plane.v1.InvokeResponse.sources:type_name -> model_plane.v1.SourceTrace
 	9,   // 7: model_plane.v1.FetchRequest.render:type_name -> model_plane.v1.RenderHints
 	9,   // 8: model_plane.v1.ExtractStructuredRequest.render:type_name -> model_plane.v1.RenderHints
-	15,  // 9: model_plane.v1.WebSearchResponse.results:type_name -> model_plane.v1.WebSearchResult
-	125, // 10: model_plane.v1.ExitPlanModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	32,  // 11: model_plane.v1.TeamCreateResponse.worker:type_name -> model_plane.v1.TeamWorker
-	32,  // 12: model_plane.v1.TeamDeleteResponse.worker:type_name -> model_plane.v1.TeamWorker
-	32,  // 13: model_plane.v1.TeamListResponse.workers:type_name -> model_plane.v1.TeamWorker
-	39,  // 14: model_plane.v1.LspQueryResponse.diagnostics:type_name -> model_plane.v1.LspDiagnostic
-	40,  // 15: model_plane.v1.LspQueryResponse.locations:type_name -> model_plane.v1.LspLocation
-	41,  // 16: model_plane.v1.LspQueryResponse.completions:type_name -> model_plane.v1.LspCompletion
-	43,  // 17: model_plane.v1.RequestApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
-	43,  // 18: model_plane.v1.ApproveApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
-	43,  // 19: model_plane.v1.DenyApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
-	43,  // 20: model_plane.v1.ListPendingApprovalsResponse.approvals:type_name -> model_plane.v1.GatewayApproval
-	52,  // 21: model_plane.v1.Trajectory.planned_actions:type_name -> model_plane.v1.TrajectoryAction
-	52,  // 22: model_plane.v1.Trajectory.executed_actions:type_name -> model_plane.v1.TrajectoryAction
-	53,  // 23: model_plane.v1.RecordTrajectoryRequest.trajectory:type_name -> model_plane.v1.Trajectory
-	53,  // 24: model_plane.v1.ListTrajectoriesResponse.trajectories:type_name -> model_plane.v1.Trajectory
-	60,  // 25: model_plane.v1.ListSkillsResponse.skills:type_name -> model_plane.v1.Skill
-	60,  // 26: model_plane.v1.GetSkillResponse.skill:type_name -> model_plane.v1.Skill
-	60,  // 27: model_plane.v1.SkillMatch.skill:type_name -> model_plane.v1.Skill
-	66,  // 28: model_plane.v1.MatchSkillsResponse.matches:type_name -> model_plane.v1.SkillMatch
-	68,  // 29: model_plane.v1.RegisterMcpServerRequest.server:type_name -> model_plane.v1.McpServer
-	68,  // 30: model_plane.v1.RegisterMcpServerResponse.server:type_name -> model_plane.v1.McpServer
-	68,  // 31: model_plane.v1.ListMcpServersResponse.servers:type_name -> model_plane.v1.McpServer
-	126, // 32: model_plane.v1.ListMcpToolsResponse.tools:type_name -> model_plane.v1.ToolDefinition
-	74,  // 33: model_plane.v1.ListMcpToolsResponse.meta:type_name -> model_plane.v1.McpToolMeta
-	78,  // 34: model_plane.v1.RegisterPluginRequest.plugin:type_name -> model_plane.v1.Plugin
-	78,  // 35: model_plane.v1.RegisterPluginResponse.plugin:type_name -> model_plane.v1.Plugin
-	78,  // 36: model_plane.v1.ListPluginsResponse.plugins:type_name -> model_plane.v1.Plugin
-	78,  // 37: model_plane.v1.SetPluginEnabledResponse.plugin:type_name -> model_plane.v1.Plugin
-	85,  // 38: model_plane.v1.ListCommandsResponse.commands:type_name -> model_plane.v1.Command
-	90,  // 39: model_plane.v1.RegisterHookRequest.hook:type_name -> model_plane.v1.Hook
-	90,  // 40: model_plane.v1.RegisterHookResponse.hook:type_name -> model_plane.v1.Hook
-	90,  // 41: model_plane.v1.ListHooksResponse.hooks:type_name -> model_plane.v1.Hook
-	99,  // 42: model_plane.v1.GetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
-	99,  // 43: model_plane.v1.SetPolicyRequest.policy:type_name -> model_plane.v1.OrgPolicy
-	99,  // 44: model_plane.v1.SetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
-	104, // 45: model_plane.v1.AppendThreadMessageResponse.message:type_name -> model_plane.v1.ThreadMessage
-	104, // 46: model_plane.v1.ListThreadMessagesResponse.messages:type_name -> model_plane.v1.ThreadMessage
-	110, // 47: model_plane.v1.GetAnalyticsResponse.tool_calls:type_name -> model_plane.v1.ToolCallCount
-	117, // 48: model_plane.v1.CreateTaskResponse.task:type_name -> model_plane.v1.TaskRecord
-	117, // 49: model_plane.v1.ListTasksResponse.tasks:type_name -> model_plane.v1.TaskRecord
-	0,   // 50: model_plane.v1.ModelGateway.Invoke:input_type -> model_plane.v1.InvokeRequest
-	0,   // 51: model_plane.v1.ModelGateway.InvokeStream:input_type -> model_plane.v1.InvokeRequest
-	10,  // 52: model_plane.v1.ModelGateway.Fetch:input_type -> model_plane.v1.FetchRequest
-	12,  // 53: model_plane.v1.ModelGateway.ExtractStructured:input_type -> model_plane.v1.ExtractStructuredRequest
-	14,  // 54: model_plane.v1.ModelGateway.WebSearch:input_type -> model_plane.v1.WebSearchRequest
-	17,  // 55: model_plane.v1.ModelGateway.Sleep:input_type -> model_plane.v1.SleepRequest
-	19,  // 56: model_plane.v1.ModelGateway.RemoteTrigger:input_type -> model_plane.v1.RemoteTriggerRequest
-	21,  // 57: model_plane.v1.ModelGateway.SendMessage:input_type -> model_plane.v1.SendMessageRequest
-	23,  // 58: model_plane.v1.ModelGateway.SyntheticOutput:input_type -> model_plane.v1.SyntheticOutputRequest
-	25,  // 59: model_plane.v1.ModelGateway.EnterPlanMode:input_type -> model_plane.v1.EnterPlanModeRequest
-	27,  // 60: model_plane.v1.ModelGateway.ExitPlanMode:input_type -> model_plane.v1.ExitPlanModeRequest
-	29,  // 61: model_plane.v1.ModelGateway.IsPlanMode:input_type -> model_plane.v1.IsPlanModeRequest
-	31,  // 62: model_plane.v1.ModelGateway.TeamCreate:input_type -> model_plane.v1.TeamCreateRequest
-	34,  // 63: model_plane.v1.ModelGateway.TeamDelete:input_type -> model_plane.v1.TeamDeleteRequest
-	36,  // 64: model_plane.v1.ModelGateway.TeamList:input_type -> model_plane.v1.TeamListRequest
-	38,  // 65: model_plane.v1.ModelGateway.LspQuery:input_type -> model_plane.v1.LspQueryRequest
-	44,  // 66: model_plane.v1.ModelGateway.RequestApproval:input_type -> model_plane.v1.RequestApprovalRequest
-	46,  // 67: model_plane.v1.ModelGateway.ApproveApproval:input_type -> model_plane.v1.ApproveApprovalRequest
-	48,  // 68: model_plane.v1.ModelGateway.DenyApproval:input_type -> model_plane.v1.DenyApprovalRequest
-	50,  // 69: model_plane.v1.ModelGateway.ListPendingApprovals:input_type -> model_plane.v1.ListPendingApprovalsRequest
-	54,  // 70: model_plane.v1.ModelGateway.RecordTrajectory:input_type -> model_plane.v1.RecordTrajectoryRequest
-	56,  // 71: model_plane.v1.ModelGateway.ListTrajectories:input_type -> model_plane.v1.ListTrajectoriesRequest
-	58,  // 72: model_plane.v1.ModelGateway.ExportTrajectories:input_type -> model_plane.v1.ExportTrajectoriesRequest
-	61,  // 73: model_plane.v1.ModelGateway.ListSkills:input_type -> model_plane.v1.ListSkillsRequest
-	63,  // 74: model_plane.v1.ModelGateway.GetSkill:input_type -> model_plane.v1.GetSkillRequest
-	65,  // 75: model_plane.v1.ModelGateway.MatchSkills:input_type -> model_plane.v1.MatchSkillsRequest
-	69,  // 76: model_plane.v1.ModelGateway.RegisterMcpServer:input_type -> model_plane.v1.RegisterMcpServerRequest
-	71,  // 77: model_plane.v1.ModelGateway.ListMcpServers:input_type -> model_plane.v1.ListMcpServersRequest
-	76,  // 78: model_plane.v1.ModelGateway.ProxyMcpTool:input_type -> model_plane.v1.ProxyMcpToolRequest
-	73,  // 79: model_plane.v1.ModelGateway.ListMcpTools:input_type -> model_plane.v1.ListMcpToolsRequest
-	79,  // 80: model_plane.v1.ModelGateway.RegisterPlugin:input_type -> model_plane.v1.RegisterPluginRequest
-	81,  // 81: model_plane.v1.ModelGateway.ListPlugins:input_type -> model_plane.v1.ListPluginsRequest
-	83,  // 82: model_plane.v1.ModelGateway.SetPluginEnabled:input_type -> model_plane.v1.SetPluginEnabledRequest
-	86,  // 83: model_plane.v1.ModelGateway.ListCommands:input_type -> model_plane.v1.ListCommandsRequest
-	88,  // 84: model_plane.v1.ModelGateway.ExecuteCommand:input_type -> model_plane.v1.ExecuteCommandRequest
-	91,  // 85: model_plane.v1.ModelGateway.RegisterHook:input_type -> model_plane.v1.RegisterHookRequest
-	93,  // 86: model_plane.v1.ModelGateway.ListHooks:input_type -> model_plane.v1.ListHooksRequest
-	95,  // 87: model_plane.v1.ModelGateway.CheckPermission:input_type -> model_plane.v1.CheckPermissionRequest
-	97,  // 88: model_plane.v1.ModelGateway.SetPermission:input_type -> model_plane.v1.SetPermissionRequest
-	100, // 89: model_plane.v1.ModelGateway.GetPolicy:input_type -> model_plane.v1.GetPolicyRequest
-	102, // 90: model_plane.v1.ModelGateway.SetPolicy:input_type -> model_plane.v1.SetPolicyRequest
-	105, // 91: model_plane.v1.ModelGateway.AppendThreadMessage:input_type -> model_plane.v1.AppendThreadMessageRequest
-	107, // 92: model_plane.v1.ModelGateway.ListThreadMessages:input_type -> model_plane.v1.ListThreadMessagesRequest
-	109, // 93: model_plane.v1.ModelGateway.GetAnalytics:input_type -> model_plane.v1.GetAnalyticsRequest
-	112, // 94: model_plane.v1.ModelGateway.TextToSpeech:input_type -> model_plane.v1.TextToSpeechRequest
-	114, // 95: model_plane.v1.ModelGateway.SpeechToText:input_type -> model_plane.v1.SpeechToTextRequest
-	116, // 96: model_plane.v1.ModelGateway.CreateTask:input_type -> model_plane.v1.CreateTaskRequest
-	119, // 97: model_plane.v1.ModelGateway.ListTasks:input_type -> model_plane.v1.ListTasksRequest
-	7,   // 98: model_plane.v1.ModelGateway.Health:input_type -> model_plane.v1.HealthRequest
-	121, // 99: model_plane.v1.ModelGateway.ScreenContent:input_type -> model_plane.v1.ScreenContentRequest
-	5,   // 100: model_plane.v1.ModelGateway.Invoke:output_type -> model_plane.v1.InvokeResponse
-	6,   // 101: model_plane.v1.ModelGateway.InvokeStream:output_type -> model_plane.v1.InvokeChunk
-	11,  // 102: model_plane.v1.ModelGateway.Fetch:output_type -> model_plane.v1.FetchResponse
-	13,  // 103: model_plane.v1.ModelGateway.ExtractStructured:output_type -> model_plane.v1.ExtractStructuredResponse
-	16,  // 104: model_plane.v1.ModelGateway.WebSearch:output_type -> model_plane.v1.WebSearchResponse
-	18,  // 105: model_plane.v1.ModelGateway.Sleep:output_type -> model_plane.v1.SleepResponse
-	20,  // 106: model_plane.v1.ModelGateway.RemoteTrigger:output_type -> model_plane.v1.RemoteTriggerResponse
-	22,  // 107: model_plane.v1.ModelGateway.SendMessage:output_type -> model_plane.v1.SendMessageResponse
-	24,  // 108: model_plane.v1.ModelGateway.SyntheticOutput:output_type -> model_plane.v1.SyntheticOutputResponse
-	26,  // 109: model_plane.v1.ModelGateway.EnterPlanMode:output_type -> model_plane.v1.EnterPlanModeResponse
-	28,  // 110: model_plane.v1.ModelGateway.ExitPlanMode:output_type -> model_plane.v1.ExitPlanModeResponse
-	30,  // 111: model_plane.v1.ModelGateway.IsPlanMode:output_type -> model_plane.v1.IsPlanModeResponse
-	33,  // 112: model_plane.v1.ModelGateway.TeamCreate:output_type -> model_plane.v1.TeamCreateResponse
-	35,  // 113: model_plane.v1.ModelGateway.TeamDelete:output_type -> model_plane.v1.TeamDeleteResponse
-	37,  // 114: model_plane.v1.ModelGateway.TeamList:output_type -> model_plane.v1.TeamListResponse
-	42,  // 115: model_plane.v1.ModelGateway.LspQuery:output_type -> model_plane.v1.LspQueryResponse
-	45,  // 116: model_plane.v1.ModelGateway.RequestApproval:output_type -> model_plane.v1.RequestApprovalResponse
-	47,  // 117: model_plane.v1.ModelGateway.ApproveApproval:output_type -> model_plane.v1.ApproveApprovalResponse
-	49,  // 118: model_plane.v1.ModelGateway.DenyApproval:output_type -> model_plane.v1.DenyApprovalResponse
-	51,  // 119: model_plane.v1.ModelGateway.ListPendingApprovals:output_type -> model_plane.v1.ListPendingApprovalsResponse
-	55,  // 120: model_plane.v1.ModelGateway.RecordTrajectory:output_type -> model_plane.v1.RecordTrajectoryResponse
-	57,  // 121: model_plane.v1.ModelGateway.ListTrajectories:output_type -> model_plane.v1.ListTrajectoriesResponse
-	59,  // 122: model_plane.v1.ModelGateway.ExportTrajectories:output_type -> model_plane.v1.ExportTrajectoriesResponse
-	62,  // 123: model_plane.v1.ModelGateway.ListSkills:output_type -> model_plane.v1.ListSkillsResponse
-	64,  // 124: model_plane.v1.ModelGateway.GetSkill:output_type -> model_plane.v1.GetSkillResponse
-	67,  // 125: model_plane.v1.ModelGateway.MatchSkills:output_type -> model_plane.v1.MatchSkillsResponse
-	70,  // 126: model_plane.v1.ModelGateway.RegisterMcpServer:output_type -> model_plane.v1.RegisterMcpServerResponse
-	72,  // 127: model_plane.v1.ModelGateway.ListMcpServers:output_type -> model_plane.v1.ListMcpServersResponse
-	77,  // 128: model_plane.v1.ModelGateway.ProxyMcpTool:output_type -> model_plane.v1.ProxyMcpToolResponse
-	75,  // 129: model_plane.v1.ModelGateway.ListMcpTools:output_type -> model_plane.v1.ListMcpToolsResponse
-	80,  // 130: model_plane.v1.ModelGateway.RegisterPlugin:output_type -> model_plane.v1.RegisterPluginResponse
-	82,  // 131: model_plane.v1.ModelGateway.ListPlugins:output_type -> model_plane.v1.ListPluginsResponse
-	84,  // 132: model_plane.v1.ModelGateway.SetPluginEnabled:output_type -> model_plane.v1.SetPluginEnabledResponse
-	87,  // 133: model_plane.v1.ModelGateway.ListCommands:output_type -> model_plane.v1.ListCommandsResponse
-	89,  // 134: model_plane.v1.ModelGateway.ExecuteCommand:output_type -> model_plane.v1.ExecuteCommandResponse
-	92,  // 135: model_plane.v1.ModelGateway.RegisterHook:output_type -> model_plane.v1.RegisterHookResponse
-	94,  // 136: model_plane.v1.ModelGateway.ListHooks:output_type -> model_plane.v1.ListHooksResponse
-	96,  // 137: model_plane.v1.ModelGateway.CheckPermission:output_type -> model_plane.v1.CheckPermissionResponse
-	98,  // 138: model_plane.v1.ModelGateway.SetPermission:output_type -> model_plane.v1.SetPermissionResponse
-	101, // 139: model_plane.v1.ModelGateway.GetPolicy:output_type -> model_plane.v1.GetPolicyResponse
-	103, // 140: model_plane.v1.ModelGateway.SetPolicy:output_type -> model_plane.v1.SetPolicyResponse
-	106, // 141: model_plane.v1.ModelGateway.AppendThreadMessage:output_type -> model_plane.v1.AppendThreadMessageResponse
-	108, // 142: model_plane.v1.ModelGateway.ListThreadMessages:output_type -> model_plane.v1.ListThreadMessagesResponse
-	111, // 143: model_plane.v1.ModelGateway.GetAnalytics:output_type -> model_plane.v1.GetAnalyticsResponse
-	113, // 144: model_plane.v1.ModelGateway.TextToSpeech:output_type -> model_plane.v1.TextToSpeechResponse
-	115, // 145: model_plane.v1.ModelGateway.SpeechToText:output_type -> model_plane.v1.SpeechToTextResponse
-	118, // 146: model_plane.v1.ModelGateway.CreateTask:output_type -> model_plane.v1.CreateTaskResponse
-	120, // 147: model_plane.v1.ModelGateway.ListTasks:output_type -> model_plane.v1.ListTasksResponse
-	8,   // 148: model_plane.v1.ModelGateway.Health:output_type -> model_plane.v1.HealthResponse
-	122, // 149: model_plane.v1.ModelGateway.ScreenContent:output_type -> model_plane.v1.ScreenContentResponse
-	100, // [100:150] is the sub-list for method output_type
-	50,  // [50:100] is the sub-list for method input_type
-	50,  // [50:50] is the sub-list for extension type_name
-	50,  // [50:50] is the sub-list for extension extendee
-	0,   // [0:50] is the sub-list for field type_name
+	15,  // 9: model_plane.v1.ExtractStructuredResponse.results:type_name -> model_plane.v1.ExtractStructuredResult
+	14,  // 10: model_plane.v1.ExtractStructuredResult.highlights:type_name -> model_plane.v1.ExtractStructuredHighlight
+	17,  // 11: model_plane.v1.WebSearchResponse.results:type_name -> model_plane.v1.WebSearchResult
+	127, // 12: model_plane.v1.ExitPlanModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	34,  // 13: model_plane.v1.TeamCreateResponse.worker:type_name -> model_plane.v1.TeamWorker
+	34,  // 14: model_plane.v1.TeamDeleteResponse.worker:type_name -> model_plane.v1.TeamWorker
+	34,  // 15: model_plane.v1.TeamListResponse.workers:type_name -> model_plane.v1.TeamWorker
+	41,  // 16: model_plane.v1.LspQueryResponse.diagnostics:type_name -> model_plane.v1.LspDiagnostic
+	42,  // 17: model_plane.v1.LspQueryResponse.locations:type_name -> model_plane.v1.LspLocation
+	43,  // 18: model_plane.v1.LspQueryResponse.completions:type_name -> model_plane.v1.LspCompletion
+	45,  // 19: model_plane.v1.RequestApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
+	45,  // 20: model_plane.v1.ApproveApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
+	45,  // 21: model_plane.v1.DenyApprovalResponse.approval:type_name -> model_plane.v1.GatewayApproval
+	45,  // 22: model_plane.v1.ListPendingApprovalsResponse.approvals:type_name -> model_plane.v1.GatewayApproval
+	54,  // 23: model_plane.v1.Trajectory.planned_actions:type_name -> model_plane.v1.TrajectoryAction
+	54,  // 24: model_plane.v1.Trajectory.executed_actions:type_name -> model_plane.v1.TrajectoryAction
+	55,  // 25: model_plane.v1.RecordTrajectoryRequest.trajectory:type_name -> model_plane.v1.Trajectory
+	55,  // 26: model_plane.v1.ListTrajectoriesResponse.trajectories:type_name -> model_plane.v1.Trajectory
+	62,  // 27: model_plane.v1.ListSkillsResponse.skills:type_name -> model_plane.v1.Skill
+	62,  // 28: model_plane.v1.GetSkillResponse.skill:type_name -> model_plane.v1.Skill
+	62,  // 29: model_plane.v1.SkillMatch.skill:type_name -> model_plane.v1.Skill
+	68,  // 30: model_plane.v1.MatchSkillsResponse.matches:type_name -> model_plane.v1.SkillMatch
+	70,  // 31: model_plane.v1.RegisterMcpServerRequest.server:type_name -> model_plane.v1.McpServer
+	70,  // 32: model_plane.v1.RegisterMcpServerResponse.server:type_name -> model_plane.v1.McpServer
+	70,  // 33: model_plane.v1.ListMcpServersResponse.servers:type_name -> model_plane.v1.McpServer
+	128, // 34: model_plane.v1.ListMcpToolsResponse.tools:type_name -> model_plane.v1.ToolDefinition
+	76,  // 35: model_plane.v1.ListMcpToolsResponse.meta:type_name -> model_plane.v1.McpToolMeta
+	129, // 36: model_plane.v1.ProxyMcpToolResponse.elicitation:type_name -> model_plane.v1.McpElicitationPending
+	80,  // 37: model_plane.v1.RegisterPluginRequest.plugin:type_name -> model_plane.v1.Plugin
+	80,  // 38: model_plane.v1.RegisterPluginResponse.plugin:type_name -> model_plane.v1.Plugin
+	80,  // 39: model_plane.v1.ListPluginsResponse.plugins:type_name -> model_plane.v1.Plugin
+	80,  // 40: model_plane.v1.SetPluginEnabledResponse.plugin:type_name -> model_plane.v1.Plugin
+	87,  // 41: model_plane.v1.ListCommandsResponse.commands:type_name -> model_plane.v1.Command
+	92,  // 42: model_plane.v1.RegisterHookRequest.hook:type_name -> model_plane.v1.Hook
+	92,  // 43: model_plane.v1.RegisterHookResponse.hook:type_name -> model_plane.v1.Hook
+	92,  // 44: model_plane.v1.ListHooksResponse.hooks:type_name -> model_plane.v1.Hook
+	101, // 45: model_plane.v1.GetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
+	101, // 46: model_plane.v1.SetPolicyRequest.policy:type_name -> model_plane.v1.OrgPolicy
+	101, // 47: model_plane.v1.SetPolicyResponse.policy:type_name -> model_plane.v1.OrgPolicy
+	106, // 48: model_plane.v1.AppendThreadMessageResponse.message:type_name -> model_plane.v1.ThreadMessage
+	106, // 49: model_plane.v1.ListThreadMessagesResponse.messages:type_name -> model_plane.v1.ThreadMessage
+	112, // 50: model_plane.v1.GetAnalyticsResponse.tool_calls:type_name -> model_plane.v1.ToolCallCount
+	119, // 51: model_plane.v1.CreateTaskResponse.task:type_name -> model_plane.v1.TaskRecord
+	119, // 52: model_plane.v1.ListTasksResponse.tasks:type_name -> model_plane.v1.TaskRecord
+	0,   // 53: model_plane.v1.ModelGateway.Invoke:input_type -> model_plane.v1.InvokeRequest
+	0,   // 54: model_plane.v1.ModelGateway.InvokeStream:input_type -> model_plane.v1.InvokeRequest
+	10,  // 55: model_plane.v1.ModelGateway.Fetch:input_type -> model_plane.v1.FetchRequest
+	12,  // 56: model_plane.v1.ModelGateway.ExtractStructured:input_type -> model_plane.v1.ExtractStructuredRequest
+	16,  // 57: model_plane.v1.ModelGateway.WebSearch:input_type -> model_plane.v1.WebSearchRequest
+	19,  // 58: model_plane.v1.ModelGateway.Sleep:input_type -> model_plane.v1.SleepRequest
+	21,  // 59: model_plane.v1.ModelGateway.RemoteTrigger:input_type -> model_plane.v1.RemoteTriggerRequest
+	23,  // 60: model_plane.v1.ModelGateway.SendMessage:input_type -> model_plane.v1.SendMessageRequest
+	25,  // 61: model_plane.v1.ModelGateway.SyntheticOutput:input_type -> model_plane.v1.SyntheticOutputRequest
+	27,  // 62: model_plane.v1.ModelGateway.EnterPlanMode:input_type -> model_plane.v1.EnterPlanModeRequest
+	29,  // 63: model_plane.v1.ModelGateway.ExitPlanMode:input_type -> model_plane.v1.ExitPlanModeRequest
+	31,  // 64: model_plane.v1.ModelGateway.IsPlanMode:input_type -> model_plane.v1.IsPlanModeRequest
+	33,  // 65: model_plane.v1.ModelGateway.TeamCreate:input_type -> model_plane.v1.TeamCreateRequest
+	36,  // 66: model_plane.v1.ModelGateway.TeamDelete:input_type -> model_plane.v1.TeamDeleteRequest
+	38,  // 67: model_plane.v1.ModelGateway.TeamList:input_type -> model_plane.v1.TeamListRequest
+	40,  // 68: model_plane.v1.ModelGateway.LspQuery:input_type -> model_plane.v1.LspQueryRequest
+	46,  // 69: model_plane.v1.ModelGateway.RequestApproval:input_type -> model_plane.v1.RequestApprovalRequest
+	48,  // 70: model_plane.v1.ModelGateway.ApproveApproval:input_type -> model_plane.v1.ApproveApprovalRequest
+	50,  // 71: model_plane.v1.ModelGateway.DenyApproval:input_type -> model_plane.v1.DenyApprovalRequest
+	52,  // 72: model_plane.v1.ModelGateway.ListPendingApprovals:input_type -> model_plane.v1.ListPendingApprovalsRequest
+	56,  // 73: model_plane.v1.ModelGateway.RecordTrajectory:input_type -> model_plane.v1.RecordTrajectoryRequest
+	58,  // 74: model_plane.v1.ModelGateway.ListTrajectories:input_type -> model_plane.v1.ListTrajectoriesRequest
+	60,  // 75: model_plane.v1.ModelGateway.ExportTrajectories:input_type -> model_plane.v1.ExportTrajectoriesRequest
+	63,  // 76: model_plane.v1.ModelGateway.ListSkills:input_type -> model_plane.v1.ListSkillsRequest
+	65,  // 77: model_plane.v1.ModelGateway.GetSkill:input_type -> model_plane.v1.GetSkillRequest
+	67,  // 78: model_plane.v1.ModelGateway.MatchSkills:input_type -> model_plane.v1.MatchSkillsRequest
+	71,  // 79: model_plane.v1.ModelGateway.RegisterMcpServer:input_type -> model_plane.v1.RegisterMcpServerRequest
+	73,  // 80: model_plane.v1.ModelGateway.ListMcpServers:input_type -> model_plane.v1.ListMcpServersRequest
+	78,  // 81: model_plane.v1.ModelGateway.ProxyMcpTool:input_type -> model_plane.v1.ProxyMcpToolRequest
+	75,  // 82: model_plane.v1.ModelGateway.ListMcpTools:input_type -> model_plane.v1.ListMcpToolsRequest
+	81,  // 83: model_plane.v1.ModelGateway.RegisterPlugin:input_type -> model_plane.v1.RegisterPluginRequest
+	83,  // 84: model_plane.v1.ModelGateway.ListPlugins:input_type -> model_plane.v1.ListPluginsRequest
+	85,  // 85: model_plane.v1.ModelGateway.SetPluginEnabled:input_type -> model_plane.v1.SetPluginEnabledRequest
+	88,  // 86: model_plane.v1.ModelGateway.ListCommands:input_type -> model_plane.v1.ListCommandsRequest
+	90,  // 87: model_plane.v1.ModelGateway.ExecuteCommand:input_type -> model_plane.v1.ExecuteCommandRequest
+	93,  // 88: model_plane.v1.ModelGateway.RegisterHook:input_type -> model_plane.v1.RegisterHookRequest
+	95,  // 89: model_plane.v1.ModelGateway.ListHooks:input_type -> model_plane.v1.ListHooksRequest
+	97,  // 90: model_plane.v1.ModelGateway.CheckPermission:input_type -> model_plane.v1.CheckPermissionRequest
+	99,  // 91: model_plane.v1.ModelGateway.SetPermission:input_type -> model_plane.v1.SetPermissionRequest
+	102, // 92: model_plane.v1.ModelGateway.GetPolicy:input_type -> model_plane.v1.GetPolicyRequest
+	104, // 93: model_plane.v1.ModelGateway.SetPolicy:input_type -> model_plane.v1.SetPolicyRequest
+	107, // 94: model_plane.v1.ModelGateway.AppendThreadMessage:input_type -> model_plane.v1.AppendThreadMessageRequest
+	109, // 95: model_plane.v1.ModelGateway.ListThreadMessages:input_type -> model_plane.v1.ListThreadMessagesRequest
+	111, // 96: model_plane.v1.ModelGateway.GetAnalytics:input_type -> model_plane.v1.GetAnalyticsRequest
+	114, // 97: model_plane.v1.ModelGateway.TextToSpeech:input_type -> model_plane.v1.TextToSpeechRequest
+	116, // 98: model_plane.v1.ModelGateway.SpeechToText:input_type -> model_plane.v1.SpeechToTextRequest
+	118, // 99: model_plane.v1.ModelGateway.CreateTask:input_type -> model_plane.v1.CreateTaskRequest
+	121, // 100: model_plane.v1.ModelGateway.ListTasks:input_type -> model_plane.v1.ListTasksRequest
+	7,   // 101: model_plane.v1.ModelGateway.Health:input_type -> model_plane.v1.HealthRequest
+	123, // 102: model_plane.v1.ModelGateway.ScreenContent:input_type -> model_plane.v1.ScreenContentRequest
+	5,   // 103: model_plane.v1.ModelGateway.Invoke:output_type -> model_plane.v1.InvokeResponse
+	6,   // 104: model_plane.v1.ModelGateway.InvokeStream:output_type -> model_plane.v1.InvokeChunk
+	11,  // 105: model_plane.v1.ModelGateway.Fetch:output_type -> model_plane.v1.FetchResponse
+	13,  // 106: model_plane.v1.ModelGateway.ExtractStructured:output_type -> model_plane.v1.ExtractStructuredResponse
+	18,  // 107: model_plane.v1.ModelGateway.WebSearch:output_type -> model_plane.v1.WebSearchResponse
+	20,  // 108: model_plane.v1.ModelGateway.Sleep:output_type -> model_plane.v1.SleepResponse
+	22,  // 109: model_plane.v1.ModelGateway.RemoteTrigger:output_type -> model_plane.v1.RemoteTriggerResponse
+	24,  // 110: model_plane.v1.ModelGateway.SendMessage:output_type -> model_plane.v1.SendMessageResponse
+	26,  // 111: model_plane.v1.ModelGateway.SyntheticOutput:output_type -> model_plane.v1.SyntheticOutputResponse
+	28,  // 112: model_plane.v1.ModelGateway.EnterPlanMode:output_type -> model_plane.v1.EnterPlanModeResponse
+	30,  // 113: model_plane.v1.ModelGateway.ExitPlanMode:output_type -> model_plane.v1.ExitPlanModeResponse
+	32,  // 114: model_plane.v1.ModelGateway.IsPlanMode:output_type -> model_plane.v1.IsPlanModeResponse
+	35,  // 115: model_plane.v1.ModelGateway.TeamCreate:output_type -> model_plane.v1.TeamCreateResponse
+	37,  // 116: model_plane.v1.ModelGateway.TeamDelete:output_type -> model_plane.v1.TeamDeleteResponse
+	39,  // 117: model_plane.v1.ModelGateway.TeamList:output_type -> model_plane.v1.TeamListResponse
+	44,  // 118: model_plane.v1.ModelGateway.LspQuery:output_type -> model_plane.v1.LspQueryResponse
+	47,  // 119: model_plane.v1.ModelGateway.RequestApproval:output_type -> model_plane.v1.RequestApprovalResponse
+	49,  // 120: model_plane.v1.ModelGateway.ApproveApproval:output_type -> model_plane.v1.ApproveApprovalResponse
+	51,  // 121: model_plane.v1.ModelGateway.DenyApproval:output_type -> model_plane.v1.DenyApprovalResponse
+	53,  // 122: model_plane.v1.ModelGateway.ListPendingApprovals:output_type -> model_plane.v1.ListPendingApprovalsResponse
+	57,  // 123: model_plane.v1.ModelGateway.RecordTrajectory:output_type -> model_plane.v1.RecordTrajectoryResponse
+	59,  // 124: model_plane.v1.ModelGateway.ListTrajectories:output_type -> model_plane.v1.ListTrajectoriesResponse
+	61,  // 125: model_plane.v1.ModelGateway.ExportTrajectories:output_type -> model_plane.v1.ExportTrajectoriesResponse
+	64,  // 126: model_plane.v1.ModelGateway.ListSkills:output_type -> model_plane.v1.ListSkillsResponse
+	66,  // 127: model_plane.v1.ModelGateway.GetSkill:output_type -> model_plane.v1.GetSkillResponse
+	69,  // 128: model_plane.v1.ModelGateway.MatchSkills:output_type -> model_plane.v1.MatchSkillsResponse
+	72,  // 129: model_plane.v1.ModelGateway.RegisterMcpServer:output_type -> model_plane.v1.RegisterMcpServerResponse
+	74,  // 130: model_plane.v1.ModelGateway.ListMcpServers:output_type -> model_plane.v1.ListMcpServersResponse
+	79,  // 131: model_plane.v1.ModelGateway.ProxyMcpTool:output_type -> model_plane.v1.ProxyMcpToolResponse
+	77,  // 132: model_plane.v1.ModelGateway.ListMcpTools:output_type -> model_plane.v1.ListMcpToolsResponse
+	82,  // 133: model_plane.v1.ModelGateway.RegisterPlugin:output_type -> model_plane.v1.RegisterPluginResponse
+	84,  // 134: model_plane.v1.ModelGateway.ListPlugins:output_type -> model_plane.v1.ListPluginsResponse
+	86,  // 135: model_plane.v1.ModelGateway.SetPluginEnabled:output_type -> model_plane.v1.SetPluginEnabledResponse
+	89,  // 136: model_plane.v1.ModelGateway.ListCommands:output_type -> model_plane.v1.ListCommandsResponse
+	91,  // 137: model_plane.v1.ModelGateway.ExecuteCommand:output_type -> model_plane.v1.ExecuteCommandResponse
+	94,  // 138: model_plane.v1.ModelGateway.RegisterHook:output_type -> model_plane.v1.RegisterHookResponse
+	96,  // 139: model_plane.v1.ModelGateway.ListHooks:output_type -> model_plane.v1.ListHooksResponse
+	98,  // 140: model_plane.v1.ModelGateway.CheckPermission:output_type -> model_plane.v1.CheckPermissionResponse
+	100, // 141: model_plane.v1.ModelGateway.SetPermission:output_type -> model_plane.v1.SetPermissionResponse
+	103, // 142: model_plane.v1.ModelGateway.GetPolicy:output_type -> model_plane.v1.GetPolicyResponse
+	105, // 143: model_plane.v1.ModelGateway.SetPolicy:output_type -> model_plane.v1.SetPolicyResponse
+	108, // 144: model_plane.v1.ModelGateway.AppendThreadMessage:output_type -> model_plane.v1.AppendThreadMessageResponse
+	110, // 145: model_plane.v1.ModelGateway.ListThreadMessages:output_type -> model_plane.v1.ListThreadMessagesResponse
+	113, // 146: model_plane.v1.ModelGateway.GetAnalytics:output_type -> model_plane.v1.GetAnalyticsResponse
+	115, // 147: model_plane.v1.ModelGateway.TextToSpeech:output_type -> model_plane.v1.TextToSpeechResponse
+	117, // 148: model_plane.v1.ModelGateway.SpeechToText:output_type -> model_plane.v1.SpeechToTextResponse
+	120, // 149: model_plane.v1.ModelGateway.CreateTask:output_type -> model_plane.v1.CreateTaskResponse
+	122, // 150: model_plane.v1.ModelGateway.ListTasks:output_type -> model_plane.v1.ListTasksResponse
+	8,   // 151: model_plane.v1.ModelGateway.Health:output_type -> model_plane.v1.HealthResponse
+	124, // 152: model_plane.v1.ModelGateway.ScreenContent:output_type -> model_plane.v1.ScreenContentResponse
+	103, // [103:153] is the sub-list for method output_type
+	53,  // [53:103] is the sub-list for method input_type
+	53,  // [53:53] is the sub-list for extension type_name
+	53,  // [53:53] is the sub-list for extension extendee
+	0,   // [0:53] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_gateway_proto_init() }
@@ -10243,13 +10672,14 @@ func file_model_plane_v1_gateway_proto_init() {
 	}
 	file_model_plane_v1_inference_proto_init()
 	file_model_plane_v1_runs_proto_init()
+	file_model_plane_v1_mcp_elicitation_proto_init()
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_gateway_proto_rawDesc), len(file_model_plane_v1_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   123,
+			NumMessages:   125,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

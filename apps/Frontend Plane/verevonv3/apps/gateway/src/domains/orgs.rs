@@ -4,9 +4,11 @@ pub(crate) mod instructions;
 pub(crate) mod members;
 pub(crate) mod model_entitlement;
 pub(crate) mod quotas;
+mod retention;
 mod roles;
 pub(crate) mod settings;
 mod shared;
+pub(crate) mod space_policy;
 pub(crate) mod switch;
 mod website;
 
@@ -68,6 +70,35 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orgs/{id}/model-entitlement/explain",
             get(model_entitlement::explain_model_entitlement),
+        )
+        // EP-9 C1: the retention window and legal holds. org-core stores them and
+        // has no such route while ORG_RETENTION_POLICY_ENABLED is off, which these
+        // answer as a typed 404.
+        .route(
+            "/api/v1/orgs/{id}/retention",
+            get(retention::get_retention).put(retention::put_retention),
+        )
+        .route(
+            "/api/v1/orgs/{id}/legal-holds",
+            get(retention::list_legal_holds).post(retention::place_legal_hold),
+        )
+        .route(
+            "/api/v1/orgs/{id}/legal-holds/{hold_id}/release",
+            post(retention::release_legal_hold),
+        )
+        // WS03-S4: org-admin Space effect-policy console routes (Control owns the row).
+        // Behind `SpaceFeatureFlags::policy_admin_api`; off answers 404.
+        .route(
+            "/api/v1/orgs/{id}/space-policy",
+            get(space_policy::get_space_policy),
+        )
+        .route(
+            "/api/v1/orgs/{id}/space-policy/entitlements",
+            put(space_policy::put_space_policy_entitlements),
+        )
+        .route(
+            "/api/v1/orgs/{id}/space-policy/events",
+            get(space_policy::list_space_policy_events),
         )
         // Members
         .route("/api/v1/orgs/{id}/members", get(members::list_members))

@@ -3,6 +3,7 @@ import {
   AttachmentsNotSentError,
   approvePlan,
   buildChatWireBody,
+  callMcpAppTool,
   groupChatModels,
   listModels,
   rejectPlan,
@@ -10,10 +11,12 @@ import {
   describeFeedbackFailure,
   getChatThread,
   getChatThreadTranscript,
+  getMcpAppResource,
   getThreadContext,
   getThreadMessages,
   listChatThreads,
   listChatThreadsPage,
+  listDeckTemplates,
   modelEffortLevels,
   modelSupportsAgentic,
   pagedTranscriptEnabled,
@@ -299,6 +302,160 @@ describe('chat-client stream-event coverage', () => {
       name: 'some_future_event',
       payload: { hello: 'world' },
     })
+  })
+
+  it('reads a search_provenance frame, and reads a provider the SPA does not name as other', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: search_provenance\ndata: ${JSON.stringify({
+            providers: [
+              { id: 'brave', label: 'Brave Search', hits: 2 },
+              { id: 'zzz_new_engine', label: 'zzz_new_engine', hits: 1 },
+            ],
+            route: 'free_chain',
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSearchProvenance = vi.fn()
+    await streamChat({ content: 'hi' }, { onSearchProvenance })
+
+    expect(onSearchProvenance).toHaveBeenCalledTimes(1)
+    expect(onSearchProvenance).toHaveBeenCalledWith({
+      providers: [
+        { id: 'brave', hits: 2 },
+        { id: 'other', hits: 1 },
+      ],
+      route: 'free_chain',
+    })
+  })
+
+  it('drops a search_provenance frame with a route the SPA does not name, or with no provider', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: search_provenance\ndata: ${JSON.stringify({ providers: [{ id: 'brave', hits: 1 }], route: 'bogus' })}\n\n`,
+          `event: search_provenance\ndata: ${JSON.stringify({ providers: [], route: 'zdr_free_only' })}\n\n`,
+        ]),
+      ),
+    )
+    const onSearchProvenance = vi.fn()
+    await streamChat({ content: 'hi' }, { onSearchProvenance })
+
+    expect(onSearchProvenance).not.toHaveBeenCalled()
+  })
+
+  it('carries a Space knowledge receipt on the source-scope frame, auto scope included', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'auto',
+            excluded_tools: [],
+            knowledge: { mode: 'retrieval', sources: 2 },
+          })}\n\n`,
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'knowledge_only',
+            excluded_tools: ['web_search'],
+            knowledge: { mode: 'not_entitled' },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenNthCalledWith(1, {
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'retrieval', sources: 2 },
+    })
+    expect(onSourceScopeApplied).toHaveBeenNthCalledWith(2, {
+      scope: 'knowledge_only',
+      excludedTools: ['web_search'],
+      knowledge: { mode: 'not_entitled' },
+    })
+  })
+
+  it('reads the knowledge receipt on the AG-UI custom form of the frame too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: CUSTOM\ndata: ${JSON.stringify({
+            type: 'CUSTOM',
+            name: 'source_scope_applied',
+            value: { scope: 'auto', excluded_tools: [], knowledge: { mode: 'not_searched' } },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenCalledWith({
+      scope: 'auto',
+      excludedTools: [],
+      knowledge: { mode: 'not_searched' },
+    })
+  })
+
+  it('drops an auto frame with no receipt, and a receipt mode the SPA does not name, keeping the filter', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          // An ordinary turn sends no frame; an auto frame with nothing to say is not a filter.
+          `event: source_scope_applied\ndata: ${JSON.stringify({ scope: 'auto', excluded_tools: [] })}\n\n`,
+          `event: source_scope_applied\ndata: ${JSON.stringify({
+            scope: 'web_only',
+            excluded_tools: ['knowledge_search'],
+            knowledge: { mode: 'in_context' },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onSourceScopeApplied = vi.fn()
+    await streamChat({ content: 'hi' }, { onSourceScopeApplied })
+
+    expect(onSourceScopeApplied).toHaveBeenCalledTimes(1)
+    expect(onSourceScopeApplied).toHaveBeenCalledWith({ scope: 'web_only', excludedTools: ['knowledge_search'] })
+    expect(onSourceScopeApplied.mock.calls[0]?.[0]).not.toHaveProperty('knowledge')
+  })
+})
+
+describe('chat-client sandbox state (WS22-S6)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('routes sandbox_state by scope, state and cause, and ignores a frame that names neither scope nor state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: sandbox_state\ndata: ${JSON.stringify({ scope: 'thread', state: 'conflict', cause: 'workspace_conflict', request_id: 'req-1' })}\n\n`,
+          `event: sandbox_state\ndata: ${JSON.stringify({ scope: 'thread', state: 'kept', request_id: 'req-1' })}\n\n`,
+          // A frame that says nothing about where the files went cannot be shown as a workspace state.
+          `event: sandbox_state\ndata: ${JSON.stringify({ cause: 'quota_exceeded' })}\n\n`,
+        ]),
+      ),
+    )
+    const onSandboxState = vi.fn()
+    await streamChat({ content: 'hi' }, { onSandboxState })
+
+    expect(onSandboxState).toHaveBeenCalledTimes(2)
+    expect(onSandboxState).toHaveBeenNthCalledWith(1, {
+      scope: 'thread',
+      state: 'conflict',
+      cause: 'workspace_conflict',
+      requestId: 'req-1',
+    })
+    expect(onSandboxState).toHaveBeenNthCalledWith(2, { scope: 'thread', state: 'kept', requestId: 'req-1' })
   })
 })
 
@@ -607,6 +764,32 @@ describe('mid-run queued input', () => {
       expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: 'msg-1', zdr: true })).toBe(false)
       expect('idempotency_key' in buildChatWireBody({ content: 'hi', clientMessageId: '' })).toBe(false)
     })
+
+    // WS01-S8: a send that opens a new Space thread names its session key from the send id, so a
+    // repeat resolves to the thread the first one created. A reply keeps the thread id as before.
+    it('puts the session key on the wire for a new-thread send, and falls back to the thread id for a reply', () => {
+      const sendId = 'a'.repeat(32)
+      const fresh = buildChatWireBody({ content: 'hi', clientMessageId: sendId, sessionKey: `space-post-${sendId}` })
+      expect(fresh.idempotency_key).toBe(sendId)
+      expect(fresh.session_key).toBe(`space-post-${sendId}`)
+      const reply = buildChatWireBody({ content: 'hi', clientMessageId: sendId, threadId: 'thr_7' })
+      expect(reply.session_key).toBe('thr_7')
+      expect(reply.thread_id).toBe('thr_7')
+      // A blank key is no key.
+      expect(buildChatWireBody({ content: 'hi', sessionKey: '   ', threadId: 'thr_7' }).session_key).toBe('thr_7')
+    })
+  })
+})
+
+describe('chat-client viewer locale (WS16-S6)', () => {
+  it('emits locale only for the two known codes', () => {
+    expect(buildChatWireBody({ content: 'hi', locale: 'no' }).locale).toBe('no')
+    expect(buildChatWireBody({ content: 'hi', locale: 'en' }).locale).toBe('en')
+    for (const other of ['fr', 'nb-NO', 'NO', '', undefined]) {
+      expect(buildChatWireBody({ content: 'hi', locale: other as never }).locale).toBeUndefined()
+    }
+    // JSON drops an undefined value, so a turn without a locale stays byte-identical.
+    expect('locale' in JSON.parse(JSON.stringify(buildChatWireBody({ content: 'hi' })))).toBe(false)
   })
 })
 
@@ -934,6 +1117,64 @@ describe('chat-client tool wiring', () => {
     })
   })
 
+  it('carries the server citation number through a single citation event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citation\ndata: ${JSON.stringify({
+          id: 'c3',
+          title: 'Third',
+          url: 'https://example.com/3',
+          snippet: 'Snippet',
+          number: 3,
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'c3', number: 3 }))
+  })
+
+  it('carries each server citation number through a batched citations event', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citations\ndata: ${JSON.stringify({
+          citations: [
+            { id: 'c1', title: 'First', url: 'https://example.com/1', snippet: '', number: 1 },
+            { id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 },
+          ],
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation.mock.calls.map(([event]) => event.number)).toEqual([1, 3])
+  })
+
+  it('reads the server citation number on the AG-UI custom form of a citation too', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          `event: CUSTOM\ndata: ${JSON.stringify({
+            type: 'CUSTOM',
+            name: 'citation',
+            value: { id: 'c3', title: 'Third', url: 'https://example.com/3', snippet: '', number: 3 },
+          })}\n\n`,
+        ]),
+      ),
+    )
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith(expect.objectContaining({ id: 'c3', number: 3 }))
+  })
+
   it('maps a follow_ups event into onFollowUps, dropping non-string/empty entries', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([
@@ -966,6 +1207,88 @@ describe('chat-client tool wiring', () => {
     await streamChat({ content: 'hi' }, { onFollowUps })
 
     expect(onFollowUps).not.toHaveBeenCalled()
+  })
+
+  /** WS14 S4: a question a run put to its owner reads into the card's shape; a malformed one is dropped. */
+  it('maps a user_question event into onUserQuestion and drops what the card cannot answer', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: user_question\ndata: ${JSON.stringify({
+          question_id: 'q_1',
+          delivery: 'next_turn',
+          expires_at: '2026-11-02T10:00:00Z',
+          items: [
+            {
+              id: 'carrier',
+              kind: 'single',
+              prompt: 'Which carrier?',
+              options: [
+                { id: 'bring', label: 'Bring' },
+                { id: 'postnord', label: 'PostNord', description: 'Next day' },
+              ],
+              allow_other: true,
+            },
+            { id: 'pin', kind: 'password', prompt: 'Your PIN?' },
+          ],
+          request_id: 'req_2',
+        })}\n\n`,
+        `event: user_question\ndata: ${JSON.stringify({ items: [] })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onUserQuestion = vi.fn()
+    await streamChat({ content: 'hi' }, { onUserQuestion })
+
+    expect(onUserQuestion).toHaveBeenCalledTimes(1)
+    expect(onUserQuestion).toHaveBeenCalledWith({
+      questionId: 'q_1',
+      delivery: 'next_turn',
+      expiresAt: '2026-11-02T10:00:00Z',
+      items: [
+        {
+          id: 'carrier',
+          kind: 'single',
+          prompt: 'Which carrier?',
+          options: [
+            { id: 'bring', label: 'Bring' },
+            { id: 'postnord', label: 'PostNord', description: 'Next day' },
+          ],
+          allowOther: true,
+        },
+      ],
+      requestId: 'req_2',
+    })
+  })
+
+  /** EP-4 S6: a server's question names the server only with a known origin and a label of 1 to 80 characters. */
+  it('reads an origin only for a known server origin with a label of 1 to 80 characters', async () => {
+    const item = { id: 'name', kind: 'text', prompt: 'Your name?' }
+    const frame = (index: number, fields: Record<string, string>) =>
+      `event: user_question\ndata: ${JSON.stringify({ question_id: `q_${index}`, items: [item], ...fields })}\n\n`
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        frame(0, { origin: 'mcp_elicitation', origin_label: 'Fixture server' }),
+        frame(1, { origin: 'model', origin_label: 'Fixture server' }),
+        frame(2, { origin: 'mcp_elicitation' }),
+        frame(3, { origin: 'mcp_elicitation', origin_label: '   ' }),
+        frame(4, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(81) }),
+        frame(5, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(80) }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onUserQuestion = vi.fn()
+    await streamChat({ content: 'hi' }, { onUserQuestion })
+
+    expect(onUserQuestion.mock.calls.map(([event]) => [event.origin, event.originLabel])).toEqual([
+      ['mcp_elicitation', 'Fixture server'],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      [undefined, undefined],
+      ['mcp_elicitation', 'x'.repeat(80)],
+    ])
   })
 
   /** plan-gate §2.1: the model's structured plan-mode plan. */
@@ -1378,6 +1701,53 @@ describe('chat-client server thread history', () => {
         spaceRef: 'space_1',
       },
     ])
+  })
+
+  it('carries the derived attention state, drops a state outside the closed set, and omits it when off', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          sessions: [
+            {
+              threadId: 'thread_waiting',
+              title: 'Waiting',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+              attentionState: 'needs_approval',
+              attentionSince: '2026-06-17T09:59:00.000Z',
+              attentionUnseen: true,
+            },
+            {
+              threadId: 'thread_unknown',
+              title: 'Unknown state',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+              attentionState: 'paused_somehow',
+              attentionUnseen: true,
+            },
+            {
+              threadId: 'thread_flag_off',
+              title: 'Switch off',
+              preview: '',
+              updatedAt: '2026-06-17T10:00:00.000Z',
+            },
+          ],
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    ))
+
+    const [waiting, unknown, flagOff] = await listChatThreads()
+
+    expect(waiting).toMatchObject({
+      threadId: 'thread_waiting',
+      attentionState: 'needs_approval',
+      attentionSince: '2026-06-17T09:59:00.000Z',
+      attentionUnseen: true,
+    })
+    expect(unknown).not.toHaveProperty('attentionState')
+    expect(unknown).not.toHaveProperty('attentionUnseen')
+    expect(flagOff).not.toHaveProperty('attentionState')
+    expect(flagOff).not.toHaveProperty('attentionUnseen')
   })
 
   it('reads a server-owned pin, and treats anything non-true as unpinned', async () => {
@@ -2659,5 +3029,248 @@ describe('chat-client thread listing under WS09 S6', () => {
     await Promise.all([listChatThreads(), listChatThreads()])
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+// WS14 S2, approve then execute: the one execute turn an approval that answered `execute_now`
+// sends names the plan it runs. The plan id rides only on an execute turn, and the answer says
+// what the client does next.
+describe('chat-client approve then execute (WS14 S2)', () => {
+  afterEach(() => {
+    clearSupportChatThreads()
+  })
+
+  const respond = (body: unknown) =>
+    new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+
+  const execute = { content: 'Kjør den godkjente planen', threadId: 'thread_1', executeGranted: true }
+
+  it('names the approved plan on the execute turn, and nowhere else', () => {
+    const body = buildChatWireBody({ ...execute, approvedPlanId: 'plan_1' })
+
+    expect(body.execute_granted).toBe(true)
+    expect(body.approved_plan_id).toBe('plan_1')
+    expect(body).not.toHaveProperty('granted_rung')
+    // Exactly the plan id differs from the same execute turn without it.
+    expect(body).toEqual({ ...buildChatWireBody(execute), approved_plan_id: 'plan_1' })
+    // Without the execute flag the plan id never goes out.
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', approvedPlanId: 'plan_1' })).not.toHaveProperty(
+      'approved_plan_id',
+    )
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', executeGranted: false, approvedPlanId: 'plan_1' })).not.toHaveProperty(
+      'approved_plan_id',
+    )
+  })
+
+  it('omits a blank plan id, so an execute turn without one is the S2a turn exactly', () => {
+    expect(buildChatWireBody({ ...execute, approvedPlanId: '   ' })).toEqual(buildChatWireBody(execute))
+    expect(buildChatWireBody({ ...execute, approvedPlanId: '' })).not.toHaveProperty('approved_plan_id')
+  })
+
+  it('reads continuation: execute_now only as that exact answer, and next_message otherwise', async () => {
+    for (const [answer, expected] of [
+      ['execute_now', 'execute_now'],
+      ['next_message', 'next_message'],
+      [undefined, 'next_message'],
+      ['run_it_now', 'next_message'],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          respond({
+            granted_rung: 'workspace_write',
+            was_in_plan_mode: true,
+            persisted: true,
+            ...(answer === undefined ? {} : { continuation: answer }),
+          }),
+        ),
+      )
+
+      const result = await approvePlan('run_1', 'workspace_write', 'writes its report', 'plan_1', [])
+
+      expect(result.continuation, `answer ${String(answer)}`).toBe(expected)
+    }
+  })
+})
+
+describe('deck templates (EP-5 S7)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  const listed = {
+    skill_id: 'skill-brand',
+    name: 'Aquatiq brand',
+    description: 'Blue on white.',
+    colors: { primary: '#0A3D62', secondary: '#3c6382', text: '#1e272e', background: '#ffffff', accent: ['#e58e26', 'red'] },
+    fonts: { heading: 'Carlito', body: 'Liberation Sans' },
+  }
+
+  it('sends the picked template as deck_template on a turn that keeps data', () => {
+    const body = buildChatWireBody({ content: 'Lag en presentasjon', deckTemplate: '  skill-brand ' })
+    expect(body.deck_template).toBe('skill-brand')
+  })
+
+  it('leaves the body unchanged when no template, a blank one or a malformed one is picked', () => {
+    const plain = buildChatWireBody({ content: 'hi' })
+    expect(plain).not.toHaveProperty('deck_template')
+    for (const deckTemplate of [undefined, '', '   ', '../blob', 'a b']) {
+      expect(buildChatWireBody({ content: 'hi', deckTemplate })).not.toHaveProperty('deck_template')
+    }
+  })
+
+  it('never sends a template on the turns the server would refuse it', () => {
+    for (const request of [
+      { content: 'hi', deckTemplate: 'skill-brand', zdr: true },
+      { content: 'hi', deckTemplate: 'skill-brand', provider: 'openai-codex-subscription' },
+      { content: 'hi', deckTemplate: 'skill-brand', sourceScope: 'conversation' as const },
+    ]) {
+      expect(buildChatWireBody(request)).not.toHaveProperty('deck_template')
+    }
+  })
+
+  it('lists templates with display fields only and drops an entry that is not one', async () => {
+    vi.stubGlobal('fetch', json({ data: { templates: [
+      listed,
+      { ...listed, skill_id: 'skill-bad', colors: { ...listed.colors, primary: 'blue' } },
+      { ...listed, skill_id: '../escape' },
+      { ...listed, skill_id: 'skill-nofont', fonts: { heading: 'Carlito' } },
+    ] } }))
+    const templates = await listDeckTemplates()
+    expect(templates).toEqual([{
+      skillId: 'skill-brand',
+      name: 'Aquatiq brand',
+      description: 'Blue on white.',
+      colors: { primary: '#0a3d62', secondary: '#3c6382', text: '#1e272e', background: '#ffffff', accent: ['#e58e26'] },
+      fonts: { heading: 'Carlito', body: 'Liberation Sans' },
+    }])
+    const fetchMock = vi.mocked(fetch)
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/deck-templates')
+  })
+
+  it('reads a 404 (switch off) and a 403 (zero retention) as no picker', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await listDeckTemplates()).toBeNull()
+    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'skills' } }, 403))
+    expect(await listDeckTemplates()).toBeNull()
+  })
+
+  it('rejects any other failure with the typed error', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
+    await expect(listDeckTemplates()).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('EP-4 S2 inline widget feature family', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('inline_widgets_feature_only_with_the_switch', () => {
+    // Off, the body is what it was before the switch existed. On, the client offers widgets, and the
+    // gateway may then add the widget notice to the prompt. Only the literal true turns it on.
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'TRUE')
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', '1')
+    expect(buildChatWireBody({ content: 'hi' }).features).not.toContain('inline_widgets')
+    vi.stubEnv('VITE_CHAT_INLINE_WIDGETS', 'true')
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('inline_widgets')
+    expect(buildChatWireBody({ content: 'hi' }).features).toContain('usage')
+  })
+})
+
+describe('EP-4 S9 MCP app resource read', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  it('reads the app document by server and tool name only', async () => {
+    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '<p>app</p>', needs_network: true } }))
+    expect(await getMcpAppResource('srv-1', 'show&org_id=org-2')).toEqual({
+      uri: 'ui://charts/pie',
+      html: '<p>app</p>',
+      needsNetwork: true,
+    })
+    const url = String(vi.mocked(fetch).mock.calls[0]?.[0])
+    expect(url).toContain('/api/v1/mcp-apps/resource?server_id=srv-1&tool=show%26org_id%3Dorg-2')
+  })
+
+  it('reads a 404 (switch off, no app) and a 403 (zero retention) as no app', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+    vi.stubGlobal('fetch', json({ error: { code: 'zdr_feature_not_supported', message: 'no', feature: 'mcp_execution' } }, 403))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+  })
+
+  it('a document that is not a ui:// app is no app', async () => {
+    vi.stubGlobal('fetch', json({ data: { uri: 'https://evil.example/app', html: '<p>app</p>' } }))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+    vi.stubGlobal('fetch', json({ data: { uri: 'ui://charts/pie', html: '   ' } }))
+    expect(await getMcpAppResource('srv-1', 'show')).toBeNull()
+  })
+
+  it('rejects any other failure with the typed error', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'upstream_unavailable', message: 'down' } }, 502))
+    await expect(getMcpAppResource('srv-1', 'show')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('EP-4 S10 MCP app tool call', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const json = (body: unknown, status = 200) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify(body),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  const request = {
+    runId: 'run-1',
+    serverId: 'srv-1',
+    tool: 'echo_read',
+    arguments: { q: 'x' },
+    frameNonce: 'frame-0123456789abcdef',
+  }
+
+  it('posts the call with the frame nonce and nothing that scopes it', async () => {
+    vi.stubGlobal('fetch', json({ data: { output: '{"content":[]}', truncated: true } }))
+    expect(await callMcpAppTool(request)).toEqual({ ok: true, output: '{"content":[]}', truncated: true })
+    const [url, init] = vi.mocked(fetch).mock.calls[0] ?? []
+    expect(String(url)).toContain('/api/v1/mcp-apps/tool-call')
+    expect((init as RequestInit).method).toBe('POST')
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      run_id: 'run-1',
+      server_id: 'srv-1',
+      tool: 'echo_read',
+      arguments: { q: 'x' },
+      frame_nonce: 'frame-0123456789abcdef',
+    })
+  })
+
+  it('answers a refusal with its typed code', async () => {
+    vi.stubGlobal('fetch', json({ error: { code: 'app_call_requires_chat', message: 'ask in the chat' } }, 403))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'app_call_requires_chat' })
+    vi.stubGlobal('fetch', json({ error: { code: 'rate_limited', message: 'slow down' } }, 429))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'rate_limited' })
+    // Switched off, the route does not exist.
+    vi.stubGlobal('fetch', json({ error: { code: 'not_found', message: 'no such route' } }, 404))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'not_found' })
+  })
+
+  it('a reply without output is a failed call', async () => {
+    vi.stubGlobal('fetch', json({ data: { truncated: false } }))
+    expect(await callMcpAppTool(request)).toEqual({ ok: false, code: 'tool_call_failed' })
   })
 })

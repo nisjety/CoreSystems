@@ -6,8 +6,13 @@
 //! ingestion bearer, the screening and framing of what comes back, and the connected-account sources a
 //! read leaves on the turn. It is declared from `tool_loop.rs` the way `sse.rs` declares its own helpers,
 //! so the slice stays inside the files it owns.
+//!
+//! It also reads the person's connected-app level (EP-10 S7): once capability-core enforces tool policies,
+//! "Ask first" or "Off" on the read, set by the person or their org, takes the read out of the Ask loop.
 
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use mp_contracts::model_plane::v1::{ToolCall, ToolDefinition};
 use mp_contracts::provider_reads::{self, ProviderRead};
@@ -38,6 +43,15 @@ const PROVIDER_HOSTS: &[&str] = &[
     "calendar.google.com",
 ];
 const NOT_AVAILABLE: &str = "read_provider_action is not available on this turn";
+/// The capability whose stored tool policy governs the connected-app read (EP-10 S7).
+const READ_CAPABILITY: &str = "cap.tool.provider.read";
+/// How long one person's read level is reused before capability-core is asked again, so a turn costs at
+/// most one policy read a minute per person.
+const POLICY_TTL: Duration = Duration::from_secs(60);
+/// The policy read is on the turn's critical path; a slower answer counts as unknown.
+const POLICY_TIMEOUT: Duration = Duration::from_secs(3);
+/// Most people whose level is remembered at once. Past it the remembered levels are dropped and read again.
+const POLICY_CACHE_MAX: usize = 4096;
 
 /// Whether the deployment has switched the Ask loop's connected-app read on.
 #[must_use]
@@ -79,6 +93,166 @@ pub fn offered(enabled: bool, zdr: bool, space_scoped: bool, turn: Option<&Conne
         && !zdr
         && !space_scoped
         && turn.is_some_and(|turn| turn.all_sources && !turn.selection.is_empty())
+}
+
+/// What the person's, or their org's, tool policy on the connected-app read means for the Ask loop (EP-10
+/// S7). The Do loop needs none of this: capability-core's engine pauses or denies its calls directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPolicy {
+    /// No tightening is in force, or capability-core does not enforce policies yet: the offer is as before.
+    Unrestricted,
+    /// "Ask first". The Ask loop cannot pause for the person, so the read is left to the Do loop.
+    AskFirst,
+    /// "Off".
+    Off,
+    /// The level could not be read. A tightening may be in force, so the read is not offered.
+    Unknown,
+}
+
+impl ReadPolicy {
+    /// Whether the Ask loop may offer the read under this level.
+    #[must_use]
+    pub fn admits_ask_loop(self) -> bool {
+        self == Self::Unrestricted
+    }
+}
+
+/// The level a capability-core tool-policy list states. While the policies are not enforced every stored
+/// level is ignored, as the engine ignores it; once they are, the strictest active row on the read wins,
+/// whether the org or the person set it. A body that is not the list is unknown.
+#[must_use]
+pub fn policy_of(body: &Value) -> ReadPolicy {
+    let (Some(enforced), Some(policies)) = (
+        body.get("enforced").and_then(Value::as_bool),
+        body.get("policies").and_then(Value::as_array),
+    ) else {
+        return ReadPolicy::Unknown;
+    };
+    if !enforced {
+        return ReadPolicy::Unrestricted;
+    }
+    let mut level = ReadPolicy::Unrestricted;
+    for policy in policies {
+        if policy.get("capability_id").and_then(Value::as_str) != Some(READ_CAPABILITY) {
+            continue;
+        }
+        match policy.get("decision").and_then(Value::as_str) {
+            Some("never") => return ReadPolicy::Off,
+            Some("ask") => level = ReadPolicy::AskFirst,
+            _ => {}
+        }
+    }
+    level
+}
+
+/// One read of the caller's level from capability-core's tool-policy list, with the person's own capability
+/// bearer: the list holds the org's rows and that person's, never another person's.
+pub async fn fetch_policy(http: &reqwest::Client, base_url: &str, bearer: &str) -> ReadPolicy {
+    let Ok(response) = http
+        .get(format!(
+            "{base_url}/api/v1/tool-policies?capability_id={READ_CAPABILITY}"
+        ))
+        .bearer_auth(bearer)
+        .timeout(POLICY_TIMEOUT)
+        .send()
+        .await
+    else {
+        return ReadPolicy::Unknown;
+    };
+    if !response.status().is_success() {
+        return ReadPolicy::Unknown;
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_or(ReadPolicy::Unknown, |body| policy_of(&body))
+}
+
+/// A level read for one person and when it was read.
+#[derive(Debug, Clone, Copy)]
+struct CachedPolicy {
+    read_at: Instant,
+    policy: ReadPolicy,
+}
+
+type PolicyCache = HashMap<(String, String), CachedPolicy>;
+
+fn policy_cache() -> &'static Mutex<PolicyCache> {
+    static CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+/// The level remembered for this person when it is younger than [`POLICY_TTL`].
+fn cached_policy(
+    cache: &PolicyCache,
+    key: &(String, String),
+    now: Instant,
+) -> Option<ReadPolicy> {
+    cache
+        .get(key)
+        .filter(|cached| now.saturating_duration_since(cached.read_at) < POLICY_TTL)
+        .map(|cached| cached.policy)
+}
+
+/// Remember a level. Expired entries go first; a cache still full of live ones is emptied, so it stays bounded.
+fn remember_policy(
+    cache: &mut PolicyCache,
+    key: (String, String),
+    policy: ReadPolicy,
+    now: Instant,
+) {
+    if cache.len() >= POLICY_CACHE_MAX {
+        cache.retain(|_, cached| now.saturating_duration_since(cached.read_at) < POLICY_TTL);
+        if cache.len() >= POLICY_CACHE_MAX {
+            cache.clear();
+        }
+    }
+    cache.insert(
+        key,
+        CachedPolicy {
+            read_at: now,
+            policy,
+        },
+    );
+}
+
+/// The caller's level on the connected-app read, read once per turn and reused for a minute per (org,
+/// person). Without a capability bearer, or when capability-core does not answer, the level is unknown and is
+/// not remembered, so the next turn asks again.
+pub async fn read_policy(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    capability_bearer: Option<&str>,
+) -> ReadPolicy {
+    let key = (org_id.to_owned(), user_id.to_owned());
+    let now = Instant::now();
+    let remembered = cached_policy(
+        &policy_cache().lock().unwrap_or_else(PoisonError::into_inner),
+        &key,
+        now,
+    );
+    if let Some(policy) = remembered {
+        return policy;
+    }
+    let Some(bearer) = capability_bearer else {
+        return ReadPolicy::Unknown;
+    };
+    let policy = fetch_policy(
+        &state.http_client,
+        &state.capability_core_base_url,
+        bearer,
+    )
+    .await;
+    if policy != ReadPolicy::Unknown {
+        remember_policy(
+            &mut policy_cache().lock().unwrap_or_else(PoisonError::into_inner),
+            key,
+            policy,
+            Instant::now(),
+        );
+    }
+    policy
 }
 
 /// The read as the Ask loop offers it: the name, description and schema the Do loop offers too.
@@ -411,6 +585,219 @@ pub fn public_summary(output: &str) -> String {
     }
 }
 
+/// Most items one deep-research search asks one connected account for (EP-2-S7). A report cites a
+/// handful of items per account; more would only spend the corpus budget the web shares.
+const RESEARCH_MAX_RESULTS: u64 = 5;
+/// Longest search text a deep-research run sends a provider.
+const RESEARCH_QUERY_CHARS: usize = 200;
+/// Longest text of one item a deep-research report is written from.
+const RESEARCH_ITEM_CHARS: usize = 2_000;
+/// Fields of an item that are addresses, not evidence. A link stays on the citation, where it is
+/// checked against the provider hosts.
+const RESEARCH_SKIPPED_FIELDS: &[&str] = &["id", "webLink", "webUrl", "webViewLink"];
+
+/// One connected-account item a deep-research run may cite (EP-2-S7). `snippet` is metadata only and
+/// is what the citation kept with the thread carries; `text` is the evidence the report is written from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResearchItem {
+    pub provider: String,
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+    pub text: String,
+}
+
+/// What the connected-account reads of one deep-research run came back with: the items it may cite,
+/// and counts only of the rest, since a step record never carries what an account holds (WS23-S1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResearchReads {
+    pub items: Vec<ResearchItem>,
+    /// Accounts whose search answered.
+    pub reads: usize,
+    /// Accounts whose search did not run or did not answer.
+    pub failed: usize,
+    /// Items screening flagged, or could not finish screening, and so were left out of the evidence.
+    pub withheld: usize,
+}
+
+/// The mail search a provider serves, by the provider key integration-corev2 reports. `None` for a
+/// provider this path knows no search for, whose account is then not read.
+#[must_use]
+pub fn research_operation(provider: &str) -> Option<&'static str> {
+    match provider {
+        "google" => Some("gmail.messages"),
+        "microsoft" => Some("mail.messages"),
+        _ => None,
+    }
+}
+
+/// The one search a deep-research run makes of one account: the question as the query, whitespace
+/// collapsed and cut, and a small page of results.
+#[must_use]
+pub fn research_args(connection_id: &str, operation: &str, question: &str) -> ReadArgs {
+    let query: String = question
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(RESEARCH_QUERY_CHARS)
+        .collect();
+    let mut params = Map::new();
+    params.insert("query".to_owned(), Value::from(query));
+    ReadArgs {
+        connection_id: connection_id.to_owned(),
+        operation: operation.to_owned(),
+        params,
+        max_results: Some(RESEARCH_MAX_RESULTS),
+        page_token: None,
+    }
+}
+
+/// The items of an answered search, each with the same title, link and metadata snippet the Ask loop's
+/// sources carry. A read that answered with a status alone has none.
+#[must_use]
+pub fn research_items(operation: &str, provider: &str, read: &ProviderRead) -> Vec<ResearchItem> {
+    if !matches!(
+        read.status,
+        provider_reads::ReadStatus::Ok | provider_reads::ReadStatus::TooLarge
+    ) {
+        return Vec::new();
+    }
+    read.items
+        .iter()
+        .map(|item| ResearchItem {
+            provider: provider.to_owned(),
+            title: item_title(operation, item),
+            url: item_url(operation, item),
+            snippet: metadata_snippet(operation, item),
+            text: research_item_text(item),
+        })
+        .collect()
+}
+
+/// An item's fields as `name: value` lines, links and ids left out, cut to [`RESEARCH_ITEM_CHARS`].
+fn research_item_text(item: &Value) -> String {
+    let Some(fields) = item.as_object() else {
+        return String::new();
+    };
+    let lines: Vec<String> = fields
+        .iter()
+        .filter(|(key, _)| !RESEARCH_SKIPPED_FIELDS.contains(&key.as_str()))
+        .filter_map(|(key, value)| {
+            let text = match value {
+                Value::String(text) => Some(text.split_whitespace().collect::<Vec<_>>().join(" ")),
+                other => text_of(other),
+            }?;
+            (!text.is_empty()).then(|| format!("{key}: {text}"))
+        })
+        .collect();
+    lines.join("\n").chars().take(RESEARCH_ITEM_CHARS).collect()
+}
+
+/// Whether screening keeps an item out of a report's evidence. In the Ask loop a flagged read is shown
+/// with a warning beside it; a report is written in one inference with no such frame per item, so a
+/// flagged or unfinished screening leaves the item out instead.
+fn research_withholds(provenance: &ToolProvenance) -> bool {
+    matches!(
+        provenance.screening.posture,
+        crate::moderation::ScreeningPosture::Flagged | crate::moderation::ScreeningPosture::Degraded
+    )
+}
+
+/// The connected-account reads of one deep-research run (EP-2-S7): one search per account the person
+/// selected for the turn, through integration-corev2 with the person's own ingestion bearer, each result
+/// screened as connector content. The same conditions as the Ask loop's read hold first: the switch, no
+/// zero retention, no Space, a selection, and a read level that admits the Ask loop. Nothing is read
+/// otherwise, and nothing here is stored.
+#[allow(clippy::too_many_arguments)] // request context, as `read_outcome` takes it
+pub async fn research_reads(
+    state: &AppState,
+    turn: Option<&ConnectorTurn>,
+    zdr: bool,
+    space_scoped: bool,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    capability_bearer: Option<&str>,
+    org_id: &str,
+    user_id: &str,
+    question: &str,
+) -> ResearchReads {
+    let (Some(turn), Some(bearer)) = (turn, ingestion_bearer) else {
+        return ResearchReads::default();
+    };
+    if !offered(enabled(), zdr, space_scoped, Some(turn)) {
+        return ResearchReads::default();
+    }
+    if !read_policy(state, org_id, user_id, capability_bearer)
+        .await
+        .admits_ask_loop()
+    {
+        return ResearchReads::default();
+    }
+    let base_url = integration_base_url();
+    let results = futures::future::join_all(turn.selection.iter().map(|connection_id| {
+        research_read(
+            state,
+            &base_url,
+            bearer.as_str(),
+            capability_bearer,
+            connection_id,
+            question,
+        )
+    }))
+    .await;
+    let mut reads = ResearchReads::default();
+    for result in results {
+        match result {
+            Some((items, withheld)) => {
+                reads.reads += 1;
+                reads.withheld += withheld;
+                reads.items.extend(items);
+            }
+            None => reads.failed += 1,
+        }
+    }
+    reads
+}
+
+/// One account's search. The provider decides which operation searches its mail, so the account's
+/// profile is read first to learn it. `None` when either read did not answer, or the provider has no
+/// known search; otherwise the items screening admits and how many it withheld.
+async fn research_read(
+    state: &AppState,
+    base_url: &str,
+    bearer: &str,
+    capability_bearer: Option<&str>,
+    connection_id: &str,
+    question: &str,
+) -> Option<(Vec<ResearchItem>, usize)> {
+    let profile = ReadArgs {
+        connection_id: connection_id.to_owned(),
+        operation: "profile".to_owned(),
+        params: Map::new(),
+        max_results: None,
+        page_token: None,
+    };
+    let provider = fetch(&state.http_client, base_url, bearer, &profile).await.ok()?.provider;
+    let operation = research_operation(&provider)?;
+    let args = research_args(connection_id, operation, question);
+    let fetched = fetch(&state.http_client, base_url, bearer, &args).await.ok()?;
+    // The whole rendered read is screened, as the Ask loop screens it, before any item is used.
+    let provenance = ToolProvenance::assess(
+        provider_reads::READ_TOOL_NAME,
+        &envelope(&args, &fetched),
+        &state.screening_semaphore,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer,
+    )
+    .await;
+    let items = research_items(operation, &fetched.provider, &fetched.read);
+    if research_withholds(&provenance) {
+        return Some((Vec::new(), items.len()));
+    }
+    Some((items, 0))
+}
+
 fn citation(
     connection: &str,
     operation: &str,
@@ -439,6 +826,7 @@ fn citation(
         start: None,
         end: None,
         origin: "connector".to_owned(),
+        passage: None,
     }
 }
 
@@ -526,7 +914,9 @@ fn provider_url(raw: &str) -> Option<String> {
     .then(|| url.to_string())
 }
 
-fn provider_label(provider: &str) -> &'static str {
+/// The label a connected account's sources are grouped under, shared with deep research (EP-2-S7).
+#[must_use]
+pub fn provider_label(provider: &str) -> &'static str {
     match provider {
         "google" => "Google",
         "microsoft" => "Microsoft 365",
@@ -539,7 +929,7 @@ mod tests {
     use super::*;
     use crate::moderation::{ScreeningPosture, ToolProvenance, TrustClass};
     use mp_contracts::provider_reads::{ReadStatus, READ_MAX_RESULTS};
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn turn(selection: &[&str], all_sources: bool) -> ConnectorTurn {
@@ -590,6 +980,145 @@ mod tests {
         // A source-filtered turn never reaches the loop with a selection, because the route refuses it.
         // The offer holds for that turn all the same.
         assert!(!offered(true, false, false, Some(&turn(&["conn_1"], false))));
+    }
+
+    fn listed(enforced: bool, decisions: &[(&str, &str)]) -> Value {
+        json!({
+            "enforced": enforced,
+            "policies": decisions
+                .iter()
+                .map(|(scope, decision)| json!({
+                    "capability_id": READ_CAPABILITY,
+                    "scope_kind": scope,
+                    "decision": decision,
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+
+    fn offered_under(policy: ReadPolicy) -> bool {
+        offered(true, false, false, Some(&turn(&["conn_1"], true))) && policy.admits_ask_loop()
+    }
+
+    #[test]
+    fn ask_first_removes_the_read_tool_in_ask() {
+        // The Ask loop cannot pause, so "Ask first" leaves the read to the Do loop, from either scope.
+        for scope in ["user", "org"] {
+            let policy = policy_of(&listed(true, &[(scope, "ask")]));
+            assert_eq!(policy, ReadPolicy::AskFirst, "{scope}");
+            assert!(!offered_under(policy), "{scope}");
+        }
+    }
+
+    #[test]
+    fn off_removes_it() {
+        for scope in ["user", "org"] {
+            let policy = policy_of(&listed(true, &[(scope, "never")]));
+            assert_eq!(policy, ReadPolicy::Off, "{scope}");
+            assert!(!offered_under(policy), "{scope}");
+        }
+        assert_eq!(
+            policy_of(&listed(true, &[("user", "ask"), ("org", "never")])),
+            ReadPolicy::Off,
+            "the strictest level wins whoever set it"
+        );
+    }
+
+    #[test]
+    fn not_enforced_changes_nothing() {
+        for decisions in [&[][..], &[("user", "ask")][..], &[("org", "never")][..]] {
+            let policy = policy_of(&listed(false, decisions));
+            assert_eq!(policy, ReadPolicy::Unrestricted, "{decisions:?}");
+            assert!(offered_under(policy), "{decisions:?}");
+        }
+        assert!(
+            offered_under(policy_of(&listed(true, &[]))),
+            "no level set is the offer as before"
+        );
+    }
+
+    #[test]
+    fn a_level_that_cannot_be_read_is_not_offered() {
+        for body in [
+            json!({"policies": []}),
+            json!({"enforced": true}),
+            json!([]),
+            json!({"error": "authentication required"}),
+        ] {
+            assert_eq!(policy_of(&body), ReadPolicy::Unknown, "{body}");
+        }
+        assert!(!offered_under(ReadPolicy::Unknown));
+    }
+
+    #[test]
+    fn a_level_for_another_capability_is_not_the_reads() {
+        let body = json!({"enforced": true, "policies": [
+            {"capability_id": "cap.tool.provider.execute", "scope_kind": "user", "decision": "never"}
+        ]});
+        assert_eq!(policy_of(&body), ReadPolicy::Unrestricted);
+    }
+
+    #[test]
+    fn a_level_is_reused_for_a_minute_per_person_and_the_cache_stays_bounded() {
+        let mut cache = PolicyCache::new();
+        let start = Instant::now();
+        let alice = ("org-a".to_owned(), "user-a".to_owned());
+        remember_policy(&mut cache, alice.clone(), ReadPolicy::Off, start);
+        assert_eq!(
+            cached_policy(&cache, &alice, start + Duration::from_secs(59)),
+            Some(ReadPolicy::Off)
+        );
+        assert_eq!(cached_policy(&cache, &alice, start + POLICY_TTL), None);
+        assert_eq!(
+            cached_policy(&cache, &("org-b".to_owned(), "user-a".to_owned()), start),
+            None,
+            "a level is never shared across orgs"
+        );
+        for index in 0..POLICY_CACHE_MAX + 10 {
+            remember_policy(
+                &mut cache,
+                ("org-a".to_owned(), format!("user-{index}")),
+                ReadPolicy::Unrestricted,
+                start,
+            );
+        }
+        assert!(cache.len() <= POLICY_CACHE_MAX, "{}", cache.len());
+    }
+
+    #[tokio::test]
+    async fn the_level_is_read_with_the_persons_bearer_for_the_read_capability() {
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tool-policies"))
+            .and(query_param("capability_id", READ_CAPABILITY))
+            .and(header("authorization", "Bearer user-capability-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(listed(true, &[("user", "ask")])),
+            )
+            .expect(1)
+            .mount(&capability_core)
+            .await;
+        let policy = fetch_policy(
+            &reqwest::Client::new(),
+            &capability_core.uri(),
+            "user-capability-token",
+        )
+        .await;
+        assert_eq!(policy, ReadPolicy::AskFirst);
+    }
+
+    #[tokio::test]
+    async fn a_refused_policy_read_is_unknown() {
+        let capability_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/tool-policies"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(json!({"error": "database unavailable"})),
+            )
+            .mount(&capability_core)
+            .await;
+        let policy = fetch_policy(&reqwest::Client::new(), &capability_core.uri(), "token").await;
+        assert_eq!(policy, ReadPolicy::Unknown);
     }
 
     #[test]
@@ -828,5 +1357,104 @@ mod tests {
             .await
             .unwrap_or_default()
             .is_empty());
+    }
+
+    /// EP-2-S7: the deep-research search of one account.
+    mod research {
+        use super::*;
+
+        fn mail_read(items: Vec<Value>) -> ProviderRead {
+            ProviderRead {
+                status: ReadStatus::Ok,
+                items,
+                next_page_token: None,
+                more_available: false,
+            }
+        }
+
+        #[test]
+        fn only_the_known_providers_have_a_research_search() {
+            assert_eq!(research_operation("google"), Some("gmail.messages"));
+            assert_eq!(research_operation("microsoft"), Some("mail.messages"));
+            assert_eq!(research_operation(""), None);
+            assert_eq!(research_operation("dropbox"), None);
+            for provider in ["google", "microsoft"] {
+                let operation = research_operation(provider).expect("a search");
+                assert!(
+                    provider_reads::read_operation_params(operation)
+                        .is_some_and(|params| params.contains(&"query")),
+                    "{operation} is a read that takes a query"
+                );
+            }
+        }
+
+        #[test]
+        fn the_research_search_is_one_small_query() {
+            let long = format!("  what   did {}  ", "word ".repeat(100));
+            let args = research_args("conn_1", "mail.messages", &long);
+            let query = args.params["query"].as_str().expect("a query");
+            assert!(query.chars().count() <= RESEARCH_QUERY_CHARS);
+            assert!(query.starts_with("what did word"), "{query}");
+            assert_eq!(args.max_results, Some(RESEARCH_MAX_RESULTS));
+            assert_eq!(args.page_token, None);
+            assert_eq!(args.params.len(), 1, "no filter but the query");
+        }
+
+        #[test]
+        fn a_research_item_keeps_its_body_out_of_the_snippet() {
+            let read = mail_read(vec![json!({
+                "id": "m1",
+                "subject": "Quarterly numbers",
+                "from": {"name": "Kari", "address": "kari@example.com"},
+                "receivedDateTime": "2026-11-01T10:00:00Z",
+                "snippet": "Revenue grew 12 percent",
+                "webLink": "https://outlook.office.com/mail/m1",
+            })]);
+            let items = research_items("mail.messages", "microsoft", &read);
+            assert_eq!(items.len(), 1);
+            let item = &items[0];
+            assert_eq!(item.provider, "microsoft");
+            assert_eq!(item.title, "Quarterly numbers");
+            assert_eq!(item.url, "https://outlook.office.com/mail/m1");
+            assert!(!item.snippet.contains("Revenue"), "metadata only: {}", item.snippet);
+            assert!(item.text.contains("snippet: Revenue grew 12 percent"), "{}", item.text);
+            assert!(!item.text.contains("m1"), "no id or link in the evidence: {}", item.text);
+        }
+
+        #[test]
+        fn a_research_item_text_is_bounded() {
+            let read = mail_read(vec![json!({"subject": "s", "snippet": "x".repeat(10_000)})]);
+            let items = research_items("mail.messages", "microsoft", &read);
+            assert!(items[0].text.chars().count() <= RESEARCH_ITEM_CHARS);
+        }
+
+        #[test]
+        fn a_status_only_read_has_no_items() {
+            for status in [
+                ReadStatus::NoResults,
+                ReadStatus::ReconnectRequired,
+                ReadStatus::CapabilityMissing,
+                ReadStatus::UnsupportedContent,
+            ] {
+                let mut read = mail_read(vec![json!({"subject": "s"})]);
+                read.status = status;
+                assert!(research_items("mail.messages", "microsoft", &read).is_empty(), "{status:?}");
+            }
+        }
+
+        #[test]
+        fn flagged_or_unfinished_screening_withholds_an_item() {
+            let mut provenance = ToolProvenance::unscreened(provider_reads::READ_TOOL_NAME, "x");
+            assert_eq!(provenance.trust, TrustClass::ConnectorContent);
+            for (posture, withheld) in [
+                (ScreeningPosture::Clean, false),
+                (ScreeningPosture::PolicyDisabled, false),
+                (ScreeningPosture::Flagged, true),
+                (ScreeningPosture::Degraded, true),
+            ] {
+                provenance.screening.posture = posture;
+                assert_eq!(research_withholds(&provenance), withheld, "{posture:?}");
+            }
+        }
     }
 }

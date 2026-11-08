@@ -1009,6 +1009,14 @@ type CronHandler struct {
 	// scheduleContract is SCHEDULE_CONTRACT_ENABLED. Off, a template that carries
 	// an approval_contract is refused, so a schedule without a contract stays draft-only.
 	scheduleContract bool
+	// contractGuards is CRON_CONTRACT_GUARDS_ENABLED. On, a bare re-enable of a
+	// schedule whose approval has lapsed is refused (WS20-S8).
+	contractGuards bool
+	// runNow is CRON_RUN_NOW_ENABLED (EP-6-S2). Off, or without the fire authorizer and
+	// its transaction pool, POST /api/v1/cron/{id}/run does not exist.
+	runNow         bool
+	runNowDB       cron.RunNowDB
+	fireAuthorizer cron.FireAuthorizer
 }
 
 // NewCronHandler constructs the handler.
@@ -1025,6 +1033,27 @@ func (h *CronHandler) WithSpaceDecisionVerifier(verifier *cron.ControlDecisionVe
 func (h *CronHandler) WithScheduleContract(enabled bool) *CronHandler {
 	h.scheduleContract = enabled
 	return h
+}
+
+// WithContractGuards refuses a bare re-enable of a schedule whose approval has lapsed
+// (WS20-S8). Off, a re-enable is accepted exactly as before.
+func (h *CronHandler) WithContractGuards(enabled bool) *CronHandler {
+	h.contractGuards = enabled
+	return h
+}
+
+// WithRunNow mounts Run now (EP-6-S2): a manual fire through the same fresh Control fire
+// authorization the sweeper uses. Only the literal "true" from CRON_RUN_NOW_ENABLED
+// turns it on.
+func (h *CronHandler) WithRunNow(db cron.RunNowDB, authorizer cron.FireAuthorizer, enabled bool) *CronHandler {
+	h.runNowDB = db
+	h.fireAuthorizer = authorizer
+	h.runNow = enabled
+	return h
+}
+
+func (h *CronHandler) runNowEnabled() bool {
+	return h.runNow && h.runNowDB != nil && h.fireAuthorizer != nil
 }
 
 // createIntentFor builds the Control binding for one create. A template without
@@ -1107,6 +1136,15 @@ func (h *CronHandler) Register(mux *http.ServeMux) {
 			h.listFires(w, r, scheduleID)
 			return
 		}
+		// Off, the path falls through to the routes below and is not found, as before.
+		if scheduleID, ok := strings.CutSuffix(id, "/run"); ok && h.runNowEnabled() {
+			if r.Method != http.MethodPost {
+				http.NotFound(w, r)
+				return
+			}
+			h.runNowFire(w, r, scheduleID)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, id)
@@ -1135,6 +1173,10 @@ type cronScheduleRow struct {
 	UpdatedAt    time.Time  `json:"updated_at"`
 	SpaceRef     string     `json:"space_ref"`
 	CreatorID    string     `json:"creator_subject_id"`
+	// LastFireStatus and LastOutcome are the newest fire's closed status and outcome
+	// tokens, set by the list only (EP-6-S2), so the hub can tell why a schedule paused.
+	LastFireStatus string `json:"last_fire_status,omitempty"`
+	LastOutcome    string `json:"last_outcome,omitempty"`
 	// SpaceDecisionToken is accepted only at creation and never stored or
 	// returned. Capability Core verifies it before extracting durable claims.
 	SpaceDecisionToken string `json:"space_schedule_create_decision,omitempty"`
@@ -1154,14 +1196,29 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		// room is not the other rooms' business, and an org-wide list is
 		// unreadable as soon as a second room exists.
 		spaceRef := strings.TrimSpace(r.URL.Query().Get("space_ref"))
+		// Optional `creator=self` narrows the list to the caller's own schedules
+		// (EP-6-S2, OD-7). Also a filter, never a grant: the creator compared is the
+		// verified actor, and any other value is no filter at all.
+		creator := ""
+		if r.URL.Query().Get("creator") == "self" {
+			creator = verifiedActorID(r)
+		}
 		rows, err := h.pool.Query(r.Context(), `
-			SELECT id, org_id, name, description, schedule_expr, timezone, task_template,
-			       enabled, last_fire_at, next_fire_at, created_at, updated_at, space_ref, creator_subject_id
-			FROM cron_schedules
-			WHERE org_id=$1 AND deleted_at IS NULL
-			  AND ($2 = '' OR space_ref = $2)
-			ORDER BY name
-		`, orgID, spaceRef)
+			SELECT s.id, s.org_id, s.name, s.description, s.schedule_expr, s.timezone, s.task_template,
+			       s.enabled, s.last_fire_at, s.next_fire_at, s.created_at, s.updated_at, s.space_ref, s.creator_subject_id,
+			       COALESCE(lf.status, ''), COALESCE(lf.outcome, '')
+			FROM cron_schedules AS s
+			LEFT JOIN LATERAL (
+				SELECT status, outcome FROM cron_fires
+				WHERE schedule_id = s.id
+				ORDER BY fired_at DESC, id DESC
+				LIMIT 1
+			) AS lf ON true
+			WHERE s.org_id=$1 AND s.deleted_at IS NULL
+			  AND ($2 = '' OR s.space_ref = $2)
+			  AND ($3 = '' OR s.creator_subject_id = $3)
+			ORDER BY s.name
+		`, orgID, spaceRef, creator)
 		if err != nil {
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -1172,13 +1229,19 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			var s cronScheduleRow
 			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.ScheduleExpr,
 				&s.Timezone, &s.TaskTemplate, &s.Enabled, &s.LastFireAt, &s.NextFireAt,
-				&s.CreatedAt, &s.UpdatedAt, &s.SpaceRef, &s.CreatorID); err != nil {
+				&s.CreatedAt, &s.UpdatedAt, &s.SpaceRef, &s.CreatorID,
+				&s.LastFireStatus, &s.LastOutcome); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			schedules = append(schedules, s)
 		}
-		writeJSON(w, map[string]any{"schedules": schedules})
+		// features tells the hub which server capabilities are on, so it never offers a
+		// button whose route does not exist.
+		writeJSON(w, map[string]any{
+			"schedules": schedules,
+			"features":  map[string]bool{"run_now": h.runNowEnabled()},
+		})
 	case http.MethodPost:
 		var s cronScheduleRow
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
@@ -1249,7 +1312,8 @@ func (h *CronHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 
 // cronFireRow is one fire of a schedule as its owner reads it. It carries
 // identifiers, closed tokens and counts only. The answer itself is read from the
-// scheduled thread named by thread_id.
+// scheduled thread named by thread_id. fire_key tells a Run now (manual:<request id>,
+// EP-6-S3) from a schedule's own fire, whose key is its slot time.
 type cronFireRow struct {
 	ID              string     `json:"id"`
 	FiredAt         time.Time  `json:"fired_at"`
@@ -1259,6 +1323,7 @@ type cronFireRow struct {
 	RunID           string     `json:"run_id"`
 	ThreadID        string     `json:"thread_id"`
 	WithheldEffects int        `json:"withheld_effects"`
+	FireKey         string     `json:"fire_key"`
 }
 
 const (
@@ -1292,7 +1357,7 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
 		return
 	}
 	rows, err := h.pool.Query(r.Context(), `
-		SELECT id, fired_at, status, outcome, completed_at, run_id, thread_id, withheld_effects
+		SELECT id, fired_at, status, outcome, completed_at, run_id, thread_id, withheld_effects, fire_key
 		FROM cron_fires
 		WHERE schedule_id=$1
 		ORDER BY fired_at DESC, id DESC
@@ -1307,7 +1372,7 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
 	for rows.Next() {
 		var f cronFireRow
 		if err := rows.Scan(&f.ID, &f.FiredAt, &f.Status, &f.Outcome, &f.CompletedAt,
-			&f.RunID, &f.ThreadID, &f.WithheldEffects); err != nil {
+			&f.RunID, &f.ThreadID, &f.WithheldEffects, &f.FireKey); err != nil {
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
 			return
 		}
@@ -1318,6 +1383,48 @@ func (h *CronHandler) listFires(w http.ResponseWriter, r *http.Request, schedule
 		return
 	}
 	writeJSON(w, map[string]any{"data": fires})
+}
+
+// runNowFire makes one manual fire of a schedule for its creator (EP-6-S2). The caller
+// supplies only a request id; the org and the actor are the verified principal's. A new
+// fire answers 202, a retried request id 200 with the fire it made first.
+func (h *CronHandler) runNowFire(w http.ResponseWriter, r *http.Request, scheduleID string) {
+	var body struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeTypedError(w, http.StatusBadRequest, "invalid_request", "the body must be a JSON object with a request_id")
+		return
+	}
+	result, refusal, err := cron.RunNow(r.Context(), h.runNowDB, h.fireAuthorizer, cron.RunNowRequest{
+		OrgID: verifiedOrganizationID(r), ScheduleID: scheduleID,
+		ActorID: verifiedActorID(r), RequestID: body.RequestID,
+	}, time.Now().UTC())
+	if err != nil {
+		writeTypedError(w, http.StatusInternalServerError, "run_now_unavailable", "the schedule could not be run now")
+		return
+	}
+	if refusal != nil {
+		writeTypedError(w, refusal.HTTPStatus, refusal.Code, refusal.Message)
+		return
+	}
+	status := http.StatusAccepted
+	if result.Deduplicated {
+		status = http.StatusOK
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": result})
+}
+
+// writeTypedError writes the typed error envelope {error:{code,message,details}}. The
+// older cron routes keep jsonErr, whose shape their callers already read.
+func writeTypedError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "message": message, "details": map[string]any{},
+	}})
 }
 
 func (h *CronHandler) get(w http.ResponseWriter, r *http.Request, id string) {
@@ -1354,6 +1461,24 @@ func (h *CronHandler) patch(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	now := time.Now().UTC()
+	if h.contractGuards && update.Enabled != nil && *update.Enabled {
+		// A bare re-enable never revives an approval that has lapsed. Renewal is a new
+		// create decision, so the schedule must be created again (WS20-S8).
+		var template []byte
+		err := h.pool.QueryRow(r.Context(), `SELECT task_template FROM cron_schedules WHERE id=$1 AND org_id=$2 AND deleted_at IS NULL`, id, verifiedOrganizationID(r)).Scan(&template)
+		if errors.Is(err, pgx.ErrNoRows) {
+			jsonErr(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		if cron.ApprovalContractLapsed(template, now) {
+			jsonErr(w, "the schedule's approval has expired; renew it before resuming", http.StatusConflict)
+			return
+		}
+	}
 	var nextFireAt any
 	if update.ScheduleExpr != nil {
 		var timezone string

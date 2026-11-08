@@ -91,6 +91,8 @@ export type ChatThreadHistoryInput = {
 }
 
 export type ChatThreadTranscriptTurn = {
+  /** The connected-app suggestion card (EP-10 S8), read back as a restored note. */
+  connectorSuggestion?: unknown
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   /** See `ChatMessage.retrievalScope`. */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope

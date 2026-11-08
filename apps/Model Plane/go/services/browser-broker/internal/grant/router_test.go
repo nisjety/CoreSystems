@@ -48,6 +48,11 @@ func (r *recordingRepo) CreateScopedSensitiveApproval(ctx context.Context, p App
 	return r.inner.CreateScopedSensitiveApproval(ctx, p)
 }
 
+func (r *recordingRepo) CreateOriginExtension(ctx context.Context, p ExtensionParams) (*Grant, error) {
+	r.record("create_extension", p.ParentGrantID, p.Zdr)
+	return r.inner.CreateOriginExtension(ctx, p)
+}
+
 func (r *recordingRepo) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	r.record("derive", p.ParentGrantID, false)
 	return r.inner.Derive(ctx, p)

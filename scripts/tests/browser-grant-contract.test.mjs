@@ -213,20 +213,56 @@ test('no browser grant message carries a space_id or team_id field', () => {
   }
 });
 
+// WS7.K (R-6: field 20, the web-policy snapshot). Quarry vendors its half before the Model Plane broker
+// half lands (the ask is in .plan-work/quarry-w1w2/MP-ASKS.md, W2-Q-WS7K). Until upstream has them, these
+// are the only vendored names that may be missing upstream; once upstream has one, it must match exactly
+// like every other field (the subset test below compares it), so this list can only be emptied.
+const PENDING_UPSTREAM_MESSAGES = new Set(['WebPolicy']);
+const PENDING_UPSTREAM_FIELDS = new Set(['AcquireGrantResponse.20', 'ValidateGrantResponse.20']);
+
 test('Quarry vendored proto is a subset of the upstream one (same name, number, type)', () => {
   const upstream = parseProto(read(UPSTREAM_PROTO));
   const vendored = parseProto(read(QUARRY_PROTO));
   assert.ok(vendored.size > 0, 'parsed no messages from the vendored proto');
   for (const [message, fields] of vendored) {
     const source = upstream.get(message);
+    if (!source && PENDING_UPSTREAM_MESSAGES.has(message)) continue;
     assert.ok(source, `${message} is vendored but does not exist upstream`);
     for (const [number, field] of fields) {
+      if (!source.has(number) && PENDING_UPSTREAM_FIELDS.has(`${message}.${number}`)) continue;
       assert.deepEqual(
         source.get(number),
         field,
         `${message}.${field.name} (= ${number}) differs from the upstream contract`,
       );
     }
+  }
+});
+
+// WS7.K: the vendored snapshot is the plan's message (D7 S10) on field 20 of both responses Quarry reads.
+// `map<string, string> caps = 3` is not seen by parseProto (no map support), so it is checked as text.
+test('Quarry vendors the WS7.K web-policy snapshot as field 20 and the plan\'s WebPolicy message', () => {
+  const text = read(QUARRY_PROTO);
+  const vendored = parseProto(text);
+  const snapshot = { name: 'web_policy', type: 'WebPolicy', repeated: false };
+  assert.deepEqual(vendored.get('AcquireGrantResponse').get(20), snapshot);
+  assert.deepEqual(vendored.get('ValidateGrantResponse').get(20), snapshot);
+  assert.equal(vendored.get('AcquireGrantRequest').has(20), false, 'no request carries a snapshot');
+  const policy = vendored.get('WebPolicy');
+  assert.ok(policy, 'WebPolicy is not vendored');
+  const string = (name) => ({ name, type: 'string', repeated: false });
+  const list = (name) => ({ name, type: 'string', repeated: true });
+  assert.deepEqual(policy.get(1), { name: 'v', type: 'uint32', repeated: false });
+  assert.deepEqual(policy.get(2), string('rev'));
+  assert.deepEqual(policy.get(4), string('robots_max'));
+  assert.deepEqual(policy.get(5), string('proxy_max'));
+  assert.deepEqual(policy.get(6), list('domains_allow'));
+  assert.deepEqual(policy.get(7), list('domains_deny'));
+  assert.match(text.replace(/\/\/.*$/gm, ''), /map\s*<\s*string\s*,\s*string\s*>\s+caps\s*=\s*3\s*;/);
+  // Once the broker half lands upstream, the same shape is required there (the subset test compares the
+  // parsed fields; this checks the map field too).
+  if (parseProto(read(UPSTREAM_PROTO)).has('WebPolicy')) {
+    assert.match(read(UPSTREAM_PROTO).replace(/\/\/.*$/gm, ''), /map\s*<\s*string\s*,\s*string\s*>\s+caps\s*=\s*3\s*;/);
   }
 });
 
@@ -587,6 +623,107 @@ test('migration 0004 is idempotent, has a down migration, and adds the three pol
   }
   // The z_ id CHECK of 0001 survives: 0004 neither drops nor replaces it.
   assert.doesNotMatch(up + down, /browser_grants_no_zdr_id_check/);
+});
+
+// INNH-10 MP-2: API-key grants. key_id is field 60 on the two grant responses only (54-59 stay reserved); the
+// generated Go carries it; the switch is off in the Go default and in compose; migration 0005 is idempotent.
+test('INNH-10: key_id is field 60 on Acquire/ValidateGrantResponse, the key switch defaults off, 0005 reruns', () => {
+  const messages = parseProto(read(UPSTREAM_PROTO));
+  const keyField = { name: 'key_id', type: 'string', repeated: false };
+  for (const name of ['AcquireGrantResponse', 'ValidateGrantResponse']) {
+    assert.deepEqual(messages.get(name).get(60), keyField, `${name}.key_id must be string = 60`);
+  }
+  for (const [name, fields] of messages) {
+    if (name === 'AcquireGrantResponse' || name === 'ValidateGrantResponse') continue;
+    for (const [number, field] of fields) {
+      assert.notEqual(field.name, 'key_id', `${name}.key_id (= ${number}): only the two responses carry the key`);
+    }
+  }
+  const generated = read('apps/Model Plane/go/gen/model_plane/v1/browser.pb.go');
+  assert.equal((generated.match(/protobuf:"bytes,60,opt,name=key_id,/g) || []).length, 2, 'regenerate browser.pb.go');
+
+  const config = read('apps/Model Plane/go/services/browser-broker/internal/server/config.go');
+  const defaults = config.match(/func DefaultConfig\(\) Config \{([\s\S]*?)\n\}/);
+  assert.ok(defaults, 'DefaultConfig not found');
+  assert.doesNotMatch(defaults[1], /KeyGrantsEnabled/, 'the key switch must default off (zero value)');
+  assert.match(config, /DefaultKeyGrantTTL\s+= 10 \* time\.Minute/);
+  assert.match(config, /MaxKeyGrantTTL\s+= 15 \* time\.Minute/);
+  assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/grant.go'), /DefaultMaxActivePerKey = 2/);
+  const dev = composeService(read('apps/Model Plane/deploy/docker-compose.yml'), 'browser-broker');
+  assert.match(dev, /BROWSER_BROKER_KEY_GRANTS_ENABLED: \$\{BROWSER_BROKER_KEY_GRANTS_ENABLED:-0\}/);
+  assert.match(dev, /BROWSER_BROKER_KEY_GRANT_TTL_SECONDS: \$\{BROWSER_BROKER_KEY_GRANT_TTL_SECONDS:-600\}/);
+  assert.match(dev, /BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY: \$\{BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY:-2\}/);
+  assert.doesNotMatch(
+    read('apps/Model Plane/deploy/docker-compose.production.yml'),
+    /BROWSER_BROKER_KEY_GRANTS_ENABLED: \$\{BROWSER_BROKER_KEY_GRANTS_ENABLED:-(1|true|on)\}/i,
+  );
+
+  const dir = 'apps/Model Plane/go/services/browser-broker/migrations';
+  const up = read(`${dir}/0005_browser_grants_key.up.sql`).replace(/--.*$/gm, '');
+  assert.match(up, /ADD COLUMN IF NOT EXISTS key_id\b/);
+  assert.doesNotMatch(up, /\bADD COLUMN (?!IF NOT EXISTS)/i, 'a non-idempotent ADD COLUMN');
+  assert.doesNotMatch(up, /\bCREATE (UNIQUE )?INDEX (?!IF NOT EXISTS)/i, 'a non-idempotent CREATE INDEX');
+  assert.doesNotMatch(up.replace(/DO \$\$[\s\S]*?\$\$;/g, ''), /ADD CONSTRAINT/i, 'a bare ADD CONSTRAINT');
+  assert.doesNotMatch(up, /\bzdr\b/, 'a ZDR key grant never reaches the table');
+  const down = read(`${dir}/0005_browser_grants_key.down.sql`).replace(/--.*$/gm, '');
+  // Key grants are deleted before the column goes, so none becomes the owner's ordinary grant.
+  assert.ok(down.indexOf('DELETE FROM browser_grants WHERE key_id IS NOT NULL') >= 0, 'down must delete key grants');
+  assert.ok(
+    down.indexOf('DELETE FROM browser_grants') < down.indexOf('DROP COLUMN IF EXISTS key_id'),
+    'down deletes key grants before dropping key_id',
+  );
+});
+
+// E3.2-e1 (OD13): origin-extension grants. Fields 21-22 on the request, 21 on the two responses (the F-t2-032 band
+// is 21-39); the switch is off in the Go default and in compose; 0006 is idempotent; the pattern language is a
+// draft constant that is off.
+test('E3.2-e1: consent fields use 21-22, the extension switch defaults off, 0006 reruns, the pattern language is off', () => {
+  const messages = parseProto(read(UPSTREAM_PROTO));
+  const request = messages.get('AcquireGrantRequest');
+  assert.deepEqual(request.get(21), { name: 'consent_scope', type: 'string', repeated: false });
+  assert.deepEqual(request.get(22), { name: 'consent_denied_domains', type: 'string', repeated: true });
+  for (const name of ['AcquireGrantResponse', 'ValidateGrantResponse']) {
+    assert.deepEqual(messages.get(name).get(21), { name: 'consent_scope', type: 'string', repeated: false });
+  }
+  for (const [name, fields] of messages) {
+    for (const [number, field] of fields) {
+      if (field.name.startsWith('consent_')) {
+        assert.ok(number >= 21 && number <= 39, `${name}.${field.name} = ${number} is outside the 21-39 band`);
+      }
+    }
+  }
+  const generated = read('apps/Model Plane/go/gen/model_plane/v1/browser.pb.go');
+  assert.equal((generated.match(/protobuf:"bytes,21,opt,name=consent_scope,/g) || []).length, 3, 'regenerate browser.pb.go');
+
+  const config = read('apps/Model Plane/go/services/browser-broker/internal/server/config.go');
+  const defaults = config.match(/func DefaultConfig\(\) Config \{([\s\S]*?)\n\}/);
+  assert.ok(defaults, 'DefaultConfig not found');
+  assert.doesNotMatch(defaults[1], /OriginExtensionEnabled/, 'the extension switch must default off (zero value)');
+  const dev = composeService(read('apps/Model Plane/deploy/docker-compose.yml'), 'browser-broker');
+  assert.match(dev, /BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: \$\{BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-0\}/);
+  assert.doesNotMatch(
+    read('apps/Model Plane/deploy/docker-compose.production.yml'),
+    /BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: \$\{BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-(1|true|on)\}/i,
+  );
+  assert.match(
+    read('apps/Model Plane/go/services/browser-broker/internal/grant/extension.go'),
+    /const ConsentPatternLanguageApproved = false\b/,
+    'the consent pattern language is a draft until counsel approves it (OD13)',
+  );
+
+  const dir = 'apps/Model Plane/go/services/browser-broker/migrations';
+  const up = read(`${dir}/0006_browser_grants_extension.up.sql`).replace(/--.*$/gm, '');
+  assert.match(up, /ADD COLUMN IF NOT EXISTS consent_scope\b/);
+  assert.doesNotMatch(up, /\bADD COLUMN (?!IF NOT EXISTS)/i, 'a non-idempotent ADD COLUMN');
+  assert.doesNotMatch(up, /\bCREATE (UNIQUE )?INDEX (?!IF NOT EXISTS)/i, 'a non-idempotent CREATE INDEX');
+  assert.doesNotMatch(up.replace(/DO \$\$[\s\S]*?\$\$;/g, ''), /ADD CONSTRAINT/i, 'a bare ADD CONSTRAINT');
+  assert.doesNotMatch(up, /\bzdr\b/, 'a ZDR extension never reaches the table');
+  const down = read(`${dir}/0006_browser_grants_extension.down.sql`).replace(/--.*$/gm, '');
+  assert.ok(down.indexOf("DELETE FROM browser_grants WHERE kind = 'origin_extension'") >= 0, 'down must delete extensions');
+  assert.ok(
+    down.indexOf('DELETE FROM browser_grants') < down.indexOf('DROP COLUMN IF EXISTS consent_scope'),
+    'down deletes extensions before dropping consent_scope',
+  );
 });
 
 test('the gateway reads BROWSER_GRANT_ENFORCEMENT from compose with an empty default, so the code picks the mode per environment', () => {

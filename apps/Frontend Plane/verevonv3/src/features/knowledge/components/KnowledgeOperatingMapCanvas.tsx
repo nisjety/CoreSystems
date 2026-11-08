@@ -12,6 +12,7 @@ import {
   type LucideProps,
 } from '@/shared/icons'
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js'
+import type { JSX } from '@solidjs/web'
 import type { LiveKnowledgePayload, LiveKnowledgeSource } from '@/shared/api/knowledge-live-client'
 import type {
   OperatingMapAgentBlueprint,
@@ -23,12 +24,14 @@ import type {
 } from '@/shared/api/operating-map-client'
 import { cn } from '@/shared/lib/cn'
 import { Button } from '@/shared/ui/Button'
+import { resolveWorkflowEvidence } from '../lib/workflow-evidence'
 
 type OperatingMapIcon = Component<LucideProps>
 
 type Props = {
   busy: boolean
   events: readonly string[]
+  graph: JSX.Element
   liveKnowledge: LiveKnowledgePayload
   loading: boolean
   operatingMap: OperatingMapSnapshot | null
@@ -93,6 +96,8 @@ export function KnowledgeOperatingMapCanvas(props: Props) {
           </Button>
         </div>
       </section>
+
+      {props.graph}
 
       <Show when={props.events.length > 0}>
         <section class="knowledge-operating-map-events">
@@ -263,7 +268,7 @@ function WorkflowCard(props: {
             <div class="knowledge-operating-map-evidence">
               <strong>{source.title}</strong>
               <span>{source.provider} · {source.updated}</span>
-              <Show when={source.chunksPreview[0]}>
+              <Show when={source.chunksPreview.find((chunk) => props.workflow.evidenceRefs.includes(chunk.id))}>
                 {(chunk) => <p>{chunk().text}</p>}
               </Show>
             </div>
@@ -302,6 +307,9 @@ function EvidenceInspector(props: {
         </Button>
       </div>
       <div class="knowledge-operating-map-evidence-drawer__grid">
+        <Show when={props.evidence.length === 0}>
+          <p>No referenced sources were found in the current source selection.</p>
+        </Show>
         <For each={props.evidence}>
           {(source) => (
             <article class="knowledge-operating-map-evidence-detail">
@@ -326,7 +334,7 @@ function EvidenceInspector(props: {
               <Show when={graphEntities(source).length > 0}>
                 <p>Graph: {graphEntities(source).map((entity) => entity.label).join(', ')}</p>
               </Show>
-              <For each={source.chunksPreview.slice(0, 2)}>
+              <For each={source.chunksPreview.filter((chunk) => props.workflow.evidenceRefs.includes(chunk.id))}>
                 {(chunk) => (
                   <blockquote>
                     <span>{chunk.title} · {chunk.score}</span>
@@ -442,19 +450,7 @@ function SectionHeader(props: { title: string; description: string }) {
 }
 
 function evidenceForWorkflow(workflow: OperatingMapWorkflow, liveKnowledge: LiveKnowledgePayload): LiveKnowledgeSource[] {
-  const refs = new Set(workflow.evidenceRefs)
-  const direct = liveKnowledge.sources.filter((source) =>
-    refs.has(source.id) ||
-    source.chunksPreview.some((chunk) => refs.has(chunk.id)),
-  )
-  if (direct.length > 0) return direct.slice(0, 2)
-
-  const normalized = `${workflow.name} ${workflow.departmentId}`.toLowerCase()
-  const matched = liveKnowledge.sources.filter((source) =>
-    [source.title, source.category, ...source.tags, ...source.related]
-      .some((value) => normalized.includes(value.toLowerCase()) || value.toLowerCase().includes(workflow.departmentId.toLowerCase())),
-  )
-  return (matched.length > 0 ? matched : liveKnowledge.sources).slice(0, 2)
+  return resolveWorkflowEvidence(workflow, liveKnowledge.sources).sources
 }
 
 function phaseStatusClass(phase: string) {

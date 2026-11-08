@@ -1,5 +1,31 @@
 use super::*;
 
+/// D2-060 (WS8.B): the lifetimes of a person's human-browse run, the plan's values. The
+/// run sweeper applies them to every open-web run whatever its class (`run_sweeper.rs`),
+/// and the lease asks the driver for the absolute one instead of the 120 s default of a
+/// run that names no runtime, which a human-browse run never does (its bounds are zeroed).
+/// No viewer and no activity for this long ends the run.
+pub(super) const HUMAN_BROWSE_IDLE_TTL_S: u64 = 900;
+/// The idle limit while the person holds the browser (they may be reading).
+pub(super) const HUMAN_BROWSE_TAKEOVER_IDLE_TTL_S: u64 = 1800;
+/// The absolute backstop, viewer or not. The grant's own absolute cap can only shorten it.
+pub(super) const HUMAN_BROWSE_ABSOLUTE_TTL_S: u64 = 14_400;
+
+/// The lease lifetime of a human-browse run started at `now`: the absolute backstop, or
+/// what is left of the grant's absolute cap when that is sooner (at least one second, so a
+/// grant at its cap is still refused by the grant check, never by a zero lease).
+pub(super) fn human_browse_lease_ttl_s(
+    absolute_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> u32 {
+    let backstop = HUMAN_BROWSE_ABSOLUTE_TTL_S;
+    let ttl = match absolute_expires_at {
+        Some(cap) => u64::try_from((cap - now).num_seconds()).unwrap_or(0).min(backstop),
+        None => backstop,
+    };
+    u32::try_from(ttl.max(1)).unwrap_or(u32::MAX)
+}
+
 /// Binds a validated broker grant to the run being started (WS1.B).
 ///
 /// A user principal may only start a run under a grant issued to that user
@@ -91,6 +117,12 @@ pub(super) fn resumed_run_class(
         .map_or(derived, |stored| stored.stricter(derived))
 }
 
+/// D2-061: the seq a resumed run's trace starts at: the checkpoint's `trace_seq`, and never
+/// below 1 (0 is a checkpoint written before the field existed).
+pub(super) fn trace_start_seq(stored: u64) -> u64 {
+    stored.max(1)
+}
+
 /// D2: the first step key a resumed run hands out. A step key is reserved for every
 /// admitted step, completed or failed, while the checkpoint's `step` counts completed steps
 /// only, so seeding the keys from `step` gave a key that a failed step had already used
@@ -108,6 +140,15 @@ pub(super) fn resume_next_step(
         .next_step
         .max(checkpoint.step)
         .max(after_receipts)
+}
+
+/// W3-E3.4-2/3: the step of the D8-10 arc a resume takes, for its log line: `expired` or
+/// `suspended` -> `live`. `None` for a resume of an `active` checkpoint (a crash or a
+/// shutdown drain left it so), and while `QUARRY_EDGE__RUN_TTL` is off (nothing writes the
+/// two statuses then). The checkpoint the resume saves at start is `active` again
+/// (`checkpoint_for_entry`), which is the `resumable` -> `live` step itself.
+pub(super) fn resume_arc(prior: AgentRunStatus, run_ttl: bool) -> Option<&'static str> {
+    (run_ttl && prior.is_resumable()).then(|| prior.as_str())
 }
 
 /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
@@ -209,7 +250,9 @@ pub async fn start_run(
                 "agent run not found",
             ));
         }
-        if checkpoint.status == AgentRunStatus::Closed {
+        // W3-E3.4-2/3: `closed` is the only terminal status; `active`, `expired` and
+        // `suspended` (a run the sweeper released with QUARRY_EDGE__RUN_TTL on) resume.
+        if checkpoint.status.is_terminal() {
             return Err(status_err(
                 StatusCode::CONFLICT,
                 &request_id,
@@ -396,7 +439,12 @@ pub async fn start_run(
             ));
         }
     }
-    let ttl_s = constraints.max_runtime_s.unwrap_or(120);
+    // D2-060: a human-browse run names no runtime (its bounds were zeroed above), so it
+    // would get the 120 s default; its lease lives the human-browse backstop instead.
+    let ttl_s = match human_grant.as_ref() {
+        Some(human) => human_browse_lease_ttl_s(human.absolute_expires_at, chrono::Utc::now()),
+        None => constraints.max_runtime_s.unwrap_or(120),
+    };
     let viewport = normalize_viewport(
         resume_checkpoint
             .as_ref()
@@ -447,11 +495,19 @@ pub async fn start_run(
     }
     // WS7.D: the run's web policy, resolved once from the caller's principal, the ZDR posture,
     // the operator baseline and the request's `policy` ask. A refusal here consumes nothing.
+    // D2-051: a resume re-applies the ask the run was started with, merged with the resume
+    // request's own (which can only tighten it), so a resume never drops a restriction.
+    let policy_ask = crate::agent_policy_gate::merge_asks(
+        resume_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.policy_ask.as_ref()),
+        body.policy.as_ref(),
+    );
     let web_decision = crate::agent_policy_gate::resolve_for_start(
         &state.policy,
         &claims,
         zdr.is_active(),
-        body.policy.as_ref(),
+        policy_ask.as_ref(),
         persist_profile,
         body.driver_requirements.uploads_from_artifacts,
         body.driver_requirements.downloads_to_artifacts,
@@ -772,10 +828,23 @@ pub async fn start_run(
     // are authoritative (see above), so the resume request cannot lengthen it.
     .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from))
     .with_policy(web_decision)
+    .with_policy_ask(policy_ask)
+    .with_trace(state.event_sink.clone(), run_id.clone())
     .with_resume_step(resume_checkpoint.as_ref().map_or(0, |cp| cp.next_step));
 
+    // D2-061: the run's event trace continues past every seq an earlier segment minted. A
+    // first start numbers from 1; a resume from the checkpoint's `trace_seq` (0 on a
+    // checkpoint written before it existed, which starts at 1 as it did).
+    let trace_start = resume_checkpoint
+        .as_ref()
+        .map_or(1, |cp| trace_start_seq(cp.trace_seq));
+
     if !zdr.is_active() {
-        let checkpoint = checkpoint_for_entry(&entry, &live);
+        let mut checkpoint = checkpoint_for_entry(&entry, &live);
+        // The trace opens only after this save, and AgentStarted takes `trace_start`, so the
+        // seq the trace mints next is the one past it (the open trace would read 0 here and
+        // overwrite what a resume carried in).
+        checkpoint.trace_seq = trace_start.saturating_add(1);
         if let Err(error) = state.receipts.save_run_checkpoint(checkpoint).await {
             let _ = state.agent_driver.release(entry.session).await;
             return Err(driver_err(&request_id, error));
@@ -803,10 +872,17 @@ pub async fn start_run(
         run_class.label(),
         if resume_checkpoint.is_some() { "resumed" } else { "started" },
     );
+    if let Some(prior_status) = resume_checkpoint
+        .as_ref()
+        .and_then(|checkpoint| resume_arc(checkpoint.status, run_ttl_enabled()))
+    {
+        // Only a non-ZDR run is resumed (refused above); a run id and a closed status label.
+        tracing::info!(run_id = %run_id, prior_status, "run resumed from a released checkpoint");
+    }
 
-    // WS10.S3: the run's event trace starts here, numbered from seq 1, so the
-    // AgentStarted below is the first event of the run's replay ring.
-    state.event_sink.open_run(&run_id, 1);
+    // WS10.S3: the run's event trace starts here, so the AgentStarted below is the first
+    // event of this segment's replay ring (seq 1 on a start, past the checkpoint on a resume).
+    state.event_sink.open_run(&run_id, trace_start);
 
     state
         .event_sink
@@ -832,4 +908,51 @@ pub async fn start_run(
             clamped: budget_view.map(|(_, clamped)| clamped).unwrap_or_default(),
         },
     )))
+}
+
+#[cfg(test)]
+mod human_browse_ttl_tests {
+    use super::*;
+
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).unwrap()
+    }
+
+    #[test]
+    fn a_human_browse_lease_lives_the_four_hour_backstop() {
+        assert_eq!(human_browse_lease_ttl_s(None, at(1_800_000_000)), 14_400);
+        // A cap further away than the backstop does not lengthen it.
+        assert_eq!(human_browse_lease_ttl_s(Some(at(1_800_100_000)), at(1_800_000_000)), 14_400);
+    }
+
+    #[test]
+    fn a_sooner_grant_cap_shortens_the_lease_but_never_to_zero() {
+        assert_eq!(human_browse_lease_ttl_s(Some(at(1_800_003_600)), at(1_800_000_000)), 3_600);
+        assert_eq!(human_browse_lease_ttl_s(Some(at(1_799_999_000)), at(1_800_000_000)), 1);
+    }
+}
+
+#[cfg(test)]
+mod resume_arc_tests {
+    use super::*;
+
+    #[test]
+    fn a_resume_of_a_released_run_names_its_arc_only_with_the_switch_on() {
+        assert_eq!(resume_arc(AgentRunStatus::Expired, true), Some("expired"));
+        assert_eq!(resume_arc(AgentRunStatus::Suspended, true), Some("suspended"));
+        // A crash or a drain leaves `active`: no arc to name.
+        assert_eq!(resume_arc(AgentRunStatus::Active, true), None);
+        // Closed never resumes (refused with 409 before this point).
+        assert_eq!(resume_arc(AgentRunStatus::Closed, true), None);
+        // Switch off: nothing is named.
+        assert_eq!(resume_arc(AgentRunStatus::Expired, false), None);
+    }
+
+    #[test]
+    fn only_closed_is_refused_by_the_resume_gate() {
+        assert!(AgentRunStatus::Closed.is_terminal());
+        for status in [AgentRunStatus::Active, AgentRunStatus::Expired, AgentRunStatus::Suspended] {
+            assert!(!status.is_terminal(), "{} resumes", status.as_str());
+        }
+    }
 }

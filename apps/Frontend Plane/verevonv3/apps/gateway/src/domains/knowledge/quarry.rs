@@ -25,14 +25,16 @@ use crate::{
 
 const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
 
-/// WS13.5: the ceiling for a scrape that drives the browser (actions, a screenshot, a
-/// PDF). The edge bounds an actions run at 115 s and its router at 125 s, so the edge
-/// answers with its typed timeout before this one fires. Every other scrape keeps the
-/// standard client's 25 s.
-const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(125);
+/// WS13.5 and INNH-1: the ceiling for a scrape that drives the browser (actions, a
+/// screenshot, a PDF) or asks a model about the page (the AI formats). The edge's
+/// route allows 125 s for both, so this client waits a little longer and the edge
+/// answers with its own typed timeout first. Every other scrape keeps the standard
+/// client's 25 s.
+const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(135);
 
 /// Whether a scrape body asks for work that outlasts the standard 25 s: a non-empty
-/// `actions` list, an object-form format, or a `screenshot` or `pdf` format.
+/// `actions` list, an object-form format (a capture or an AI format), or a
+/// `screenshot`, `pdf` or `summary` string format.
 fn scrape_needs_browser_budget(body: &Value) -> bool {
     let has_actions = body
         .get("actions")
@@ -44,7 +46,7 @@ fn scrape_needs_browser_budget(body: &Value) -> bool {
         .is_some_and(|formats| {
             formats.iter().any(|format| match format {
                 Value::Object(_) => true,
-                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf"),
+                Value::String(name) => matches!(name.as_str(), "screenshot" | "pdf" | "summary"),
                 _ => false,
             })
         });
@@ -501,6 +503,11 @@ fn classify_scrape_failure(
     elapsed: Duration,
     upstream: &Value,
 ) -> (&'static str, String) {
+    // W3-E3.8.5: a DRIVER_FAILED naming dns, connect or tls (sent only with
+    // QUARRY_EDGE__FETCH_SUB_CODES on) has a code of its own, ahead of the elapsed rule.
+    if let Some((code, message)) = shared::fetch_sub_code_refusal(upstream) {
+        return (code, message.to_owned());
+    }
     if status == StatusCode::FORBIDDEN && scrape_block_reason(upstream).is_some() {
         return (
             "site_blocked",
@@ -839,8 +846,119 @@ pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Resul
     if !exclude.is_empty() {
         body["exclude_paths"] = json!(exclude);
     }
+    // INNH-6: sitemap discovery, and the cleaning options each page is scraped with.
+    // Absent or null means the edge default.
+    if let Some(sitemap) = input.get("sitemap").filter(|value| !value.is_null()) {
+        let mode = sitemap
+            .as_str()
+            .filter(|mode| matches!(*mode, "skip" | "include" | "only"));
+        let Some(mode) = mode else {
+            return Err("sitemap must be skip, include or only.".to_owned());
+        };
+        body["sitemap"] = json!(mode);
+    }
+    if let Some(options) = input
+        .get("scrape_options")
+        .or_else(|| input.get("scrapeOptions"))
+        .filter(|value| !value.is_null())
+    {
+        let options = scrape_options_body(options)?;
+        if !options.is_empty() {
+            body["scrape_options"] = Value::Object(options);
+        }
+    }
 
     Ok(body)
+}
+
+/// The formats a crawl page can return (`scrape_options.formats`).
+const CRAWL_PAGE_FORMATS: [&str; 5] = ["markdown", "html", "rawHtml", "links", "metadata"];
+
+/// The per-page cleaning options of a crawl (INNH-6), in snake case from either spelling.
+/// Only the keys Quarry applies to each page pass. Anything else is refused by name, so a
+/// crawl cannot carry a capture, an action or an AI format through `scrape_options`.
+fn scrape_options_body(input: &Value) -> Result<serde_json::Map<String, Value>, String> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| "scrape_options must be an object.".to_owned())?;
+    let mut out = serde_json::Map::new();
+    for (key, value) in object {
+        let field = match key.as_str() {
+            "formats" => "formats",
+            "extractor" => "extractor",
+            "onlyMainContent" | "only_main_content" => "only_main_content",
+            "includeTags" | "include_tags" => "include_tags",
+            "excludeTags" | "exclude_tags" => "exclude_tags",
+            "removeBase64Images" | "remove_base64_images" => "remove_base64_images",
+            "timeoutMs" | "timeout_ms" => "timeout_ms",
+            other => return Err(format!("scrape_options.{other} is not supported here.")),
+        };
+        let checked = match field {
+            "formats" => {
+                let formats = value
+                    .as_array()
+                    .ok_or_else(|| "scrape_options.formats must be a list.".to_owned())?;
+                let mut kept = Vec::with_capacity(formats.len());
+                for format in formats {
+                    let name = format
+                        .as_str()
+                        .filter(|name| CRAWL_PAGE_FORMATS.contains(name))
+                        .ok_or_else(|| {
+                            format!("scrape_options.formats has an unsupported format: {format}.")
+                        })?;
+                    kept.push(json!(name));
+                }
+                Value::Array(kept)
+            }
+            "extractor" => {
+                let name = value
+                    .as_str()
+                    .filter(|name| matches!(*name, "readability" | "clean_full" | "raw"))
+                    .ok_or_else(|| {
+                        "scrape_options.extractor must be readability, clean_full or raw.".to_owned()
+                    })?;
+                json!(name)
+            }
+            "only_main_content" | "remove_base64_images" => json!(value.as_bool().ok_or_else(|| {
+                format!("scrape_options.{field} must be true or false.")
+            })?),
+            "include_tags" | "exclude_tags" => selector_list(value, field)?,
+            _ => json!(value
+                .as_u64()
+                .filter(|ms| (1_000..=55_000).contains(ms))
+                .ok_or_else(|| {
+                    "scrape_options.timeout_ms must be between 1000 and 55000.".to_owned()
+                })?),
+        };
+        out.insert(field.to_owned(), checked);
+    }
+    Ok(out)
+}
+
+/// A CSS selector list of a crawl page's cleaning options: at most 32 entries, each
+/// non-blank and at most 256 characters.
+fn selector_list(value: &Value, field: &str) -> Result<Value, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| format!("scrape_options.{field} must be a list of selectors."))?;
+    if items.len() > 32 {
+        return Err(format!("scrape_options.{field} is limited to 32 selectors."));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let selector = item
+            .as_str()
+            .map(str::trim)
+            .filter(|selector| !selector.is_empty())
+            .ok_or_else(|| format!("scrape_options.{field} entries must be non-blank strings."))?;
+        if selector.chars().count() > 256 {
+            return Err(format!(
+                "scrape_options.{field} entries are limited to 256 characters."
+            ));
+        }
+        out.push(json!(selector));
+    }
+    Ok(Value::Array(out))
 }
 
 /// Validate the curated subset a user picked from `/crawl/discover` into a
@@ -1240,7 +1358,77 @@ mod tests {
         assert!(!long(json!({ "url": "https://e.test/" })));
         assert!(!long(json!({ "url": "https://e.test/", "actions": [] })));
         assert!(!long(json!({ "formats": ["markdown", "html"] })));
-        assert_eq!(SCRAPE_BROWSER_TIMEOUT, Duration::from_secs(125));
+        // INNH-1: the AI formats are model calls, so they share the long ceiling.
+        assert!(long(json!({ "formats": ["markdown", "summary"] })));
+        assert!(long(json!({ "formats": ["markdown", { "type": "json", "schema": { "type": "object" } }] })));
+        assert!(long(json!({ "formats": [{ "type": "highlights", "query": "price" }] })));
+        // The edge's route allows 125 s; this client must wait longer than that.
+        assert!(SCRAPE_BROWSER_TIMEOUT > Duration::from_secs(125));
+    }
+
+    /// INNH-1: the AI format objects reach the edge exactly as the caller sent them,
+    /// and an AI scrape runs under the long ceiling. The edge's answer (the inline
+    /// `json`, `summary` and `ai` report) comes back unchanged too.
+    #[tokio::test]
+    async fn ai_format_objects_pass_through_unchanged_and_get_the_long_ceiling() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(1500))
+                    .set_body_json(json!({
+                        "data": {
+                            "status": 200,
+                            "markdown": "# Price 2 190 NOK",
+                            "json": { "title": "Ridge 40" },
+                            "summary": "A gravel bike.",
+                            "ai": {
+                                "json": { "status": "ok", "untrusted_source": true, "schema_valid": true, "repair": "none" },
+                                "total": { "calls": 1, "input_tokens": 10, "output_tokens": 4 }
+                            }
+                        }
+                    })),
+            )
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state.client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let format_objects = json!([
+            "markdown",
+            { "type": "json", "schema": { "type": "object", "required": ["title"], "properties": { "title": { "type": "string" } } } },
+            { "type": "summary", "max_chars": 300 },
+        ]);
+        let response = scrape(
+            State(state),
+            Extension(preview_user()),
+            None,
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/p", "formats": format_objects.clone() })),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK, "an AI scrape outlasts the 1 s client default");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let answer: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(answer["data"]["json"]["title"], "Ridge 40");
+        assert_eq!(answer["data"]["ai"]["total"]["calls"], 1);
+
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = received
+            .iter()
+            .find(|request| request.url.path() == "/v1/scrape")
+            .map(|request| serde_json::from_slice(&request.body).unwrap())
+            .expect("the scrape reached the edge");
+        assert_eq!(forwarded["formats"], format_objects, "the AI format objects are forwarded unchanged");
+        assert!(forwarded.get("initiated_by").is_none(), "a person's scrape carries no origin stamp");
     }
 
     /// WS13.5: the origin stamp is tighten-only and comes from the verified caller.
@@ -1404,6 +1592,116 @@ mod tests {
     fn crawl_site_action_goes_through_the_ssrf_normalizer() {
         assert!(normalize_crawl_body_for(&json!({ "url": "http://127.0.0.1/" }), Surface::Model).is_err());
         assert!(normalize_crawl_body_for(&json!({ "url": "http://localhost/" }), Surface::Model).is_err());
+    }
+
+    /// INNH-6: the sitemap mode and the per-page cleaning options reach the edge in snake
+    /// case, from either spelling. An empty options object is left out.
+    #[test]
+    fn crawl_body_forwards_sitemap_and_page_options() {
+        let body = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "sitemap": "include",
+            "scrapeOptions": {
+                "onlyMainContent": false,
+                "includeTags": ["main", " article "],
+                "excludeTags": [".cookie-banner"],
+                "removeBase64Images": true,
+                "timeoutMs": 20000,
+                "extractor": "clean_full",
+                "formats": ["markdown", "links"],
+            },
+        }))
+        .unwrap();
+        assert_eq!(body["sitemap"], json!("include"));
+        assert_eq!(body["scrape_options"]["only_main_content"], json!(false));
+        assert_eq!(body["scrape_options"]["include_tags"], json!(["main", "article"]));
+        assert_eq!(body["scrape_options"]["exclude_tags"], json!([".cookie-banner"]));
+        assert_eq!(body["scrape_options"]["remove_base64_images"], json!(true));
+        assert_eq!(body["scrape_options"]["timeout_ms"], json!(20_000));
+        assert_eq!(body["scrape_options"]["extractor"], json!("clean_full"));
+        assert_eq!(body["scrape_options"]["formats"], json!(["markdown", "links"]));
+
+        let plain = normalize_crawl_body(&json!({
+            "url": "https://example.com/",
+            "sitemap": "skip",
+            "scrape_options": {},
+        }))
+        .unwrap();
+        assert_eq!(plain["sitemap"], json!("skip"));
+        assert!(plain.get("scrape_options").is_none());
+
+        let absent = normalize_crawl_body(&json!({ "url": "https://example.com/", "sitemap": null })).unwrap();
+        assert!(absent.get("sitemap").is_none());
+    }
+
+    /// INNH-6: every sitemap value and page option Quarry cannot apply is refused, by name.
+    #[test]
+    fn crawl_body_refuses_sitemap_and_page_options_it_cannot_apply() {
+        let with = |key: &str, value: Value| {
+            let mut input = json!({ "url": "https://example.com/" });
+            input[key] = value;
+            normalize_crawl_body(&input)
+        };
+        assert_eq!(
+            with("sitemap", json!("all")).unwrap_err(),
+            "sitemap must be skip, include or only."
+        );
+        assert_eq!(
+            with("scrape_options", json!("main")).unwrap_err(),
+            "scrape_options must be an object."
+        );
+        assert_eq!(
+            with("scrape_options", json!({ "actions": [] })).unwrap_err(),
+            "scrape_options.actions is not supported here."
+        );
+        assert!(with("scrape_options", json!({ "formats": ["screenshot"] })).unwrap_err().contains("screenshot"));
+        assert!(with("scrape_options", json!({ "formats": "markdown" })).is_err());
+        assert!(with("scrape_options", json!({ "include_tags": vec!["div"; 33] })).is_err());
+        assert!(with("scrape_options", json!({ "exclude_tags": [" "] })).is_err());
+        assert!(with("scrape_options", json!({ "include_tags": ["x".repeat(257)] })).is_err());
+        assert!(with("scrape_options", json!({ "extractor": "magic" })).is_err());
+        assert!(with("scrape_options", json!({ "timeout_ms": 999 })).is_err());
+        assert!(with("scrape_options", json!({ "timeout_ms": 55_001 })).is_err());
+        assert!(with("scrape_options", json!({ "only_main_content": "yes" })).is_err());
+    }
+
+    /// INNH-7: `max_age` and `cache` are not gateway fields. The scrape body passes through,
+    /// so the edge receives the freshness window and the cache policy as the caller sent them.
+    #[tokio::test]
+    async fn scrape_forwards_max_age_and_cache_unchanged() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "status": 200, "markdown": "# A", "effective_options": { "cache_state": "miss" } }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let response = scrape(
+            State(state),
+            Extension(preview_user()),
+            None,
+            HeaderMap::new(),
+            Json(json!({
+                "url": "https://example.com/p",
+                "max_age": 120_000,
+                "cache": { "max_age_s": 60 },
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let received = quarry.received_requests().await.unwrap();
+        let forwarded: Value = serde_json::from_slice(&received[0].body).unwrap();
+        assert_eq!(forwarded["max_age"], json!(120_000));
+        assert_eq!(forwarded["cache"]["max_age_s"], json!(60));
+        assert!(forwarded["cache"].get("mode").is_none());
     }
 
     #[test]
@@ -1796,6 +2094,33 @@ mod tests {
         assert_eq!(
             classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &Value::Null).0,
             "scrape_failed"
+        );
+    }
+
+    /// W3-E3.8.5: the fetch reasons Quarry names on a DRIVER_FAILED get their own code, also
+    /// after a slow chain; any other reason keeps the status classification.
+    #[test]
+    fn a_driver_failed_fetch_reason_has_its_own_scrape_code() {
+        let body = |reason: &str| {
+            json!({ "error": { "code": "DRIVER_FAILED", "message": "dns error for secret.example", "details": { "reason": reason } } })
+        };
+        for (reason, want) in [
+            ("dns", "scrape_host_not_found"),
+            ("connect", "scrape_unreachable"),
+            ("tls", "scrape_tls_failed"),
+        ] {
+            let (code, message) =
+                classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::from_secs(25), &body(reason));
+            assert_eq!(code, want, "{reason}");
+            assert!(!message.contains("secret.example"), "{reason}: no upstream text");
+        }
+        assert_eq!(
+            classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &body("all_drivers_failed")).0,
+            "scrape_failed"
+        );
+        assert_eq!(
+            classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::from_secs(25), &body("all_drivers_failed")).0,
+            "scrape_timeout"
         );
     }
 
@@ -2371,6 +2696,168 @@ pub(super) async fn crawl_job_events(
     .await
 }
 
+// ---- Job lifecycle and control proxy (WS15.L5) ---------------------------------
+//
+// The six routes below carry a person's (or a Model proposal's) read and control
+// calls for one crawl to quarry-edge's `/v1/crawl/{id}` family. They use the same
+// session-bound `aud=quarry` token as every other Quarry leg, so the organization
+// comes from the token's signed claims; the only scoping header sent is the
+// `x-user-id` the proxy helper derives from the session. No browser header and no
+// browser query parameter other than the two paging numbers below is forwarded, so
+// a caller cannot name another organization or user. The edge keeps the control
+// verbs behind `QUARRY_EDGE__JOB_CONTROL`; while that is off it answers a typed
+// 501 and this proxy returns it unchanged.
+
+/// A job id is `job_<ulid>`: ASCII letters, digits, `_` and `-` only. Anything else
+/// (a `.`, which could climb a path segment, a `/`, `%`, a space) is refused before
+/// an upstream call is built.
+fn job_id_is_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+}
+
+fn invalid_job_id() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error("invalid_job_id", "The job id is not valid.")),
+    )
+        .into_response()
+}
+
+/// The query of the errors read: `after_seq` pages by event sequence and `limit`
+/// caps the page. Both must be plain digits; every other parameter is dropped.
+fn errors_query(uri: &Uri) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for pair in uri.query().unwrap_or_default().split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if matches!(key, "after_seq" | "limit")
+            && !value.is_empty()
+            && value.len() <= 12
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && !kept.iter().any(|k| k.starts_with(&format!("{key}=")))
+        {
+            kept.push(format!("{key}={value}"));
+        }
+    }
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    }
+}
+
+/// One call to the edge's crawl family, answered as the edge answered it.
+async fn crawl_edge_call(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: String,
+) -> Response {
+    let cookie = shared::cookie_header(headers);
+    let token = shared::quarry_token(state, user, &cookie).await;
+    let url = format!("{}{}", state.quarry_edge_url, path);
+    let (status, Json(body)) =
+        proxy_bearer_json(state, method, &url, None, token.as_deref(), &user.user_id).await;
+    (status, Json(body)).into_response()
+}
+
+/// `GET /api/v1/knowledge/crawl/{id}`: the status of one crawl.
+pub(crate) async fn crawl_status(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::GET, path).await
+}
+
+/// `GET /api/v1/knowledge/crawl/{id}/errors`: the pages of the crawl that failed.
+pub(crate) async fn crawl_errors(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!(
+        "/v1/crawl/{}/errors{}",
+        urlencoding::encode(&id),
+        errors_query(&uri)
+    );
+    crawl_edge_call(&state, &user, &headers, Method::GET, path).await
+}
+
+/// `GET /api/v1/knowledge/crawl/ongoing`: the organization's crawls still in flight.
+pub(crate) async fn crawl_ongoing(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Response {
+    crawl_edge_call(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "/v1/crawl/ongoing".to_owned(),
+    )
+    .await
+}
+
+/// `DELETE /api/v1/knowledge/crawl/{id}`: stop a crawl for good.
+pub(crate) async fn crawl_cancel(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::DELETE, path).await
+}
+
+/// `POST /api/v1/knowledge/crawl/{id}/pause`.
+pub(crate) async fn crawl_pause(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}/pause", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::POST, path).await
+}
+
+/// `POST /api/v1/knowledge/crawl/{id}/resume`.
+pub(crate) async fn crawl_resume(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if !job_id_is_valid(&id) {
+        return invalid_job_id();
+    }
+    let path = format!("/v1/crawl/{}/resume", urlencoding::encode(&id));
+    crawl_edge_call(&state, &user, &headers, Method::POST, path).await
+}
+
 /// WS15.L3: the knowledge job-event proxy forwards `follow=true` in the query and
 /// the caller's `Last-Event-ID` header to quarry-edge, and returns the upstream
 /// SSE bytes unchanged.
@@ -2707,5 +3194,273 @@ mod scrape_artifact_tests {
         let mut body = json!({ "url": "https://example.com/", "formats": ["pdf"] });
         strip_preview_only_fields(&mut body);
         assert!(body.get("formats").is_none());
+    }
+}
+
+/// WS15.L5: the crawl status, errors, ongoing and control proxy. Each handler reaches
+/// the edge's `/v1/crawl` family with the session user, forwards nothing the browser
+/// sent, and returns the edge's answer (a 501 included) unchanged.
+#[cfg(test)]
+mod job_control_tests {
+    use super::*;
+    use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[test]
+    fn a_job_id_is_letters_digits_underscore_and_dash_only() {
+        assert!(job_id_is_valid(JOB));
+        assert!(job_id_is_valid("run-1_A"));
+        for bad in ["", "..", "a.b", "a/b", "a%2Fb", "a b", "a?x=1", "a:b", "ö"] {
+            assert!(!job_id_is_valid(bad), "{bad:?}");
+        }
+        assert!(job_id_is_valid(&"a".repeat(128)));
+        assert!(!job_id_is_valid(&"a".repeat(129)));
+    }
+
+    #[test]
+    fn the_errors_query_keeps_only_two_numeric_paging_parameters() {
+        let q = |s: &str| errors_query(&s.parse::<Uri>().unwrap());
+        assert_eq!(q("/x"), "");
+        assert_eq!(q("/x?after_seq=5&limit=10"), "?after_seq=5&limit=10");
+        assert_eq!(q("/x?limit=10&org_id=org-2&after_seq=5"), "?limit=10&after_seq=5");
+        assert_eq!(q("/x?org_id=org-2&user_id=u"), "");
+        assert_eq!(q("/x?limit=abc"), "");
+        assert_eq!(q("/x?limit=-1"), "");
+        assert_eq!(q("/x?limit="), "");
+        assert_eq!(q("/x?limit=1&limit=2"), "?limit=1");
+        assert_eq!(q("/x?limit=1234567890123"), "");
+    }
+
+    #[tokio::test]
+    async fn status_reads_the_crawl_with_the_session_user_and_returns_the_edge_answer() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/crawl/{JOB}")))
+            .and(wm_header("x-user-id", "user-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "job_id": JOB, "kind": "crawl", "status": "running", "phase": "fetching" }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        let response = crawl_status(
+            State(state_for(&quarry)),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["phase"], "fetching");
+    }
+
+    #[tokio::test]
+    async fn no_browser_header_or_foreign_scope_reaches_the_edge() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/crawl/{JOB}/errors")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+            .mount(&quarry)
+            .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user-id", "attacker".parse().unwrap());
+        headers.insert("x-org-id", "org-2".parse().unwrap());
+        headers.insert("x-organization-id", "org-2".parse().unwrap());
+        headers.insert("authorization", "Bearer forged".parse().unwrap());
+        let uri: Uri = format!("/api/v1/knowledge/crawl/{JOB}/errors?after_seq=7&limit=20&org_id=org-2")
+            .parse()
+            .unwrap();
+        let response = crawl_errors(
+            State(state_for(&quarry)),
+            Extension(user()),
+            headers,
+            Path(JOB.to_owned()),
+            uri,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        let request = &seen[0];
+        assert_eq!(request.url.query(), Some("after_seq=7&limit=20"));
+        assert_eq!(request.headers.get("x-user-id").unwrap(), "user-1");
+        assert!(request.headers.get("x-org-id").is_none());
+        assert!(request.headers.get("x-organization-id").is_none());
+        // The forged bearer is not the one sent: with no minted token there is none.
+        assert_ne!(
+            request.headers.get("authorization").map(|v| v.to_str().unwrap_or("")),
+            Some("Bearer forged")
+        );
+    }
+
+    #[tokio::test]
+    async fn ongoing_reads_the_static_route_of_the_edge() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/crawl/ongoing"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "items": [] } })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let response =
+            crawl_ongoing(State(state_for(&quarry)), Extension(user()), HeaderMap::new()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn pause_resume_and_cancel_use_the_edge_verbs() {
+        let quarry = MockServer::start().await;
+        let accepted = ResponseTemplate::new(200).set_body_json(json!({
+            "data": { "job_id": JOB, "phase": "pausing", "control": { "desired": "pause", "pending": true } }
+        }));
+        for (verb, route) in [
+            ("POST", format!("/v1/crawl/{JOB}/pause")),
+            ("POST", format!("/v1/crawl/{JOB}/resume")),
+            ("DELETE", format!("/v1/crawl/{JOB}")),
+        ] {
+            Mock::given(wm_method(verb))
+                .and(wm_path(route))
+                .and(wm_header("x-user-id", "user-1"))
+                .respond_with(accepted.clone())
+                .expect(1)
+                .mount(&quarry)
+                .await;
+        }
+        let state = state_for(&quarry);
+
+        let paused = crawl_pause(
+            State(state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let resumed = crawl_resume(
+            State(state.clone()),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let cancelled = crawl_cancel(
+            State(state),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        for response in [paused, resumed, cancelled] {
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body["data"]["control"]["pending"], true);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_edges_typed_501_while_job_control_is_off_reaches_the_caller() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path(format!("/v1/crawl/{JOB}/pause")))
+            .respond_with(ResponseTemplate::new(501).set_body_json(json!({
+                "ok": false,
+                "error": { "code": "UNSUPPORTED", "message": "job control is not enabled" }
+            })))
+            .mount(&quarry)
+            .await;
+        let response = crawl_pause(
+            State(state_for(&quarry)),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "UNSUPPORTED");
+    }
+
+    #[tokio::test]
+    async fn an_unsafe_id_is_refused_before_any_upstream_call() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        for bad in ["..", "a.b", "a/b", "", "x y"] {
+            let responses = vec![
+                crawl_status(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+                crawl_errors(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                    "/x".parse().unwrap(),
+                )
+                .await,
+                crawl_cancel(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+                crawl_pause(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+                crawl_resume(
+                    State(state.clone()),
+                    Extension(user()),
+                    HeaderMap::new(),
+                    Path(bad.to_owned()),
+                )
+                .await,
+            ];
+            for response in responses {
+                let (status, body) = body_json(response).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+                assert_eq!(body["error"]["code"], "invalid_job_id");
+            }
+        }
+        assert!(quarry.received_requests().await.unwrap().is_empty());
     }
 }

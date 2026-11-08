@@ -32,8 +32,10 @@ use std::time::{Duration, Instant};
 
 use mp_contracts::model_plane::v1 as pb;
 use mp_contracts::model_plane::v1::capability_core_client::CapabilityCoreClient;
+use mp_contracts::model_plane::v1::mcp_elicitation_service_client::McpElicitationServiceClient;
 use mp_contracts::model_plane::v1::model_gateway_client::ModelGatewayClient;
 use mp_contracts::tool_class::SideEffectClass;
+use mp_contracts::user_question;
 use tonic::transport::Channel;
 use tonic::{Request, Status};
 
@@ -107,24 +109,57 @@ impl McpGatewayClient {
         tool_name: &str,
         input_json: &str,
     ) -> Result<String, String> {
-        self.proxy(Request::new(proxy_request(
-            org_id, user_id, server_id, tool_name, input_json, "",
-        )))
-        .await
+        // The plain path never allows a server's form, so a form here is a gateway fault.
+        match self
+            .proxy(Request::new(proxy_request(
+                org_id, user_id, server_id, tool_name, input_json, "", false,
+            )))
+            .await?
+        {
+            McpProxyOutcome::Output(output) => Ok(output),
+            McpProxyOutcome::Elicitation(_) => Err(UNASKED_FORM.to_owned()),
+        }
     }
 
-    async fn proxy(&self, request: Request<pb::ProxyMcpToolRequest>) -> Result<String, String> {
+    async fn proxy(
+        &self,
+        request: Request<pb::ProxyMcpToolRequest>,
+    ) -> Result<McpProxyOutcome, String> {
         let mut client = ModelGatewayClient::new(self.channel.clone());
         let resp = client
             .proxy_mcp_tool(request)
             .await
             .map_err(|e| format!("mcp proxy transport: {e}"))?
             .into_inner();
-        if resp.error_message.is_empty() {
-            Ok(resp.output_json)
-        } else {
-            Err(resp.error_message)
-        }
+        proxy_outcome(resp)
+    }
+}
+
+/// What a proxied MCP call came back with.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpProxyOutcome {
+    /// The call finished; the tool's output JSON.
+    Output(String),
+    /// The server asked the run's owner a question and the gateway holds the call until it is
+    /// answered, declined or cancelled (EP-4 S4). Only a call that allowed elicitation gets one.
+    Elicitation(pb::McpElicitationPending),
+}
+
+/// The refusal of a form the call did not allow. The gateway sets one only when the request
+/// allowed it, so this reads a gateway fault, and the held call is cancelled.
+pub const UNASKED_FORM: &str =
+    "the MCP server asked a question this call did not allow; the call was cancelled";
+
+/// Read a proxy answer: a pending form first (its output and error are empty by contract), then
+/// the server's error, then the output.
+fn proxy_outcome(resp: pb::ProxyMcpToolResponse) -> Result<McpProxyOutcome, String> {
+    if let Some(pending) = resp.elicitation {
+        return Ok(McpProxyOutcome::Elicitation(pending));
+    }
+    if resp.error_message.is_empty() {
+        Ok(McpProxyOutcome::Output(resp.output_json))
+    } else {
+        Err(resp.error_message)
     }
 }
 
@@ -135,6 +170,7 @@ fn proxy_request(
     tool_name: &str,
     input_json: &str,
     expected_digest: &str,
+    allow_elicitation: bool,
 ) -> pb::ProxyMcpToolRequest {
     pb::ProxyMcpToolRequest {
         request_id: String::new(),
@@ -145,7 +181,204 @@ fn proxy_request(
         // Re-authorized per-user gateway-side (defense in depth).
         user_id: user_id.to_owned(),
         expected_digest: expected_digest.to_owned(),
+        // EP-4 S7: true only for a run [`allow_elicitation`] admits; false keeps today's wire.
+        allow_elicitation,
     }
+}
+
+// --- MCP elicitation in Do runs (EP-4 S7) ------------------------------------
+
+/// The switch that lets a governed run's MCP calls carry a server's form to the run's owner
+/// (`MCP_DO_ELICITATION`). Read strictly: only the literal `true` enables it, and the default is
+/// off. Off, every `ProxyMcpToolRequest.allow_elicitation` is false and the wire is what it was.
+/// It needs the gateway's `MCP_ELICITATION_ENABLED` too; either one off means no form is asked.
+pub const ELICITATION_SWITCH_ENV: &str = "MCP_DO_ELICITATION";
+
+/// Only the literal `true` enables the switch, as every switch of this service reads it.
+#[must_use]
+pub fn elicitation_switch_on(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Whether the deployment lets a run carry a server's form, read once per process so a run
+/// cannot see it change.
+#[must_use]
+pub fn elicitation_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        elicitation_switch_on(std::env::var(ELICITATION_SWITCH_ENV).ok().as_deref())
+    })
+}
+
+/// The facts of a run that decide whether its MCP calls may carry a server's form (D9).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ElicitationRun {
+    /// 0 for the root loop; a delegated subagent has no owner of its own to ask.
+    pub depth: u32,
+    pub zdr: bool,
+    /// The run's route is waived (DEC-32), which keeps nothing, exactly like ZDR.
+    pub waived: bool,
+    /// The run can pause and resume (WS03 S8-A): a form holds the run until its owner answers.
+    pub parkable: bool,
+    /// A Space run has more than one person who could answer; W3 asks only a personal run's owner.
+    pub space_scoped: bool,
+    /// Questions the run has put to its owner so far, its model's and servers' alike.
+    pub questions_asked: u32,
+}
+
+/// Whether this run's MCP calls may allow the server to ask its owner a question.
+#[must_use]
+pub fn allow_elicitation(run: &ElicitationRun) -> bool {
+    allow_elicitation_when(elicitation_enabled(), run)
+}
+
+/// [`allow_elicitation`] with the switch given, so the rule is testable without the environment.
+/// A form becomes a question, so it shares the run's question cap with `ask_user`; session-core
+/// enforces the same cap when the question is stored.
+#[must_use]
+pub fn allow_elicitation_when(on: bool, run: &ElicitationRun) -> bool {
+    on && run.depth == 0
+        && !run.zdr
+        && !run.waived
+        && run.parkable
+        && !run.space_scoped
+        && usize::try_from(run.questions_asked)
+            .is_ok_and(|asked| asked < user_question::MAX_QUESTIONS_PER_RUN)
+}
+
+/// `AnswerMcpElicitationRequest.action` for an answered form.
+pub const ELICITATION_ACCEPT: &str = "accept";
+/// The owner dismissed the form without an answer.
+pub const ELICITATION_DECLINE: &str = "decline";
+/// No answer will come: the question expired, or the run ended or was cancelled.
+pub const ELICITATION_CANCEL: &str = "cancel";
+
+/// The gateway's typed error for an answer that reached a replica without the held call (D16).
+pub const ELICITATION_EXPIRED: &str = "mcp_elicitation_expired";
+
+/// What goes back to the server for one form, read from its question.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElicitationReply {
+    pub action: &'static str,
+    /// The owner's answers; empty unless `action` is accept.
+    pub answers: Vec<pb::QuestionAnswerItem>,
+}
+
+/// The reply a question's state stands for: an answer is accepted with its items, a skip is a
+/// decline, and anything else (expired, cancelled, or answered with nothing) cancels the call, so
+/// the server never reads silence as consent.
+#[must_use]
+pub fn elicitation_reply(question: &pb::RunQuestion) -> ElicitationReply {
+    match question.state() {
+        pb::QuestionState::Answered if !question.answers.is_empty() => ElicitationReply {
+            action: ELICITATION_ACCEPT,
+            answers: question.answers.clone(),
+        },
+        pb::QuestionState::Skipped => ElicitationReply {
+            action: ELICITATION_DECLINE,
+            answers: Vec::new(),
+        },
+        _ => ElicitationReply {
+            action: ELICITATION_CANCEL,
+            answers: Vec::new(),
+        },
+    }
+}
+
+/// The question a pending form is put to the owner as: a `resume` question that names the
+/// server, carries the gateway's mapped items, lives no longer than the gateway holds the call,
+/// and is keyed `{run_id}:{step_id}:elicit:<ordinal>` so a retry of the same step returns the
+/// same question. `None` when the hold is already over or the form carries nothing to ask: the
+/// call is then cancelled instead of asked.
+#[must_use]
+pub fn elicitation_question(
+    run_id: &str,
+    step_id: &str,
+    org_id: &str,
+    pending: &pb::McpElicitationPending,
+    ordinal: u32,
+    now_unix: i64,
+) -> Option<pb::CreateRunQuestionRequest> {
+    let hold_left = pending.expires_at_unix.saturating_sub(now_unix);
+    if hold_left <= 0 || pending.items.is_empty() {
+        return None;
+    }
+    let expires_in_seconds = u32::try_from(hold_left)
+        .unwrap_or(u32::MAX)
+        .min(user_question::RESUME_TTL_SECS);
+    Some(pb::CreateRunQuestionRequest {
+        run_id: run_id.to_owned(),
+        step_id: step_id.to_owned(),
+        org_id: org_id.to_owned(),
+        delivery: user_question::DELIVERY_RESUME.to_owned(),
+        items: pending.items.clone(),
+        expires_in_seconds,
+        idempotency_key: format!("{run_id}:{step_id}:elicit:{ordinal}"),
+        origin: user_question::ORIGIN_MCP_ELICITATION.to_owned(),
+        origin_label: elicitation_origin_label(pending),
+    })
+}
+
+/// The server's display name as a question's origin label: control characters dropped, cut at
+/// [`user_question::MAX_ORIGIN_LABEL`] characters, and the server id when the name is empty, so
+/// the label session-core requires is never blank.
+#[must_use]
+pub fn elicitation_origin_label(pending: &pb::McpElicitationPending) -> String {
+    let clean = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| !ch.is_control())
+            .take(user_question::MAX_ORIGIN_LABEL)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    let label = clean(&pending.server_label);
+    if label.is_empty() {
+        clean(&pending.server_id)
+    } else {
+        label
+    }
+}
+
+/// What the model reads while the run waits for the owner's answer to a server's form.
+#[must_use]
+pub fn elicitation_waiting_text(origin_label: &str) -> String {
+    format!("Venter på svar fra eieren på et skjema fra {origin_label}.")
+}
+
+fn answer_request(
+    org_id: &str,
+    user_id: &str,
+    elicitation_id: &str,
+    reply: ElicitationReply,
+) -> pb::AnswerMcpElicitationRequest {
+    pb::AnswerMcpElicitationRequest {
+        elicitation_id: elicitation_id.to_owned(),
+        org_id: org_id.to_owned(),
+        // The gateway answers only for the user the call was held for: the run's owner.
+        user_id: user_id.to_owned(),
+        action: reply.action.to_owned(),
+        answers: reply.answers,
+    }
+}
+
+/// Read an answer's outcome. A call the gateway no longer holds becomes the typed
+/// [`ELICITATION_EXPIRED`] error the model reads: the call did not complete, and nothing says it
+/// ran.
+fn answer_outcome(resp: pb::AnswerMcpElicitationResponse) -> Result<McpProxyOutcome, String> {
+    if resp.error_message.starts_with(ELICITATION_EXPIRED) {
+        return Err(format!(
+            "{ELICITATION_EXPIRED}: the MCP server's form is no longer waiting for an answer, so \
+             the call did not complete"
+        ));
+    }
+    proxy_outcome(pb::ProxyMcpToolResponse {
+        output_json: resp.output_json,
+        error_message: resp.error_message,
+        elicitation: resp.elicitation,
+        // An answer carries no request id, and the outcome does not read one.
+        ..Default::default()
+    })
 }
 
 /// Split `mcp__<server_id>__<tool>` into `(server_id, tool)`. Mirrors the
@@ -821,11 +1054,14 @@ impl GovernedMcp {
 
     /// Run one MCP tool through the gateway as the execution service. The gateway
     /// refuses the call when the tool's definition no longer has `expected_digest`.
+    /// With `allow_elicitation` (EP-4 S7) the server may ask the run's owner a question,
+    /// and the gateway answers with the held form instead of an output.
     ///
     /// # Errors
     ///
     /// An error string the model can read: no credential, a transport fault, or the
     /// remote server's own error.
+    #[allow(clippy::too_many_arguments)]
     pub async fn proxy(
         &self,
         org_id: &str,
@@ -834,7 +1070,8 @@ impl GovernedMcp {
         tool_name: &str,
         input_json: &str,
         expected_digest: &str,
-    ) -> Result<String, String> {
+        allow_elicitation: bool,
+    ) -> Result<McpProxyOutcome, String> {
         let mut request = Request::new(proxy_request(
             org_id,
             user_id,
@@ -842,6 +1079,7 @@ impl GovernedMcp {
             tool_name,
             input_json,
             expected_digest,
+            allow_elicitation,
         ));
         let bearer = self
             .gateway_bearer(org_id)
@@ -850,6 +1088,36 @@ impl GovernedMcp {
         insert_bearer(&mut request, "authorization", &bearer)
             .map_err(|status| status.message().to_owned())?;
         self.gateway.proxy(request).await
+    }
+
+    /// Send one reply to a form the gateway holds (EP-4 S7), as the execution service and for
+    /// the run's owner, and read the held call on: its output, the server's error, or a further
+    /// form.
+    ///
+    /// # Errors
+    ///
+    /// An error string the model can read: no credential, a transport fault, the server's own
+    /// error, or [`ELICITATION_EXPIRED`] when the gateway no longer holds the call.
+    pub async fn answer_elicitation(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        elicitation_id: &str,
+        reply: ElicitationReply,
+    ) -> Result<McpProxyOutcome, String> {
+        let mut request = Request::new(answer_request(org_id, user_id, elicitation_id, reply));
+        let bearer = self
+            .gateway_bearer(org_id)
+            .await
+            .map_err(|status| format!("mcp gateway credential: {}", status.message()))?;
+        insert_bearer(&mut request, "authorization", &bearer)
+            .map_err(|status| status.message().to_owned())?;
+        let response = McpElicitationServiceClient::new(self.gateway.channel.clone())
+            .answer_mcp_elicitation(request)
+            .await
+            .map_err(|e| format!("mcp elicitation transport: {e}"))?
+            .into_inner();
+        answer_outcome(response)
     }
 
     /// One screening verdict from model-gateway, asked as the execution service. The capability
@@ -1561,11 +1829,231 @@ mod tests {
 
     #[test]
     fn the_proxy_request_carries_the_digest_the_gateway_must_recheck() {
-        let governed = proxy_request("org", "user", "srv", "tool", "{}", DIGEST);
+        let governed = proxy_request("org", "user", "srv", "tool", "{}", DIGEST, false);
         assert_eq!(governed.expected_digest, DIGEST);
         assert_eq!(governed.server_id, "srv");
         assert_eq!(governed.tool_name, "tool");
-        let plain = proxy_request("org", "user", "srv", "tool", "{}", "");
+        let plain = proxy_request("org", "user", "srv", "tool", "{}", "", false);
         assert!(plain.expected_digest.is_empty());
+    }
+
+    // --- EP-4 S7: elicitation -----------------------------------------------
+
+    fn root_run() -> ElicitationRun {
+        ElicitationRun {
+            depth: 0,
+            zdr: false,
+            waived: false,
+            parkable: true,
+            space_scoped: false,
+            questions_asked: 0,
+        }
+    }
+
+    fn pending(label: &str, expires_at_unix: i64) -> pb::McpElicitationPending {
+        pb::McpElicitationPending {
+            elicitation_id: "el_01".to_owned(),
+            server_id: "srv_01".to_owned(),
+            server_label: label.to_owned(),
+            message: "Which project?".to_owned(),
+            requested_schema_json: "{}".to_owned(),
+            items: vec![pb::QuestionItem {
+                id: "project".to_owned(),
+                kind: "text".to_owned(),
+                prompt: "Project".to_owned(),
+                ..Default::default()
+            }],
+            expires_at_unix,
+        }
+    }
+
+    fn question(state: pb::QuestionState, answers: Vec<pb::QuestionAnswerItem>) -> pb::RunQuestion {
+        pb::RunQuestion {
+            state: state as i32,
+            answers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_elicitation_switch_reads_only_the_literal_true() {
+        assert!(elicitation_switch_on(Some("true")));
+        for raw in [None, Some(""), Some("TRUE"), Some("1"), Some(" true"), Some("yes")] {
+            assert!(!elicitation_switch_on(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn allow_elicitation_false_when_switch_off() {
+        assert!(allow_elicitation_when(true, &root_run()));
+        assert!(!allow_elicitation_when(false, &root_run()));
+        let request = proxy_request("org", "user", "srv", "tool", "{}", DIGEST, false);
+        assert!(!request.allow_elicitation, "off keeps today's wire");
+        let request = proxy_request("org", "user", "srv", "tool", "{}", DIGEST, true);
+        assert!(request.allow_elicitation);
+    }
+
+    #[test]
+    fn allow_elicitation_false_for_subagent_and_space_runs() {
+        let refused = [
+            ElicitationRun { depth: 1, ..root_run() },
+            ElicitationRun { space_scoped: true, ..root_run() },
+            ElicitationRun { zdr: true, ..root_run() },
+            ElicitationRun { waived: true, ..root_run() },
+            ElicitationRun { parkable: false, ..root_run() },
+        ];
+        for run in refused {
+            assert!(!allow_elicitation_when(true, &run), "{run:?}");
+        }
+    }
+
+    #[test]
+    fn question_cap_counts_elicitations() {
+        let cap = u32::try_from(user_question::MAX_QUESTIONS_PER_RUN).expect("small");
+        let below = ElicitationRun { questions_asked: cap - 1, ..root_run() };
+        assert!(allow_elicitation_when(true, &below));
+        let at = ElicitationRun { questions_asked: cap, ..root_run() };
+        assert!(!allow_elicitation_when(true, &at), "a run at its question cap asks no more");
+    }
+
+    #[test]
+    fn a_proxy_answer_with_a_form_is_an_elicitation() {
+        let form = pending("Fixture", 1_000);
+        let outcome = proxy_outcome(pb::ProxyMcpToolResponse {
+            output_json: String::new(),
+            error_message: String::new(),
+            elicitation: Some(form.clone()),
+            ..Default::default()
+        });
+        assert_eq!(outcome, Ok(McpProxyOutcome::Elicitation(form)));
+        let done = proxy_outcome(pb::ProxyMcpToolResponse {
+            output_json: "{\"ok\":true}".to_owned(),
+            error_message: String::new(),
+            elicitation: None,
+            ..Default::default()
+        });
+        assert_eq!(done, Ok(McpProxyOutcome::Output("{\"ok\":true}".to_owned())));
+        let failed = proxy_outcome(pb::ProxyMcpToolResponse {
+            output_json: String::new(),
+            error_message: "boom".to_owned(),
+            elicitation: None,
+            ..Default::default()
+        });
+        assert_eq!(failed, Err("boom".to_owned()));
+    }
+
+    #[test]
+    fn pending_form_creates_a_resume_question_with_server_origin() {
+        let form = pending("Fixture", 1_600);
+        let request = elicitation_question("run_1", "step_1", "org_1", &form, 1, 1_000)
+            .expect("a live form is asked");
+        assert_eq!(request.delivery, user_question::DELIVERY_RESUME);
+        assert_eq!(request.origin, user_question::ORIGIN_MCP_ELICITATION);
+        assert_eq!(request.origin_label, "Fixture");
+        assert_eq!(request.items, form.items);
+        assert_eq!(request.expires_in_seconds, 600, "the question lives as long as the hold");
+        assert_eq!(request.idempotency_key, "run_1:step_1:elicit:1");
+        assert_eq!(request.run_id, "run_1");
+        assert_eq!(request.org_id, "org_1");
+    }
+
+    #[test]
+    fn retry_returns_the_same_question() {
+        let form = pending("Fixture", 2_000);
+        let first = elicitation_question("run_1", "step_1", "org_1", &form, 1, 1_000).expect("asked");
+        let retry = elicitation_question("run_1", "step_1", "org_1", &form, 1, 1_500).expect("asked");
+        assert_eq!(first.idempotency_key, retry.idempotency_key);
+        let second_form =
+            elicitation_question("run_1", "step_1", "org_1", &form, 2, 1_500).expect("asked");
+        assert_ne!(first.idempotency_key, second_form.idempotency_key);
+    }
+
+    #[test]
+    fn an_expired_or_empty_form_is_not_asked() {
+        assert!(elicitation_question("r", "s", "o", &pending("F", 1_000), 1, 1_000).is_none());
+        let mut empty = pending("F", 5_000);
+        empty.items.clear();
+        assert!(elicitation_question("r", "s", "o", &empty, 1, 1_000).is_none());
+        let far = pending("F", i64::MAX);
+        let request = elicitation_question("r", "s", "o", &far, 1, 0).expect("asked");
+        assert_eq!(request.expires_in_seconds, user_question::RESUME_TTL_SECS);
+    }
+
+    #[test]
+    fn the_origin_label_is_clean_bounded_and_never_blank() {
+        assert_eq!(elicitation_origin_label(&pending("Fix\u{7}ture\n", 0)), "Fixture");
+        assert_eq!(elicitation_origin_label(&pending("  ", 0)), "srv_01");
+        let long = "x".repeat(200);
+        assert_eq!(
+            elicitation_origin_label(&pending(&long, 0)).chars().count(),
+            user_question::MAX_ORIGIN_LABEL
+        );
+        assert_eq!(
+            elicitation_waiting_text("Fixture"),
+            "Venter på svar fra eieren på et skjema fra Fixture."
+        );
+    }
+
+    #[test]
+    fn answer_is_mapped_and_sent_as_accept() {
+        let answers = vec![pb::QuestionAnswerItem {
+            item_id: "project".to_owned(),
+            option_ids: Vec::new(),
+            text: "Apollo".to_owned(),
+        }];
+        let reply = elicitation_reply(&question(pb::QuestionState::Answered, answers.clone()));
+        assert_eq!(reply.action, ELICITATION_ACCEPT);
+        assert_eq!(reply.answers, answers);
+        let request = answer_request("org", "owner", "el_01", reply);
+        assert_eq!(request.action, "accept");
+        assert_eq!(request.user_id, "owner");
+        assert_eq!(request.elicitation_id, "el_01");
+        assert_eq!(request.answers, answers);
+    }
+
+    #[test]
+    fn skip_sends_decline() {
+        let reply = elicitation_reply(&question(pb::QuestionState::Skipped, Vec::new()));
+        assert_eq!(reply.action, ELICITATION_DECLINE);
+        assert!(reply.answers.is_empty());
+    }
+
+    #[test]
+    fn expiry_sends_cancel() {
+        for state in [
+            pb::QuestionState::Expired,
+            pb::QuestionState::Cancelled,
+            pb::QuestionState::Requested,
+            pb::QuestionState::Unspecified,
+        ] {
+            let reply = elicitation_reply(&question(state, Vec::new()));
+            assert_eq!(reply.action, ELICITATION_CANCEL, "{state:?}");
+        }
+        let empty_answer = elicitation_reply(&question(pb::QuestionState::Answered, Vec::new()));
+        assert_eq!(empty_answer.action, ELICITATION_CANCEL, "an empty answer is no consent");
+    }
+
+    #[test]
+    fn lost_held_call_is_a_tool_error() {
+        let lost = answer_outcome(pb::AnswerMcpElicitationResponse {
+            output_json: String::new(),
+            error_message: format!("{ELICITATION_EXPIRED}: the form is no longer waiting"),
+            elicitation: None,
+        })
+        .expect_err("a call the gateway lost is an error");
+        assert!(lost.starts_with(ELICITATION_EXPIRED), "{lost}");
+        let done = answer_outcome(pb::AnswerMcpElicitationResponse {
+            output_json: "{}".to_owned(),
+            error_message: String::new(),
+            elicitation: None,
+        });
+        assert_eq!(done, Ok(McpProxyOutcome::Output("{}".to_owned())));
+        let again = pending("Fixture", 1_000);
+        let asked_again = answer_outcome(pb::AnswerMcpElicitationResponse {
+            output_json: String::new(),
+            error_message: String::new(),
+            elicitation: Some(again.clone()),
+        });
+        assert_eq!(asked_again, Ok(McpProxyOutcome::Elicitation(again)));
     }
 }

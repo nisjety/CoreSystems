@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/triodelab/model-plane/services/orchestrator-core/internal/decisionkey"
 )
 
 const (
@@ -87,8 +89,8 @@ func NewControlScheduledRunExecutionAuthorizer(endpoint, token, keyID, publicKey
 	endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	token = strings.TrimSpace(token)
 	keyID = strings.TrimSpace(keyID)
-	rawKey, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(publicKeyBase64))
-	if endpoint == "" || token == "" || keyID == "" || err != nil || len(rawKey) != ed25519.PublicKeySize {
+	rawKey, _, err := decisionkey.DecodePublicKey(publicKeyBase64)
+	if endpoint == "" || token == "" || keyID == "" || err != nil {
 		return nil, fmt.Errorf("Control scheduled-run execution endpoint, credential, key ID, and public key are required")
 	}
 	if client == nil {
@@ -132,7 +134,7 @@ func (a *ControlScheduledRunExecutionAuthorizer) AuthorizeScheduledRunExecution(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Control scheduled-run execution authority rejected: status %d", response.StatusCode)
+		return "", controlRejection("Control scheduled-run execution authority", response)
 	}
 	var envelope struct {
 		Data struct {
@@ -229,6 +231,9 @@ func (a *ControlScheduledRunExecutionAuthorizer) verify(token string, intent Sch
 	}
 	keyID, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || string(keyID) != a.keyID {
+		if err == nil {
+			decisionkey.ReportUnknownKey("scheduled-run", string(keyID), a.keyID)
+		}
 		return fmt.Errorf("untrusted Control scheduled-run execution decision key")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[3])

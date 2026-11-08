@@ -333,13 +333,28 @@ func (s *Store) Purge(ctx context.Context, retentionDays int) (PurgeResult, erro
 // AuditFilter constrains the audit-list query. Every field except OrgID
 // is optional; OrgID is mandatory and enforced at the SQL layer too.
 type AuditFilter struct {
-	OrgID  string
-	Since  time.Time
-	Until  time.Time
-	Event  string
-	UserID string
-	Limit  int
+	OrgID      string
+	Since      time.Time
+	Until      time.Time
+	Event      string
+	UserID     string
+	Plane      string
+	Outcome    string
+	Subject    string
+	ResourceID string
+	// HasCursor turns on keyset paging: only rows strictly older than
+	// (CursorIngestedAt, CursorID) in (ingested_at DESC, id DESC) order.
+	HasCursor        bool
+	CursorIngestedAt time.Time
+	CursorID         int64
+	// Limit is the number of rows to return. The API asks for one more than
+	// the page size to learn whether another page exists, so the ceiling is
+	// MaxAuditListLimit+1.
+	Limit int
 }
+
+// MaxAuditListLimit is the largest page size GET /v1/audit serves.
+const MaxAuditListLimit = 500
 
 type AuditRow struct {
 	ID         int64          `json:"id"`
@@ -359,7 +374,7 @@ type AuditRow struct {
 }
 
 func (s *Store) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error) {
-	if f.Limit <= 0 || f.Limit > 500 {
+	if f.Limit <= 0 || f.Limit > MaxAuditListLimit+1 {
 		f.Limit = 100
 	}
 	since := f.Since
@@ -382,9 +397,16 @@ func (s *Store) ListAudit(ctx context.Context, f AuditFilter) ([]AuditRow, error
 		  AND ingested_at <= $3
 		  AND ($4 = '' OR event = $4)
 		  AND ($5 = '' OR user_id = $5)
-		ORDER BY ingested_at DESC
+		  AND ($7 = '' OR plane = $7)
+		  AND ($8 = '' OR outcome = $8)
+		  AND ($9 = '' OR subject = $9)
+		  AND ($10 = '' OR resource_id = $10)
+		  AND (NOT $11::boolean OR (ingested_at, id) < ($12::timestamptz, $13::bigint))
+		ORDER BY ingested_at DESC, id DESC
 		LIMIT $6
-	`, f.OrgID, since, until, f.Event, f.UserID, f.Limit)
+	`, f.OrgID, since, until, f.Event, f.UserID, f.Limit,
+		f.Plane, f.Outcome, f.Subject, f.ResourceID,
+		f.HasCursor, f.CursorIngestedAt, f.CursorID)
 	if err != nil {
 		return nil, err
 	}

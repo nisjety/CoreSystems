@@ -114,6 +114,13 @@ export type InteractiveRetentionPosture = Readonly<{
   authority: 'interactive-org-retention-policy';
 }>;
 
+/** Proof for a single execution-token mint, never derived from cached posture. */
+export type FreshExecutionRetentionProof = Readonly<{
+  orgId: string;
+  authority: 'fresh-interactive-org-retention-policy';
+  zdr: false;
+}>;
+
 const DEFAULT_POSTURE: InteractiveRetentionPosture = Object.freeze({
   zdr: false,
   authority: 'interactive-org-retention-policy',
@@ -373,6 +380,25 @@ function lookupOnce(organizationId: string): Promise<LookupResult> {
   });
   lookupsInFlight.set(organizationId, started);
   return started;
+}
+
+/**
+ * Confirm that ZDR is explicitly switched off at org-core for this mint.
+ * A missing org, malformed response or outage does not change the ordinary
+ * token issuance policy; it simply cannot authorize a persistent receipt.
+ * Deliberately bypass the posture cache, including its stale-if-error path.
+ */
+export async function resolveFreshExecutionRetentionProof(
+  organizationId: string,
+): Promise<FreshExecutionRetentionProof | undefined> {
+  if (!ORGANIZATION_ID.test(organizationId)) return undefined;
+  try {
+    const result = await lookupOnce(organizationId);
+    if (result.kind !== 'found' || result.zdrIntent) return undefined;
+    return { orgId: organizationId, authority: 'fresh-interactive-org-retention-policy', zdr: false };
+  } catch {
+    return undefined;
+  }
 }
 
 function remember(organizationId: string, entry: PostureEntry): void {

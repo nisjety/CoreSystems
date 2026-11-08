@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -277,6 +278,13 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("orchestration: scheduled run contract is not bound to its execution input: %w", err)
 	}
+	// Off, the goal is never read, so the workflow input stays byte-identical.
+	goalID := ""
+	if goalJudgeActivityEnabled() {
+		if goalID, err = scheduledTemplateGoalID(req.TaskTemplateJSON, req.TemplateDigest); err != nil {
+			return nil, fmt.Errorf("orchestration: scheduled run goal is not bound to its execution input: %w", err)
+		}
+	}
 	return workflows.ScheduledRunInput{
 		RunID:             t.RunID,
 		ThreadID:          strings.TrimSpace(req.ThreadID),
@@ -294,7 +302,51 @@ func buildScheduledRunInput(raw json.RawMessage, t Tenancy) (any, error) {
 		ContractDigest:    contract.Digest,
 		ContractExpiresAt: contract.ExpiresAt,
 		Retention:         t.Retention(),
+		GoalID:            goalID,
 	}, nil
+}
+
+// goalJudgeActivityEnabled is ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED (EP-7 S6), read at each
+// start. Only the literal "true" turns it on. A variable so tests can set it without the process
+// environment.
+var goalJudgeActivityEnabled = func() bool {
+	return os.Getenv("ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED") == "true"
+}
+
+// maxGoalIDLength bounds the goal id a template may name: "goal_" and a ulid, with room to spare.
+const maxGoalIDLength = 64
+
+// scheduledTemplateGoalID returns the thread goal a goal-bound template continues (EP-7 S6), or ""
+// for a schedule without one. Only the id is taken: the goal's text already is the template's
+// goal, and the judge reads the objective and criteria from Session Core, never from Temporal.
+func scheduledTemplateGoalID(templateJSON, expectedDigest string) (string, error) {
+	rawTemplate, _, err := verifyScheduledTemplate(templateJSON, expectedDigest)
+	if err != nil {
+		return "", err
+	}
+	raw, present := rawTemplate["goal_id"]
+	if !present {
+		return "", nil
+	}
+	var goalID string
+	if err := json.Unmarshal(raw, &goalID); err != nil || !validGoalID(goalID) {
+		return "", errors.New("goal id is invalid")
+	}
+	return goalID, nil
+}
+
+// validGoalID accepts "goal_" followed by ASCII letters, digits and underscores, bounded.
+func validGoalID(id string) bool {
+	rest, ok := strings.CutPrefix(id, "goal_")
+	if !ok || rest == "" || len(id) > maxGoalIDLength {
+		return false
+	}
+	for _, r := range rest {
+		if !(r == '_' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+			return false
+		}
+	}
+	return true
 }
 
 // scheduledTemplateGoalAndPolicy verifies the immutable task template against

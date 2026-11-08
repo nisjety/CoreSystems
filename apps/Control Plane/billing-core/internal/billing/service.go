@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -996,4 +997,263 @@ func (s *Service) enqueueInvoiceChargeRetry(ctx context.Context, invoice Invoice
 	}
 	dedupeKey := string(RetryJobKindStripeCharge) + ":" + invoice.InvoiceID
 	return s.repo.EnqueueRetryJob(ctx, RetryJobKindStripeCharge, dedupeKey, payload, time.Now().UTC())
+}
+
+// --- Quarry limits snapshot (W2-CP-L1, the Control half of U43 / WS6.D) ---
+//
+// One read-only answer per organization for the Quarry edge's `billing_core`
+// limits source: the effective plan, the three metered Quarry allowances, and
+// the plan capacity caps (`quarry.cap.*`). Three rules the edge relies on:
+//
+//   - Unconfigured is not zero. A metric with no allowance policy and no
+//     account quota key is `configured: false` with `remaining: null`; only a
+//     configured allowance that ran out is `remaining: 0`.
+//   - A cap the plan says nothing about is `null` (the edge keeps its floor).
+//     Placeholder plan defaults are served only when
+//     BILLING_QUARRY_PLAN_CAP_DEFAULTS=1 (default off); an explicit per-org
+//     `quarry.cap.*` key in the account's quota limits always applies.
+//   - The read never writes an account: an organization without a billing
+//     account is reported as `account: "absent"` instead of being created.
+
+const (
+	QuarryMetricCrawlPage          = "quarry.crawl.page"
+	QuarryMetricBatchURL           = "quarry.batch.url"
+	QuarryMetricBrowserSecondAgent = "quarry.browser.second.agent"
+
+	QuarryCapAgentRuns       = "quarry.cap.agent_runs"
+	QuarryCapInteractiveRuns = "quarry.cap.interactive_runs"
+	QuarryCapRenderPermits   = "quarry.cap.render_permits"
+	QuarryCapCrawlJobs       = "quarry.cap.crawl_jobs"
+	QuarryCapJobBacklog      = "quarry.cap.job_backlog"
+	QuarryCapRateMultiplier  = "quarry.cap.rate_multiplier"
+
+	// QuarryPlanCapDefaultsEnv turns the placeholder plan defaults on. Off
+	// (unset or anything but 1/true/on) serves only explicit per-org keys.
+	QuarryPlanCapDefaultsEnv = "BILLING_QUARRY_PLAN_CAP_DEFAULTS"
+
+	QuarryAccountPresent = "present"
+	QuarryAccountAbsent  = "absent"
+
+	QuarryAllowanceSourcePolicy    = "allowance_policy"
+	QuarryAllowanceSourcePlanQuota = "plan_quota"
+	QuarryAllowanceSourceNone      = "none"
+)
+
+// QuarryLimitMetrics are the metered allowances the snapshot always reports.
+var QuarryLimitMetrics = []string{QuarryMetricCrawlPage, QuarryMetricBatchURL, QuarryMetricBrowserSecondAgent}
+
+// quarryPlanCapDefaultsByPlan holds PLACEHOLDER numbers from the build plan
+// (WS6.D file table); Control Plane owns the real values. Order per plan:
+// agent_runs, interactive_runs, render_permits, crawl_jobs, job_backlog,
+// rate_multiplier. The stored plan "trial" takes free's numbers (the plan's
+// "trial = free"); an active trial resolves to TrialPlan and takes that plan's.
+var quarryPlanCapDefaultsByPlan = map[string][6]int64{
+	"free":       {1, 2, 1, 1, 10, 1},
+	"trial":      {1, 2, 1, 1, 10, 1},
+	"hobby":      {2, 4, 1, 2, 50, 2},
+	"standard":   {4, 6, 2, 3, 200, 4},
+	"pro":        {8, 8, 2, 5, 1000, 10},
+	"enterprise": {16, 16, 4, 10, 5000, 50},
+}
+
+// QuarryAllowance is one metered Quarry allowance as the edge sees it.
+type QuarryAllowance struct {
+	Metric     string `json:"metric"`
+	Configured bool   `json:"configured"`
+	// Source is allowance_policy, plan_quota or none.
+	Source string `json:"source"`
+	// Active is false for an ended or paused policy (it then refuses use).
+	Active    bool       `json:"active"`
+	Unlimited bool       `json:"unlimited"`
+	Limit     *int64     `json:"limit"`
+	Used      int64      `json:"used"`
+	Remaining *int64     `json:"remaining"`
+	Exhausted bool       `json:"exhausted"`
+	PeriodEnd *time.Time `json:"period_end,omitempty"`
+}
+
+// QuarryPlanCaps are the plan capacity caps. nil means "the plan says nothing".
+type QuarryPlanCaps struct {
+	AgentRuns       *int64 `json:"agent_runs"`
+	InteractiveRuns *int64 `json:"interactive_runs"`
+	RenderPermits   *int64 `json:"render_permits"`
+	CrawlJobs       *int64 `json:"crawl_jobs"`
+	JobBacklog      *int64 `json:"job_backlog"`
+	RateMultiplier  *int64 `json:"rate_multiplier"`
+}
+
+// QuarryLimits is the org-bound snapshot served to the quarry-edge principal.
+type QuarryLimits struct {
+	OrgID             string                     `json:"org_id"`
+	Account           string                     `json:"account"`
+	Plan              string                     `json:"plan"`
+	SubscriptionState SubscriptionState          `json:"subscription_state,omitempty"`
+	Allowances        map[string]QuarryAllowance `json:"allowances"`
+	Caps              QuarryPlanCaps             `json:"caps"`
+	PlanCapDefaults   bool                       `json:"plan_cap_defaults"`
+	AsOf              time.Time                  `json:"as_of"`
+}
+
+func quarryPlanCapDefaultsEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(QuarryPlanCapDefaultsEnv))) {
+	case "1", "true", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// QuarryLimits reads the snapshot for one organization. It never creates a
+// billing account. A tombstoned organization returns ErrOrganizationDeleted;
+// an invalid organization id returns ErrAllowanceInvalid.
+func (s *Service) QuarryLimits(ctx context.Context, orgID string, now time.Time) (QuarryLimits, error) {
+	if err := validateUsageDimension("org_id", orgID, 128, false); err != nil {
+		return QuarryLimits{}, fmt.Errorf("%w: invalid organization", ErrAllowanceInvalid)
+	}
+	now = now.UTC()
+	snapshot := QuarryLimits{
+		OrgID:           orgID,
+		Account:         QuarryAccountPresent,
+		Allowances:      make(map[string]QuarryAllowance, len(QuarryLimitMetrics)),
+		PlanCapDefaults: quarryPlanCapDefaultsEnabled(),
+		AsOf:            now,
+	}
+	account, err := s.repo.GetAccount(ctx, orgID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// Read-only: describe the default account without persisting it.
+		account = NewDefaultAccount(orgID)
+		snapshot.Account = QuarryAccountAbsent
+		snapshot.Plan = EffectivePlan(account, now)
+	case err != nil:
+		return QuarryLimits{}, err
+	default:
+		snapshot.Plan = s.ResolveEffectivePlan(ctx, account, now)
+	}
+	snapshot.SubscriptionState = account.SubscriptionState
+
+	// Allowances also checks the organization tombstone (ErrOrganizationDeleted).
+	reports, err := s.repo.Allowances(ctx, orgID, now)
+	if err != nil {
+		return QuarryLimits{}, err
+	}
+	for _, metric := range QuarryLimitMetrics {
+		if allowance, ok := QuarryAllowanceFromReports(reports, metric); ok {
+			snapshot.Allowances[metric] = allowance
+			continue
+		}
+		limit, ok := account.QuotaLimits[metric]
+		if !ok {
+			snapshot.Allowances[metric] = QuarryAllowanceUnconfigured(metric)
+			continue
+		}
+		used := 0.0
+		if snapshot.Account == QuarryAccountPresent {
+			if used, err = s.repo.GetMetricUsage(ctx, orgID, metric); err != nil {
+				return QuarryLimits{}, err
+			}
+		}
+		snapshot.Allowances[metric] = QuarryAllowanceFromPlanQuota(metric, limit, used)
+	}
+	snapshot.Caps = QuarryPlanCapsFor(account.QuotaLimits, snapshot.Plan, snapshot.PlanCapDefaults)
+	return snapshot, nil
+}
+
+// QuarryAllowanceUnconfigured is "no allowance for this metric": never zero.
+func QuarryAllowanceUnconfigured(metric string) QuarryAllowance {
+	return QuarryAllowance{Metric: metric, Configured: false, Source: QuarryAllowanceSourceNone}
+}
+
+// QuarryAllowanceFromReports applies GetQuotaStatus's policy rules to one
+// metric: a policy that has not started yet is skipped (it must not take away
+// the current answer before its start), an ended or paused one refuses use.
+func QuarryAllowanceFromReports(reports []AllowanceReport, metric string) (QuarryAllowance, bool) {
+	for _, report := range reports {
+		if report.Policy.Metric != metric || report.AsOf.Before(report.Policy.StartsAt) {
+			continue
+		}
+		period := report.Current
+		allowance := QuarryAllowance{
+			Metric:     metric,
+			Configured: true,
+			Source:     QuarryAllowanceSourcePolicy,
+			Active:     report.Active,
+			Used:       period.Used,
+		}
+		if !report.Active {
+			zero := int64(0)
+			allowance.Remaining = &zero
+			allowance.Exhausted = true
+			return allowance, true
+		}
+		limit := period.Used - period.Overage + period.Remaining
+		remaining := period.Remaining
+		if remaining < 0 {
+			remaining = 0
+		}
+		allowance.Limit = &limit
+		allowance.Remaining = &remaining
+		allowance.Exhausted = remaining == 0
+		if !period.To.IsZero() {
+			end := period.To.UTC()
+			allowance.PeriodEnd = &end
+		}
+		return allowance, true
+	}
+	return QuarryAllowance{}, false
+}
+
+// QuarryAllowanceFromPlanQuota reads an account quota key (all-time usage, as
+// GetQuotaStatus does). A negative limit is the plan's "unlimited".
+func QuarryAllowanceFromPlanQuota(metric string, limit, used float64) QuarryAllowance {
+	allowance := QuarryAllowance{
+		Metric:     metric,
+		Configured: true,
+		Source:     QuarryAllowanceSourcePlanQuota,
+		Active:     true,
+		Used:       int64(math.Ceil(math.Max(used, 0))),
+	}
+	if limit < 0 {
+		allowance.Unlimited = true
+		return allowance
+	}
+	bounded := int64(math.Floor(limit))
+	remaining := bounded - allowance.Used
+	if remaining < 0 {
+		remaining = 0
+	}
+	allowance.Limit = &bounded
+	allowance.Remaining = &remaining
+	allowance.Exhausted = remaining == 0
+	return allowance
+}
+
+// QuarryPlanCapsFor resolves each cap: an explicit non-negative per-org key in
+// quotaLimits wins; otherwise the placeholder plan default when enabled;
+// otherwise nil. A negative explicit key is treated as "says nothing" (nil):
+// the edge has no "unlimited" capacity, only its process-wide cap.
+func QuarryPlanCapsFor(quotaLimits map[string]float64, plan string, defaultsEnabled bool) QuarryPlanCaps {
+	defaults, hasDefaults := quarryPlanCapDefaultsByPlan[normalizePlan(plan)]
+	resolve := func(index int, key string) *int64 {
+		if value, ok := quotaLimits[key]; ok {
+			if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+				return nil
+			}
+			bounded := int64(math.Floor(value))
+			return &bounded
+		}
+		if defaultsEnabled && hasDefaults {
+			value := defaults[index]
+			return &value
+		}
+		return nil
+	}
+	return QuarryPlanCaps{
+		AgentRuns:       resolve(0, QuarryCapAgentRuns),
+		InteractiveRuns: resolve(1, QuarryCapInteractiveRuns),
+		RenderPermits:   resolve(2, QuarryCapRenderPermits),
+		CrawlJobs:       resolve(3, QuarryCapCrawlJobs),
+		JobBacklog:      resolve(4, QuarryCapJobBacklog),
+		RateMultiplier:  resolve(5, QuarryCapRateMultiplier),
+	}
 }

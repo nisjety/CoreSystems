@@ -11,11 +11,19 @@ async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("execution-core")?;
     info!("execution-core starting");
 
+    // EP-9 E4: shell-rule proposals narrow WS13-S7's proposals, so they refuse to start without them.
+    mp_contracts::shell_rule::shell_rule_proposals_checked()?;
+
     // Probe the OS sandbox ONCE, at boot, on the record. A capability problem in
     // the container (bubblewrap installed but unable to build a namespace) used to
     // surface as a generic per-call tool failure; now it is one line in the
     // startup log, before any tool has run. Result is cached for the process.
     execution_core::sandbox::log_support();
+
+    // One line on the browser planner: the mode in force, how big the allowlist
+    // is, the procedure and the limits. A `default_on` request without its
+    // acknowledgement is downgraded here, on the record.
+    execution_core::tool_bridge::log_browser_planner_banner();
 
     // Attest what the sandbox probe just measured to capability-core, then keep
     // attesting: capability-core denies dispatch for any capability whose runtime

@@ -1144,7 +1144,7 @@ impl RetrievalPipeline {
             // the user-core facade (it would refuse the service bearer and fail
             // open to empty after paying the call's latency); it sees
             // organization-shared documents only. Users resolve as before.
-            let granted = crate::authz::resolve_explicit_grants(
+            let mut granted = crate::authz::resolve_explicit_grants(
                 self.visibility.as_ref(),
                 &req.org_id,
                 req.user_id.as_deref(),
@@ -1152,6 +1152,31 @@ impl RetrievalPipeline {
                 req.verified_bearer.as_deref(),
             )
             .await;
+            // WS14-S5: under a verified Space decision, a document attached to
+            // that room is also visible to a current member through the owner's
+            // Space grant. Resolved per request and uncached, so it is part of
+            // the cache partition below like any other grant; a service
+            // principal never gets one.
+            if let (Some(scope), Some(user_id), false) = (
+                req.space_scope.as_ref(),
+                req.user_id.as_deref(),
+                req.service_principal,
+            ) {
+                let attached = self
+                    .visibility
+                    .visible_space_documents(
+                        &req.org_id,
+                        user_id,
+                        &scope.authority.space_ref,
+                        req.verified_bearer.as_deref(),
+                    )
+                    .await;
+                for id in attached {
+                    if !granted.contains(&id) {
+                        granted.push(id);
+                    }
+                }
+            }
             (req.user_id.as_deref(), granted)
         };
 

@@ -147,6 +147,32 @@ describe('buildKnowledgeHierarchy', () => {
 })
 
 describe('collapseHierarchyToScene', () => {
+  it('connects workflow nodes only to directly referenced documents and loaded excerpts', () => {
+    const payload = makePayload()
+    payload.sources[1]!.chunksPreview = [{ id: 'chunk-b', title: 'Excerpt', text: 'Evidence', score: '1' }]
+    const hierarchy = buildKnowledgeHierarchy(payload, labels, {
+      key: 'proposal-1', status: 'pending', statusLabel: 'Forslag',
+      workflows: [
+        { id: 'one', name: 'Follow up', departmentId: 'support', phase: 'Assist', risk: 'medium', evidenceRefs: ['doc-a', 'chunk-b', 'missing'] },
+        { id: 'two', name: 'Review', departmentId: 'support', phase: 'Assist', risk: 'low', evidenceRefs: ['doc-a'] },
+        { id: 'three', name: 'Unresolved', departmentId: 'support', phase: 'Assist', risk: 'low', evidenceRefs: ['missing'] },
+      ],
+    })
+    const one = hierarchy.byId.get('kg:workflow:proposal-1:one')!
+    expect(one.label).toBe('Forslag · Follow up')
+    expect(one.sourceIds).toEqual(['doc-a', 'doc-b'])
+    expect(one.workflow?.unresolvedRefs).toEqual(['missing'])
+    const scene = collapseHierarchyToScene(hierarchy, new Set([KNOWLEDGE_GRAPH_ROOT_ID]))
+    expect(scene.nodes.filter((node) => node.id === 'kg:doc:doc-a')).toHaveLength(1)
+    expect(scene.nodes.some((node) => node.id === 'kg:doc:doc-c')).toBe(false)
+    expect(scene.edges.filter((edge) => edge.label === 'evidence')).toEqual([
+      { from: 'kg:workflow:proposal-1:one', to: 'kg:doc:doc-a', label: 'evidence' },
+      { from: 'kg:workflow:proposal-1:one', to: 'kg:doc:doc-b', label: 'evidence' },
+      { from: 'kg:workflow:proposal-1:two', to: 'kg:doc:doc-a', label: 'evidence' },
+    ])
+    expect(scene.nodes.some((node) => node.id === 'kg:workflow:proposal-1:three')).toBe(true)
+  })
+
   it('draws only the top level when nothing but the root is expanded', () => {
     const hierarchy = buildKnowledgeHierarchy(makePayload(), labels)
     const scene = collapseHierarchyToScene(hierarchy, new Set([KNOWLEDGE_GRAPH_ROOT_ID]))

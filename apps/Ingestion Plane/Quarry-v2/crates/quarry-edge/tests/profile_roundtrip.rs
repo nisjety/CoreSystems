@@ -6,7 +6,7 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use quarry_browser::session::{Cookie, SessionSnapshot, Viewport};
+use quarry_browser::session::{Cookie, ProfileStore, SaveMeta, SessionSnapshot, Viewport};
 use quarry_runtime::{fetch::StaticDriver, EventSink};
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -16,6 +16,13 @@ mod support;
 const TEST_BEARER: &str = "profile-roundtrip-dev-token";
 
 async fn spawn_app() -> SocketAddr {
+    spawn_app_with_store().await.0
+}
+
+/// The edge plus its profile store. The dev-bypass stub carries no `quarry:profiles:import`
+/// scope (D2-055), so a test that needs a saved profile puts one in the store directly instead
+/// of through `POST /v1/profiles`.
+async fn spawn_app_with_store() -> (SocketAddr, Arc<dyn ProfileStore>) {
     std::env::set_var("QUARRY_EDGE_AUTH_DEV_BYPASS", "1");
 
     let (tx, mut rx) = mpsc::channel(64);
@@ -25,13 +32,33 @@ async fn spawn_app() -> SocketAddr {
     let static_driver =
         Arc::new(StaticDriver::new(Duration::from_secs(10), "quarry-test").unwrap());
     let state = support::base_state(static_driver, event_sink);
+    let profiles = state.profiles.clone();
     let app = quarry_edge::routes::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    addr
+    (addr, profiles)
+}
+
+/// Save `snapshot` as the dev-bypass stub's profile (org and actor of `dev_bypass_stub_claims`).
+async fn save_snapshot(
+    profiles: &Arc<dyn ProfileStore>,
+    id: Option<quarry_core::ids::kinds::ProfileKind>,
+    snapshot: &SessionSnapshot,
+) -> String {
+    let id = id.unwrap_or_else(quarry_core::ids::Id::new);
+    profiles
+        .save(
+            "org_placeholder",
+            &id,
+            snapshot,
+            &SaveMeta::now(Some("user_placeholder".to_owned())),
+        )
+        .await
+        .expect("the store saves");
+    id.to_string()
 }
 
 fn authed(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -83,28 +110,12 @@ fn rich_snapshot() -> SessionSnapshot {
 
 #[tokio::test]
 async fn profile_save_load_roundtrip_preserves_all_fields() {
-    let addr = spawn_app().await;
+    let (addr, profiles) = spawn_app_with_store().await;
     let client = reqwest::Client::new();
 
-    // Save
+    // Save (straight into the store: the dev stub cannot import, see the 403 test below)
     let snapshot = rich_snapshot();
-    let save_resp = authed(
-        client
-            .post(format!("http://{addr}/v1/profiles"))
-            .json(&serde_json::json!({ "snapshot": snapshot })),
-    )
-    .send()
-    .await
-    .unwrap();
-    assert!(
-        save_resp.status().is_success(),
-        "save failed: {save_resp:?}"
-    );
-    let save_body: Value = save_resp.json().await.unwrap();
-    let profile_id = save_body["data"]["profile_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let profile_id = save_snapshot(&profiles, None, &snapshot).await;
 
     // Load: the redacted view (WS17.P0). No cookie value and no storage value comes back;
     // a cookie value is reported as null with its length.
@@ -139,21 +150,10 @@ async fn profile_save_load_roundtrip_preserves_all_fields() {
 
 #[tokio::test]
 async fn profile_list_includes_saved_profile() {
-    let addr = spawn_app().await;
+    let (addr, profiles) = spawn_app_with_store().await;
     let client = reqwest::Client::new();
 
-    let saved_id = {
-        let resp = authed(
-            client
-                .post(format!("http://{addr}/v1/profiles"))
-                .json(&serde_json::json!({ "snapshot": rich_snapshot() })),
-        )
-        .send()
-        .await
-        .unwrap();
-        let body: Value = resp.json().await.unwrap();
-        body["data"]["profile_id"].as_str().unwrap().to_string()
-    };
+    let saved_id = save_snapshot(&profiles, None, &rich_snapshot()).await;
 
     let list_resp = authed(client.get(format!("http://{addr}/v1/profiles")))
         .send()
@@ -286,21 +286,10 @@ async fn profile_rename_of_legacy_metadata_less_profile_persists_user_private_no
     // ephemeral — `create_profile`/`update_profile` reject that scope
     // outright for any explicit request). It must coerce to
     // `user_private` instead.
-    let addr = spawn_app().await;
+    let (addr, profiles) = spawn_app_with_store().await;
     let client = reqwest::Client::new();
 
-    let saved_id = {
-        let resp = authed(
-            client
-                .post(format!("http://{addr}/v1/profiles"))
-                .json(&serde_json::json!({ "snapshot": rich_snapshot() })),
-        )
-        .send()
-        .await
-        .unwrap();
-        let body: Value = resp.json().await.unwrap();
-        body["data"]["profile_id"].as_str().unwrap().to_string()
-    };
+    let saved_id = save_snapshot(&profiles, None, &rich_snapshot()).await;
 
     let renamed = authed(
         client
@@ -389,21 +378,10 @@ async fn profile_restore_probe_includes_name_and_scope() {
 
 #[tokio::test]
 async fn profile_delete_removes_entry() {
-    let addr = spawn_app().await;
+    let (addr, profiles) = spawn_app_with_store().await;
     let client = reqwest::Client::new();
 
-    let saved_id = {
-        let resp = authed(
-            client
-                .post(format!("http://{addr}/v1/profiles"))
-                .json(&serde_json::json!({ "snapshot": rich_snapshot() })),
-        )
-        .send()
-        .await
-        .unwrap();
-        let body: Value = resp.json().await.unwrap();
-        body["data"]["profile_id"].as_str().unwrap().to_string()
-    };
+    let saved_id = save_snapshot(&profiles, None, &rich_snapshot()).await;
 
     let del_resp = authed(client.delete(format!("http://{addr}/v1/profiles/{saved_id}")))
         .send()
@@ -434,28 +412,37 @@ async fn profile_load_unknown_returns_404() {
 
 #[tokio::test]
 async fn profile_save_with_specified_id_round_trips_that_id() {
-    let addr = spawn_app().await;
+    let (addr, profiles) = spawn_app_with_store().await;
     let client = reqwest::Client::new();
     let chosen: quarry_core::ids::kinds::ProfileKind = quarry_core::ids::Id::new();
     let chosen_str = chosen.to_string();
 
-    let resp = authed(
-        client
-            .post(format!("http://{addr}/v1/profiles"))
-            .json(&serde_json::json!({
-                "profile_id": chosen_str,
-                "snapshot": rich_snapshot(),
-            })),
-    )
-    .send()
-    .await
-    .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["data"]["profile_id"].as_str().unwrap(), chosen_str);
+    let saved = save_snapshot(&profiles, Some(chosen), &rich_snapshot()).await;
+    assert_eq!(saved, chosen_str);
 
     let load = authed(client.get(format!("http://{addr}/v1/profiles/{chosen_str}")))
         .send()
         .await
         .unwrap();
     assert!(load.status().is_success());
+}
+
+/// D2-055: the dev-bypass stub cannot import a profile. `POST /v1/profiles` answers 403 and
+/// names the scope; nothing is stored.
+#[tokio::test]
+async fn the_dev_bypass_stub_cannot_import_a_profile() {
+    let (addr, profiles) = spawn_app_with_store().await;
+    let client = reqwest::Client::new();
+    let resp = authed(
+        client
+            .post(format!("http://{addr}/v1/profiles"))
+            .json(&serde_json::json!({ "snapshot": rich_snapshot() })),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(resp.status().as_u16(), 403);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("quarry:profiles:import"), "{text}");
+    assert!(profiles.list("org_placeholder").await.unwrap().is_empty());
 }

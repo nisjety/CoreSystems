@@ -16,6 +16,7 @@ jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
 }));
 const mockResolveInteractiveRetentionPosture = jest.fn();
+const mockResolveFreshExecutionRetentionProof = jest.fn();
 // Only the interactive posture is replaced; the organization-binding check stays
 // the real one (these registries are `allowAnyOrg`, which it lets through
 // without a lookup).
@@ -24,6 +25,7 @@ jest.mock('./interactive-retention-policy', () => ({
     './interactive-retention-policy',
   ),
   resolveInteractiveRetentionPosture: mockResolveInteractiveRetentionPosture,
+  resolveFreshExecutionRetentionProof: mockResolveFreshExecutionRetentionProof,
 }));
 
 import { PlaneTokenController } from './plane-token.controller';
@@ -289,6 +291,7 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
     mockGetSession.mockReset();
     mockResolveCanonicalTokenContext.mockReset();
     mockResolveInteractiveRetentionPosture.mockReset();
+    mockResolveFreshExecutionRetentionProof.mockReset();
     mockGetSession.mockResolvedValue({
       user: { id: 'user-a', email: 'user@example.test' },
       session: { activeOrganizationId: 'org-a' },
@@ -299,6 +302,26 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
       zdr: false,
       authority: 'interactive-org-retention-policy',
     });
+  });
+
+  it('requests fresh proof only for the execution audience, without changing normal minting when unavailable', async () => {
+    mockResolveCanonicalTokenContext.mockResolvedValue({ orgId: 'org-a', role: 'member' });
+    const tokens = {
+      isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: 'interactive' }),
+    };
+    const controller = new PlaneTokenController(tokens as never, {} as never);
+    const proof = { orgId: 'org-a', authority: 'fresh-interactive-org-retention-policy', zdr: false };
+    mockResolveFreshExecutionRetentionProof.mockResolvedValueOnce(proof).mockResolvedValueOnce(undefined);
+    await controller.getToken('execution-core', { headers: {} } as never);
+    expect(tokens.issuePlaneToken).toHaveBeenLastCalledWith('execution-core', expect.objectContaining({ executionRetentionProof: proof }));
+    await controller.getToken('execution-core', { headers: {} } as never);
+    expect(tokens.issuePlaneToken).toHaveBeenLastCalledWith('execution-core', expect.objectContaining({ executionRetentionProof: undefined }));
+    await controller.getToken('session-core', { headers: {} } as never);
+    expect(mockResolveFreshExecutionRetentionProof).toHaveBeenCalledTimes(2);
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({ zdr: true, authority: 'interactive-org-retention-policy' });
+    await controller.getToken('execution-core', { headers: {} } as never);
+    expect(mockResolveFreshExecutionRetentionProof).toHaveBeenCalledTimes(2);
   });
 
   it.each([

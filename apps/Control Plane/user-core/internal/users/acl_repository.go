@@ -20,9 +20,10 @@ import (
 // table only records the explicit shares that widen that default.
 
 const (
-	subjectTypeUser = "user"
-	roleView        = "view"
-	roleEdit        = "edit"
+	subjectTypeUser  = "user"
+	subjectTypeSpace = "space"
+	roleView         = "view"
+	roleEdit         = "edit"
 
 	resourceTypeDocument = "document"
 )
@@ -263,6 +264,126 @@ func (r *AclRepository) RevokeAllForSubject(ctx context.Context, orgID, subjectT
 	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to revoke grants for subject: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
+// NormalizeGrantRole is normalizeRole for callers outside the package (the
+// owner-asserted facade decides role_not_supported from the normalized role).
+func NormalizeGrantRole(role string) (string, error) { return normalizeRole(role) }
+
+// IsActiveOrgMember reports whether the user is an active member of the org.
+// The owner-asserted grant path refuses a subject outside the org: a share
+// never crosses a tenant boundary.
+func (r *AclRepository) IsActiveOrgMember(ctx context.Context, orgID, userID string) (bool, error) {
+	var active bool
+	if err := r.db.Pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM user_org_memberships WHERE user_id=$1 AND org_id=$2 AND status='active')`,
+		userID, orgID,
+	).Scan(&active); err != nil {
+		return false, fmt.Errorf("failed to check org membership: %w", err)
+	}
+	return active, nil
+}
+
+// ErrSpaceNotGrantable means the Space is not an active, shared Space of the
+// grant's org, or the resource type cannot be granted to a Space.
+var ErrSpaceNotGrantable = errors.New("space is not grantable for this resource")
+
+// GrantSpaceSubject is the ONLY writer of a subject_type='space' row (WS14-S2).
+// The row means "the owner attached this resource to the room": it is honoured
+// only inside a Space read that also proves current membership and audience
+// (ListVisibleForSpace), so it can narrow or co-require but never widen an
+// owner ACL. It requires a Space-grantable resource type (documents only) and
+// an active, non-personal Space registered in the grant's org. The role is
+// always 'view'. Idempotent: replaying keeps the first granter and time and
+// reports created=false.
+func (r *AclRepository) GrantSpaceSubject(ctx context.Context, orgID, resourceType, resourceID, spaceRef, grantedBy string) (*ResourceGrant, bool, error) {
+	if err := authztaxonomy.ValidateUserGrant(resourceType); err != nil {
+		return nil, false, fmt.Errorf("grant rejected: %w", err)
+	}
+	if !authztaxonomy.SpaceGrantable(resourceType) {
+		return nil, false, fmt.Errorf("grant rejected: %w", ErrSpaceNotGrantable)
+	}
+	var registered bool
+	if err := r.db.Pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		    SELECT 1 FROM registered_spaces
+		    WHERE space_ref=$1 AND org_id=$2 AND registration_state='active' AND space_kind <> 'personal')`,
+		spaceRef, orgID,
+	).Scan(&registered); err != nil {
+		return nil, false, fmt.Errorf("failed to resolve Space for grant: %w", err)
+	}
+	if !registered {
+		return nil, false, fmt.Errorf("grant rejected: %w", ErrSpaceNotGrantable)
+	}
+	out := &ResourceGrant{}
+	var created bool
+	err := r.db.Pool.QueryRow(ctx,
+		`INSERT INTO resource_grants
+		    (grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by)
+		 VALUES ($1, $2, $3, $4, 'space', $5, 'view', $6)
+		 ON CONFLICT (org_id, resource_type, resource_id, subject_type, subject_id)
+		 DO UPDATE SET role = resource_grants.role
+		 RETURNING grant_id, org_id, resource_type, resource_id, subject_type, subject_id, role, granted_by, granted_at, (xmax = 0)`,
+		uuid.New().String(), orgID, resourceType, resourceID, spaceRef, grantedBy,
+	).Scan(&out.GrantID, &out.OrgID, &out.ResourceType, &out.ResourceID,
+		&out.SubjectType, &out.SubjectID, &out.Role, &out.GrantedBy, &out.GrantedAt, &created)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to upsert Space grant: %w", err)
+	}
+	return out, created, nil
+}
+
+// ListVisibleForSpace returns the resource ids of a type that are attached to
+// the Space (a subject_type='space' grant) AND that the user may see through
+// the Space right now: the Space is registered in the org, not personal, and
+// active or archived (read-only), the user is an active org member AND an
+// active Space member AND in the Space's CURRENT recipient audience. ok=false
+// (and no ids) means the user does not resolve as a current member; the caller
+// treats that as an empty set, never as an error that leaks existence. The
+// audience revision is the one the join used.
+func (r *AclRepository) ListVisibleForSpace(ctx context.Context, orgID, resourceType, spaceRef, userID string) (ids []string, audienceRevision int64, ok bool, err error) {
+	var granted []string
+	err = r.db.Pool.QueryRow(ctx,
+		`SELECT r.recipient_audience_revision,
+		        ARRAY(SELECT g.resource_id FROM resource_grants g
+		              WHERE g.org_id=s.org_id AND g.resource_type=$3
+		                AND g.subject_type='space' AND g.subject_id=s.space_ref
+		              ORDER BY g.granted_at ASC, g.resource_id ASC)
+		 FROM registered_spaces s
+		 JOIN space_memberships m ON m.space_ref=s.space_ref
+		 JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		 JOIN space_recipient_audience_members am
+		   ON am.space_ref=s.space_ref AND am.revision=r.recipient_audience_revision AND am.subject_id=m.subject_id
+		 WHERE s.space_ref=$1 AND s.org_id=$2
+		   AND s.registration_state IN ('active','archived')
+		   AND s.space_kind <> 'personal'
+		   AND m.subject_type='user' AND m.subject_id=$4 AND m.active=TRUE
+		   AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$4 AND u.org_id=$2 AND u.status='active')`,
+		spaceRef, orgID, resourceType, userID,
+	).Scan(&audienceRevision, &granted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return []string{}, 0, false, nil
+	}
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("failed to list Space-visible resources: %w", err)
+	}
+	if granted == nil {
+		granted = []string{}
+	}
+	return granted, audienceRevision, true, nil
+}
+
+// RevokeSpaceGrants removes every grant whose subject is the Space, across
+// resource types (the Space's attached files stop being reachable through it).
+// Returns the number of rows removed. Space deletion does the same inside its
+// own transaction (purgeControlSpaceProjections); this is the standalone form.
+func (r *AclRepository) RevokeSpaceGrants(ctx context.Context, spaceRef string) (int64, error) {
+	result, err := r.db.Pool.Exec(ctx,
+		`DELETE FROM resource_grants WHERE subject_type='space' AND subject_id=$1`, spaceRef)
+	if err != nil {
+		return 0, fmt.Errorf("failed to revoke Space grants: %w", err)
 	}
 	return result.RowsAffected(), nil
 }

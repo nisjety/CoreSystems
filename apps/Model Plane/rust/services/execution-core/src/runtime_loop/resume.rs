@@ -103,6 +103,235 @@ pub(crate) fn loop_resume_enabled() -> bool {
     mp_contracts::loop_fold::loop_resume_enabled()
 }
 
+/// The environment switch for a question that pauses its run for an answer in that same run (build
+/// plan WS14 S5). Read strictly: only the literal `true` enables it.
+pub(crate) const ASK_RESUME_ENV: &str = "AGENT_ASK_USER_RESUME_ENABLED";
+
+/// Whether a question may pause its run for a same-run answer: its own switch, and both switches of
+/// the approval continuation it resumes through (`AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` and
+/// `EXECUTION_LOOP_RESUME_ENABLED`). All three must be on. Otherwise the answer is the next turn.
+#[must_use]
+pub(crate) fn ask_resume_on_when(own: Option<&str>, continue_on: bool, loop_resume_on: bool) -> bool {
+    own == Some("true") && continue_on && loop_resume_on
+}
+
+/// [`ask_resume_on_when`] read from this process's environment and the continuation switches.
+pub(crate) fn ask_resume_enabled() -> bool {
+    ask_resume_on_when(
+        std::env::var(ASK_RESUME_ENV).ok().as_deref(),
+        continue_enabled(),
+        loop_resume_enabled(),
+    )
+}
+
+/// The environment switch for running a call the person edited before approving it (EP-10-S5).
+/// The same name session-core and the model-gateway read for the edit itself. Read strictly: only
+/// the literal `true` enables it.
+pub(crate) const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the approval edit switch (see `TEST_CONTINUE`).
+    static TEST_APPROVAL_EDIT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds the approval edit switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+pub(crate) struct ApprovalEditSwitch;
+
+#[cfg(test)]
+impl ApprovalEditSwitch {
+    pub(crate) fn set(on: bool) -> Self {
+        TEST_APPROVAL_EDIT.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ApprovalEditSwitch {
+    fn drop(&mut self) {
+        TEST_APPROVAL_EDIT.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether `APPROVAL_EDIT_ENABLED` is on in this process (the one strict parser,
+/// `mp_contracts::loop_fold::switch_from`). Default off: a revised approval then restores and
+/// reports exactly as before (its in-place restore falls back, and no edit note is added).
+pub(crate) fn approval_edit_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_APPROVAL_EDIT.with(std::cell::Cell::get) {
+        return forced;
+    }
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
+}
+
+/// What the model is told about a call the person edited before approving it (EP-10-S5, D8):
+/// the names of the fields they changed, never the values. Built only by the resume boundary,
+/// from the consumed approval and the fold's draft, never from the model's arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditNote {
+    /// The fields that differ from the draft, in the fixed order `to`, `subject`, `body_text`
+    /// (`mp_contracts::approval_edit`'s names). Empty when no draft was at hand to compare with
+    /// (a stage-1 segment restores no fold): the note then says the call was edited, unnamed.
+    fields: Vec<&'static str>,
+}
+
+/// The words the model reads for each field name.
+const EDIT_FIELD_WORDS: [(&str, &str); 3] = [
+    (mp_contracts::approval_edit::FIELD_TO, "recipients"),
+    (mp_contracts::approval_edit::FIELD_SUBJECT, "subject"),
+    (mp_contracts::approval_edit::FIELD_BODY_TEXT, "body"),
+];
+
+/// What the step record keeps when the edited fields are not known.
+const EDIT_FIELDS_UNNAMED: &str = "unnamed";
+
+impl EditNote {
+    /// An edit whose fields are not known (no draft to compare with).
+    pub(crate) const fn unnamed() -> Self {
+        Self { fields: Vec::new() }
+    }
+
+    /// The fields that differ from the draft.
+    #[cfg(test)] // read by the tests only: production reads the sentence and the step note
+    pub(crate) fn fields(&self) -> &[&'static str] {
+        &self.fields
+    }
+
+    /// The sentence the model reads ahead of the released call's result.
+    pub(crate) fn sentence(&self) -> String {
+        let words: Vec<&str> = EDIT_FIELD_WORDS
+            .iter()
+            .filter(|(field, _)| self.fields.contains(field))
+            .map(|(_, word)| *word)
+            .collect();
+        let what = if words.is_empty() {
+            "this call".to_owned()
+        } else {
+            words.join(", ")
+        };
+        format!(
+            "The person edited {what} before approving; the sent version differs from your draft. \
+             Do not quote your draft as what was sent."
+        )
+    }
+
+    /// The suffix the step record keeps: ` edited=<names>`, field names only.
+    pub(crate) fn step_note(&self) -> String {
+        if self.fields.is_empty() {
+            return format!(" edited={EDIT_FIELDS_UNNAMED}");
+        }
+        format!(" edited={}", self.fields.join(","))
+    }
+
+    /// The note whose [`EditNote::sentence`] is exactly `line`, or `None`. Only the notes this
+    /// module can build are recognised (every subset of the three fields, and the unnamed one),
+    /// so a line that merely resembles one is never taken for it.
+    pub(crate) fn from_sentence(line: &str) -> Option<Self> {
+        let names: Vec<&'static str> = EDIT_FIELD_WORDS.iter().map(|(field, _)| *field).collect();
+        (0..1_u8 << names.len())
+            .map(|mask| Self {
+                fields: names
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| mask & (1 << index) != 0)
+                    .map(|(_, field)| *field)
+                    .collect(),
+            })
+            .find(|note| note.sentence() == line)
+    }
+}
+
+/// The mail body keys an edit may touch (`mp_contracts::approval_edit::apply_edit`); every other
+/// key of the body is the draft's.
+const EDITABLE_BODY_KEYS: [&str; 4] = ["to", "subject", "bodyText", "bodyHtml"];
+
+/// The fields a person's edit changed, when the edited call stays inside what an edit may change
+/// (EP-10-S5, D1 and D2): the same tool (`execute_provider_action`), the same connection, the same
+/// operation (a mail send), every key but `body` unchanged, and in `body` only `to`, `subject` and
+/// `bodyText` changed (`bodyHtml` may only be dropped, and only with a text edit). `None` for
+/// anything else, including an edit that changed nothing: the restore then falls back.
+///
+/// This is the executor's own check of the narrowing session-core's edit contract already made;
+/// it never widens what the person approved, it only names it.
+pub(crate) fn edited_mail_fields(
+    tool_name: &str,
+    drafted_input: &str,
+    edited_input: &str,
+) -> Option<Vec<&'static str>> {
+    use mp_contracts::approval_edit::{FIELD_BODY_TEXT, FIELD_SUBJECT, FIELD_TO};
+    use mp_contracts::provider_writes::{is_mail_send, mail_recipients};
+    use serde_json::Value;
+
+    if tool_name.trim() != super::EXECUTE_PROVIDER_ACTION_TOOL {
+        return None;
+    }
+    let drafted: Value = serde_json::from_str(drafted_input).ok()?;
+    let edited: Value = serde_json::from_str(edited_input).ok()?;
+    let (drafted, edited) = (drafted.as_object()?, edited.as_object()?);
+    let text = |object: &serde_json::Map<String, Value>, key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty())
+    };
+    // An edit may not retarget: the connection and the operation are the draft's.
+    let connection = text(drafted, "connection_id")?;
+    let operation = text(drafted, "operation")?;
+    if text(edited, "connection_id")? != connection
+        || text(edited, "operation")? != operation
+        || !is_mail_send(&operation)
+    {
+        return None;
+    }
+    // Every key but the body is the draft's, and no key is added or dropped.
+    if drafted.len() != edited.len()
+        || drafted
+            .iter()
+            .any(|(key, value)| key != "body" && edited.get(key) != Some(value))
+    {
+        return None;
+    }
+    let (Some(Value::Object(draft_body)), Some(Value::Object(edit_body))) =
+        (drafted.get("body"), edited.get("body"))
+    else {
+        return None;
+    };
+    let frozen_key_changed = draft_body.keys().chain(edit_body.keys()).any(|key| {
+        !EDITABLE_BODY_KEYS.contains(&key.as_str()) && draft_body.get(key) != edit_body.get(key)
+    });
+    if frozen_key_changed {
+        return None;
+    }
+    let subject = |body: &serde_json::Map<String, Value>| {
+        body.get("subject")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_owned()
+    };
+    let mut fields = Vec::new();
+    if mail_recipients(draft_body.get("to")) != mail_recipients(edit_body.get("to")) {
+        fields.push(FIELD_TO);
+    }
+    if subject(draft_body) != subject(edit_body) {
+        fields.push(FIELD_SUBJECT);
+    }
+    if draft_body.get("bodyText") != edit_body.get("bodyText") {
+        fields.push(FIELD_BODY_TEXT);
+    }
+    // The formatted body may only go, and only when the text was edited (it would no longer
+    // match the text); it is never added or changed.
+    match (draft_body.get("bodyHtml"), edit_body.get("bodyHtml")) {
+        (_, None) if fields.contains(&FIELD_BODY_TEXT) => {}
+        (None, None) => {}
+        (Some(drafted_html), Some(edited_html)) if drafted_html == edited_html => {}
+        _ => return None,
+    }
+    (!fields.is_empty()).then_some(fields)
+}
+
 /// Why a release could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReleaseRefusal {
@@ -144,6 +373,9 @@ pub(crate) struct ApprovedRelease {
     tool_name: String,
     class: EffectClass,
     args_digest: String,
+    /// Set when the person edited the call before approving it (EP-10-S5); the released call's
+    /// result then says so. It never changes what the release covers.
+    edit: Option<EditNote>,
 }
 
 impl ApprovedRelease {
@@ -173,7 +405,19 @@ impl ApprovedRelease {
             tool_name: tool_name.to_owned(),
             class: effect::effect_class_of(tool_name, tool_input),
             args_digest,
+            edit: None,
         })
+    }
+
+    /// The same release, with the person's edit of the call recorded (or cleared with `None`).
+    #[must_use]
+    pub(crate) fn with_edit(self, edit: Option<EditNote>) -> Self {
+        Self { edit, ..self }
+    }
+
+    /// The person's edit of the released call, when there was one.
+    pub(crate) fn edit(&self) -> Option<&EditNote> {
+        self.edit.as_ref()
     }
 
     /// Whether this release covers the call: the same step, the same tool and
@@ -909,6 +1153,27 @@ pub(crate) struct Consumed {
     pub effective: Authority,
     /// The segment this continuation is (the paused step's segment plus one).
     pub segment: u32,
+    /// How many times the person edited the call before granting it (EP-10-S5); 0 when
+    /// `tool_input_json` is the call the model drafted.
+    pub revision: u32,
+    /// The fingerprint of the call as the model drafted it, set only with `revision > 0`. A
+    /// digest: the fold's pending pause names this one, not the edited call's.
+    pub original_action_fingerprint: String,
+}
+
+impl Consumed {
+    /// Whether this approval is a revised one the executor may run as edited: the person edited
+    /// it, session-core says which draft it replaced, and `APPROVAL_EDIT_ENABLED` is on. With
+    /// the switch off a revised approval is treated as before (its in-place restore falls back).
+    pub(crate) fn edited(&self) -> bool {
+        self.revision > 0 && !self.original_action_fingerprint.is_empty() && approval_edit_enabled()
+    }
+
+    /// The note a stage-1 segment's released call carries: there is no fold, so no draft to name
+    /// the fields from. `None` for a call the person did not edit, or with the switch off.
+    pub(crate) fn edit_note(&self) -> Option<EditNote> {
+        self.edited().then(EditNote::unnamed)
+    }
 }
 
 impl std::fmt::Debug for Consumed {
@@ -919,6 +1184,7 @@ impl std::fmt::Debug for Consumed {
             .field("tool_name", &self.tool_name)
             .field("step_id", &self.step_id)
             .field("segment", &self.segment)
+            .field("revision", &self.revision)
             .field("mode", &self.mode)
             .field("snapshot_digest", &self.snapshot_digest)
             .field("tools", &self.tools.len())
@@ -1037,6 +1303,9 @@ pub(crate) struct Restored {
     pub claimed_seq: u64,
     /// The segment the resumed loop writes under.
     pub segment: u32,
+    /// The person's edit of the approved call, named against the fold's draft (EP-10-S5).
+    /// `None` for a call the model drafted.
+    pub edit: Option<EditNote>,
 }
 
 impl Restored {
@@ -1066,6 +1335,7 @@ impl std::fmt::Debug for Restored {
             .field("attempted_retrievals", &self.attempted_retrievals.len())
             .field("claimed_seq", &self.claimed_seq)
             .field("segment", &self.segment)
+            .field("edit", &self.edit)
             .finish()
     }
 }
@@ -1135,6 +1405,8 @@ struct Checked {
     pending: usize,
     /// For each call, the index of its completed entry.
     completed: Vec<Option<usize>>,
+    /// The person's edit of the pending call, named against the fold's draft (EP-10-S5).
+    edit: Option<EditNote>,
 }
 
 /// The pure checks of a claimed fold against the consumed approval, before the ledger is
@@ -1150,10 +1422,13 @@ struct Checked {
 /// 8. the claimed authority digest is the fold authority's;
 /// 9. the fold authority is no wider than the snapshot's (REFUSE);
 /// 10. the fold's pending pause is this approval's: pause reference, step and tool, a
-///     fingerprint that is present and, when the resume states one, equal;
+///     fingerprint that is present and, when the resume states one, equal; for a call the
+///     person edited (`Consumed::edited`), also equal to the draft's fingerprint;
 /// 11. the open round is 1 to 64 calls and exactly one is the approved call, with the same
 ///     tool and the same arguments digest (the consumed descriptor has no fingerprint, so
-///     the identity rests on pause reference, step, tool and digest);
+///     the identity rests on pause reference, step, tool and digest); for a call the person
+///     edited, the digest is not compared and the edit must stay inside the edit contract
+///     instead ([`edited_mail_fields`]: same tool, connection and operation);
 /// 12. every completed entry belongs to exactly one call, found by step id, or for a call
 ///     refused before dispatch by its unique provider id; none belongs to the pending call;
 /// 13. a call with no step id has its outcome;
@@ -1197,10 +1472,13 @@ fn check_fold(
         return refuse(Refusal::AuthorityWidened);
     }
 
-    // 10: the pause is this approval's.
+    // 10: the pause is this approval's. A call the person edited (EP-10-S5) still answers the
+    // pause the model drafted, so the fold's fingerprint is held against the draft's, which
+    // session-core kept when the edit replaced it.
     let Some(pending) = &fold.pending else {
         return fallback(F::PendingMismatch);
     };
+    let edited = consumed.edited();
     if pending.kind != PauseKind::Approval
         || consumed.step_id.is_empty()
         || pending.pause_ref != format!("{run_id}:{}", consumed.step_id)
@@ -1208,6 +1486,7 @@ fn check_fold(
         || pending.call != consumed.tool_name
         || pending.action_fingerprint.is_empty()
         || (!resume_fingerprint.is_empty() && resume_fingerprint != pending.action_fingerprint)
+        || (edited && pending.action_fingerprint != consumed.original_action_fingerprint)
     {
         return fallback(F::PendingMismatch);
     }
@@ -1229,13 +1508,24 @@ fn check_fold(
     };
     let fold_digest = effect::args_digest_of(&call.arguments_json);
     let consumed_digest = effect::args_digest_of(&consumed.tool_input_json);
-    if call.name != consumed.tool_name
-        || call.arguments_json.is_empty()
-        || fold_digest.is_none()
-        || fold_digest != consumed_digest
-    {
+    if call.name != consumed.tool_name || call.arguments_json.is_empty() || fold_digest.is_none() {
         return fallback(F::PendingMismatch);
     }
+    // The digest equality is relaxed for this one call only when the person edited it: the
+    // edited call must then stay inside what an edit may change (same tool, connection and
+    // operation, only the mail fields), and the fields it changed are named for the model.
+    let edit = if edited {
+        let Some(fields) =
+            edited_mail_fields(&call.name, &call.arguments_json, &consumed.tool_input_json)
+        else {
+            return fallback(F::PendingMismatch);
+        };
+        Some(EditNote { fields })
+    } else if fold_digest != consumed_digest {
+        return fallback(F::PendingMismatch);
+    } else {
+        None
+    };
 
     // 12: every outcome belongs to one call.
     let mut completed: Vec<Option<usize>> = vec![None; round.calls.len()];
@@ -1292,6 +1582,7 @@ fn check_fold(
     Ok(Checked {
         pending: pending_index,
         completed,
+        edit,
     })
 }
 
@@ -1447,6 +1738,7 @@ fn reconcile(
         attempted_retrievals: fold.attempted_retrievals.iter().cloned().collect(),
         claimed_seq: claimed.seq,
         segment: consumed.segment,
+        edit: checked.edit.clone(),
     })
 }
 
@@ -1689,6 +1981,18 @@ pub(crate) async fn restore_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The question resume switch is on only for the literal `true`, and only with both continuation
+    /// switches it rides on.
+    #[test]
+    fn the_ask_resume_switch_needs_its_literal_true_and_both_continuation_switches() {
+        assert!(ask_resume_on_when(Some("true"), true, true));
+        for own in [None, Some("TRUE"), Some("1"), Some("on"), Some(" true"), Some("false")] {
+            assert!(!ask_resume_on_when(own, true, true), "{own:?} must not enable the resume switch");
+        }
+        assert!(!ask_resume_on_when(Some("true"), false, true), "the approval continuation must be on");
+        assert!(!ask_resume_on_when(Some("true"), true, false), "the loop resume must be on");
+    }
 
     /// The gate a release test runs under: off, so the answer is the name's.
     fn gate_off() -> RunGate<'static> {
@@ -2369,6 +2673,8 @@ mod tests {
             snapshot_digest: authority.digest(),
             effective: authority.clone(),
             segment: 2,
+            revision: 0,
+            original_action_fingerprint: String::new(),
         }
     }
 
@@ -3959,5 +4265,274 @@ mod tests {
         })
         .await;
         assert_eq!(refusal_of(result), Refusal::ContinuationAlreadyConsumed);
+    }
+
+    // ---- an approval the person edited (EP-10-S5) ----
+
+    const PROVIDER_ACTION: &str = "execute_provider_action";
+    /// The fold's pending fingerprint: the draft's, which session-core keeps as the original.
+    const DRAFT_FINGERPRINT: &str = "fp-1";
+
+    /// The mail send the model drafted, as the fold keeps it.
+    fn drafted_mail() -> serde_json::Value {
+        serde_json::json!({
+            "connection_id": "conn-1",
+            "operation": "gmail.send",
+            "params": {},
+            "body": {
+                "to": ["alice@example.com"],
+                "subject": "Old subject",
+                "bodyText": "the drafted body",
+                "bodyHtml": "<p>the drafted body</p>",
+                "threadId": "thread-1",
+            },
+        })
+    }
+
+    /// The draft after the person's edit, as `apply_edit` builds it: a changed subject and body,
+    /// and the formatted copy dropped with the text edit.
+    fn edited_mail() -> serde_json::Value {
+        let mut edited = drafted_mail();
+        edited["body"]["subject"] = "New subject".into();
+        edited["body"]["bodyText"] = "the edited body".into();
+        edited["body"]
+            .as_object_mut()
+            .expect("an object body")
+            .remove("bodyHtml");
+        edited
+    }
+
+    /// The pause fold with a mail send as its pending call, drafted as `drafted_mail`.
+    fn mail_pause_fold() -> LoopFoldV1 {
+        let mut fold = pause_fold();
+        let round = round_mut(&mut fold);
+        round.calls[1].name = PROVIDER_ACTION.to_owned();
+        round.calls[1].arguments_json = drafted_mail().to_string();
+        let pending = fold.pending.as_mut().expect("the pause fold has a pending pause");
+        pending.call = PROVIDER_ACTION.to_owned();
+        pending.action_fingerprint = DRAFT_FINGERPRINT.to_owned();
+        fold
+    }
+
+    /// The consume of the mail send: `input` as the retained descriptor holds it, with the
+    /// revision session-core reports and the draft's fingerprint when it is a revision.
+    fn consumed_mail(input: &serde_json::Value, revision: u32) -> Consumed {
+        Consumed {
+            tool_name: PROVIDER_ACTION.to_owned(),
+            tool_input_json: input.to_string(),
+            revision,
+            original_action_fingerprint: if revision > 0 {
+                DRAFT_FINGERPRINT.to_owned()
+            } else {
+                String::new()
+            },
+            ..consumed()
+        }
+    }
+
+    fn restore_mail(consumed: &Consumed) -> Result<Restored, RestoreOrRefuse> {
+        restore_of(&claimed_of(mail_pause_fold()), consumed, &Ledger::new())
+    }
+
+    #[test]
+    fn the_approval_edit_switch_follows_the_environment_unless_a_test_forces_it() {
+        {
+            let _on = ApprovalEditSwitch::set(true);
+            assert!(approval_edit_enabled());
+        }
+        {
+            let _off = ApprovalEditSwitch::set(false);
+            assert!(!approval_edit_enabled());
+        }
+        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
+        assert_eq!(
+            approval_edit_enabled(),
+            mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
+        );
+    }
+
+    #[test]
+    fn an_edited_approval_restores_in_place_with_the_edited_call_and_names_the_fields() {
+        let _on = ApprovalEditSwitch::set(true);
+        let restored = restore_mail(&consumed_mail(&edited_mail(), 1)).expect("restores in place");
+        assert!(restored.is_consistent());
+        // The released call is the edited one, never the fold's draft.
+        assert_eq!(restored.response.tool_calls[1].name, PROVIDER_ACTION);
+        assert_eq!(restored.response.tool_calls[1].arguments_json, edited_mail().to_string());
+        assert_eq!(
+            restored.slots[1],
+            SeedSlot::Release {
+                step_id: RELEASE_ID.to_owned()
+            }
+        );
+        let edit = restored.edit.expect("the edit is named against the draft");
+        assert_eq!(edit.fields(), ["subject", "body_text"]);
+        // Every other call of the round is exactly as an unedited restore leaves it.
+        assert_eq!(restored.response.tool_calls[0].arguments_json, r#"{"query":"stale"}"#);
+    }
+
+    #[test]
+    fn an_unedited_mail_send_restores_with_no_edit_note() {
+        let _on = ApprovalEditSwitch::set(true);
+        let restored = restore_mail(&consumed_mail(&drafted_mail(), 0)).expect("restores");
+        assert_eq!(restored.edit, None);
+    }
+
+    #[test]
+    fn an_edited_approval_falls_back_when_the_switch_is_off() {
+        let _off = ApprovalEditSwitch::set(false);
+        assert_eq!(
+            fallback_of(restore_mail(&consumed_mail(&edited_mail(), 1))),
+            RestoreFailure::PendingMismatch,
+            "with the switch off a revised approval falls back exactly as before"
+        );
+        assert_eq!(consumed_mail(&edited_mail(), 1).edit_note(), None);
+    }
+
+    #[test]
+    fn a_changed_call_with_no_revision_is_never_relaxed() {
+        let _on = ApprovalEditSwitch::set(true);
+        // revision 0: session-core says the call is the draft, so a different call is a mismatch.
+        assert_eq!(
+            fallback_of(restore_mail(&consumed_mail(&edited_mail(), 0))),
+            RestoreFailure::PendingMismatch
+        );
+        // A revision with no original fingerprint is not an edit the loop can match.
+        let mut no_original = consumed_mail(&edited_mail(), 1);
+        no_original.original_action_fingerprint = String::new();
+        assert!(!no_original.edited());
+        assert_eq!(fallback_of(restore_mail(&no_original)), RestoreFailure::PendingMismatch);
+    }
+
+    #[test]
+    fn an_edited_approval_must_answer_the_drafts_own_pause() {
+        let _on = ApprovalEditSwitch::set(true);
+        // The original session-core kept is another draft's: not this pause.
+        let mut other_draft = consumed_mail(&edited_mail(), 1);
+        other_draft.original_action_fingerprint = "fp-other".to_owned();
+        assert_eq!(fallback_of(restore_mail(&other_draft)), RestoreFailure::PendingMismatch);
+        // A resume that states a fingerprint states the draft's (the pause's own), never the
+        // edited call's.
+        let claimed = claimed_of(mail_pause_fold());
+        let edited = consumed_mail(&edited_mail(), 1);
+        assert!(restore(&claimed, &edited, RUN, DRAFT_FINGERPRINT, RELEASE_ID, &Ledger::new(), PROMPT).is_ok());
+        assert_eq!(
+            fallback_of(restore(&claimed, &edited, RUN, "fp-edited", RELEASE_ID, &Ledger::new(), PROMPT)),
+            RestoreFailure::PendingMismatch
+        );
+    }
+
+    #[test]
+    fn an_edited_approval_cannot_change_connection_operation_or_anything_but_the_mail_fields() {
+        let _on = ApprovalEditSwitch::set(true);
+        let retargets: [(&str, fn(&mut serde_json::Value)); 8] = [
+            ("another connection", |v| v["connection_id"] = "conn-2".into()),
+            ("another operation", |v| v["operation"] = "mail.send".into()),
+            ("not a mail send", |v| v["operation"] = "slack.message.send".into()),
+            ("changed params", |v| v["params"] = serde_json::json!({"userId": "me"})),
+            ("an added top-level key", |v| v["approvalId"] = "appr-forged".into()),
+            ("a changed thread", |v| v["body"]["threadId"] = "thread-2".into()),
+            ("an added body key", |v| v["body"]["cc"] = serde_json::json!(["eve@example.com"])),
+            ("a changed formatted body", |v| v["body"]["bodyHtml"] = "<p>other</p>".into()),
+        ];
+        for (label, retarget) in retargets {
+            let mut input = edited_mail();
+            retarget(&mut input);
+            assert_eq!(
+                fallback_of(restore_mail(&consumed_mail(&input, 1))),
+                RestoreFailure::PendingMismatch,
+                "{label}: an edit may not change it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_edited_approval_of_another_tool_is_not_relaxed() {
+        let _on = ApprovalEditSwitch::set(true);
+        // The pause fold's own pending call (delete_records) under a revised consume.
+        let mut consumed = consumed();
+        consumed.tool_input_json = r#"{"table":"fresh"}"#.to_owned();
+        consumed.revision = 1;
+        consumed.original_action_fingerprint = "fp-1".to_owned();
+        assert!(consumed.edited());
+        assert_eq!(
+            fallback_of(restore_of(&claimed_of(pause_fold()), &consumed, &Ledger::new())),
+            RestoreFailure::PendingMismatch
+        );
+    }
+
+    #[test]
+    fn edited_mail_fields_names_only_what_the_person_changed() {
+        let drafted = drafted_mail();
+        let fields = |edited: &serde_json::Value| {
+            edited_mail_fields(PROVIDER_ACTION, &drafted.to_string(), &edited.to_string())
+        };
+        // A recipient edit keeps the formatted body.
+        let mut to_only = drafted.clone();
+        to_only["body"]["to"] = serde_json::json!(["alice@example.com", "bob@example.com"]);
+        assert_eq!(fields(&to_only), Some(vec!["to"]));
+        // A subject that differs only by surrounding space is not an edit of it.
+        let mut spaced = drafted.clone();
+        spaced["body"]["subject"] = "  Old subject ".into();
+        assert_eq!(fields(&spaced), None, "nothing changed");
+        assert_eq!(fields(&drafted), None, "nothing changed");
+        assert_eq!(fields(&edited_mail()), Some(vec!["subject", "body_text"]));
+        // The formatted body goes only with a text edit.
+        let mut html_dropped = to_only.clone();
+        html_dropped["body"].as_object_mut().unwrap().remove("bodyHtml");
+        assert_eq!(fields(&html_dropped), None);
+        // Another tool, or input that is not JSON, is never an edit.
+        assert_eq!(
+            edited_mail_fields("delete_records", &drafted.to_string(), &edited_mail().to_string()),
+            None
+        );
+        assert_eq!(edited_mail_fields(PROVIDER_ACTION, "not json", &edited_mail().to_string()), None);
+    }
+
+    #[test]
+    fn the_edit_note_names_fields_never_values() {
+        let named = EditNote {
+            fields: vec!["subject", "body_text"],
+        };
+        assert_eq!(
+            named.sentence(),
+            "The person edited subject, body before approving; the sent version differs from \
+             your draft. Do not quote your draft as what was sent."
+        );
+        assert_eq!(named.step_note(), " edited=subject,body_text");
+        let unnamed = EditNote::unnamed();
+        assert!(unnamed.sentence().starts_with("The person edited this call before approving;"));
+        assert_eq!(unnamed.step_note(), " edited=unnamed");
+        // Every note this module can build is recognised from its sentence, and nothing else is.
+        for note in [named, unnamed, EditNote { fields: vec!["to"] }] {
+            assert_eq!(EditNote::from_sentence(&note.sentence()), Some(note));
+        }
+        assert_eq!(EditNote::from_sentence("The person edited the database."), None);
+        assert_eq!(EditNote::from_sentence(""), None);
+    }
+
+    #[test]
+    fn a_stage_one_segment_carries_an_unnamed_note_only_when_edited_and_switched_on() {
+        let revised = consumed_mail(&edited_mail(), 1);
+        {
+            let _on = ApprovalEditSwitch::set(true);
+            assert_eq!(revised.edit_note(), Some(EditNote::unnamed()));
+            assert_eq!(consumed_mail(&drafted_mail(), 0).edit_note(), None);
+        }
+        let _off = ApprovalEditSwitch::set(false);
+        assert_eq!(revised.edit_note(), None);
+    }
+
+    #[test]
+    fn an_edit_note_never_changes_what_a_release_covers() {
+        let input = edited_mail().to_string();
+        let plain = ApprovedRelease::new(gate_off(), RELEASE_ID, PROVIDER_ACTION, &input).unwrap();
+        let noted = plain.clone().with_edit(Some(EditNote::unnamed()));
+        assert_eq!(noted.edit(), Some(&EditNote::unnamed()));
+        assert_eq!(plain.edit(), None);
+        assert!(noted.covers(RELEASE_ID, PROVIDER_ACTION, &input));
+        assert!(!noted.covers(RELEASE_ID, PROVIDER_ACTION, &drafted_mail().to_string()));
+        assert_eq!(noted.ledger_entry(RUN, "personal", false), plain.ledger_entry(RUN, "personal", false));
+        assert_eq!(noted.with_edit(None), plain);
     }
 }

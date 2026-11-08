@@ -168,3 +168,24 @@ func TestLoadAcceptsDeliveryWorkerWithExplicitProviderAndVerifier(t *testing.T) 
 		t.Fatalf("worker config = enabled:%v poll:%s lease:%s", cfg.DeliveryWorkerEnabled, cfg.DeliveryWorkerPollInterval, cfg.DeliveryWorkerLease)
 	}
 }
+
+func TestLoadNativeTypesEnabledOnlyByTheLiteralTrue(t *testing.T) {
+	for value, want := range map[string]bool{
+		"":      false,
+		"false": false,
+		"1":     false,
+		"yes":   false,
+		"TRUE":  false,
+		"true":  true,
+	} {
+		baseEnvironment(t)
+		t.Setenv("NOTIFICATION_NATIVE_TYPES_ENABLED", value)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+		if cfg.NativeTypesEnabled != want {
+			t.Fatalf("NOTIFICATION_NATIVE_TYPES_ENABLED=%q: NativeTypesEnabled = %v, want %v", value, cfg.NativeTypesEnabled, want)
+		}
+	}
+}

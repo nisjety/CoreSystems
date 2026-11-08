@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
 )
 
 const (
@@ -141,8 +143,8 @@ func NewControlFireAuthorizer(endpoint, token, keyID, publicKeyBase64 string, cl
 
 func NewControlDecisionVerifier(keyID, publicKeyBase64 string) (*ControlDecisionVerifier, error) {
 	keyID = strings.TrimSpace(keyID)
-	publicRaw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(publicKeyBase64))
-	if keyID == "" || err != nil || len(publicRaw) != ed25519.PublicKeySize {
+	publicRaw, _, err := decisionkey.DecodePublicKey(publicKeyBase64)
+	if keyID == "" || err != nil {
 		return nil, fmt.Errorf("Control schedule authorization public key is invalid")
 	}
 	return &ControlDecisionVerifier{keyID: keyID, public: ed25519.PublicKey(publicRaw)}, nil
@@ -296,6 +298,9 @@ func (v *ControlDecisionVerifier) verify(token string) (controlDecision, error) 
 	}
 	encodedKeyID, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || string(encodedKeyID) != v.keyID {
+		if err == nil {
+			decisionkey.ReportUnknownKey("cron", string(encodedKeyID), v.keyID)
+		}
 		return controlDecision{}, fmt.Errorf("untrusted Control schedule decision key")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[3])

@@ -81,6 +81,19 @@ A body refused by its content kind (`QUARRY_EDGE__DOC_ROUTING`, `docs/RUNBOOKS.m
 |---|---|---|
 | `viewport_emulation_failed` | `error` (Chromium's message) | a new page could not be given its viewport, so the tab does not open. `QUARRY_BROWSER_PAGE_HYGIENE=off` does not skip this call (`docs/RUNBOOKS.md`, "Browser viewport and page hygiene") |
 
+## 502 `DRIVER_FAILED` from the fetch waterfall (E3.8.1)
+
+Only with `QUARRY_EDGE__FETCH_SUB_CODES` on (`1`, `true` or `on`; default off). With the flag off a fetch failure carries no waterfall reason, as before. The code stays `DRIVER_FAILED` (502), and `retryable` is the reason's own flag, not the code's (false). `details.fallback_attempts` lists each tier that was tried with its error. A typed reason a tier already gave (`action_failed`, `session_reaped`, ...) is kept with its own flag.
+
+The waterfall names the chain's reason: the sub-code every tried tier failed with, when they all agree on one, else `all_drivers_failed`. A tier that answered with a status or a body the chain moved on from, a tier that was not registered, and two tiers that disagree all give `all_drivers_failed`. A tier names its own `dns`, `tls` or `connect` only where its driver can tell them apart. Until the static and TLS tiers do, every chain reports `all_drivers_failed`.
+
+| reason | retryable | meaning | what a caller does |
+|---|---|---|---|
+| `dns` | true | the host name did not resolve on every tier tried. A resolver fault can clear on a repeat; a name that does not exist fails the same way | check the host name; one or two retries at most |
+| `tls` | false | the TLS handshake or the certificate check failed on every tier tried | the site's TLS setup is the cause; repeating the same call will not help |
+| `connect` | true | no TCP connection could be made (refused, reset, unreachable) on every tier tried | retry shortly |
+| `all_drivers_failed` | false | every tier in the chain was tried and none served the page, and they did not agree on one cause | read `details.fallback_attempts` for each tier's error, then choose another source or wait |
+
 ## 429 `RATE_LIMITED` from the browser driver (driver caps, WS3.F)
 
 Checked after the run caps above (R-26), by the local Chromium driver's slot book (`crates/quarry-browser/src/slots.rs`). The body is `details {reason, scope, limit, active, retry_after_seconds}` with `retry_after_seconds` 15. Retryable.

@@ -105,6 +105,15 @@ pub struct Claims {
     pub service_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// INNH-10: the API key an `api_key` principal was minted for (the Better Auth key id, never
+    /// the key). Present only on an `api_key` token; on any other principal type it makes the
+    /// token ambiguous and [`Self::principal_kind`] refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<String>,
+    /// INNH-10: the user who owns the API key of an `api_key` principal. Attribution only: the
+    /// principal is the key (`sub = apikey:<key_id>`), never this person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_user_id: Option<String>,
 }
 
 /// The `step_up` claim: the holder re-proved their password at `at` (Unix seconds), so a
@@ -135,6 +144,116 @@ pub struct VerifiedStepUp(pub Option<StepUpClaim>);
 enum PrincipalKind {
     User,
     Service,
+    /// INNH-10: an API key exchanged by Auth Core for a short-lived token. Admitted ONLY on the
+    /// key-grant routes ([`API_KEY_ROUTES`]) and, while its switch is on, the Agent API routes
+    /// ([`AGENT_API_KEY_ROUTES`], EP-12 S5); refused on every other route by
+    /// [`authorize_principal_route`] and on the gRPC surface by `grpc_auth`.
+    ApiKey,
+}
+
+/// The subject prefix of an `api_key` principal: `sub` is exactly `apikey:<key_id>`.
+const API_KEY_SUBJECT_PREFIX: &str = "apikey:";
+/// The scope an `api_key` principal needs on the key-grant routes (INNH-10 OD-5).
+pub(crate) const API_KEY_SCOPE_BROWSER_AGENT: &str = "browser:agent";
+const MAX_API_KEY_ID_LEN: usize = 128;
+const MAX_ACTING_USER_ID_LEN: usize = 256;
+
+/// The only routes an `api_key` principal may reach, as `(method, axum path)`. Everything else
+/// is refused with 403 by [`authorize_principal_route`].
+pub const API_KEY_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/v1/browser/key-grants"),
+    ("DELETE", "/v1/browser/key-grants/:grant_id"),
+];
+
+/// Whether `method path` (a concrete request path) is one of [`API_KEY_ROUTES`]. A grant id is
+/// one non-empty path segment; the handler validates its characters.
+fn api_key_route_allowed(method: &str, path: &str) -> bool {
+    match method {
+        "POST" => path == "/v1/browser/key-grants",
+        "DELETE" => path
+            .strip_prefix("/v1/browser/key-grants/")
+            .is_some_and(|grant_id| !grant_id.is_empty() && !grant_id.contains('/')),
+        _ => false,
+    }
+}
+
+/// EP-12 S5: the scope an `api_key` principal needs on the Agent API routes (D3, D4). The
+/// key-grant routes keep `browser:agent`; neither scope opens the other's routes.
+pub(crate) const API_KEY_SCOPE_AGENT_RUNS: &str = "agent:runs";
+
+/// EP-12 S5: the Agent API routes an `api_key` principal reaches while `MODEL_GATEWAY_AGENT_API`
+/// is on, as `(method, axum path)`. Off, [`API_KEY_ROUTES`] is the whole allow-list.
+pub const AGENT_API_KEY_ROUTES: &[(&str, &str)] = &[
+    // EP-12 S7: start an Ask run.
+    ("POST", "/v1/agent/runs"),
+    ("GET", "/v1/agent/runs/:run_id"),
+    ("GET", "/v1/agent/runs/:run_id/events"),
+    ("POST", "/v1/agent/runs/:run_id/cancel"),
+    ("GET", "/v1/agent/threads/:thread_id/runs"),
+    ("GET", "/v1/agent/threads/:thread_id/messages"),
+];
+
+/// The one downstream header a key may send, and only on an Agent API route: its own
+/// `aud=session-core` bearer.
+const API_KEY_SESSION_HEADER: &str = "x-session-authorization";
+
+/// EP-12 S7: the second downstream header a key may send, and only on the start route: its own
+/// `aud=inference-core` bearer, which runs the Ask turn.
+const API_KEY_INFERENCE_HEADER: &str = "x-inference-authorization";
+
+/// EP-12 S7: whether `method path` is the Agent API start route, the only route that calls a
+/// model with the key's inference bearer.
+fn agent_api_start_route(method: &str, path: &str) -> bool {
+    method == "POST" && path == "/v1/agent/runs"
+}
+
+/// Whether `method path` (a concrete request path) is one of [`AGENT_API_KEY_ROUTES`]. An id is
+/// one non-empty path segment; the handler validates its characters.
+fn agent_api_route(method: &str, path: &str) -> bool {
+    AGENT_API_KEY_ROUTES
+        .iter()
+        .any(|(route_method, pattern)| *route_method == method && path_matches(pattern, path))
+}
+
+/// Whether `path` fills `pattern` segment for segment, a `:name` segment taking any one
+/// non-empty segment. A trailing slash is one more (empty) segment, so it never matches.
+fn path_matches(pattern: &str, path: &str) -> bool {
+    let mut patterns = pattern.split('/');
+    let mut segments = path.split('/');
+    loop {
+        match (patterns.next(), segments.next()) {
+            (None, None) => return true,
+            (Some(expected), Some(segment)) => {
+                let fits = if expected.starts_with(':') {
+                    !segment.is_empty()
+                } else {
+                    expected == segment
+                };
+                if !fits {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
+/// The scope a key needs for `method path`, or `None` when no key may reach it. The Agent API
+/// routes exist for a key only while `agent_api` (the switch) is on.
+fn api_key_route_scope(method: &str, path: &str, agent_api: bool) -> Option<&'static str> {
+    if api_key_route_allowed(method, path) {
+        Some(API_KEY_SCOPE_BROWSER_AGENT)
+    } else if agent_api && agent_api_route(method, path) {
+        Some(API_KEY_SCOPE_AGENT_RUNS)
+    } else {
+        None
+    }
+}
+
+/// A key id as the broker accepts it: 1 to 128 bytes of printable, non-space ASCII.
+fn valid_api_key_id(key_id: &str) -> bool {
+    (1..=MAX_API_KEY_ID_LEN).contains(&key_id.len())
+        && key_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
 }
 
 /// A distinct `aud=data-plane` user bearer, independently verified against the
@@ -273,6 +392,112 @@ impl VerifiedBrowserBearer {
     #[cfg(test)]
     pub(crate) fn for_test(token: &str) -> Self {
         Self::new(token)
+    }
+}
+
+/// INNH-10: the independently verified `aud=browser-broker` bearer of an `api_key` principal.
+/// Accepted only from `x-browser-authorization`, only on the key-grant routes, and only when it
+/// is the same key as the ingress token (same `sub`, `org_id`, `key_id`, `acting_user_id` and
+/// retention posture). A distinct type from [`VerifiedBrowserBearer`] on purpose: no user route
+/// can ever extract a key's bearer, and the key-grant routes can never extract a user's.
+#[derive(Clone)]
+pub struct VerifiedApiKeyBrowserBearer(Arc<str>);
+
+impl VerifiedApiKeyBrowserBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
+impl fmt::Debug for VerifiedApiKeyBrowserBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedApiKeyBrowserBearer([REDACTED])")
+    }
+}
+
+/// EP-12 S5: the independently verified `aud=session-core` bearer of an `api_key` principal.
+/// Accepted only from `x-session-authorization`, only on an Agent API route while the switch is
+/// on, exactly once, and only as the same key as the ingress token (same `sub`, `org_id`,
+/// `key_id`, `acting_user_id` and retention posture) holding `agent:runs`. A distinct type from
+/// [`VerifiedSessionBearer`] on purpose: no user route can extract a key's session bearer.
+#[derive(Clone)]
+pub struct VerifiedApiKeySessionBearer(Arc<str>);
+
+impl VerifiedApiKeySessionBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    /// The key's bearer as the session credential the shared Session Core request helpers and
+    /// the run-events stream forward. Only an Agent API handler holds a key bearer, and Session
+    /// Core binds every call it carries to the key's own threads and runs.
+    pub(crate) fn as_session_bearer(&self) -> VerifiedSessionBearer {
+        VerifiedSessionBearer::new(&self.0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
+impl fmt::Debug for VerifiedApiKeySessionBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedApiKeySessionBearer([REDACTED])")
+    }
+}
+
+/// EP-12 S7: the independently verified `aud=inference-core` bearer of an `api_key` principal.
+/// Accepted only from `x-inference-authorization`, only on the start route while the switch is
+/// on, exactly once, and only as the same key as the ingress token holding `agent:runs`, with the
+/// same retention posture. A distinct type from [`VerifiedInferenceBearer`] on purpose: no user
+/// route can extract a key's inference bearer, and the start route can never extract a user's.
+#[derive(Clone)]
+pub struct VerifiedApiKeyInferenceBearer(Arc<str>);
+
+impl VerifiedApiKeyInferenceBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::new(token)
+    }
+}
+
+impl fmt::Debug for VerifiedApiKeyInferenceBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedApiKeyInferenceBearer([REDACTED])")
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedApiKeyBrowserBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
     }
 }
 
@@ -563,12 +788,15 @@ impl Claims {
             "user"
                 if !self.user_id.is_empty()
                     && self.sub == self.user_id
-                    && self.service_id.is_none() =>
+                    && self.service_id.is_none()
+                    && self.key_id.is_none() =>
             {
                 Ok(PrincipalKind::User)
             }
+            "api_key" if self.is_well_formed_api_key() => Ok(PrincipalKind::ApiKey),
             "service"
                 if self.user_id.is_empty()
+                    && self.key_id.is_none()
                     && self.service_id.as_deref().is_some_and(|service_id| {
                         service_id == self.sub
                             && service_id
@@ -582,6 +810,46 @@ impl Claims {
                 Ok(PrincipalKind::Service)
             }
             _ => Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+
+    /// The shape rules of an `api_key` token (INNH-10, the same rules the broker's `authctx`
+    /// applies): `sub == "apikey:" + key_id` exactly, a bounded printable key id, an owning
+    /// `acting_user_id` that is unpadded and not itself a key, and no user or service identity.
+    fn is_well_formed_api_key(&self) -> bool {
+        let (Some(key_id), Some(owner)) = (self.key_id.as_deref(), self.acting_user_id.as_deref())
+        else {
+            return false;
+        };
+        valid_api_key_id(key_id)
+            && self.sub.strip_prefix(API_KEY_SUBJECT_PREFIX) == Some(key_id)
+            && self.user_id.is_empty()
+            && self.service_id.is_none()
+            && !owner.is_empty()
+            && owner.len() <= MAX_ACTING_USER_ID_LEN
+            && owner == owner.trim()
+            && !owner.starts_with(API_KEY_SUBJECT_PREFIX)
+    }
+
+    /// The key id of a well-formed `api_key` principal, `None` for every other principal.
+    #[must_use]
+    pub fn api_key_id(&self) -> Option<&str> {
+        if self.principal_kind() == Ok(PrincipalKind::ApiKey) {
+            self.key_id.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// The service id of a SERVICE principal, `None` for a user. Reads the claim only; whether the
+    /// claim set is well formed is [`Self::principal_kind`]'s question, asked by the route policy.
+    /// The rate limiter keys a service's bucket on this.
+    #[must_use]
+    pub fn service_principal_id(&self) -> Option<&str> {
+        if self.principal_type.as_deref() == Some("service") {
+            self.service_id.as_deref().filter(|id| !id.is_empty())
+        } else {
+            None
         }
     }
 
@@ -801,6 +1069,8 @@ fn dev_bypass_claims(headers: &HeaderMap) -> Claims {
     let user_id = header_string(headers, "x-user-id", "user_placeholder");
     let org_id = header_string(headers, "x-org-id", "org_placeholder");
     Claims {
+        key_id: None,
+        acting_user_id: None,
         sub: user_id.clone(),
         iss: "dev".to_owned(),
         exp: i64::MAX,
@@ -1023,6 +1293,136 @@ async fn verify_delegated_user_bearer(
         warn!(
             audience = default_audience,
             "delegated user bearer retention posture differs from the ingress token"
+        );
+        return Err(AuthRejection::ZdrPostureMismatch);
+    }
+    Ok(Some(token))
+}
+
+/// The delegated headers an `api_key` principal may never send: every downstream bearer except
+/// the broker one. A key has no user identity, so none of them can be bound to it.
+const API_KEY_FORBIDDEN_DELEGATIONS: &[&str] = &[
+    "x-data-plane-authorization",
+    "x-capability-authorization",
+    "x-cost-authorization",
+    "x-session-authorization",
+    "x-inference-authorization",
+    "x-execution-authorization",
+    "x-ingestion-authorization",
+    "x-sandbox-authorization",
+];
+
+/// INNH-10: verify the `aud=browser-broker` bearer of an `api_key` principal. It is accepted only
+/// on the key-grant routes and only as the same key as the ingress token: same `sub`, `org_id`,
+/// `key_id` and `acting_user_id`, and the same retention posture (a mixed set is the typed
+/// `zdr_posture_mismatch`, as for a user's bearers). Anything else is a 403.
+async fn verify_delegated_api_key_browser_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+    method: &str,
+    path: &str,
+) -> Result<Option<VerifiedApiKeyBrowserBearer>, AuthRejection> {
+    if !headers.contains_key("x-browser-authorization") {
+        return Ok(None);
+    }
+    if !api_key_route_allowed(method, path) {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
+    let Some((token, claims)) = decode_delegated_bearer(
+        headers,
+        "x-browser-authorization",
+        "BROWSER_BROKER_AUTH_AUDIENCE",
+        "browser-broker",
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if claims.principal_kind() != Ok(PrincipalKind::ApiKey)
+        || claims.sub != model_claims.sub
+        || claims.org_id != model_claims.org_id
+        || claims.key_id != model_claims.key_id
+        || claims.acting_user_id != model_claims.acting_user_id
+    {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
+    if claims.zdr != model_claims.zdr || claims.zdr_waiver != model_claims.zdr_waiver {
+        warn!("delegated api key bearer retention posture differs from the ingress token");
+        return Err(AuthRejection::ZdrPostureMismatch);
+    }
+    Ok(Some(VerifiedApiKeyBrowserBearer::new(&token)))
+}
+
+/// EP-12 S5: verify the `aud=session-core` bearer of an `api_key` principal on an Agent API route
+/// (the caller checks the route and the switch). Exactly one header: a repeated one is a 403, so
+/// no proxy can pick a different value than the one verified. The bearer must be the same key as
+/// the ingress token and hold `agent:runs`; a different retention posture is the typed
+/// `zdr_posture_mismatch`. Anything else is a 403.
+async fn verify_delegated_api_key_session_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedApiKeySessionBearer>, AuthRejection> {
+    verify_delegated_api_key_agent_bearer(
+        headers,
+        model_claims,
+        API_KEY_SESSION_HEADER,
+        "SESSION_CORE_AUTH_AUDIENCE",
+        "session-core",
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedApiKeySessionBearer::new(&token)))
+}
+
+/// EP-12 S7: verify the `aud=inference-core` bearer of an `api_key` principal on the start route
+/// (the caller checks the route and the switch), under the same rules as its session bearer.
+async fn verify_delegated_api_key_inference_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedApiKeyInferenceBearer>, AuthRejection> {
+    verify_delegated_api_key_agent_bearer(
+        headers,
+        model_claims,
+        API_KEY_INFERENCE_HEADER,
+        "INFERENCE_CORE_AUTH_AUDIENCE",
+        "inference-core",
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedApiKeyInferenceBearer::new(&token)))
+}
+
+/// The binding rules every Agent API downstream bearer of a key shares: exactly one header, the
+/// named audience, the same key as the ingress token holding `agent:runs`, and the same retention
+/// posture (a different one is the typed `zdr_posture_mismatch`). Anything else is a 403.
+async fn verify_delegated_api_key_agent_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+    header_name: &'static str,
+    audience_env: &'static str,
+    default_audience: &'static str,
+) -> Result<Option<String>, AuthRejection> {
+    match headers.get_all(header_name).iter().count() {
+        0 => return Ok(None),
+        1 => {}
+        _ => return Err(StatusCode::FORBIDDEN.into()),
+    }
+    let Some((token, claims)) =
+        decode_delegated_bearer(headers, header_name, audience_env, default_audience).await?
+    else {
+        return Ok(None);
+    };
+    if claims.principal_kind() != Ok(PrincipalKind::ApiKey)
+        || claims.sub != model_claims.sub
+        || claims.org_id != model_claims.org_id
+        || claims.key_id != model_claims.key_id
+        || claims.acting_user_id != model_claims.acting_user_id
+        || !claims.has_scope(API_KEY_SCOPE_AGENT_RUNS)
+    {
+        return Err(StatusCode::FORBIDDEN.into());
+    }
+    if claims.zdr != model_claims.zdr || claims.zdr_waiver != model_claims.zdr_waiver {
+        warn!(
+            audience = default_audience,
+            "delegated api key bearer retention posture differs from the ingress token"
         );
         return Err(AuthRejection::ZdrPostureMismatch);
     }
@@ -1292,6 +1692,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
     let principal_kind = token_data.claims.principal_kind().inspect_err(|_| {
         warn!("JWT carries missing, mismatched, or ambiguous principal identity");
     })?;
+    let mut api_key_browser_bearer = None;
+    let mut api_key_session_bearer = None;
+    let mut api_key_inference_bearer = None;
     let (
         data_plane_bearer,
         capability_bearer,
@@ -1347,7 +1750,52 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 None,
             )
         }
+        PrincipalKind::ApiKey => {
+            // A key carries no user identity, so no user-bound downstream bearer can be bound to
+            // it. Only the key's own broker bearer, on the key-grant routes, and (EP-12 S5) the
+            // key's own session bearer, on an Agent API route while its switch is on, and (S7) its
+            // own inference bearer, on the start route only.
+            let on_agent_api_route = agent_api_route(req.method().as_str(), req.uri().path())
+                && crate::agent_api_routes::enabled();
+            let on_agent_api_start = on_agent_api_route
+                && agent_api_start_route(req.method().as_str(), req.uri().path());
+            if API_KEY_FORBIDDEN_DELEGATIONS.iter().any(|header| {
+                req.headers().contains_key(*header)
+                    && !(on_agent_api_route && *header == API_KEY_SESSION_HEADER)
+                    && !(on_agent_api_start && *header == API_KEY_INFERENCE_HEADER)
+            }) {
+                warn!("api key principal supplied a downstream delegation it may not hold");
+                return Err(StatusCode::FORBIDDEN.into());
+            }
+            api_key_browser_bearer = verify_delegated_api_key_browser_bearer(
+                req.headers(),
+                &token_data.claims,
+                req.method().as_str(),
+                req.uri().path(),
+            )
+            .await?;
+            if on_agent_api_route {
+                api_key_session_bearer =
+                    verify_delegated_api_key_session_bearer(req.headers(), &token_data.claims)
+                        .await?;
+            }
+            if on_agent_api_start {
+                api_key_inference_bearer =
+                    verify_delegated_api_key_inference_bearer(req.headers(), &token_data.claims)
+                        .await?;
+            }
+            (None, None, None, None, None, None, None, None, None)
+        }
     };
+    if let Some(bearer) = api_key_browser_bearer {
+        req.extensions_mut().insert(bearer);
+    }
+    if let Some(bearer) = api_key_session_bearer {
+        req.extensions_mut().insert(bearer);
+    }
+    if let Some(bearer) = api_key_inference_bearer {
+        req.extensions_mut().insert(bearer);
+    }
     req.extensions_mut().insert(step_up);
     req.extensions_mut().insert(token_data.claims);
     req.extensions_mut()
@@ -1394,12 +1842,158 @@ const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 const MAIL_TASK_BRIDGE_CALLER_SERVICE: &str = "service:verevon-gateway";
 const SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD: &str = "mail-task:prepare-thread";
 
-/// Restrict service principals to the two non-persisting unary machine routes.
+/// One row of the service route table: a service principal may call `method path` when it holds
+/// `scope` and, if `service` is set, is exactly that service. `service: None` means any service
+/// holding the scope.
+///
+/// `flag` (E3.6-8) names an environment switch that must be `1`, `true` or `on` for the SERVICE
+/// lane of this route to exist: while it is off the gateway answers a service that holds the
+/// scope with `404`, as if the row were not there. The route itself, and what users may do with
+/// it, are unchanged by the switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceRouteGrant {
+    pub service: Option<&'static str>,
+    pub method: &'static str,
+    pub path: &'static str,
+    pub scope: &'static str,
+    pub flag: Option<&'static str>,
+}
+
+/// E3.6-8: the service lane of `POST /v1/ai/language/pii` (the optional model tier of the
+/// document PII stage). Default off.
+pub const SERVICE_FLAG_AI_PII: &str = "MODEL_GATEWAY_AI_PII_SERVICE";
+/// E3.6-8: the service lane of `POST /v1/ai/documents/layout` (OCR / layout). Default off.
+pub const SERVICE_FLAG_AI_LAYOUT: &str = "MODEL_GATEWAY_AI_LAYOUT_SERVICE";
+
+/// Every route a SERVICE principal may reach (WS16.S1). Users keep the existing route policy.
+/// This table is the single source of the machine-route policy and is pinned by the golden
+/// `api/contracts/model-gateway-service-routes.json`: a route added here changes the golden in
+/// the same change, which is what lets another plane's fake gateway read the real rules.
+pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/chat",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: None,
+    },
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/embeddings",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: None,
+    },
+    ServiceRouteGrant {
+        service: Some(CONTROL_SPACE_DELETION_SERVICE),
+        method: "POST",
+        path: "/v1/internal/space-deletion/threads",
+        scope: SERVICE_SCOPE_MODEL_SPACE_DELETE,
+        flag: None,
+    },
+    ServiceRouteGrant {
+        service: Some(MAIL_TASK_BRIDGE_CALLER_SERVICE),
+        method: "POST",
+        path: "/v1/internal/mail-task/prepare-thread",
+        scope: SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD,
+        flag: None,
+    },
+    // E3.6-8: the two routes below exist for a service only while their switch is on.
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/documents/layout",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: Some(SERVICE_FLAG_AI_LAYOUT),
+    },
+    ServiceRouteGrant {
+        service: None,
+        method: "POST",
+        path: "/v1/ai/language/pii",
+        scope: SERVICE_SCOPE_MODELS_INVOKE,
+        flag: Some(SERVICE_FLAG_AI_PII),
+    },
+];
+
+/// The second bearer a service call to `/v1/ai/chat` needs, as the golden records it.
+pub const SERVICE_INFERENCE_BEARER_HEADER: &str = "x-inference-authorization";
+const SERVICE_INFERENCE_BEARER_AUDIENCE: &str = "inference-core";
+
+/// Whether `claims`, a service principal, may call `method path`.
+fn service_route_allowed(claims: &Claims, method: &str, path: &str) -> bool {
+    SERVICE_ROUTE_GRANTS.iter().any(|grant| {
+        grant.method == method
+            && grant.path == path
+            && grant.service.is_none_or(|service| claims.sub == service)
+            && claims.has_scope(grant.scope)
+    })
+}
+
+/// Whether a switch value turns a flag on: only the literals `1`, `true` and `on`.
+fn service_flag_on(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "on"))
+}
+
+/// Whether `claims` holds a row for `method path` whose switch is OFF, so the route does not
+/// exist for it yet. `lookup` reads the environment (injected for tests). A row without a
+/// switch, a row the caller does not hold, and a route in no row all answer `false`: this
+/// only ever turns an admitted request into a `404`.
+fn service_route_switched_off(
+    claims: &Claims,
+    method: &str,
+    path: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> bool {
+    SERVICE_ROUTE_GRANTS.iter().any(|grant| {
+        grant.method == method
+            && grant.path == path
+            && grant.service.is_none_or(|service| claims.sub == service)
+            && claims.has_scope(grant.scope)
+            && grant
+                .flag
+                .is_some_and(|flag| !service_flag_on(lookup(flag).as_deref()))
+    })
+}
+
+/// The route table and the second-bearer requirement as the JSON golden pins them.
+#[must_use]
+pub fn service_route_table_json() -> serde_json::Value {
+    serde_json::json!({
+        "contract": "model-gateway.service-routes",
+        "version": 1,
+        "generated_by": "model-gateway auth tests (MP_UPDATE_GOLDEN=1)",
+        "routes": SERVICE_ROUTE_GRANTS
+            .iter()
+            .map(|grant| serde_json::json!({
+                "service": grant.service,
+                "method": grant.method,
+                "path": grant.path,
+                "scope": grant.scope,
+                "flag": grant.flag,
+            }))
+            .collect::<Vec<_>>(),
+        "service_inference_bearer": {
+            "header": SERVICE_INFERENCE_BEARER_HEADER,
+            "audience": SERVICE_INFERENCE_BEARER_AUDIENCE,
+            "requires_scopes": [SERVICE_SCOPE_MODELS_INVOKE],
+            "downstream_requires_scope": SERVICE_SCOPE_INFERENCE_INVOKE,
+        },
+    })
+}
+
+/// Restrict service principals to the rows of [`SERVICE_ROUTE_GRANTS`].
 /// Users retain the existing route policy. This must run after [`require_auth`].
+///
+/// A service call to `POST /v1/ai/chat` needs TWO bearers: the gateway token
+/// (`Authorization`, `aud=model-gateway`, scope `models:invoke`) and a second
+/// `x-inference-authorization` (`aud=inference-core`, scope `inference:invoke`), verified by
+/// `verify_delegated_service_inference_bearer`, which also requires its `sub` and `service_id`
+/// to equal the ingress token's. The ingress claims must pass [`Claims::principal_kind`] as a
+/// service: `service_id == sub == "service:<id>"` and a `reason` of 3 to 500 characters.
 ///
 /// # Errors
 /// Returns `401` when verified claims are absent/ambiguous and `403` when a
-/// service principal lacks the exact route or `models:invoke` scope.
+/// service principal lacks the exact route or the row's scope.
 pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Response, StatusCode> {
     let claims = req
         .extensions()
@@ -1408,20 +2002,7 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
     match claims.principal_kind()? {
         PrincipalKind::User => Ok(next.run(req).await),
         PrincipalKind::Service => {
-            let allowed = match (req.method(), req.uri().path()) {
-                (&axum::http::Method::POST, "/v1/ai/chat" | "/v1/ai/embeddings") => {
-                    claims.has_scope(SERVICE_SCOPE_MODELS_INVOKE)
-                }
-                (&axum::http::Method::POST, "/v1/internal/space-deletion/threads") => {
-                    claims.sub == CONTROL_SPACE_DELETION_SERVICE
-                        && claims.has_scope(SERVICE_SCOPE_MODEL_SPACE_DELETE)
-                }
-                (&axum::http::Method::POST, "/v1/internal/mail-task/prepare-thread") => {
-                    claims.sub == MAIL_TASK_BRIDGE_CALLER_SERVICE
-                        && claims.has_scope(SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD)
-                }
-                _ => false,
-            };
+            let allowed = service_route_allowed(claims, req.method().as_str(), req.uri().path());
             if !allowed {
                 warn!(
                     service = %claims.sub,
@@ -1431,7 +2012,37 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
                 );
                 return Err(StatusCode::FORBIDDEN);
             }
+            // E3.6-8: a switched-off lane is a 404, after the scope check so a caller without
+            // the scope learns nothing about it (it gets the same 403 as any other route).
+            if service_route_switched_off(claims, req.method().as_str(), req.uri().path(), &|name| {
+                std::env::var(name).ok()
+            }) {
+                return Err(StatusCode::NOT_FOUND);
+            }
             Ok(next.run(req).await)
+        }
+        // INNH-10: a key reaches exactly the key-grant routes, with `browser:agent`, and (EP-12 S5)
+        // the Agent API routes, with `agent:runs`, while `MODEL_GATEWAY_AGENT_API` is on. Every
+        // other route (and every route added later) is a 403: this arm is an allow-list, not a
+        // deny-list. The switch is read only for a path that is an Agent API route.
+        PrincipalKind::ApiKey => {
+            let (method, path) = (req.method().as_str(), req.uri().path());
+            let agent_api = agent_api_route(method, path) && crate::agent_api_routes::enabled();
+            let scope = api_key_route_scope(method, path, agent_api);
+            if scope.is_some_and(|scope| claims.has_scope(scope)) {
+                Ok(next.run(req).await)
+            } else if scope == Some(API_KEY_SCOPE_AGENT_RUNS) {
+                // The Agent API contract names this refusal, so a client can tell a key that
+                // lacks the permission from a route it may not reach.
+                Ok(crate::agent_api_routes::scope_missing().into_response())
+            } else {
+                warn!(
+                    method = %req.method(),
+                    path = %req.uri().path(),
+                    "api key principal route or scope denied"
+                );
+                Err(StatusCode::FORBIDDEN)
+            }
         }
     }
 }
@@ -1545,6 +2156,7 @@ mod tests {
         std::env::remove_var("SANDBOX_MANAGER_AUTH_AUDIENCE");
         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
         std::env::remove_var("ALLOW_INSECURE_DEV_DEFAULTS");
+        std::env::remove_var(crate::agent_api_routes::ENABLED_ENV);
     }
 
     fn test_router() -> Router {
@@ -1602,6 +2214,8 @@ mod tests {
     #[test]
     fn claims_roundtrip_json_with_defaults() {
         let c = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: 1_700_000_000,
@@ -1634,6 +2248,8 @@ mod tests {
     #[test]
     fn claims_roundtrip_with_aud_and_scopes() {
         let c = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "u1".into(),
             iss: "auth-core".into(),
             exp: 1_700_000_000,
@@ -1676,6 +2292,8 @@ mod tests {
     #[test]
     fn require_org_matches_and_rejects() {
         let c = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-test".into(),
             iss: "auth-core".into(),
             exp: i64::MAX,
@@ -2240,6 +2858,790 @@ mod tests {
         clear_env();
     }
 
+    fn api_key_claims(key_id: &str) -> Claims {
+        Claims {
+            sub: format!("apikey:{key_id}"),
+            user_id: String::new(),
+            principal_type: Some("api_key".to_owned()),
+            key_id: Some(key_id.to_owned()),
+            acting_user_id: Some("user-test".to_owned()),
+            scopes: vec![API_KEY_SCOPE_BROWSER_AGENT.to_owned()],
+            ..base_claims()
+        }
+    }
+
+    #[test]
+    fn api_key_principal_shape_is_exact_and_the_key_id_is_refused_elsewhere() {
+        assert_eq!(api_key_claims("key-1").principal_kind(), Ok(PrincipalKind::ApiKey));
+        assert_eq!(api_key_claims("key-1").api_key_id(), Some("key-1"));
+        let refused: Vec<(&str, Claims)> = vec![
+            ("sub mismatch", Claims { sub: "apikey:key-2".into(), ..api_key_claims("key-1") }),
+            ("sub without prefix", Claims { sub: "key-1".into(), ..api_key_claims("key-1") }),
+            ("missing key_id", Claims { key_id: None, ..api_key_claims("key-1") }),
+            ("empty key_id", Claims { sub: "apikey:".into(), ..api_key_claims("") }),
+            ("key_id over 128", api_key_claims(&"k".repeat(129))),
+            ("key_id with a space", api_key_claims("key 1")),
+            ("missing owner", Claims { acting_user_id: None, ..api_key_claims("key-1") }),
+            ("empty owner", Claims { acting_user_id: Some(String::new()), ..api_key_claims("key-1") }),
+            ("padded owner", Claims { acting_user_id: Some(" user".into()), ..api_key_claims("key-1") }),
+            ("owner is a key", Claims { acting_user_id: Some("apikey:k".into()), ..api_key_claims("key-1") }),
+            ("user_id present", Claims { user_id: "user-test".into(), ..api_key_claims("key-1") }),
+            ("service_id present", Claims { service_id: Some("service:x".into()), ..api_key_claims("key-1") }),
+            ("key_id on a user", Claims { key_id: Some("key-1".into()), ..base_claims() }),
+            (
+                "key_id on a service",
+                Claims {
+                    sub: "service:quarry".into(),
+                    user_id: String::new(),
+                    principal_type: Some("service".into()),
+                    service_id: Some("service:quarry".into()),
+                    reason: Some("test service".into()),
+                    key_id: Some("key-1".into()),
+                    ..base_claims()
+                },
+            ),
+        ];
+        for (case, claims) in refused {
+            assert_eq!(claims.principal_kind(), Err(StatusCode::UNAUTHORIZED), "{case}");
+            assert_eq!(claims.api_key_id(), None, "{case}");
+        }
+        assert_eq!(base_claims().principal_kind(), Ok(PrincipalKind::User), "users unchanged");
+    }
+
+    #[test]
+    fn api_key_routes_are_exactly_the_two_key_grant_shapes() {
+        assert!(api_key_route_allowed("POST", "/v1/browser/key-grants"));
+        assert!(api_key_route_allowed("DELETE", "/v1/browser/key-grants/abc"));
+        for (method, path) in [
+            ("GET", "/v1/browser/key-grants"),
+            ("DELETE", "/v1/browser/key-grants"),
+            ("DELETE", "/v1/browser/key-grants/"),
+            ("DELETE", "/v1/browser/key-grants/a/b"),
+            ("POST", "/v1/browser/key-grants/abc"),
+            ("POST", "/v1/browser/key-grants/abc/renew"),
+            ("POST", "/v1/browser/grants"),
+            ("DELETE", "/v1/browser/grants/abc"),
+            ("POST", "/v1/browser/key-grants-x"),
+            ("POST", "/v1/invoke"),
+        ] {
+            assert!(!api_key_route_allowed(method, path), "{method} {path}");
+        }
+        assert_eq!(API_KEY_ROUTES.len(), 2);
+    }
+
+    /// EP-12 S5: the key allow-list as a table over the Agent API switch. Off, it is exactly the
+    /// INNH-10 pair with `browser:agent`; on, the six Agent API shapes join it with
+    /// `agent:runs`, and nothing else does.
+    #[test]
+    fn api_key_route_scope_is_a_table_over_the_agent_api_switch() {
+        let key_grant = Some(API_KEY_SCOPE_BROWSER_AGENT);
+        let agent = Some(API_KEY_SCOPE_AGENT_RUNS);
+        let table: &[(&str, &str, Option<&str>, Option<&str>)] = &[
+            // (method, path, switch off, switch on)
+            ("POST", "/v1/browser/key-grants", key_grant, key_grant),
+            ("DELETE", "/v1/browser/key-grants/g1", key_grant, key_grant),
+            ("POST", "/v1/agent/runs", None, agent),
+            ("GET", "/v1/agent/runs/run-1", None, agent),
+            ("GET", "/v1/agent/runs/run-1/events", None, agent),
+            ("POST", "/v1/agent/runs/run-1/cancel", None, agent),
+            ("GET", "/v1/agent/threads/thread-1/runs", None, agent),
+            ("GET", "/v1/agent/threads/thread-1/messages", None, agent),
+            // Wrong method, missing or extra segment, trailing slash, the people's run routes.
+            ("POST", "/v1/agent/runs/run-1", None, None),
+            ("DELETE", "/v1/agent/runs/run-1", None, None),
+            ("GET", "/v1/agent/runs/run-1/cancel", None, None),
+            ("GET", "/v1/agent/runs", None, None),
+            ("PUT", "/v1/agent/runs", None, None),
+            ("POST", "/v1/agent/runs/", None, None),
+            ("GET", "/v1/agent/runs/", None, None),
+            ("GET", "/v1/agent/runs//events", None, None),
+            ("GET", "/v1/agent/runs/run-1/", None, None),
+            ("GET", "/v1/agent/runs/run-1/events/replay", None, None),
+            ("GET", "/v1/agent/runs/a/b", None, None),
+            ("GET", "/v1/agent/threads/thread-1", None, None),
+            ("GET", "/v1/agent/threads/thread-1/events", None, None),
+            ("GET", "/v1/agent/threads/thread-1/messages/x", None, None),
+            ("GET", "/v1/runs/run-1", None, None),
+            ("GET", "/v1/runs/run-1/events", None, None),
+            ("POST", "/v1/runs/run-1/cancel", None, None),
+            ("GET", "/v1/threads/thread-1/messages", None, None),
+            ("POST", "/v1/invoke", None, None),
+        ];
+        for (method, path, off, on) in table {
+            assert_eq!(
+                api_key_route_scope(method, path, false),
+                *off,
+                "off: {method} {path}"
+            );
+            assert_eq!(
+                api_key_route_scope(method, path, true),
+                *on,
+                "on: {method} {path}"
+            );
+        }
+        assert_eq!(AGENT_API_KEY_ROUTES.len(), 6);
+        for (method, pattern) in AGENT_API_KEY_ROUTES {
+            let concrete = pattern.replace(":run_id", "r1").replace(":thread_id", "t1");
+            assert_eq!(
+                api_key_route_scope(method, &concrete, true),
+                agent,
+                "{method} {pattern}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn authorize_principal_route_admits_a_key_on_the_agent_api_only_while_it_is_on() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+        async fn call(claims: Claims, method: &str, path: &str) -> (StatusCode, String) {
+            let response = Router::new()
+                .route("/v1/agent/runs/:run_id", get(ok_handler))
+                .route(
+                    "/v1/agent/runs/:run_id/cancel",
+                    axum::routing::post(ok_handler),
+                )
+                .route("/v1/browser/key-grants", axum::routing::post(ok_handler))
+                .route("/v1/runs/:run_id", get(ok_handler))
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+        let agent_key = Claims {
+            scopes: vec![API_KEY_SCOPE_AGENT_RUNS.to_owned()],
+            ..api_key_claims("key-1")
+        };
+
+        clear_env();
+        let (status, body) = call(agent_key.clone(), "GET", "/v1/agent/runs/r1").await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "off: the agent routes are not on the list"
+        );
+        assert!(body.is_empty(), "off: the bare 403 every other route gives");
+
+        for value in ["1", "on", "yes", "truthy", ""] {
+            std::env::set_var(crate::agent_api_routes::ENABLED_ENV, value);
+            let (status, _) = call(agent_key.clone(), "GET", "/v1/agent/runs/r1").await;
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "only the word true enables it: {value:?}"
+            );
+        }
+
+        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
+        assert_eq!(
+            call(agent_key.clone(), "GET", "/v1/agent/runs/r1").await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(agent_key.clone(), "POST", "/v1/agent/runs/r1/cancel")
+                .await
+                .0,
+            StatusCode::OK
+        );
+        // `agent:runs` opens neither the key-grant routes nor a person's run route.
+        assert_eq!(
+            call(agent_key.clone(), "POST", "/v1/browser/key-grants")
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(agent_key.clone(), "GET", "/v1/runs/r1").await.0,
+            StatusCode::FORBIDDEN
+        );
+        // A key without `agent:runs` gets the contract's typed refusal, naming the scope.
+        let (status, body) = call(api_key_claims("key-1"), "GET", "/v1/agent/runs/r1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let body: serde_json::Value = serde_json::from_str(&body).expect("a typed body");
+        assert_eq!(body["error"]["code"], "agent_api_scope_missing");
+        assert_eq!(body["error"]["details"]["scope"], API_KEY_SCOPE_AGENT_RUNS);
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_api_key_session_bearer_is_the_same_key_once_and_only_on_agent_routes() {
+        async fn echo_key_session(
+            bearer: Option<axum::Extension<VerifiedApiKeySessionBearer>>,
+        ) -> String {
+            bearer.map_or_else(String::new, |bearer| {
+                bearer.0.as_session_bearer().as_str().to_owned()
+            })
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-api-key-session-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("SESSION_CORE_AUTH_AUDIENCE", "session-core");
+
+        let agent = |claims: Claims| Claims {
+            scopes: vec![API_KEY_SCOPE_AGENT_RUNS.to_owned()],
+            ..claims
+        };
+        let session_aud = |claims: Claims| Claims {
+            aud: Some("session-core".into()),
+            ..agent(claims)
+        };
+        let model_token = sign_jwt(&agent(api_key_claims("key-1")), kid);
+        let key_session = sign_jwt(&session_aud(api_key_claims("key-1")), kid);
+        let router = || {
+            Router::new()
+                .route("/v1/agent/runs/:run_id", get(echo_key_session))
+                .route("/v1/runs/:run_id", get(echo_key_session))
+                .layer(middleware::from_fn(require_auth))
+        };
+        let call = |path: &'static str, extra: Vec<(&'static str, String)>| {
+            let mut builder = HttpRequest::builder()
+                .method("GET")
+                .uri(path)
+                .header("authorization", format!("Bearer {model_token}"));
+            for (name, value) in extra {
+                builder = builder.header(name, value);
+            }
+            router().oneshot(builder.body(Body::empty()).unwrap())
+        };
+        let session_header =
+            |token: &str| vec![("x-session-authorization", format!("Bearer {token}"))];
+
+        // Off: the header is one a key may not send, as before.
+        let response = call("/v1/agent/runs/r1", session_header(&key_session))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "switch off");
+
+        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
+        let response = call("/v1/agent/runs/r1", session_header(&key_session))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            key_session.as_bytes(),
+            "the key's own session bearer is forwarded"
+        );
+
+        // The same header on any other route stays forbidden.
+        let response = call("/v1/runs/r1", session_header(&key_session))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a person's run route"
+        );
+
+        // Twice, even the same value: refused.
+        let response = call(
+            "/v1/agent/runs/r1",
+            vec![
+                ("x-session-authorization", format!("Bearer {key_session}")),
+                ("x-session-authorization", format!("Bearer {key_session}")),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "exactly one session bearer"
+        );
+
+        let unscoped = sign_jwt(
+            &Claims {
+                aud: Some("session-core".into()),
+                ..api_key_claims("key-1")
+            },
+            kid,
+        );
+        let another_key = sign_jwt(&session_aud(api_key_claims("key-2")), kid);
+        let another_owner = sign_jwt(
+            &session_aud(Claims {
+                acting_user_id: Some("user-other".into()),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let other_org = sign_jwt(
+            &session_aud(Claims {
+                org_id: "org-other".into(),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let a_user = sign_jwt(
+            &Claims {
+                aud: Some("session-core".into()),
+                ..base_claims()
+            },
+            kid,
+        );
+        for (case, token) in [
+            ("without agent:runs", unscoped),
+            ("another key", another_key),
+            ("another owner", another_owner),
+            ("another org", other_org),
+            ("a user bearer", a_user),
+        ] {
+            let response = call("/v1/agent/runs/r1", session_header(&token))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{case}");
+        }
+
+        let wrong_audience = sign_jwt(&agent(api_key_claims("key-1")), kid);
+        let response = call("/v1/agent/runs/r1", session_header(&wrong_audience))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "the model token is not a session bearer"
+        );
+
+        let zdr_session = sign_jwt(
+            &session_aud(Claims {
+                zdr: true,
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let response = call("/v1/agent/runs/r1", session_header(&zdr_session))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("zdr_posture_mismatch"),
+            "a mixed posture is the typed refusal"
+        );
+
+        // Every other downstream bearer stays forbidden on an Agent API route.
+        for header in API_KEY_FORBIDDEN_DELEGATIONS
+            .iter()
+            .filter(|header| **header != API_KEY_SESSION_HEADER)
+        {
+            let response = call(
+                "/v1/agent/runs/r1",
+                vec![
+                    ("x-session-authorization", format!("Bearer {key_session}")),
+                    (*header, format!("Bearer {key_session}")),
+                ],
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{header}");
+        }
+        let response = call(
+            "/v1/agent/runs/r1",
+            vec![("x-browser-authorization", format!("Bearer {key_session}"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "the broker bearer stays on the key-grant routes"
+        );
+
+        // Without the header the request passes auth with no key session bearer for the handler.
+        let response = call("/v1/agent/runs/r1", Vec::new()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
+        clear_env();
+    }
+
+    /// EP-12 S7: a key's own `aud=inference-core` bearer passes only on the start route, while
+    /// the switch is on, once, and only as the same key holding `agent:runs`.
+    #[tokio::test]
+    #[serial]
+    async fn delegated_api_key_inference_bearer_is_the_same_key_only_on_the_start_route() {
+        async fn echo_key_inference(
+            bearer: Option<axum::Extension<VerifiedApiKeyInferenceBearer>>,
+        ) -> String {
+            bearer.map_or_else(String::new, |bearer| bearer.0.as_str().to_owned())
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-api-key-inference-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("SESSION_CORE_AUTH_AUDIENCE", "session-core");
+        std::env::set_var("INFERENCE_CORE_AUTH_AUDIENCE", "inference-core");
+
+        let agent = |claims: Claims| Claims {
+            scopes: vec![API_KEY_SCOPE_AGENT_RUNS.to_owned()],
+            ..claims
+        };
+        let inference_aud = |claims: Claims| Claims {
+            aud: Some("inference-core".into()),
+            ..agent(claims)
+        };
+        let model_token = sign_jwt(&agent(api_key_claims("key-1")), kid);
+        let key_inference = sign_jwt(&inference_aud(api_key_claims("key-1")), kid);
+        let router = || {
+            Router::new()
+                .route("/v1/agent/runs", axum::routing::post(echo_key_inference))
+                .route("/v1/agent/runs/:run_id", get(echo_key_inference))
+                .layer(middleware::from_fn(require_auth))
+        };
+        let call = |method: &'static str, path: &'static str, token: &str| {
+            router().oneshot(
+                HttpRequest::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header("x-inference-authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+
+        let response = call("POST", "/v1/agent/runs", &key_inference)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "switch off");
+
+        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
+        let response = call("POST", "/v1/agent/runs", &key_inference)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            body,
+            key_inference.as_bytes(),
+            "the key's own inference bearer is forwarded"
+        );
+
+        // Every other Agent API route keeps it forbidden: only the start route calls a model.
+        let response = call("GET", "/v1/agent/runs/r1", &key_inference)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "a read route");
+
+        let response = router()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/agent/runs")
+                    .header("authorization", format!("Bearer {model_token}"))
+                    .header(
+                        "x-inference-authorization",
+                        format!("Bearer {key_inference}"),
+                    )
+                    .header(
+                        "x-inference-authorization",
+                        format!("Bearer {key_inference}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "exactly one inference bearer"
+        );
+
+        let unscoped = sign_jwt(
+            &Claims {
+                aud: Some("inference-core".into()),
+                ..api_key_claims("key-1")
+            },
+            kid,
+        );
+        let another_key = sign_jwt(&inference_aud(api_key_claims("key-2")), kid);
+        let a_user = sign_jwt(
+            &Claims {
+                aud: Some("inference-core".into()),
+                ..base_claims()
+            },
+            kid,
+        );
+        for (case, token) in [
+            ("without agent:runs", unscoped),
+            ("another key", another_key),
+            ("a user bearer", a_user),
+        ] {
+            let response = call("POST", "/v1/agent/runs", &token).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{case}");
+        }
+
+        let session_audience = sign_jwt(
+            &Claims {
+                aud: Some("session-core".into()),
+                ..agent(api_key_claims("key-1"))
+            },
+            kid,
+        );
+        let response = call("POST", "/v1/agent/runs", &session_audience)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a session bearer is not an inference bearer"
+        );
+
+        let zdr_inference = sign_jwt(
+            &inference_aud(Claims {
+                zdr: true,
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let response = call("POST", "/v1/agent/runs", &zdr_inference)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("zdr_posture_mismatch"),
+            "a mixed posture is the typed refusal"
+        );
+        clear_env();
+    }
+
+    #[tokio::test]
+    async fn authorize_principal_route_admits_a_key_only_on_its_routes_with_its_scope() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+        async fn status_of(claims: Claims, method: &str, path: &str) -> StatusCode {
+            Router::new()
+                .route("/v1/browser/key-grants", axum::routing::post(ok_handler))
+                .route("/v1/browser/key-grants/:id", axum::routing::delete(ok_handler))
+                .route("/v1/invoke", axum::routing::post(ok_handler))
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+        let key = api_key_claims("key-1");
+        assert_eq!(status_of(key.clone(), "POST", "/v1/browser/key-grants").await, StatusCode::OK);
+        assert_eq!(status_of(key.clone(), "DELETE", "/v1/browser/key-grants/g1").await, StatusCode::OK);
+        assert_eq!(status_of(key.clone(), "POST", "/v1/invoke").await, StatusCode::FORBIDDEN);
+        let unscoped = Claims { scopes: Vec::new(), ..key };
+        assert_eq!(
+            status_of(unscoped, "POST", "/v1/browser/key-grants").await,
+            StatusCode::FORBIDDEN,
+            "a key without browser:agent is refused even on its route"
+        );
+        // A user passes the fence on the key routes (the handler refuses it), as before.
+        assert_eq!(status_of(base_claims(), "POST", "/v1/invoke").await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_api_key_bearer_must_be_the_same_key_and_only_on_the_key_routes() {
+        async fn echo_key_bearer(bearer: VerifiedApiKeyBrowserBearer) -> String {
+            bearer.as_str().to_owned()
+        }
+        async fn echo_user_bearer(bearer: VerifiedBrowserBearer) -> String {
+            bearer.as_str().to_owned()
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let kid = "test-kid-api-key-delegation";
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        std::env::set_var("BROWSER_BROKER_AUTH_AUDIENCE", "browser-broker");
+
+        let broker_aud = |claims: Claims| Claims {
+            aud: Some("browser-broker".into()),
+            ..claims
+        };
+        let model_token = sign_jwt(&api_key_claims("key-1"), kid);
+        let key_bearer = sign_jwt(&broker_aud(api_key_claims("key-1")), kid);
+        let router = || {
+            Router::new()
+                .route("/v1/browser/key-grants", axum::routing::post(echo_key_bearer))
+                .route("/v1/browser/grants", axum::routing::post(echo_user_bearer))
+                .route("/", get(echo_key_bearer))
+                .layer(middleware::from_fn(require_auth))
+        };
+        let call = |path: &'static str, method: &'static str, extra: Vec<(&'static str, String)>| {
+            let mut builder = HttpRequest::builder()
+                .method(method)
+                .uri(path)
+                .header("authorization", format!("Bearer {model_token}"));
+            for (name, value) in extra {
+                builder = builder.header(name, value);
+            }
+            router().oneshot(builder.body(Body::empty()).unwrap())
+        };
+
+        let response = call(
+            "/v1/browser/key-grants",
+            "POST",
+            vec![("x-browser-authorization", format!("Bearer {key_bearer}"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        assert_eq!(body, key_bearer.as_bytes(), "the key's own broker bearer is forwarded");
+
+        // The same pair on any other route: refused before a handler runs.
+        for (path, method) in [("/", "GET"), ("/v1/browser/grants", "POST")] {
+            let response = call(
+                path,
+                method,
+                vec![("x-browser-authorization", format!("Bearer {key_bearer}"))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+
+        let another_key = sign_jwt(&broker_aud(api_key_claims("key-2")), kid);
+        let another_owner = sign_jwt(
+            &broker_aud(Claims {
+                acting_user_id: Some("user-other".into()),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let other_org = sign_jwt(
+            &broker_aud(Claims {
+                org_id: "org-other".into(),
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let a_user = sign_jwt(&broker_aud(base_claims()), kid);
+        for (case, token) in [
+            ("another key", another_key),
+            ("another owner", another_owner),
+            ("another org", other_org),
+            ("a user bearer", a_user),
+        ] {
+            let response = call(
+                "/v1/browser/key-grants",
+                "POST",
+                vec![("x-browser-authorization", format!("Bearer {token}"))],
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{case}");
+        }
+
+        let zdr_bearer = sign_jwt(
+            &broker_aud(Claims {
+                zdr: true,
+                ..api_key_claims("key-1")
+            }),
+            kid,
+        );
+        let response = call(
+            "/v1/browser/key-grants",
+            "POST",
+            vec![("x-browser-authorization", format!("Bearer {zdr_bearer}"))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("zdr_posture_mismatch"),
+            "a mixed posture is the typed refusal"
+        );
+
+        // No other downstream bearer may ride with a key, on any route.
+        let response = call(
+            "/v1/browser/key-grants",
+            "POST",
+            vec![
+                ("x-browser-authorization", format!("Bearer {key_bearer}")),
+                ("x-session-authorization", format!("Bearer {key_bearer}")),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Without the broker bearer the handler's extractor has nothing: 401.
+        let response = call("/v1/browser/key-grants", "POST", Vec::new()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // A user's browser bearer never becomes a key bearer.
+        let user_model = sign_jwt(&base_claims(), kid);
+        let user_browser = sign_jwt(&broker_aud(base_claims()), kid);
+        let response = router()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/v1/browser/key-grants")
+                    .header("authorization", format!("Bearer {user_model}"))
+                    .header("x-browser-authorization", format!("Bearer {user_browser}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        clear_env();
+    }
+
     #[tokio::test]
     #[serial]
     async fn delegated_sandbox_bearer_requires_exact_audience_and_matching_identity() {
@@ -2763,6 +4165,8 @@ mod tests {
 
     fn base_claims() -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-test".into(),
             iss: "auth-core".into(),
             exp: now_secs() + 3600,
@@ -3042,6 +4446,8 @@ mod tests {
 
         fn service(service_id: &str, scopes: &[&str]) -> Claims {
             Claims {
+                key_id: None,
+                acting_user_id: None,
                 sub: service_id.to_owned(),
                 iss: "auth-core".to_owned(),
                 exp: now_secs() + 60,
@@ -3118,6 +4524,8 @@ mod tests {
 
         fn service(service_id: &str, scopes: &[&str]) -> Claims {
             Claims {
+                key_id: None,
+                acting_user_id: None,
                 sub: service_id.to_owned(),
                 iss: "auth-core".to_owned(),
                 exp: now_secs() + 60,
@@ -3423,6 +4831,8 @@ mod tests {
         let mut inference = service_claims();
         inference["aud"] = serde_json::json!("inference-core");
         inference["zdr"] = serde_json::json!(false);
+        // Inference Core's own scope: the delegate is checked against `inference:invoke`, not the gateway's.
+        inference["scopes"] = serde_json::json!(["inference:invoke"]);
         let (status, body) = send_with_headers(&[
             ("authorization", format!("Bearer {ingress}")),
             (
@@ -3468,5 +4878,263 @@ mod tests {
         let (status, body) = send_with_headers(&headers(false)).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         clear_env();
+    }
+}
+
+/// WS16.S1: the service route table as a golden-pinned artefact. The table and the second-bearer
+/// rule are what a caller's fake gateway reads, so a route or scope added to
+/// [`SERVICE_ROUTE_GRANTS`] must change the golden in the same change.
+#[cfg(test)]
+mod service_route_table_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+    use axum::{body::Body, http::Request as HttpRequest, middleware, Router};
+    use tower::ServiceExt;
+
+    const GOLDEN_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/model-gateway-service-routes.json"
+    );
+
+    fn render() -> String {
+        let mut text = serde_json::to_string_pretty(&service_route_table_json())
+            .expect("the route table serializes");
+        text.push('\n');
+        text
+    }
+
+    fn pin_line(text: &str) -> String {
+        format!(
+            "{:x} *model-gateway-service-routes.json\n",
+            Sha256::digest(text.as_bytes())
+        )
+    }
+
+    /// Regenerate with `MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib
+    /// service_route_table_matches_the_golden`; then update the digest in
+    /// `scripts/tests/zdr-contract-sync.test.sh` and re-vendor Quarry's copy.
+    #[test]
+    fn service_route_table_matches_the_golden() {
+        let generated = render();
+        let pin_path = format!("{GOLDEN_PATH}.sha256");
+        if std::env::var("MP_UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
+            std::fs::create_dir_all(std::path::Path::new(GOLDEN_PATH).parent().unwrap())
+                .expect("the contracts directory");
+            std::fs::write(GOLDEN_PATH, &generated).expect("write the route table golden");
+            std::fs::write(&pin_path, pin_line(&generated)).expect("write the route table pin");
+            return;
+        }
+        let committed = std::fs::read_to_string(GOLDEN_PATH).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {GOLDEN_PATH} ({error}). Generate it with MP_UPDATE_GOLDEN=1 cargo test \
+                 -p model-gateway --lib service_route_table_matches_the_golden"
+            )
+        });
+        assert!(
+            !committed.contains('\r'),
+            "the route table golden must keep LF line endings (it is hashed byte for byte)"
+        );
+        assert_eq!(
+            committed, generated,
+            "SERVICE_ROUTE_GRANTS differs from the committed golden. If the change is intended, \
+             regenerate with MP_UPDATE_GOLDEN=1, refresh the pin and Quarry's vendored copy, and \
+             update the digest in scripts/tests/zdr-contract-sync.test.sh."
+        );
+        let pin = std::fs::read_to_string(&pin_path).expect("the golden's .sha256 pin");
+        assert_eq!(pin, pin_line(&committed), "the .sha256 pin differs from the golden");
+    }
+
+    fn service(sub: &str, scopes: &[&str]) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: sub.to_owned(),
+            iss: "test".to_owned(),
+            exp: i64::MAX,
+            org_id: "org".to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: None,
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            zdr: false,
+            org_zdr: None,
+            zdr_waiver: None,
+            sovereign: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some(sub.to_owned()),
+            reason: Some("a reason".to_owned()),
+        }
+    }
+
+    /// The table keeps the semantics of the `match` it replaced: any service holding
+    /// `models:invoke` reaches the two AI routes; the two internal routes are one named service
+    /// each; nothing else (notably `/v1/invoke`) is open to a service.
+    #[test]
+    fn the_table_keeps_the_semantics_of_the_match_it_replaced() {
+        let any = service("service:anything", &["models:invoke"]);
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/chat"));
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/embeddings"));
+        assert!(!service_route_allowed(&any, "GET", "/v1/ai/chat"));
+        assert!(!service_route_allowed(&any, "POST", "/v1/invoke"));
+        assert!(!service_route_allowed(&any, "POST", "/v1/invoke/stream"));
+        let no_scope = service("service:anything", &[]);
+        assert!(!service_route_allowed(&no_scope, "POST", "/v1/ai/chat"));
+
+        let deletion = service("service:control-space-deletion", &["model:space-delete"]);
+        assert!(service_route_allowed(&deletion, "POST", "/v1/internal/space-deletion/threads"));
+        let imposter = service("service:control-space-deletion-copy", &["model:space-delete"]);
+        assert!(!service_route_allowed(&imposter, "POST", "/v1/internal/space-deletion/threads"));
+        assert!(!service_route_allowed(&deletion, "POST", "/v1/ai/chat"));
+
+        let mail = service("service:verevon-gateway", &["mail-task:prepare-thread"]);
+        assert!(service_route_allowed(&mail, "POST", "/v1/internal/mail-task/prepare-thread"));
+        let wrong = service("service:someone-else", &["mail-task:prepare-thread"]);
+        assert!(!service_route_allowed(&wrong, "POST", "/v1/internal/mail-task/prepare-thread"));
+    }
+
+    #[test]
+    fn the_golden_records_the_second_bearer_and_never_opens_invoke() {
+        let table = service_route_table_json();
+        assert_eq!(table["service_inference_bearer"]["header"], "x-inference-authorization");
+        assert_eq!(table["service_inference_bearer"]["audience"], "inference-core");
+        assert_eq!(
+            table["service_inference_bearer"]["downstream_requires_scope"],
+            "inference:invoke"
+        );
+        let paths: Vec<&str> = table["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["path"].as_str().unwrap())
+            .collect();
+        assert!(!paths.iter().any(|path| path.starts_with("/v1/invoke")), "{paths:?}");
+    }
+
+    #[test]
+    fn service_principal_id_reads_only_a_service_claim() {
+        let svc = service("service:quarry-edge", &["models:invoke"]);
+        assert_eq!(svc.service_principal_id(), Some("service:quarry-edge"));
+        let mut user = svc.clone();
+        user.principal_type = Some("user".to_owned());
+        assert_eq!(user.service_principal_id(), None);
+    }
+
+    /// E3.6-8: the two extra routes are in the table, flagged, and nothing else is.
+    #[test]
+    fn the_layout_and_pii_rows_carry_their_switch_and_no_other_row_does() {
+        let flagged: Vec<(&str, &str)> = SERVICE_ROUTE_GRANTS
+            .iter()
+            .filter_map(|grant| grant.flag.map(|flag| (grant.path, flag)))
+            .collect();
+        assert_eq!(
+            flagged,
+            vec![
+                ("/v1/ai/documents/layout", "MODEL_GATEWAY_AI_LAYOUT_SERVICE"),
+                ("/v1/ai/language/pii", "MODEL_GATEWAY_AI_PII_SERVICE"),
+            ]
+        );
+        for grant in SERVICE_ROUTE_GRANTS.iter().filter(|g| g.flag.is_some()) {
+            assert_eq!(grant.method, "POST");
+            assert_eq!(grant.scope, "models:invoke");
+            assert_eq!(grant.service, None);
+        }
+        // Still never /v1/invoke, and no sibling route of the flagged two opened by accident.
+        let any = service("service:anything", &["models:invoke"]);
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/documents/layout"));
+        assert!(service_route_allowed(&any, "POST", "/v1/ai/language/pii"));
+        for path in [
+            "/v1/ai/documents",
+            "/v1/ai/documents/analyze",
+            "/v1/ai/documents/forms",
+            "/v1/ai/language",
+            "/v1/ai/language/entities",
+            "/v1/ai/language/detect",
+        ] {
+            assert!(!service_route_allowed(&any, "POST", path), "{path}");
+        }
+        assert!(!service_route_allowed(&any, "GET", "/v1/ai/language/pii"));
+    }
+
+    #[test]
+    fn a_service_switch_is_on_only_for_the_three_literals() {
+        for on in ["1", "true", "on", " 1 "] {
+            assert!(service_flag_on(Some(on)), "{on:?}");
+        }
+        for off in ["", "0", "false", "off", "yes", "TRUE", "enabled", "2"] {
+            assert!(!service_flag_on(Some(off)), "{off:?}");
+        }
+        assert!(!service_flag_on(None));
+    }
+
+    #[test]
+    fn a_flagged_route_is_switched_off_by_default_and_only_for_a_caller_who_holds_it() {
+        let svc = service("service:quarry-edge", &["models:invoke"]);
+        let unset = |_: &str| None;
+        let only = |name: &'static str| {
+            move |asked: &str| (asked == name).then(|| "1".to_owned())
+        };
+        for path in ["/v1/ai/language/pii", "/v1/ai/documents/layout"] {
+            assert!(service_route_switched_off(&svc, "POST", path, &unset), "{path}");
+        }
+        // Each switch opens its own route only.
+        let pii_on = only("MODEL_GATEWAY_AI_PII_SERVICE");
+        assert!(!service_route_switched_off(&svc, "POST", "/v1/ai/language/pii", &pii_on));
+        assert!(service_route_switched_off(&svc, "POST", "/v1/ai/documents/layout", &pii_on));
+        let layout_on = only("MODEL_GATEWAY_AI_LAYOUT_SERVICE");
+        assert!(!service_route_switched_off(&svc, "POST", "/v1/ai/documents/layout", &layout_on));
+        assert!(service_route_switched_off(&svc, "POST", "/v1/ai/language/pii", &layout_on));
+        // A switch value that is not a literal stays off.
+        let wrong = |_: &str| Some("yes".to_owned());
+        assert!(service_route_switched_off(&svc, "POST", "/v1/ai/language/pii", &wrong));
+        // No scope, wrong method, an unflagged route: not this function's business (403 / allowed).
+        let no_scope = service("service:quarry-edge", &[]);
+        assert!(!service_route_switched_off(&no_scope, "POST", "/v1/ai/language/pii", &unset));
+        assert!(!service_route_switched_off(&svc, "GET", "/v1/ai/language/pii", &unset));
+        assert!(!service_route_switched_off(&svc, "POST", "/v1/ai/chat", &unset));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn the_middleware_answers_404_while_the_switch_is_off_and_403_without_the_scope() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+        async fn status_of(claims: Claims, path: &str) -> StatusCode {
+            Router::new()
+                .route("/v1/ai/language/pii", axum::routing::post(ok_handler))
+                .route("/v1/ai/documents/layout", axum::routing::post(ok_handler))
+                .route("/v1/ai/chat", axum::routing::post(ok_handler))
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri(path)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+        std::env::remove_var(SERVICE_FLAG_AI_PII);
+        std::env::remove_var(SERVICE_FLAG_AI_LAYOUT);
+        let svc = service("service:quarry-edge", &["models:invoke"]);
+        let no_scope = service("service:quarry-edge", &[]);
+
+        assert_eq!(status_of(svc.clone(), "/v1/ai/language/pii").await, StatusCode::NOT_FOUND);
+        assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::NOT_FOUND);
+        assert_eq!(status_of(svc.clone(), "/v1/ai/chat").await, StatusCode::OK);
+        assert_eq!(status_of(no_scope, "/v1/ai/language/pii").await, StatusCode::FORBIDDEN);
+
+        std::env::set_var(SERVICE_FLAG_AI_PII, "1");
+        assert_eq!(status_of(svc.clone(), "/v1/ai/language/pii").await, StatusCode::OK);
+        assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::NOT_FOUND);
+        std::env::set_var(SERVICE_FLAG_AI_LAYOUT, "true");
+        assert_eq!(status_of(svc.clone(), "/v1/ai/documents/layout").await, StatusCode::OK);
+        std::env::set_var(SERVICE_FLAG_AI_PII, "0");
+        assert_eq!(status_of(svc, "/v1/ai/language/pii").await, StatusCode::NOT_FOUND);
+        std::env::remove_var(SERVICE_FLAG_AI_PII);
+        std::env::remove_var(SERVICE_FLAG_AI_LAYOUT);
     }
 }

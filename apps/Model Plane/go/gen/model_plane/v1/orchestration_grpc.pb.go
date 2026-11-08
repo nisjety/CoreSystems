@@ -31,7 +31,13 @@ const (
 	OrchestrationCoreService_ListPendingApprovals_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
 	OrchestrationCoreService_GetApproval_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/GetApproval"
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_RerouteApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/RerouteApproval"
 	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
+	OrchestrationCoreService_ClaimOnceApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval"
+	OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/HoldQuarantinedOutput"
+	OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ClaimQuarantineRelease"
+	OrchestrationCoreService_GetQuarantinePreview_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/GetQuarantinePreview"
+	OrchestrationCoreService_GetApprovalPreview_FullMethodName                = "/model_plane.v1.OrchestrationCoreService/GetApprovalPreview"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
 	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
@@ -95,11 +101,35 @@ type OrchestrationCoreServiceClient interface {
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
+	// Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+	// member holding a Control-signed `model.approval.reroute` decision; Control has already
+	// checked that the caller is the requester or a manager. Refused for a zero-retention caller
+	// and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+	RerouteApproval(ctx context.Context, in *RerouteApprovalRequest, opts ...grpc.CallOption) (*RerouteApprovalResponse, error)
 	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
 	// durable Do loop that paused for the approval calls this when it re-enters, so
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error)
+	// Claim the granted once-approval for one exact action, so the agent's retry of a
+	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+	// caller is the run owner's session; the claim is one atomic update, so two
+	// concurrent claims have one winner. Refused for a zero-retention caller.
+	ClaimOnceApproval(ctx context.Context, in *ClaimOnceApprovalRequest, opts ...grpc.CallOption) (*ClaimOnceApprovalResponse, error)
+	// Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+	// is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+	// Refused for a zero-retention caller and for a run that is not in a Space.
+	HoldQuarantinedOutput(ctx context.Context, in *HoldQuarantinedOutputRequest, opts ...grpc.CallOption) (*HoldQuarantinedOutputResponse, error)
+	// Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+	// call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+	ClaimQuarantineRelease(ctx context.Context, in *ClaimQuarantineReleaseRequest, opts ...grpc.CallOption) (*ClaimQuarantineReleaseResponse, error)
+	// A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+	// approval and no one else (build plan WS10 S8).
+	GetQuarantinePreview(ctx context.Context, in *GetQuarantinePreviewRequest, opts ...grpc.CallOption) (*GetQuarantinePreviewResponse, error)
+	// EP-10 S1: the full draft a pending approval would release, shaped from its retained
+	// descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+	// other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+	GetApprovalPreview(ctx context.Context, in *GetApprovalPreviewRequest, opts ...grpc.CallOption) (*GetApprovalPreviewResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -282,10 +312,70 @@ func (c *orchestrationCoreServiceClient) DecideApproval(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *orchestrationCoreServiceClient) RerouteApproval(ctx context.Context, in *RerouteApprovalRequest, opts ...grpc.CallOption) (*RerouteApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RerouteApprovalResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_RerouteApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *orchestrationCoreServiceClient) ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ConsumeApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_ConsumeApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ClaimOnceApproval(ctx context.Context, in *ClaimOnceApprovalRequest, opts ...grpc.CallOption) (*ClaimOnceApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimOnceApprovalResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ClaimOnceApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) HoldQuarantinedOutput(ctx context.Context, in *HoldQuarantinedOutputRequest, opts ...grpc.CallOption) (*HoldQuarantinedOutputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HoldQuarantinedOutputResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ClaimQuarantineRelease(ctx context.Context, in *ClaimQuarantineReleaseRequest, opts ...grpc.CallOption) (*ClaimQuarantineReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimQuarantineReleaseResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) GetQuarantinePreview(ctx context.Context, in *GetQuarantinePreviewRequest, opts ...grpc.CallOption) (*GetQuarantinePreviewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetQuarantinePreviewResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetQuarantinePreview_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) GetApprovalPreview(ctx context.Context, in *GetApprovalPreviewRequest, opts ...grpc.CallOption) (*GetApprovalPreviewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetApprovalPreviewResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetApprovalPreview_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -488,11 +578,35 @@ type OrchestrationCoreServiceServer interface {
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
+	// Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+	// member holding a Control-signed `model.approval.reroute` decision; Control has already
+	// checked that the caller is the requester or a manager. Refused for a zero-retention caller
+	// and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+	RerouteApproval(context.Context, *RerouteApprovalRequest) (*RerouteApprovalResponse, error)
 	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
 	// durable Do loop that paused for the approval calls this when it re-enters, so
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error)
+	// Claim the granted once-approval for one exact action, so the agent's retry of a
+	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+	// caller is the run owner's session; the claim is one atomic update, so two
+	// concurrent claims have one winner. Refused for a zero-retention caller.
+	ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error)
+	// Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+	// is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+	// Refused for a zero-retention caller and for a run that is not in a Space.
+	HoldQuarantinedOutput(context.Context, *HoldQuarantinedOutputRequest) (*HoldQuarantinedOutputResponse, error)
+	// Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+	// call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+	ClaimQuarantineRelease(context.Context, *ClaimQuarantineReleaseRequest) (*ClaimQuarantineReleaseResponse, error)
+	// A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+	// approval and no one else (build plan WS10 S8).
+	GetQuarantinePreview(context.Context, *GetQuarantinePreviewRequest) (*GetQuarantinePreviewResponse, error)
+	// EP-10 S1: the full draft a pending approval would release, shaped from its retained
+	// descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+	// other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+	GetApprovalPreview(context.Context, *GetApprovalPreviewRequest) (*GetApprovalPreviewResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -591,8 +705,26 @@ func (UnimplementedOrchestrationCoreServiceServer) GetApproval(context.Context, 
 func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecideApproval not implemented")
 }
+func (UnimplementedOrchestrationCoreServiceServer) RerouteApproval(context.Context, *RerouteApprovalRequest) (*RerouteApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RerouteApproval not implemented")
+}
 func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimOnceApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) HoldQuarantinedOutput(context.Context, *HoldQuarantinedOutputRequest) (*HoldQuarantinedOutputResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HoldQuarantinedOutput not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ClaimQuarantineRelease(context.Context, *ClaimQuarantineReleaseRequest) (*ClaimQuarantineReleaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimQuarantineRelease not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetQuarantinePreview(context.Context, *GetQuarantinePreviewRequest) (*GetQuarantinePreviewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetQuarantinePreview not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetApprovalPreview(context.Context, *GetApprovalPreviewRequest) (*GetApprovalPreviewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetApprovalPreview not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
@@ -874,6 +1006,24 @@ func _OrchestrationCoreService_DecideApproval_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_RerouteApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RerouteApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).RerouteApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_RerouteApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).RerouteApproval(ctx, req.(*RerouteApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ConsumeApprovalRequest)
 	if err := dec(in); err != nil {
@@ -888,6 +1038,96 @@ func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, req.(*ConsumeApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ClaimOnceApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimOnceApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ClaimOnceApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ClaimOnceApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ClaimOnceApproval(ctx, req.(*ClaimOnceApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_HoldQuarantinedOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HoldQuarantinedOutputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).HoldQuarantinedOutput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).HoldQuarantinedOutput(ctx, req.(*HoldQuarantinedOutputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ClaimQuarantineRelease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimQuarantineReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ClaimQuarantineRelease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ClaimQuarantineRelease(ctx, req.(*ClaimQuarantineReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_GetQuarantinePreview_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetQuarantinePreviewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetQuarantinePreview(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetQuarantinePreview_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetQuarantinePreview(ctx, req.(*GetQuarantinePreviewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_GetApprovalPreview_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalPreviewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetApprovalPreview(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetApprovalPreview_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetApprovalPreview(ctx, req.(*GetApprovalPreviewRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1193,8 +1433,32 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _OrchestrationCoreService_DecideApproval_Handler,
 		},
 		{
+			MethodName: "RerouteApproval",
+			Handler:    _OrchestrationCoreService_RerouteApproval_Handler,
+		},
+		{
 			MethodName: "ConsumeApproval",
 			Handler:    _OrchestrationCoreService_ConsumeApproval_Handler,
+		},
+		{
+			MethodName: "ClaimOnceApproval",
+			Handler:    _OrchestrationCoreService_ClaimOnceApproval_Handler,
+		},
+		{
+			MethodName: "HoldQuarantinedOutput",
+			Handler:    _OrchestrationCoreService_HoldQuarantinedOutput_Handler,
+		},
+		{
+			MethodName: "ClaimQuarantineRelease",
+			Handler:    _OrchestrationCoreService_ClaimQuarantineRelease_Handler,
+		},
+		{
+			MethodName: "GetQuarantinePreview",
+			Handler:    _OrchestrationCoreService_GetQuarantinePreview_Handler,
+		},
+		{
+			MethodName: "GetApprovalPreview",
+			Handler:    _OrchestrationCoreService_GetApprovalPreview_Handler,
 		},
 		{
 			MethodName: "ClaimApprovalDeliveries",
@@ -1281,13 +1545,13 @@ type OrchestratorWorkflowServiceClient interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   * the workflow id is derived deterministically from
+	//   - the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(ctx context.Context, in *StartWorkflowRequest, opts ...grpc.CallOption) (*StartWorkflowResponse, error)
@@ -1329,13 +1593,13 @@ type OrchestratorWorkflowServiceServer interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   * the workflow id is derived deterministically from
+	//   - the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(context.Context, *StartWorkflowRequest) (*StartWorkflowResponse, error)
@@ -1402,6 +1666,324 @@ var OrchestratorWorkflowService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StartWorkflow",
 			Handler:    _OrchestratorWorkflowService_StartWorkflow_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/orchestration.proto",
+}
+
+const (
+	RunQuestionConsumeService_ConsumeRunQuestion_FullMethodName = "/model_plane.v1.RunQuestionConsumeService/ConsumeRunQuestion"
+)
+
+// RunQuestionConsumeServiceClient is the client API for RunQuestionConsumeService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+// plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+// change.
+type RunQuestionConsumeServiceClient interface {
+	// Claim an answered `resume` question for its run's continuation. The first claim spends the
+	// answer. The same claim token again is a safe replay that returns the answer; another claim is
+	// reported as already consumed, not as an error. Owner-only and org-scoped.
+	ConsumeRunQuestion(ctx context.Context, in *ConsumeRunQuestionRequest, opts ...grpc.CallOption) (*ConsumeRunQuestionResponse, error)
+}
+
+type runQuestionConsumeServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewRunQuestionConsumeServiceClient(cc grpc.ClientConnInterface) RunQuestionConsumeServiceClient {
+	return &runQuestionConsumeServiceClient{cc}
+}
+
+func (c *runQuestionConsumeServiceClient) ConsumeRunQuestion(ctx context.Context, in *ConsumeRunQuestionRequest, opts ...grpc.CallOption) (*ConsumeRunQuestionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsumeRunQuestionResponse)
+	err := c.cc.Invoke(ctx, RunQuestionConsumeService_ConsumeRunQuestion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RunQuestionConsumeServiceServer is the server API for RunQuestionConsumeService service.
+// All implementations must embed UnimplementedRunQuestionConsumeServiceServer
+// for forward compatibility.
+//
+// Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+// plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+// change.
+type RunQuestionConsumeServiceServer interface {
+	// Claim an answered `resume` question for its run's continuation. The first claim spends the
+	// answer. The same claim token again is a safe replay that returns the answer; another claim is
+	// reported as already consumed, not as an error. Owner-only and org-scoped.
+	ConsumeRunQuestion(context.Context, *ConsumeRunQuestionRequest) (*ConsumeRunQuestionResponse, error)
+	mustEmbedUnimplementedRunQuestionConsumeServiceServer()
+}
+
+// UnimplementedRunQuestionConsumeServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedRunQuestionConsumeServiceServer struct{}
+
+func (UnimplementedRunQuestionConsumeServiceServer) ConsumeRunQuestion(context.Context, *ConsumeRunQuestionRequest) (*ConsumeRunQuestionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConsumeRunQuestion not implemented")
+}
+func (UnimplementedRunQuestionConsumeServiceServer) mustEmbedUnimplementedRunQuestionConsumeServiceServer() {
+}
+func (UnimplementedRunQuestionConsumeServiceServer) testEmbeddedByValue() {}
+
+// UnsafeRunQuestionConsumeServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to RunQuestionConsumeServiceServer will
+// result in compilation errors.
+type UnsafeRunQuestionConsumeServiceServer interface {
+	mustEmbedUnimplementedRunQuestionConsumeServiceServer()
+}
+
+func RegisterRunQuestionConsumeServiceServer(s grpc.ServiceRegistrar, srv RunQuestionConsumeServiceServer) {
+	// If the following call panics, it indicates UnimplementedRunQuestionConsumeServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&RunQuestionConsumeService_ServiceDesc, srv)
+}
+
+func _RunQuestionConsumeService_ConsumeRunQuestion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsumeRunQuestionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RunQuestionConsumeServiceServer).ConsumeRunQuestion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RunQuestionConsumeService_ConsumeRunQuestion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RunQuestionConsumeServiceServer).ConsumeRunQuestion(ctx, req.(*ConsumeRunQuestionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// RunQuestionConsumeService_ServiceDesc is the grpc.ServiceDesc for RunQuestionConsumeService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var RunQuestionConsumeService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.RunQuestionConsumeService",
+	HandlerType: (*RunQuestionConsumeServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ConsumeRunQuestion",
+			Handler:    _RunQuestionConsumeService_ConsumeRunQuestion_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/orchestration.proto",
+}
+
+const (
+	ApprovalScopeGrantService_UseApprovalScopeGrant_FullMethodName    = "/model_plane.v1.ApprovalScopeGrantService/UseApprovalScopeGrant"
+	ApprovalScopeGrantService_ListApprovalScopeGrants_FullMethodName  = "/model_plane.v1.ApprovalScopeGrantService/ListApprovalScopeGrants"
+	ApprovalScopeGrantService_RevokeApprovalScopeGrant_FullMethodName = "/model_plane.v1.ApprovalScopeGrantService/RevokeApprovalScopeGrant"
+)
+
+// ApprovalScopeGrantServiceClient is the client API for ApprovalScopeGrantService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// A standing release for one eligible call, given by a "this thread" or "this run" decision.
+// Served by session-core. It is its own service rather than a method of
+// OrchestrationCoreService, so the implementations of that service, and their test doubles,
+// need no change.
+type ApprovalScopeGrantServiceClient interface {
+	// Atomically matches one live grant for a call and counts the use. The caller is an
+	// execution-core service principal acting for the run's owner. An empty grant_id means no
+	// grant matched, and the call pauses as it did before grants existed.
+	UseApprovalScopeGrant(ctx context.Context, in *UseApprovalScopeGrantRequest, opts ...grpc.CallOption) (*UseApprovalScopeGrantResponse, error)
+	// The verified caller's own grants in one thread.
+	ListApprovalScopeGrants(ctx context.Context, in *ListApprovalScopeGrantsRequest, opts ...grpc.CallOption) (*ListApprovalScopeGrantsResponse, error)
+	// Revokes one of the verified caller's live grants. Revocation takes effect at once.
+	RevokeApprovalScopeGrant(ctx context.Context, in *RevokeApprovalScopeGrantRequest, opts ...grpc.CallOption) (*RevokeApprovalScopeGrantResponse, error)
+}
+
+type approvalScopeGrantServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewApprovalScopeGrantServiceClient(cc grpc.ClientConnInterface) ApprovalScopeGrantServiceClient {
+	return &approvalScopeGrantServiceClient{cc}
+}
+
+func (c *approvalScopeGrantServiceClient) UseApprovalScopeGrant(ctx context.Context, in *UseApprovalScopeGrantRequest, opts ...grpc.CallOption) (*UseApprovalScopeGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UseApprovalScopeGrantResponse)
+	err := c.cc.Invoke(ctx, ApprovalScopeGrantService_UseApprovalScopeGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *approvalScopeGrantServiceClient) ListApprovalScopeGrants(ctx context.Context, in *ListApprovalScopeGrantsRequest, opts ...grpc.CallOption) (*ListApprovalScopeGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApprovalScopeGrantsResponse)
+	err := c.cc.Invoke(ctx, ApprovalScopeGrantService_ListApprovalScopeGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *approvalScopeGrantServiceClient) RevokeApprovalScopeGrant(ctx context.Context, in *RevokeApprovalScopeGrantRequest, opts ...grpc.CallOption) (*RevokeApprovalScopeGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeApprovalScopeGrantResponse)
+	err := c.cc.Invoke(ctx, ApprovalScopeGrantService_RevokeApprovalScopeGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ApprovalScopeGrantServiceServer is the server API for ApprovalScopeGrantService service.
+// All implementations must embed UnimplementedApprovalScopeGrantServiceServer
+// for forward compatibility.
+//
+// A standing release for one eligible call, given by a "this thread" or "this run" decision.
+// Served by session-core. It is its own service rather than a method of
+// OrchestrationCoreService, so the implementations of that service, and their test doubles,
+// need no change.
+type ApprovalScopeGrantServiceServer interface {
+	// Atomically matches one live grant for a call and counts the use. The caller is an
+	// execution-core service principal acting for the run's owner. An empty grant_id means no
+	// grant matched, and the call pauses as it did before grants existed.
+	UseApprovalScopeGrant(context.Context, *UseApprovalScopeGrantRequest) (*UseApprovalScopeGrantResponse, error)
+	// The verified caller's own grants in one thread.
+	ListApprovalScopeGrants(context.Context, *ListApprovalScopeGrantsRequest) (*ListApprovalScopeGrantsResponse, error)
+	// Revokes one of the verified caller's live grants. Revocation takes effect at once.
+	RevokeApprovalScopeGrant(context.Context, *RevokeApprovalScopeGrantRequest) (*RevokeApprovalScopeGrantResponse, error)
+	mustEmbedUnimplementedApprovalScopeGrantServiceServer()
+}
+
+// UnimplementedApprovalScopeGrantServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedApprovalScopeGrantServiceServer struct{}
+
+func (UnimplementedApprovalScopeGrantServiceServer) UseApprovalScopeGrant(context.Context, *UseApprovalScopeGrantRequest) (*UseApprovalScopeGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UseApprovalScopeGrant not implemented")
+}
+func (UnimplementedApprovalScopeGrantServiceServer) ListApprovalScopeGrants(context.Context, *ListApprovalScopeGrantsRequest) (*ListApprovalScopeGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListApprovalScopeGrants not implemented")
+}
+func (UnimplementedApprovalScopeGrantServiceServer) RevokeApprovalScopeGrant(context.Context, *RevokeApprovalScopeGrantRequest) (*RevokeApprovalScopeGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeApprovalScopeGrant not implemented")
+}
+func (UnimplementedApprovalScopeGrantServiceServer) mustEmbedUnimplementedApprovalScopeGrantServiceServer() {
+}
+func (UnimplementedApprovalScopeGrantServiceServer) testEmbeddedByValue() {}
+
+// UnsafeApprovalScopeGrantServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ApprovalScopeGrantServiceServer will
+// result in compilation errors.
+type UnsafeApprovalScopeGrantServiceServer interface {
+	mustEmbedUnimplementedApprovalScopeGrantServiceServer()
+}
+
+func RegisterApprovalScopeGrantServiceServer(s grpc.ServiceRegistrar, srv ApprovalScopeGrantServiceServer) {
+	// If the following call panics, it indicates UnimplementedApprovalScopeGrantServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ApprovalScopeGrantService_ServiceDesc, srv)
+}
+
+func _ApprovalScopeGrantService_UseApprovalScopeGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UseApprovalScopeGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalScopeGrantServiceServer).UseApprovalScopeGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalScopeGrantService_UseApprovalScopeGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalScopeGrantServiceServer).UseApprovalScopeGrant(ctx, req.(*UseApprovalScopeGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ApprovalScopeGrantService_ListApprovalScopeGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApprovalScopeGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalScopeGrantServiceServer).ListApprovalScopeGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalScopeGrantService_ListApprovalScopeGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalScopeGrantServiceServer).ListApprovalScopeGrants(ctx, req.(*ListApprovalScopeGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ApprovalScopeGrantService_RevokeApprovalScopeGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeApprovalScopeGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalScopeGrantServiceServer).RevokeApprovalScopeGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalScopeGrantService_RevokeApprovalScopeGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalScopeGrantServiceServer).RevokeApprovalScopeGrant(ctx, req.(*RevokeApprovalScopeGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ApprovalScopeGrantService_ServiceDesc is the grpc.ServiceDesc for ApprovalScopeGrantService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ApprovalScopeGrantService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ApprovalScopeGrantService",
+	HandlerType: (*ApprovalScopeGrantServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "UseApprovalScopeGrant",
+			Handler:    _ApprovalScopeGrantService_UseApprovalScopeGrant_Handler,
+		},
+		{
+			MethodName: "ListApprovalScopeGrants",
+			Handler:    _ApprovalScopeGrantService_ListApprovalScopeGrants_Handler,
+		},
+		{
+			MethodName: "RevokeApprovalScopeGrant",
+			Handler:    _ApprovalScopeGrantService_RevokeApprovalScopeGrant_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -1,8 +1,22 @@
-import { formatResetTime, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
+import { ConnectorSuggestionCard } from './ConnectorSuggestionCard'
+import type { ConnectIntent } from '@/shared/integrations/connect-intent'
+import { ForkAction, threadForkEnabled } from './ForkAction'
+import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
+import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
 import {
+  WritePreviewDisclosure,
+  approvalWritePreviewEnabled,
+  isMailSendApproval,
+  mailEditProblemText,
+  type MailEditDraft,
+} from './WritePreview'
+import {
+  approvalEditRefusalOf,
   type Approval,
   type ApprovalDecision,
+  type ApprovalEdit,
+  type ApprovalScope,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
 import {
@@ -54,15 +68,28 @@ import {
   type AnswerState,
   type ConversationNode,
   type ConversationNodeContext,
+  type ConversationNodeEntry,
   type DiffResult,
   type PlanApprovalStatus,
   type ToolIntent,
 } from '@/shared/chat-nodes'
 import type { DockedNodes } from '@/shared/chat-nodes/types'
+import type { ChatContextRef } from '@/shared/actions/chat-context-refs'
 // The barrel does not re-export it yet; one more line there when it next changes.
 import { nodeKey } from '@/shared/chat-nodes/derive'
-import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+import type {
+  AutonomyRung,
+  ChatKnowledgeReceipt,
+  ChatPlanStep,
+  ChatSearchProviderId,
+  ChatSearchProvenanceEvent,
+  ChatSearchRoute,
+  MemoryOrigin,
+  RecalledMemory,
+} from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
+import { isWidgetFence } from '../lib/inline-widget'
+import type { SettledFold } from '../lib/settled-fold'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
@@ -70,6 +97,11 @@ import { listNotifications, type Notification } from '@/shared/api/notifications
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
 import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
+import { memberSkillAuthoring } from '@/shared/api/skills-client'
+import { SaveAsSkillDialog } from '@/features/skills/components/SaveAsSkillDialog'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { hasWorkspaceAdminAccess } from '@/shared/session/access'
+import { getSession } from '@/shared/session/session-store'
 import { ApiError } from '@/shared/api/http'
 import {
   For,
@@ -94,7 +126,11 @@ import {
   highlightCode,
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
+import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
+import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
+import { SettledTurnContent } from './SettledTurnFold'
+import { StepStrip, stepStripEnabled } from './StepStrip'
 import {
   domId,
   formatBytes,
@@ -128,6 +164,7 @@ import {
   type GeneratedFile,
   type GeneratedImagePreview,
   type IconComponent,
+  type LifecycleNotice,
   type MarkdownBlock,
   type MarkdownListItem,
   type MarkdownQuoteLine,
@@ -136,13 +173,43 @@ import {
 } from './chat-types'
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import type { ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
-import { streamActivityLabel, type StreamActivity } from '@/features/chat/lib/stream-activity'
+import { streamActivityLabel, type StreamActivity, type Translator } from '@/features/chat/lib/stream-activity'
+import { narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
-import { approvalHeadline, approvalReason } from '@/shared/approvals/approval-copy'
+import {
+  approvalHeadline,
+  approvalReason,
+  browserAssistActionLabel,
+  browserAssistKindOf,
+  browserAssistNoTakeOverLine,
+} from '@/shared/approvals/approval-copy'
+import type { ChatRunBrowserControl } from '@/features/chat/lib/chat-run-watch'
+import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
+import {
+  APPROVAL_REDIRECT_ENABLED,
+  browserApprovalCardEnabled,
+  runApprovalFitsCard,
+  runApprovalToCardModel,
+  type ApprovalCardModel,
+} from '@/features/browser/approval/approval-model'
 import { confirmStepUp } from '@/shared/approvals/step-up'
 import { createPlayingSpeechId, speechPlayer } from '@/features/voice/speech-playback'
 import { readAloudBlockedMessage, readAloudUnavailableMessage } from '@/features/voice/voice-mode-state'
+
+/**
+ * What an assistant turn's connected-app suggestion card needs from the page (EP-10 S8, S9). Absent where the
+ * surface offers no card.
+ */
+export type ConnectorSuggestionWiring = {
+  orgId?: string
+  /** "Use it for this question": select the account for the turn and send the question again. */
+  onUse: (suggestion: { suggestionId: string; provider: string }, connectionId: string) => void
+  connectTurn?: () => { threadId: string; prompt: string } | null
+  pendingConnectIntent?: () => ConnectIntent | null
+  resumeConnectIntent?: (intent: ConnectIntent, connectionId: string, providerLabel: string) => boolean
+  dismissConnectIntent?: () => void
+}
 
 export function MessageBlock(props: {
   copied: boolean
@@ -177,6 +244,8 @@ export function MessageBlock(props: {
    */
   onScheduleThis?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
@@ -201,8 +270,17 @@ export function MessageBlock(props: {
    * attest zero data retention.
    */
   temporaryChat?: boolean
+  /**
+   * The thread is scoped to a Space. Its history has its own surface and authority, so the conversation export
+   * is not offered there (EP-12 D8).
+   */
+  spaceScoped?: boolean
   /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
   docked?: DockedNodes
+  /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
+  settledFold?: SettledFold
+  /** The connected-app suggestion card's wiring (EP-10 S8); see `ConnectorSuggestionWiring`. */
+  connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   // `<For>` invokes its mapper untracked in Solid 2. Read the store-backed
   // role through a memo so the conditional branch is established in a tracked
@@ -273,8 +351,16 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   'source-scope': {
     kind: 'source-scope',
     render: (node) => (
-      <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} />
+      <SourceScopeNotice scope={node.scope} excludedTools={node.excludedTools} knowledge={node.knowledge} />
     ),
+  },
+  'search-provenance': {
+    kind: 'search-provenance',
+    render: (node) => <SearchProvenanceNotice provenance={node.provenance} />,
+  },
+  'lifecycle-notices': {
+    kind: 'lifecycle-notices',
+    render: (node) => <LifecycleNotices notices={node.notices} />,
   },
   truncated: {
     kind: 'truncated',
@@ -305,6 +391,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
           <ApprovalRequests
             approvals={node.approvals}
             onDecide={ctx.onApprovalDecision}
+            onDecideEdited={ctx.onApprovalEditedDecision}
           />
         }
       >
@@ -368,6 +455,22 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
     ),
   },
 })
+
+/**
+ * One run of a turn's node entries through the registry. The keyed form keeps a
+ * row's DOM while the list re-derives; `VITE_CHAT_RENDER_LEGACY=true` keeps the old
+ * unkeyed one. `SettledTurnContent` calls it once for the fold body and once for the rest.
+ */
+const renderNodeEntries = (entries: () => ConversationNodeEntry[]) =>
+  chatRenderLegacy() ? (
+    <For each={entries()}>
+      {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
+    </For>
+  ) : (
+    <For each={entries()} keyed={(entry) => nodeKey(entry.node)}>
+      {(entry) => CHAT_NODE_REGISTRY.renderLive(entry)}
+    </For>
+  )
 
 /**
  * What the transcript keeps of a control the composer dock holds: where to look,
@@ -468,6 +571,8 @@ export function AssistantMessage(props: {
   /** See `MessageBlock`'s doc — same "Planlegg dette" affordance, forwarded through. */
   onScheduleThis?: () => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
@@ -492,8 +597,14 @@ export function AssistantMessage(props: {
   threadId?: string | null
   /** See `MessageBlock`'s doc: disables "Les høyt". */
   temporaryChat?: boolean
+  /** See `MessageBlock`'s doc: a Space thread's export is not offered. */
+  spaceScoped?: boolean
   /** See `MessageBlock`'s doc. */
   docked?: DockedNodes
+  /** See `MessageBlock`'s doc. */
+  settledFold?: SettledFold
+  /** See `MessageBlock`'s doc. */
+  connectorSuggestion?: ConnectorSuggestionWiring
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
@@ -540,6 +651,22 @@ export function AssistantMessage(props: {
       setRemembered(err instanceof ApiError && err.code === 'memory_not_enabled' ? 'paused' : 'failed')
     }
   }
+  // "Lagre som ferdighet" (EP-11 S1): an admin may save a private skill from an answer, a member only while
+  // the member switch is on. A temporary chat and a conversation not yet saved never offer it. The member
+  // answer is asked only for a signed-in member on an answer that could show the action, so an anonymous
+  // or temporary render never calls the gateway.
+  const [savingSkill, setSavingSkill] = createSignal(false)
+  const skillActionShape = () =>
+    !props.temporaryChat && Boolean(props.threadId) && !props.message.streaming && Boolean(props.message.content.trim())
+  const askMemberSkillAuthoring = () =>
+    skillActionShape() && getSession().status === 'authenticated' && !hasWorkspaceAdminAccess(getSession())
+  const [memberSkills] = createResource(
+    () => (askMemberSkillAuthoring() ? true : undefined),
+    () => memberSkillAuthoring(),
+  )
+  const canSaveAsSkill = () =>
+    skillActionShape() && (hasWorkspaceAdminAccess(getSession()) || memberSkills() === true)
+
   const toggleReadAloud = () => {
     if (player.playingId() === props.message.id) {
       player.stop()
@@ -627,6 +754,7 @@ export function AssistantMessage(props: {
       onViewSteps: props.onViewSteps,
       onViewAttachments: props.onViewAttachments,
       onApprovalDecision: props.onApprovalDecision,
+      onApprovalEditedDecision: props.onApprovalEditedDecision,
       onApprovePlan: props.onApprovePlan,
       onRejectPlan: props.onRejectPlan,
       onSelectFollowUp: props.onSelectFollowUp,
@@ -764,16 +892,46 @@ export function AssistantMessage(props: {
           could leak into a "clean" PDF).
         */}
         <div class="verevon-chat-message__content" ref={(el) => { contentRef = el }}>
-          {chatRenderLegacy() ? (
-            <For each={nodeEntries()}>
-              {(entry) => CHAT_NODE_REGISTRY.render(entry.node, entry.context)}
-            </For>
-          ) : (
-            <For each={nodeEntries()} keyed={(entry) => nodeKey(entry.node)}>
-              {(entry) => CHAT_NODE_REGISTRY.renderLive(entry)}
-            </For>
-          )}
+          {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`. */}
+          <InlineWidgetSurface value={inlineWidgetsEnabled() ? 'live' : 'inert'}>
+            <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
+              <SettledTurnContent fold={props.settledFold} entries={nodeEntries()} renderEntries={renderNodeEntries} />
+            </InlineWidgetAnswer>
+            {/* EP-4 S9: the apps of this answer's settled MCP calls, under the same chat-only surface. */}
+            <Show when={mcpAppsEnabled() && (props.message.toolCalls?.length ?? 0) > 0}>
+              <McpAppsForAnswer
+                calls={props.message.toolCalls ?? []}
+                streaming={props.message.streaming}
+                temporaryChat={props.temporaryChat}
+                onSelectFollowUp={props.onSelectFollowUp}
+                runId={props.message.runId}
+              />
+            </Show>
+          </InlineWidgetSurface>
+          <Show when={stepStripEnabled && props.message.streaming}>
+            <StepStrip
+              calls={props.message.toolCalls ?? []}
+              planSteps={props.message.proposedPlan?.steps.length}
+              notices={props.message.lifecycle}
+            />
+          </Show>
         </div>
+        {/* EP-10 S8: at most one connected-app suggestion per turn; the card hides itself in a Space or temporary chat. */}
+        <Show when={props.connectorSuggestion ? props.message.connectorSuggestion : undefined}>
+          {(suggestion) => (
+            <ConnectorSuggestionCard
+              suggestion={suggestion()}
+              orgId={props.connectorSuggestion?.orgId ?? ''}
+              spaceScoped={props.spaceScoped}
+              temporary={props.temporaryChat}
+              onUse={(connectionId) => props.connectorSuggestion?.onUse(suggestion(), connectionId)}
+              connectTurn={props.connectorSuggestion?.connectTurn}
+              pendingConnectIntent={props.connectorSuggestion?.pendingConnectIntent}
+              resumeConnectIntent={props.connectorSuggestion?.resumeConnectIntent}
+              dismissConnectIntent={props.connectorSuggestion?.dismissConnectIntent}
+            />
+          )}
+        </Show>
         <Show when={!waiting() && !errored()}>
           <div class="verevon-chat-message-actions">
             <Show when={props.pinned}>
@@ -800,12 +958,31 @@ export function AssistantMessage(props: {
             <MessageAction label={props.copied ? 'Copied' : 'Copy'} onClick={props.onCopy}>
               {props.copied ? <Check size={14} /> : <Copy size={14} />}
             </MessageAction>
+            <Show when={threadForkEnabled() && !props.temporaryChat && Boolean(props.threadId) && props.message.role === 'assistant' && !props.message.streaming}>
+              <ForkAction threadId={props.threadId ?? ''} messageId={props.message.id} />
+            </Show>
+            {/* The export is about the whole conversation, so it is offered once: on the latest answer, beside fork. */}
+            <Show when={threadExportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
+              <ExportConversationAction
+                threadId={props.threadId ?? ''}
+                temporaryChat={props.temporaryChat}
+                spaceScoped={props.spaceScoped}
+              />
+            </Show>
             <Show when={canRemember()}>
               <MessageAction
                 label={remembered() === 'saved' ? i18n.tr('Husket', 'Remembered') : i18n.tr('Husk dette', 'Remember this')}
                 onClick={() => void rememberThis()}
               >
                 {remembered() === 'saved' ? <Check size={14} /> : <Brain size={14} />}
+              </MessageAction>
+            </Show>
+            <Show when={canSaveAsSkill()}>
+              <MessageAction
+                label={i18n.tr('Lagre som ferdighet', 'Save as skill')}
+                onClick={() => setSavingSkill(true)}
+              >
+                <Sparkles size={14} />
               </MessageAction>
             </Show>
             {/*
@@ -1082,6 +1259,15 @@ export function AssistantMessage(props: {
             )}
           </Show>
         </Show>
+        <Show when={savingSkill()}>
+          <SaveAsSkillDialog
+            threadId={props.threadId ?? ''}
+            messageId={props.message.id}
+            content={props.message.content}
+            temporary={props.temporaryChat}
+            onClose={() => setSavingSkill(false)}
+          />
+        </Show>
       </div>
     </article>
   )
@@ -1165,6 +1351,7 @@ export function UserMessage(props: {
             <UserMessageContent content={props.message.content} />
             <ToolChips tools={props.message.tools} />
             <AttachmentChips attachments={props.message.attachments} tone="user" onOpen={props.onViewAttachments} />
+            <ContextRefChips refs={props.message.contextRefs ?? []} />
           </div>
           <div class="verevon-chat-message-actions verevon-chat-message-actions--user">
             <Show
@@ -1390,15 +1577,27 @@ export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'h
  * A closed ```chart``` fence is the same story: the native chart when its JSON
  * reads, the plain code block plus a one-line note when it does not (see
  * `ChartFenceBlock`), and a plain code block while it is still streaming.
+ *
+ * A closed ```widget fence is a live sandboxed widget only where the surface
+ * says so (`InlineWidgetSurface`, a chat assistant answer) and the switch is on;
+ * everywhere else, and while streaming, it is a code block like any other.
  */
 export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
+  const widgetsLive = useInlineWidgetsLive()
   return (
     <Show
       when={props.block.closed && props.block.lang.trim().toLowerCase() === 'chart'}
       fallback={
         <Show
           when={props.block.closed && props.block.lang.trim().toLowerCase() === 'mermaid'}
-          fallback={<TranscriptCodeBlock block={props.block} />}
+          fallback={
+            <Show
+              when={widgetsLive && isWidgetFence(props.block)}
+              fallback={<TranscriptCodeBlock block={props.block} />}
+            >
+              <InlineWidget source={props.block.text} fallback={<TranscriptCodeBlock block={props.block} />} />
+            </Show>
+          }
         >
           <MermaidDiagram code={props.block.text} />
         </Show>
@@ -2111,31 +2310,251 @@ export function FollowUpChips(props: { suggestions: string[]; onSelect?: (text: 
   )
 }
 
-export function ApprovalRequests(props: {
-  approvals: Approval[]
-  onDecide: (approvalId: string, decision: ApprovalDecision) => void
+/**
+ * Whether the card offers a standing scope for this approval (build plan WS13 S6). The server's
+ * `scope_options` is the offer: it lists a standing scope only where the cause allows one and the
+ * deployment has switched standing scopes on, so the card never offers what the decide route refuses.
+ */
+function offersStandingScope(approval: Approval, scope: Exclude<ApprovalScope, 'once'>): boolean {
+  return approval.cause?.scopeOptions.includes(scope) ?? false
+}
+
+/** What a member may choose for a site the agent asks to open (WS21-S6). */
+export type BrowserSiteConsentChoice = 'allow_this_run' | 'remember_read' | 'remember_act' | 'deny'
+
+/**
+ * The choices a browser-site consent card offers for one host. The card never offers more than the
+ * admin's ceiling for that host, and it never appears under zero data retention, where the agent
+ * browser is refused before any consent is asked.
+ */
+export function browserSiteConsentChoices(
+  maxLevel: 'read' | 'act',
+  zdr: boolean,
+): BrowserSiteConsentChoice[] {
+  if (zdr) return []
+  return maxLevel === 'act'
+    ? ['allow_this_run', 'remember_read', 'remember_act', 'deny']
+    : ['allow_this_run', 'remember_read', 'deny']
+}
+
+export function browserSiteConsentLabel(
+  choice: BrowserSiteConsentChoice,
+  i18n: { tr: (noText: string, enText: string) => string },
+): string {
+  switch (choice) {
+    case 'allow_this_run':
+      return i18n.tr('Tillat for denne kjøringen', 'Allow for this run')
+    case 'remember_read':
+      return i18n.tr('Husk: bare lesing', 'Remember: reading only')
+    case 'remember_act':
+      return i18n.tr('Husk: lesing og handling', 'Remember: reading and acting')
+    case 'deny':
+      return i18n.tr('Ikke tillat', 'Do not allow')
+  }
+}
+
+/**
+ * WS21-S6: asks the member whether the agent may open one site. The host and the ceiling come from
+ * the approval's cause, the record the server keeps, never from text on the page.
+ */
+export function BrowserSiteConsentCard(props: {
+  host: string
+  maxLevel: 'read' | 'act'
+  zdr: boolean
+  onDecide: (choice: BrowserSiteConsentChoice) => void
 }) {
   const i18n = useI18n()
+  const choices = () => browserSiteConsentChoices(props.maxLevel, props.zdr)
+  return (
+    <Show when={choices().length > 0}>
+      <div
+        class="verevon-chat-approval__consent"
+        role="group"
+        aria-label={i18n.tr('Nettside for agenten', 'Site for the agent')}
+      >
+        <p class="verevon-chat-approval__detail">
+          {i18n.tr(
+            `Agenten vil åpne ${props.host}. Skal den få lov?`,
+            `The agent wants to open ${props.host}. Allow it?`,
+          )}
+        </p>
+        <div class="verevon-chat-approval__actions">
+          <For each={choices()}>
+            {(choice) => (
+              <button
+                type="button"
+                class={
+                  choice === 'deny'
+                    ? 'verevon-chat-approval__reject'
+                    : 'verevon-chat-approval__approve'
+                }
+                onClick={() => props.onDecide(choice)}
+              >
+                {browserSiteConsentLabel(choice, i18n)}
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+    </Show>
+  )
+}
+
+/**
+ * EP-1 S2: the agent asks the person to clear a wall on the page (a sign-in, a human check, a
+ * consent choice, a firewall). The words and the host come from the approval's cause, the record
+ * the server keeps, never from text on the page. Take over flips the browser to the person through
+ * the same control call the live panel uses, compare-and-set on the epoch the projection shows; it is
+ * offered only when the turn's browser is bound and the owner may take it (`onTakeOver` present).
+ * Skip this site declines the request: the run closes the page and looks elsewhere.
+ */
+export function BrowserHumanAssistCard(props: {
+  approval: Approval
+  control?: ChatRunBrowserControl
+  onTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+  onSkip: () => void
+}) {
+  const i18n = useI18n()
+  const control = () => (props.onTakeOver ? props.control : undefined)
+  return (
+    <div class="verevon-chat-approval" role="group" aria-label={approvalHeadline(props.approval, i18n)}>
+      <div class="verevon-chat-approval__head">
+        <span class="verevon-chat-approval__badge">{i18n.tr('Hjelp', 'Help')}</span>
+        <span class="verevon-chat-approval__kind">{approvalHeadline(props.approval, i18n)}</span>
+      </div>
+      <Show when={approvalReason(props.approval, i18n)}>
+        {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+      </Show>
+      <Show when={!control()}>
+        <p class="verevon-chat-approval__detail">{browserAssistNoTakeOverLine(i18n)}</p>
+      </Show>
+      <div class="verevon-chat-approval__actions">
+        <Show when={control()}>
+          {(bound) => (
+            <button
+              type="button"
+              class="verevon-chat-approval__approve"
+              onClick={() => props.onTakeOver?.(bound().sessionId, bound().controlEpoch)}
+            >
+              {browserAssistActionLabel('take_over', i18n)}
+            </button>
+          )}
+        </Show>
+        <button type="button" class="verevon-chat-approval__reject" onClick={() => props.onSkip()}>
+          {browserAssistActionLabel('skip', i18n)}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+export function ApprovalRequests(props: {
+  approvals: Approval[]
+  onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
+  /** The turn's browser, as the person may address it (EP-1 S1); a help card offers Take over with it. */
+  browserControl?: ChatRunBrowserControl
+  /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
+  onBrowserTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
+  /**
+   * Sends an approval with the person's edits to a drafted mail send (EP-10-S6), for this one call.
+   * It rejects with the typed `ApiError`, so a 409 `approval_changed` keeps the card and the
+   * person's text. Absent: the card offers no edit mode.
+   */
+  onDecideEdited?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
+}) {
+  const i18n = useI18n()
+  // The person's pending edits by approval id (EP-10-S6). Present only while the form differs from
+  // the draft; an edited approval is ONCE only (decision D1), so a standing scope hides meanwhile.
+  const [drafts, setDrafts] = createSignal<Record<string, MailEditDraft>>({})
+  // Bumped on a 409 approval_changed: the disclosure refetches the draft and keeps the person's text.
+  const [conflicts, setConflicts] = createSignal<Record<string, number>>({})
+  const [editErrors, setEditErrors] = createSignal<Record<string, string>>({})
+  const [editBusy, setEditBusy] = createSignal<string | null>(null)
+
+  const noteDraft = (approvalId: string, draft: MailEditDraft | null) => {
+    setDrafts((current) => {
+      const next = { ...current }
+      if (draft) next[approvalId] = draft
+      else delete next[approvalId]
+      return next
+    })
+  }
+
+  const noteEditError = (approvalId: string, message: string | null) => {
+    setEditErrors((current) => {
+      const next = { ...current }
+      if (message) next[approvalId] = message
+      else delete next[approvalId]
+      return next
+    })
+  }
+
+  const sendEdited = async (approvalId: string, edit: ApprovalEdit) => {
+    const send = props.onDecideEdited
+    if (!send || editBusy() !== null) return
+    setEditBusy(approvalId)
+    noteEditError(approvalId, null)
+    try {
+      await send(approvalId, edit)
+      noteDraft(approvalId, null)
+    } catch (error) {
+      const refusal = approvalEditRefusalOf(error)
+      if (refusal === 'approval_changed') {
+        setConflicts((current) => ({ ...current, [approvalId]: (current[approvalId] ?? 0) + 1 }))
+      }
+      noteEditError(
+        approvalId,
+        refusal
+          ? mailEditProblemText(refusal, i18n.tr)
+          : translateApiError(error, i18n.tr, {
+              no: 'Godkjenningen med endringene gikk ikke gjennom.',
+              en: 'The approval with your edits did not go through.',
+            }),
+      )
+    } finally {
+      setEditBusy(null)
+    }
+  }
+
   // An approval whose cause asks for a fresh password confirmation before it is granted (build
   // plan WS13 S5). Only the grant asks; a denial never does.
   const [confirming, setConfirming] = createSignal<string | null>(null)
+  // The standing scope a confirmed grant carries. A standing scope is only ever chosen by its own
+  // control, so the one decision stays what a plain approval means.
+  const [confirmingScope, setConfirmingScope] = createSignal<ApprovalScope | undefined>(undefined)
   const [password, setPassword] = createSignal('')
   const [confirmError, setConfirmError] = createSignal<string | null>(null)
   const [confirmBusy, setConfirmBusy] = createSignal(false)
 
   const cancelConfirmation = () => {
     setConfirming(null)
+    setConfirmingScope(undefined)
     setPassword('')
     setConfirmError(null)
   }
 
-  const approve = (approval: Approval) => {
+  const decide = (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => {
+    if (scope) {
+      props.onDecide(approvalId, decision, scope)
+    } else {
+      props.onDecide(approvalId, decision)
+    }
+  }
+
+  const approve = (approval: Approval, scope?: ApprovalScope) => {
+    const draft = scope === undefined ? drafts()[approval.id] : undefined
+    if (draft?.problem) return
     if (approval.cause?.stepUpRequired) {
       setConfirmError(null)
+      setConfirmingScope(scope)
       setConfirming(approval.id)
       return
     }
-    props.onDecide(approval.id, 'approve')
+    if (draft) {
+      void sendEdited(approval.id, draft.edit)
+      return
+    }
+    decide(approval.id, 'approve', scope)
   }
 
   const confirmationFailure = (error: unknown): string => {
@@ -2166,14 +2585,50 @@ export function ApprovalRequests(props: {
       setConfirmBusy(false)
       setPassword('')
     }
+    const scope = confirmingScope()
     cancelConfirmation()
-    props.onDecide(approval.id, 'approve')
+    // The step-up runs first for an edited grant exactly as for a plain one (WS13-S5).
+    const draft = scope === undefined ? drafts()[approval.id] : undefined
+    if (draft && !draft.problem) {
+      void sendEdited(approval.id, draft.edit)
+      return
+    }
+    decide(approval.id, 'approve', scope)
+  }
+
+  // E3.2-b swap: the shared keyboard-first card (W3-B1-06), inline in the
+  // transcript (D9), behind VITE_BROWSER_APPROVAL_CARD. Only an approval the
+  // card can express takes it (no password step-up, no standing scope); the
+  // copy is the cause wording this deck already shows.
+  const cardModel = (approval: Approval): ApprovalCardModel | null => {
+    if (!browserApprovalCardEnabled() || !runApprovalFitsCard(approval)) return null
+    const base = runApprovalToCardModel(approval)
+    if (!base) return null
+    return {
+      ...base,
+      reason: approvalReason(approval, i18n) ?? '',
+      actionType: approvalHeadline(approval, i18n),
+    }
   }
 
   return (
     <div class="verevon-chat-approvals" role="group" aria-label={i18n.tr('Godkjenninger', 'Approvals')}>
       <For each={props.approvals}>
         {(approval) => (
+          <Show
+            when={!browserAssistKindOf(approval.cause)}
+            fallback={
+              <BrowserHumanAssistCard
+                approval={approval}
+                control={props.browserControl}
+                onTakeOver={props.onBrowserTakeOver}
+                onSkip={() => props.onDecide(approval.id, 'reject')}
+              />
+            }
+          >
+          <Show
+            when={cardModel(approval)}
+            fallback={
           <div class="verevon-chat-approval">
             <div class="verevon-chat-approval__head">
               <span class="verevon-chat-approval__badge">{i18n.tr('Godkjenning', 'Approval')}</span>
@@ -2182,6 +2637,21 @@ export function ApprovalRequests(props: {
             <Show when={approvalReason(approval, i18n)}>
               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
             </Show>
+            <Show when={approvalWritePreviewEnabled() && isMailSendApproval(approval)}>
+              <WritePreviewDisclosure
+                approvalId={approval.id}
+                editable={props.onDecideEdited !== undefined}
+                onDraftChange={(draft) => noteDraft(approval.id, draft)}
+                conflict={conflicts()[approval.id] ?? 0}
+              />
+            </Show>
+            <Show when={editErrors()[approval.id]}>
+              {(message) => (
+                <p class="verevon-chat-approval__error" role="alert">
+                  {message()}
+                </p>
+              )}
+            </Show>
             <Show
               when={confirming() === approval.id}
               fallback={
@@ -2189,10 +2659,31 @@ export function ApprovalRequests(props: {
                   <button
                     type="button"
                     class="verevon-chat-approval__approve"
+                    disabled={Boolean(drafts()[approval.id]?.problem) || editBusy() === approval.id}
                     onClick={() => approve(approval)}
                   >
-                    {i18n.tr('Godkjenn', 'Approve')}
+                    {drafts()[approval.id]
+                      ? i18n.tr('Send med mine endringer', 'Send with my edits')
+                      : i18n.tr('Godkjenn', 'Approve')}
                   </button>
+                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'thread')}>
+                    <button
+                      type="button"
+                      class="verevon-chat-approval__approve"
+                      onClick={() => approve(approval, 'thread')}
+                    >
+                      {i18n.tr('Godkjenn for denne tråden', 'Approve for this thread')}
+                    </button>
+                  </Show>
+                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'run')}>
+                    <button
+                      type="button"
+                      class="verevon-chat-approval__approve"
+                      onClick={() => approve(approval, 'run')}
+                    >
+                      {i18n.tr('Godkjenn for denne kjøringen', 'Approve for this run')}
+                    </button>
+                  </Show>
                   <button
                     type="button"
                     class="verevon-chat-approval__reject"
@@ -2236,7 +2727,9 @@ export function ApprovalRequests(props: {
                   >
                     {confirmBusy()
                       ? i18n.tr('Bekrefter…', 'Confirming…')
-                      : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
+                      : drafts()[approval.id] && confirmingScope() === undefined
+                        ? i18n.tr('Bekreft og send med mine endringer', 'Confirm and send with my edits')
+                        : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
                   </button>
                   <button
                     type="button"
@@ -2249,6 +2742,21 @@ export function ApprovalRequests(props: {
               </form>
             </Show>
           </div>
+            }
+          >
+            {(card) => (
+              <BrowserApprovalDecisionCard
+                approval={card()}
+                allowRedirect={APPROVAL_REDIRECT_ENABLED}
+                decide={(request) => {
+                  // The parent owns the decide call and the transcript refresh.
+                  decide(request.approvalId, request.decision)
+                  return Promise.resolve()
+                }}
+              />
+            )}
+          </Show>
+          </Show>
         )}
       </For>
     </div>
@@ -2344,7 +2852,7 @@ function ToolIntentIcon(props: { intent: ToolIntent }) {
  * informative without expanding it. The body is still the raw payload, because
  * the payload is the evidence and reshaping it would hide what the model saw.
  */
-export function ToolCallCard(props: { call: ChatToolCall }) {
+export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const failed = () =>
@@ -2354,6 +2862,9 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
     failed() ? i18n.tr('feilet', 'failed') : running() ? i18n.tr('kjører ...', 'running ...') : i18n.tr('fullført', 'completed')
   const args = () => formatToolArgs(props.call.args)
   const presentation = createMemo(() => toolPresentation(props.call))
+  // With the step strip on, the row reads as a sentence that already carries the count and any truncation,
+  // so those marks are dropped below. Off, the raw name and both marks stay as they were.
+  const label = () => (stepStripEnabled ? narrate(props.call, i18n) : props.call.name)
 
   return (
     <div class="verevon-chat-tool-call" data-intent={presentation().intent}>
@@ -2363,10 +2874,10 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
         onClick={() => setOpen((value) => !value)}
       >
         <ToolIntentIcon intent={presentation().intent} />
-        <span>{props.call.name}</span>
+        <span>{label()}</span>
         {/* A search that returned nothing is a real outcome, so 0 must render —
             hence an explicit null check rather than a truthiness test. */}
-        <Show when={presentation().count != null && !running()}>
+        <Show when={presentation().count != null && !running() && !stepStripEnabled}>
           <em class="verevon-chat-tool-call__count">
             {presentation().count}{' '}
             {presentation().count === 1 ? 'treff' : 'treff'}
@@ -2377,7 +2888,16 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
             +{presentation().added ?? 0} −{presentation().removed ?? 0}
           </em>
         </Show>
-        <Show when={presentation().truncated}>
+        <Show when={presentation().sandbox}>
+          {(sandbox) => (
+            <em class="verevon-chat-tool-call__sandbox" data-sandbox={sandbox()}>
+              {sandbox() === 'isolated_no_network'
+                ? i18n.tr('Isolert, uten nett', 'Isolated, no network')
+                : i18n.tr('ukjent', 'unknown')}
+            </em>
+          )}
+        </Show>
+        <Show when={presentation().truncated && !stepStripEnabled}>
           {/* Not the same as "no results": there IS more and the model did not
               see it, which matters for any answer built on this. */}
           <em
@@ -2392,6 +2912,11 @@ export function ToolCallCard(props: { call: ChatToolCall }) {
         </em>
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
+      <Show when={props.onInspect}>
+        <button type="button" class="verevon-chat-tool-call__inspect" onClick={() => props.onInspect?.()}>
+          {i18n.tr('Åpne i Trace', 'Open in Trace')}
+        </button>
+      </Show>
       <Show when={open() && (args() || props.call.output || props.call.error)}>
         <div>
           <Show when={args()}>
@@ -3033,6 +3558,27 @@ export function AttachmentChips(props: {
   )
 }
 
+/**
+ * The context chips a user turn was sent with (EP-3 S5), read back from `metadata.context_refs`. Labels
+ * only: a chip is a reference the gateway resolved, never content, so nothing here opens or fetches it.
+ */
+function ContextRefChips(props: { refs: readonly ChatContextRef[] }) {
+  const i18n = useI18n()
+  return (
+    <Show when={props.refs.length > 0}>
+      <div class="verevon-chat-context-refs" role="list" aria-label={i18n.tr('Kontekst', 'Context')}>
+        <For each={props.refs}>
+          {(ref) => (
+            <span role="listitem" class="verevon-chat-context-ref" data-kind={ref.kind}>
+              {ref.label || ref.id}
+            </span>
+          )}
+        </For>
+      </div>
+    </Show>
+  )
+}
+
 /** Connector-attach picker provenance labels — mirrors the composer's own
  * CONNECTOR_SOURCE_LABELS (DashboardComposer.tsx), kept as a small local
  * copy here rather than a cross-file import: this is a display-only label
@@ -3189,6 +3735,57 @@ export function GeneratedImagePreviews(props: { previews: GeneratedImagePreview[
  * working path for a data URI, so that is the primary control here; the
  * open-in-tab affordance survives only for real http(s) URLs, where it works.
  */
+/**
+ * WS19-S3: the gateway's structural check of a generated file, as a chip. The
+ * check reads the file's container only, so neither the label nor its title may
+ * say the file opens in Office. A `skipped` check, or none, shows nothing.
+ */
+function GeneratedFileCheckChip(props: { check?: GeneratedFile['check'] }) {
+  const i18n = useI18n()
+  const chip = () => {
+    switch (props.check?.level) {
+      case 'passed':
+        return {
+          level: 'passed',
+          label: i18n.tr('Kontrollert', 'Checked'),
+          title: i18n.tr(
+            'Filstrukturen er kontrollert. Det betyr ikke at Office åpner filen.',
+            'The file structure was checked. This does not mean Office opens the file.',
+          ),
+        }
+      case 'warnings':
+        return {
+          level: 'warnings',
+          label: i18n.tr('Advarsler', 'Warnings'),
+          title: i18n.tr(
+            'Kontrollen av filstrukturen fant advarsler. Det er ikke prøvd om Office åpner filen.',
+            'The file structure check found warnings. Whether Office opens the file was not tried.',
+          ),
+        }
+      case 'failed':
+        return {
+          level: 'failed',
+          label: i18n.tr('Feil funnet', 'Errors found'),
+          title: i18n.tr(
+            'Kontrollen av filstrukturen fant feil. Det er ikke prøvd om Office åpner filen.',
+            'The file structure check found errors. Whether Office opens the file was not tried.',
+          ),
+        }
+      default:
+        return undefined
+    }
+  }
+  return (
+    <Show when={chip()}>
+      {(c) => (
+        <span class={`verevon-chat-generated-file__check verevon-chat-generated-file__check--${c().level}`} title={c().title}>
+          {c().label}
+        </span>
+      )}
+    </Show>
+  )
+}
+
 export function GeneratedFiles(props: { files: GeneratedFile[] }) {
   const i18n = useI18n()
   return (
@@ -3206,6 +3803,7 @@ export function GeneratedFiles(props: { files: GeneratedFile[] }) {
                 <Show when={bytes() > 0}><span>{formatBytes(bytes())}</span></Show>
                 <Download size={12} />
               </a>
+              <GeneratedFileCheckChip check={file.check} />
               <Show when={remote()}>
                 <a
                   class="verevon-chat-generated-file__open"
@@ -3735,24 +4333,208 @@ export function TruncatedAnswerNotice(props: { stopReason: string }) {
 }
 
 /**
+ * What the gateway did to this turn while it ran (WS15): a retry, a compaction, a context change, a reduced answer.
+ * One plain note per notice, in the order they happened. Nothing here asks for an action, and nothing is an alarm.
+ */
+export function LifecycleNotices(props: { notices: LifecycleNotice[] }) {
+  const i18n = useI18n()
+  return (
+    <div class="verevon-chat-lifecycle-notices">
+      <For each={props.notices}>
+        {(notice) => (
+          <p class="verevon-chat-lifecycle-notice" role="note">
+            <Info size={12} />
+            {lifecycleNoticeSentence(notice, i18n)}
+          </p>
+        )}
+      </For>
+    </div>
+  )
+}
+
+/**
+ * The sentence a lifecycle notice reads as, shown and announced alike. It is built from the notice's counts and the
+ * gateway's closed tokens only. A token this build does not know reads as the generic sentence, and a summary that
+ * failed is never worded as one that worked.
+ */
+export function lifecycleNoticeSentence(notice: LifecycleNotice, i18n: Translator): string {
+  switch (notice.kind) {
+    case 'retry':
+      return retrySentence(notice, i18n)
+    case 'compaction':
+      return compactionSentence(notice, i18n)
+    case 'context':
+      return contextSentence(notice, i18n)
+    case 'retrieval':
+      return retrievalSentence(notice, i18n)
+  }
+}
+
+/** For a token this build does not know: the context changed, which is the one thing certain about it. */
+const adjustedSentence = (i18n: Translator) => i18n.tr('Konteksten ble justert.', 'Context was adjusted.')
+
+function retrySentence(notice: Extract<LifecycleNotice, { kind: 'retry' }>, i18n: Translator): string {
+  const tool = notice.tool ? humanizeToolName(notice.tool) : i18n.tr('verktøyet', 'the tool')
+  const attempt = i18n.tr(`(forsøk ${notice.attempt} av ${notice.maxAttempts})`, `(attempt ${notice.attempt} of ${notice.maxAttempts})`)
+  switch (notice.reason) {
+    case 'timeout':
+      return i18n.tr(`Prøver ${tool} på nytt etter tidsavbrudd ${attempt}.`, `Retrying ${tool} after a timeout ${attempt}.`)
+    case 'connection':
+      return i18n.tr(`Prøver ${tool} på nytt etter en tilkoblingsfeil ${attempt}.`, `Retrying ${tool} after a connection error ${attempt}.`)
+    case 'upstream_unavailable':
+      return i18n.tr(
+        `Prøver ${tool} på nytt etter at tjenesten var utilgjengelig ${attempt}.`,
+        `Retrying ${tool} after the service was unavailable ${attempt}.`,
+      )
+    case 'rate_limited':
+      return i18n.tr(`Prøver ${tool} på nytt etter for mange forespørsler ${attempt}.`, `Retrying ${tool} after too many requests ${attempt}.`)
+    case 'other':
+      return i18n.tr(`Prøver ${tool} på nytt etter en midlertidig feil ${attempt}.`, `Retrying ${tool} after a temporary error ${attempt}.`)
+    default:
+      return i18n.tr(`Prøver ${tool} på nytt ${attempt}.`, `Retrying ${tool} ${attempt}.`)
+  }
+}
+
+function compactionSentence(notice: Extract<LifecycleNotice, { kind: 'compaction' }>, i18n: Translator): string {
+  if (notice.scope === 'tool_results' && notice.outcome === 'cleared') {
+    return i18n.tr(
+      'Gamle verktøyresultater ble fjernet for å få plass i konteksten.',
+      'Old tool results were removed to fit the context.',
+    )
+  }
+  if (notice.scope === 'history') {
+    switch (notice.outcome) {
+      case 'summarized':
+        return i18n.tr('Eldre meldinger ble oppsummert for å få plass i konteksten.', 'Older messages were summarized to fit the context.')
+      case 'reused':
+        return i18n.tr('En tidligere oppsummering av eldre meldinger ble brukt igjen.', 'An earlier summary of older messages was reused.')
+      case 'truncated':
+        return i18n.tr(
+          'Oppsummeringen av eldre meldinger mislyktes, så de ble kuttet for å få plass.',
+          'Summarizing older messages failed, so they were cut to fit the context.',
+        )
+    }
+  }
+  return adjustedSentence(i18n)
+}
+
+function contextSentence(notice: Extract<LifecycleNotice, { kind: 'context' }>, i18n: Translator): string {
+  switch (notice.change) {
+    case 'history_shed': {
+      const dropped = notice.messagesDropped ?? 0
+      if (dropped === 1) return i18n.tr('1 eldre melding ble utelatt fra konteksten.', '1 older message was left out of the context.')
+      if (dropped > 1) {
+        return i18n.tr(`${dropped} eldre meldinger ble utelatt fra konteksten.`, `${dropped} older messages were left out of the context.`)
+      }
+      return i18n.tr('Eldre meldinger ble utelatt fra konteksten.', 'Older messages were left out of the context.')
+    }
+    case 'skills_truncated':
+      return i18n.tr('Instruksjonene for en ferdighet ble kortet ned.', 'The instructions for a skill were shortened.')
+    case 'run_context_skipped':
+      return i18n.tr('En del av kjørekonteksten ble hoppet over.', 'Part of the run context was skipped.')
+    default:
+      return adjustedSentence(i18n)
+  }
+}
+
+/** A reduced answer is told as one, whatever the reason: the generic wording covers a key this build does not word. */
+function retrievalSentence(notice: Extract<LifecycleNotice, { kind: 'retrieval' }>, i18n: Translator): string {
+  if (notice.wordingKey === 'retrieval.zdr_dense_unavailable') {
+    return i18n.tr(
+      'Svaret bygger bare på tekstsøk i kildene, fordi semantisk søk ikke er tilgjengelig under Zero Data Retention.',
+      'The answer uses text search in the sources only, because semantic search is not available under Zero Data Retention.',
+    )
+  }
+  return i18n.tr('Svaret ble laget ut fra et begrenset søk i kildene.', 'The answer was produced from a reduced search of the sources.')
+}
+
+/**
  * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2's
  * "shown in the receipt" requirement) — a small disclosure chip next to the
  * other per-turn notices (verification, memory recall), never a silent
  * change of behavior. `excludedTools` is deliberately not rendered inline
  * here: it is the assembled-context inspector's job (`ChatPanels.tsx`), the
  * existing surface for that kind of transparency, to keep this chip short.
+ *
+ * `knowledge` is a Space's knowledge receipt (WS18-S3): what the Space's
+ * knowledge did for this answer. It gets a chip of its own, so a turn with no
+ * source filter shows only that one.
  */
 export function SourceScopeNotice(props: {
-  scope: 'knowledge_only' | 'web_only'
+  scope: 'knowledge_only' | 'web_only' | 'auto'
   excludedTools: string[]
+  knowledge?: ChatKnowledgeReceipt
 }) {
   const i18n = useI18n()
+  const knowledgeText = (knowledge: ChatKnowledgeReceipt) => {
+    if (knowledge.mode === 'not_entitled') {
+      return i18n.tr('Prosjektkunnskap ikke tilgjengelig for dette svaret', 'Project knowledge not available for this answer')
+    }
+    if (knowledge.mode === 'not_searched') {
+      return i18n.tr('Prosjektkunnskap ikke brukt i dette svaret', 'Project knowledge not used for this answer')
+    }
+    if (knowledge.sources === undefined) return i18n.tr('Prosjektkunnskap: søkt', 'Project knowledge: searched')
+    return knowledge.sources === 1
+      ? i18n.tr('Prosjektkunnskap: 1 kilde', 'Project knowledge: 1 source')
+      : i18n.tr(`Prosjektkunnskap: ${knowledge.sources} kilder`, `Project knowledge: ${knowledge.sources} sources`)
+  }
+  return (
+    <>
+      <Show when={props.scope !== 'auto'}>
+        <p class="verevon-chat-source-scope-notice" role="note">
+          <Info size={12} />
+          {props.scope === 'knowledge_only'
+            ? i18n.tr('Kilder: kun organisasjonskunnskap', 'Sources: organization knowledge only')
+            : i18n.tr('Kilder: kun nett', 'Sources: web only')}
+        </p>
+      </Show>
+      <Show when={props.knowledge}>
+        {(knowledge) => (
+          <p class="verevon-chat-source-scope-notice" role="note">
+            <Info size={12} />
+            {knowledgeText(knowledge())}
+          </p>
+        )}
+      </Show>
+    </>
+  )
+}
+
+/**
+ * "Searched via X" (EP-9 W1): which search providers served this turn's web searches, and the route that allowed
+ * them. The wording is keyed by the closed provider id, so a provider the server does not name shows as "other
+ * provider" and never as its raw id. Names and a reason only: no query and no URL reach this line.
+ */
+export function SearchProvenanceNotice(props: { provenance: ChatSearchProvenanceEvent }) {
+  const i18n = useI18n()
+  const providerName = (id: ChatSearchProviderId) => {
+    if (id === 'tantivy_local') return i18n.tr('Verevon-indeks', 'Verevon index')
+    if (id === 'verevon') return i18n.tr('Verevon-søk', 'Verevon search')
+    if (id === 'brave') return 'Brave Search'
+    if (id === 'serper') return i18n.tr('Serper (Google-resultater)', 'Serper (Google results)')
+    if (id === 'searxng') return 'SearXNG'
+    if (id === 'stract') return 'Stract'
+    return i18n.tr('annen leverandør', 'other provider')
+  }
+  const routeText = (route: ChatSearchRoute) => {
+    if (route === 'zdr_free_only') {
+      return i18n.tr(
+        'Nulldatalagring er på, så bare gratis søketjenester ble brukt.',
+        'Zero data retention is on, so only free search providers were used.',
+      )
+    }
+    if (route === 'paid_allowed') {
+      return i18n.tr('Betalte søketjenester er tillatt for dette svaret.', 'Paid search providers are allowed for this answer.')
+    }
+    return i18n.tr('Bare gratis søketjenester er tillatt for dette svaret.', 'Only free search providers are allowed for this answer.')
+  }
   return (
     <p class="verevon-chat-source-scope-notice" role="note">
       <Info size={12} />
-      {props.scope === 'knowledge_only'
-        ? i18n.tr('Kilder: kun organisasjonskunnskap', 'Sources: organization knowledge only')
-        : i18n.tr('Kilder: kun nett', 'Sources: web only')}
+      {i18n.tr('Søkt via ', 'Searched via ')}
+      {props.provenance.providers.map((provider) => providerName(provider.id)).join(', ')}
+      {'. '}
+      {routeText(props.provenance.route)}
     </p>
   )
 }
@@ -4078,6 +4860,7 @@ export function ThinkingDots(props: {
    */
   runId?: string
 }) {
+  const i18n = useI18n()
   const mountedAt = Date.now()
   /**
    * The turn's own start, not this component's.
@@ -4118,7 +4901,7 @@ export function ThinkingDots(props: {
           the first second, and unlike the counter it cannot read as a stall. */}
       <Show when={props.activity}>
         {(activity) => (
-          <small class="verevon-chat-thinking__activity">{streamActivityLabel(activity())}</small>
+          <small class="verevon-chat-thinking__activity">{streamActivityLabel(activity(), i18n)}</small>
         )}
       </Show>
       <Show when={elapsedMs() >= THINKING_ELAPSED_THRESHOLD_MS}>

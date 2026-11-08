@@ -62,7 +62,12 @@ import {
   type Citation,
   type EvidenceSource,
   type IconComponent,
+  type RunMeter,
 } from './chat-types'
+import { CitedPassageViewer, citedPassageOf } from './CitedPassageViewer'
+import { RunCostMeter } from './RunCostMeter'
+import { RunLedger } from './RunLedger'
+import { runLedgerEnabled } from '../lib/run-ledger'
 import { uiEventLabel, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import { availableChatSurfaces, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { useI18n } from '@/shared/i18n'
@@ -102,6 +107,8 @@ export function ChatHeader(props: {
   onChange: (tab: ChatTab) => void
   onNewChat: () => void
   onRegenerate: () => void
+  /** The chat browser's header control (WS9.H). Absent while the dock is off in this build. */
+  browserSlot?: JSX.Element
 }) {
   const i18n = useI18n()
   const [openMenu, setOpenMenu] = createSignal<'workspace' | 'more' | null>(null)
@@ -157,6 +164,7 @@ export function ChatHeader(props: {
         </p>
       </div>
       <div class="verevon-chat-header__actions">
+        {props.browserSlot}
         <Show when={workSurfaces().length > 0}>
           <div class="verevon-chat-header-menu" onFocusOut={closeOnFocusOut}>
             <button
@@ -357,7 +365,15 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle: 
  * for a web-search or knowledge turn — the headings and the tally disappear and
  * this renders exactly the flat list it always did.
  */
-export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
+export function SourcesPanel(props: {
+  grounding?: ChatKnowledgeGrounding | null
+  sources: EvidenceSource[]
+  /**
+   * The `[n]` a gap-driven second research pass read (EP-2-S6), from the report's provenance stamp. When any
+   * read source carries one of them the read list is grouped by pass; otherwise it renders as before.
+   */
+  secondPassNumbers?: readonly number[]
+}) {
   const i18n = useI18n()
   // Connected-app items (WS23 S6) are the person's own mail, files and events, not web or knowledge
   // evidence: they sit under their own heading, grouped by account, and stay out of the read tally.
@@ -395,6 +411,39 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
     (entry) => evidenceSourceGroupKey(entry.source),
     (entry) => evidenceSourceGroupLabel(entry.source),
   ))
+  // Pass grouping (EP-2-S6) sits inside the read section, above the domain grouping: a pass is the
+  // coarser fact (what the first search found versus what the gap search added), and each pass keeps
+  // its own domain groups and the running index computed above.
+  const secondPass = createMemo(() => new Set(props.secondPassNumbers ?? []))
+  const inSecondPass = (source: EvidenceSource) =>
+    source.kind === 'web' && source.number !== undefined && secondPass().has(source.number)
+  const passSplit = createMemo(() => readEntries().some((entry) => inSecondPass(entry.source)))
+  const readPassGroups = createMemo(() => [1, 2].map((pass) => ({
+    pass,
+    groups: groupBySourceGroupId<SourceEntry>(
+      readEntries().filter((entry) => inSecondPass(entry.source) === (pass === 2)),
+      (entry) => evidenceSourceGroupKey(entry.source),
+      (entry) => evidenceSourceGroupLabel(entry.source),
+    ),
+  })).filter((section) => section.groups.length > 0))
+  const renderReadGroups = (groups: () => ReturnType<typeof readGroups>) => (
+    <For each={groups()}>
+      {(group) => (
+        <section class="verevon-chat-source-domain-group">
+          <Show when={groups().length > 1}>
+            <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+          </Show>
+          <For each={group.items}>
+            {(entry) => (
+              entry.source.kind === 'knowledge'
+                ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+                : <WebSourceCard source={entry.source} index={entry.index} />
+            )}
+          </For>
+        </section>
+      )}
+    </For>
+  )
   return (
     <Show
       when={props.sources.length > 0 || props.grounding}
@@ -443,22 +492,20 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
           <Show when={hasUnread() && groups().read.length > 0}>
             <h2 class="verevon-chat-source-group__heading">{i18n.tr('Lest og brukt', 'Read and used')}</h2>
           </Show>
-          <For each={readGroups()}>
-            {(group) => (
-              <section class="verevon-chat-source-domain-group">
-                <Show when={readGroups().length > 1}>
-                  <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
-                </Show>
-                <For each={group.items}>
-                  {(entry) => (
-                    entry.source.kind === 'knowledge'
-                      ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
-                      : <WebSourceCard source={entry.source} index={entry.index} />
-                  )}
-                </For>
-              </section>
-            )}
-          </For>
+          <Show when={passSplit()} fallback={renderReadGroups(readGroups)}>
+            <For each={readPassGroups()}>
+              {(section) => (
+                <section class="verevon-chat-source-pass" data-pass={section.pass}>
+                  <h2 class="verevon-chat-source-group__heading">
+                    {section.pass === 1
+                      ? i18n.tr('Første runde', 'First pass')
+                      : i18n.tr('Andre runde: hull i kildene', 'Second pass: gaps in the sources')}
+                  </h2>
+                  {renderReadGroups(() => section.groups)}
+                </section>
+              )}
+            </For>
+          </Show>
           <Show when={hasUnread()}>
             <section class="verevon-chat-source-group verevon-chat-source-group--unread">
               <h2 class="verevon-chat-source-group__heading">{i18n.tr('Ikke lest', 'Not read')}</h2>
@@ -580,6 +627,8 @@ export function ConnectorSourceCard(props: { source: Citation & { kind: 'web' } 
   const body = () => (
     <>
       <div class="verevon-chat-source-card__meta">
+        {/* A deep-research report numbers the items it cites (EP-2-S7); the number is what its `[n]` names. */}
+        <Show when={props.source.number}>{(number) => <span>[{number()}]</span>}</Show>
         <span>{i18n.tr('Tilkoblet app', 'Connected app')}</span>
         <em>{citationGroupLabel(props.source)}</em>
       </div>
@@ -604,23 +653,45 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
   // paragraph at all rather than an empty one.
   const i18n = useI18n()
   const snippet = createMemo(() => evidenceSourceSnippet(props.source))
+  // The passage the server sent for this source (EP-2-S4); none while the gateway switch is off.
+  const passage = createMemo(() => citedPassageOf(props.source))
+  const [passageOpen, setPassageOpen] = createSignal(false)
   const body = () => (
     <>
       <div class="verevon-chat-source-card__meta">
         <span>{props.index}</span>
-        <em>{hostname(props.source.url)}</em>
+        {/* A knowledge source a research report cites (EP-2-S7) has a provider, not a host: its URL is the
+            provider's name, so the card names the group the server labelled. */}
+        <em>{props.source.origin === 'knowledge' ? citationGroupLabel(props.source) : hostname(props.source.url)}</em>
       </div>
       <h2>{props.source.title || props.source.url}</h2>
       <Show when={snippet()}><p>{snippet()}</p></Show>
+      <Show when={passage()?.quote}>
+        {(quote) => <blockquote class="verevon-chat-source-card__quote">{quote()}</blockquote>}
+      </Show>
     </>
   )
   // The URL comes from the model's search results: an unsafe one keeps the card's text but is not a link.
-  return (
+  const card = () => (
     <Show
       when={isSafeLinkHref(props.source.url)}
       fallback={<span class="verevon-chat-source-card verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{body()}</span>}
     >
       <a class="verevon-chat-source-card" href={props.source.url} target="_blank" rel="noopener noreferrer">{body()}</a>
+    </Show>
+  )
+  // The passage control sits beside the card, never inside its link.
+  return (
+    <Show when={passage()} fallback={card()}>
+      <div class="verevon-chat-source-card-passage">
+        {card()}
+        <button type="button" class="verevon-chat-source-card__passage" onClick={() => setPassageOpen(true)}>
+          {i18n.tr('Vis passasjen', 'Show the passage')}
+        </button>
+        <Show when={passageOpen()}>
+          <CitedPassageViewer citation={props.source} onClose={() => setPassageOpen(false)} />
+        </Show>
+      </div>
     </Show>
   )
 }
@@ -683,9 +754,10 @@ export function ContextWindowPanel(props: {
    * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2's
    * "shown in the receipt" requirement) — the concrete transparency surface
    * for the excluded tool classes, sourced from the turn's own
-   * `source_scope_applied` SSE frame. Absent for an `auto` turn.
+   * `source_scope_applied` SSE frame. Absent for an `auto` turn; a Space's
+   * `auto` receipt names no excluded source, so it shows nothing here.
    */
-  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  scopeApplied?: import('@/shared/api/chat-client').ChatSourceScopeAppliedEvent
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
@@ -720,7 +792,7 @@ export function ContextWindowPanel(props: {
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
       <Show when={open()}>
-        <Show when={props.scopeApplied}>
+        <Show when={props.scopeApplied?.scope === 'auto' ? undefined : props.scopeApplied}>
           {(scopeApplied) => (
             <p class="verevon-chat-context-window__note">
               {scopeApplied().scope === 'knowledge_only'
@@ -807,7 +879,11 @@ export function StepsPanel(props: {
    */
   toolCalls?: ChatToolCall[]
   screen?: ChatArtifact | null
+  /** The turn's running cost and usage (WS27-S4), shown under the Work header. */
+  meter?: RunMeter
   onStopTask: () => void
+  /** Opens the Trace on a tool call (EP-14 S4). The cards offer it only with the run ledger on. */
+  onInspectCall?: (callId: string) => void
 }) {
   const i18n = useI18n()
   const activeTask = () => props.turnStatus !== 'stopped' && props.turnStatus !== 'error'
@@ -907,6 +983,10 @@ export function StepsPanel(props: {
               {i18n.tr('Stopp', 'Stop')}
             </button>
           </div>
+          <RunCostMeter
+            meter={props.meter}
+            quotaRefreshKey={`${props.threadId ?? ''}:${activeTask() ? 'live' : 'settled'}`}
+          />
           {/* Step count drives the plan refetch: session-core mirrors each
               completed execution step into the run's plan, so a new task step
               is the cheapest available signal that the durable plan has more
@@ -972,7 +1052,12 @@ export function StepsPanel(props: {
               <section class="verevon-chat-steps-tools">
                 <h3>{i18n.tr('Verktøykall', 'Tool calls')}</h3>
                 <For each={props.toolCalls ?? []}>
-                  {(call) => <ToolCallCard call={call} />}
+                  {(call) => (
+                    <ToolCallCard
+                      call={call}
+                      onInspect={runLedgerEnabled && props.onInspectCall ? () => props.onInspectCall?.(call.id) : undefined}
+                    />
+                  )}
                 </For>
               </section>
             </Show>
@@ -997,15 +1082,17 @@ export function StepsPanel(props: {
                         ? Math.round((outputTokens / latencyMs) * 1000)
                         : null
                     }
+                    // The run-cost meter's cache figures, so this line and the meter cannot disagree.
+                    const cacheRead = () => props.meter?.cacheReadTokens ?? current.cacheReadTokens ?? 0
                     const cacheTotal = () => {
-                      return (current.cacheReadTokens ?? 0) + (current.cacheWriteTokens ?? 0)
+                      return cacheRead() + (props.meter?.cacheWriteTokens ?? current.cacheWriteTokens ?? 0)
                     }
                     return (
                       <div class="verevon-chat-telemetry" aria-label={i18n.tr('Kjøringsmålinger', 'Run metrics')}>
                         <Metric label="Output" value={`${current.outputTokens ?? '—'} tokens`} />
                         <Metric label="Tokens/sec" value={tokensPerSecond() != null ? String(tokensPerSecond()) : '—'} />
                         <Show when={cacheTotal() > 0}>
-                          <Metric label="Prompt cache" value={`${current.cacheReadTokens ?? 0} read`} />
+                          <Metric label="Prompt cache" value={`${cacheRead()} read`} />
                         </Show>
                       </div>
                     )
@@ -1483,6 +1570,8 @@ export function TracePanel(props: {
   events: readonly VerevonUiEvent[]
   replayTruncated?: boolean
   runId?: string | null
+  /** A tool call the Inspect action asked the ledger to select (EP-14 S4). Read only with the ledger on. */
+  inspectRequest?: { callId: string } | null
 }) {
   const i18n = useI18n()
   return (
@@ -1500,38 +1589,44 @@ export function TracePanel(props: {
           </div>
           <span>{props.events.length} hendelser</span>
         </header>
-        <Show when={props.replayTruncated}>
-          {/* An audit record that is incomplete must say so. This fires both
-              when the durable replay hits its page ceiling and when a long
-              live run reaches the same cap in memory. */}
-          <p class="verevon-chat-trace-log__notice" role="status">
-            Visningen er avkortet ved 5&nbsp;000 hendelser — de eldste vises ikke
-            her. Den varige loggen er fortsatt komplett.
-          </p>
-        </Show>
-        <Show
-          when={props.events.length > 0}
-          fallback={<p class="verevon-chat-trace-log__empty">{i18n.tr('Ingen hendelser er registrert ennå.', 'No events have been recorded yet.')}</p>}
-        >
-          <ol>
-            <For each={props.events}>
-              {(event) => (
-                <li>
-                  <span class="verevon-chat-trace-log__marker" aria-hidden="true" />
-                  <div>
-                    <span class="verevon-chat-trace-log__event-copy">
-                      <strong>{uiEventLabel(event)}</strong>
-                      <Show when={cancellationReceipt(event)}>
-                        {(receipt) => <code title={receipt()}>kvittering {shortReceipt(receipt())}</code>}
-                      </Show>
-                    </span>
-                    <time>{formatTime(event.at)}</time>
-                  </div>
-                </li>
-              )}
-            </For>
-          </ol>
-        </Show>
+        {runLedgerEnabled ? (
+          <RunLedger events={props.events} replayTruncated={props.replayTruncated} inspectRequest={props.inspectRequest} />
+        ) : (
+          <>
+            <Show when={props.replayTruncated}>
+              {/* An audit record that is incomplete must say so. This fires both
+                  when the durable replay hits its page ceiling and when a long
+                  live run reaches the same cap in memory. */}
+              <p class="verevon-chat-trace-log__notice" role="status">
+                Visningen er avkortet ved 5&nbsp;000 hendelser — de eldste vises ikke
+                her. Den varige loggen er fortsatt komplett.
+              </p>
+            </Show>
+            <Show
+              when={props.events.length > 0}
+              fallback={<p class="verevon-chat-trace-log__empty">{i18n.tr('Ingen hendelser er registrert ennå.', 'No events have been recorded yet.')}</p>}
+            >
+              <ol>
+                <For each={props.events}>
+                  {(event) => (
+                    <li>
+                      <span class="verevon-chat-trace-log__marker" aria-hidden="true" />
+                      <div>
+                        <span class="verevon-chat-trace-log__event-copy">
+                          <strong>{uiEventLabel(event)}</strong>
+                          <Show when={cancellationReceipt(event)}>
+                            {(receipt) => <code title={receipt()}>kvittering {shortReceipt(receipt())}</code>}
+                          </Show>
+                        </span>
+                        <time>{formatTime(event.at)}</time>
+                      </div>
+                    </li>
+                  )}
+                </For>
+              </ol>
+            </Show>
+          </>
+        )}
       </section>
     </div>
   )

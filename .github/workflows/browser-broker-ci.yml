@@ -85,8 +85,8 @@ jobs:
       run:
         working-directory: "apps/Model Plane/go/services/browser-broker"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: "apps/Model Plane/go/go.work"
           cache-dependency-path: "apps/Model Plane/go/services/browser-broker/go.sum"
@@ -109,8 +109,8 @@ jobs:
       run:
         working-directory: "apps/Model Plane/go/services/browser-broker"
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: "apps/Model Plane/go/go.work"
           cache-dependency-path: "apps/Model Plane/go/services/browser-broker/go.sum"
@@ -126,7 +126,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: bootstrap_broker_db.sh against a throwaway postgres
         run: bash scripts/tests/bootstrap-broker-db.test.sh
 
@@ -134,8 +134,8 @@ jobs:
     name: Grant contract (L1)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "22"
       - name: browser-grant contract

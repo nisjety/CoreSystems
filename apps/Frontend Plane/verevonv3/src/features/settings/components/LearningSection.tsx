@@ -161,6 +161,18 @@ function skipNotice(reason: string, i18n: I18n): string | null {
   }
 }
 
+/** What the review puts before the reason of a proposal the owner asked for with /learn (EP-11 S7). */
+const LEARN_REASON_PREFIX = 'learn:'
+
+/**
+ * A proposal's reason as shown: whether the owner asked for it with /learn, and the reviewer's
+ * sentence without the marker.
+ */
+export function proposalReason(reason: string): { requested: boolean; text: string } {
+  if (!reason.startsWith(LEARN_REASON_PREFIX)) return { requested: false, text: reason }
+  return { requested: true, text: reason.slice(LEARN_REASON_PREFIX.length).trim() }
+}
+
 /** A proposal waits for its owner alone; the server shows nobody else one. */
 function isOwnPendingProposal(skill: Skill, ownerId: string): boolean {
   return ownerId !== '' && skill.review_state === 'proposed' && skill.owner_user_id === ownerId
@@ -357,15 +369,20 @@ export function LearningSection() {
                 const diff = () =>
                   lineDiff(snapshotContent(source()?.beforeJson ?? '') ?? '', skill.content)
                 const busy = () => busyId() === skill.id
+                const reason = () => proposalReason(skill.proposal_reason ?? '')
                 return (
                   <div class="verevon-settings-integration-row">
                     <div>
                       <p>
                         {skill.name}{' '}
                         <span class="verevon-trust-chip">{i18n.tr('Venter på deg', 'Waiting for you')}</span>
+                        <Show when={reason().requested}>
+                          {' '}
+                          <span class="verevon-trust-chip">{i18n.tr('Bedt om av deg', 'Requested by you')}</span>
+                        </Show>
                       </p>
-                      <Show when={skill.proposal_reason}>
-                        {(reason) => <span>{reason()}</span>}
+                      <Show when={reason().text}>
+                        {(text) => <span>{text()}</span>}
                       </Show>
                       <Show when={source()?.threadId}>
                         {(threadId) => (
@@ -477,7 +494,7 @@ export function LearningSection() {
                         <Show when={actor}>{(label) => <span class="verevon-trust-chip">{label()}</span>}</Show>
                         <span class="verevon-trust-chip">{formatWhen(entry.createdAt)}</span>
                       </span>
-                      <Show when={entry.reason}>
+                      <Show when={proposalReason(entry.reason).text}>
                         {(reason) => <span class="verevon-settings-subnote">{reason()}</span>}
                       </Show>
                       <Show when={entry.threadId}>

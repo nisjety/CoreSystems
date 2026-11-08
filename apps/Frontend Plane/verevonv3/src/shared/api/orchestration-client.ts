@@ -1,5 +1,11 @@
-import { orchestrationDecideApprovalInput } from '@/shared/actions/action-registry'
+import type { z } from 'zod'
+import {
+  type integrationsConnectorPoliciesOutput,
+  integrationsSetConnectorPolicyInput,
+  orchestrationDecideApprovalInput,
+} from '@/shared/actions/action-registry'
 import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
+import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
@@ -38,6 +44,35 @@ export type {
 
 export type ApprovalDecision = 'approve' | 'reject'
 
+/**
+ * How far an approval decision reaches (build plan WS13 S6). `once` is the one decision that always
+ * exists; `thread` and `run` are standing grants, which the server offers only where the approval's
+ * cause allows them and the deployment has switched them on.
+ */
+export type ApprovalScope = 'once' | 'thread' | 'run'
+
+const APPROVAL_SCOPES: readonly ApprovalScope[] = ['once', 'thread', 'run']
+/** What approving does with the paused work (build plan WS10 S1). Server-stated, never guessed. */
+export type ApprovalResumeClass = 'action_continuation' | 'live_poll' | 'none'
+
+/** Where an approved action stands. Derived server-side from the delivery rows. */
+export type ApprovalContinuationState =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'not_resumable'
+  | 'live'
+  | 'awaiting_continue'
+
+export type ApprovalContinuation = {
+  state: ApprovalContinuationState
+  failureCode?: string
+  /** Independent read-back of the outcome, when one exists. */
+  verification?: string
+  providerReceiptId?: string
+}
+
 /** A pending/decided approval as reported by model-gateway's orchestration API. */
 export type Approval = {
   id: string
@@ -51,6 +86,14 @@ export type Approval = {
   kind?: string
   /** Why the pause was raised, when the creator stated it. Absent on an older approval. */
   cause?: ApprovalCause
+  /** Stable key of the gated tool, when the creator stated it. */
+  toolKey?: string
+  /** Short allowlisted label of the gated action. Never raw arguments. */
+  actionLabel?: string
+  /** What approving does. Absent on an approval created before the card context existed. */
+  resumeClass?: ApprovalResumeClass
+  /** Where the approved action stands. Absent until the approval is granted. */
+  continuation?: ApprovalContinuation
   /** PENDING | GRANTED | DENIED | EXPIRED (uppercased provider enum name). */
   status?: string
   requestedBy?: string
@@ -109,11 +152,39 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
       ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
       : [],
     stepUpRequired: cause.step_up_required === true,
+    assistKind: str(cause.assist_kind),
+    assistOrigin: str(cause.assist_origin),
+    host: str(cause.host),
+  }
+}
+
+const RESUME_CLASSES: readonly ApprovalResumeClass[] = ['action_continuation', 'live_poll', 'none']
+const CONTINUATION_STATES: readonly ApprovalContinuationState[] = [
+  'queued',
+  'running',
+  'completed',
+  'failed',
+  'not_resumable',
+  'live',
+  'awaiting_continue',
+]
+
+/** The typed continuation, read through the closed vocabulary; an unknown state is no claim. */
+export function normalizeApprovalContinuation(raw: unknown): ApprovalContinuation | undefined {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined
+  const value = raw as Record<string, unknown>
+  const state = CONTINUATION_STATES.find((candidate) => candidate === value.state)
+  if (!state) return undefined
+  return {
+    state,
+    failureCode: str(value.failure_code),
+    verification: str(value.verification),
+    providerReceiptId: str(value.provider_receipt_id),
   }
 }
 
 /** Normalize a model-gateway approval object (snake_case) to our camelCase shape. */
-function normalizeApproval(raw: RawApproval): Approval | null {
+export function normalizeApproval(raw: RawApproval): Approval | null {
   const id = str(raw.id) ?? str(raw.approval_id)
   if (!id) return null
   return {
@@ -123,6 +194,10 @@ function normalizeApproval(raw: RawApproval): Approval | null {
     stepId: str(raw.step_id) ?? str(raw.stepId),
     kind: str(raw.kind) ?? str(raw.approval_kind),
     cause: normalizeApprovalCause(raw.cause),
+    toolKey: str(raw.tool_key),
+    actionLabel: str(raw.action_label),
+    resumeClass: RESUME_CLASSES.find((candidate) => candidate === raw.resume_class),
+    continuation: normalizeApprovalContinuation(raw.continuation),
     status: canonicalApprovalStatus(str(raw.status) ?? str(raw.state)),
     requestedBy: str(raw.requested_by) ?? str(raw.requestedBy),
     detail: str(raw.detail) ?? str(raw.summary) ?? str(raw.reason) ?? str(raw.tool),
@@ -152,20 +227,327 @@ export async function decideApproval(
   decision: ApprovalDecision,
   reason?: string,
   signal?: AbortSignal,
+  scope: ApprovalScope = 'once',
+  promote = false,
+  edit?: ApprovalEdit,
 ): Promise<Approval | null> {
-  const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
-  if (!checked.success) {
+  const checked = orchestrationDecideApprovalInput.safeParse({
+    approvalId,
+    decision,
+    reason: reason ?? '',
+    ...(edit ? { edit } : {}),
+  })
+  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else. An edit
+  // (EP-10-S6, decision D1) is approved for this one call only: never with a standing scope or
+  // "Always". The server refuses both too; refusing here keeps the person from believing it went.
+  if (
+    !checked.success ||
+    !APPROVAL_SCOPES.includes(scope) ||
+    (promote && (decision !== 'approve' || scope !== 'thread')) ||
+    (edit !== undefined && (scope !== 'once' || promote))
+  ) {
     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
   }
   const payload = await requestJson<{ approval?: RawApproval }>(
     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
     {
       method: 'POST',
-      body: JSON.stringify({ decision, reason: checked.data.reason ?? '' }),
+      // The scope, "Always" and an edit are sent only when asked for: the one plain decision
+      // carries none of them, so an unedited approval is byte-identical to before EP-10-S6.
+      body: JSON.stringify({
+        decision,
+        reason: checked.data.reason ?? '',
+        ...(scope === 'once' ? {} : { scope }),
+        ...(promote ? { promote: true } : {}),
+        ...(checked.data.edit
+          ? { edit: { patch: checked.data.edit.patch, baseFingerprint: checked.data.edit.baseFingerprint } }
+          : {}),
+      }),
       signal,
     },
   )
   return payload.approval ? normalizeApproval(payload.approval) : null
+}
+
+/**
+ * "Send with my edits" (EP-10-S6): the person's changes to a drafted mail send and the fingerprint
+ * of the draft they saw (`ApprovalPreview.actionFingerprint`).
+ */
+export type ApprovalEdit = {
+  patch: MailSendPatch
+  baseFingerprint: string
+}
+
+/**
+ * The typed refusals of an edited approval (EP-10-S4 gateway and BFF): the draft changed since it
+ * was read (409 `approval_changed`), it was edited too often (409 `revision_limit`), edits are
+ * switched off or not the caller's (403), or the patch broke a limit (422, the EP-10-S3 codes).
+ */
+export const APPROVAL_EDIT_REFUSALS = [
+  'approval_changed',
+  'revision_limit',
+  'approval_edit_disabled',
+  'edit_owner_only',
+  'edit_requires_grant',
+  'edit_requires_once',
+  'invalid_patch',
+  'invalid_base_fingerprint',
+  ...APPROVAL_EDIT_CODES,
+] as const
+
+export type ApprovalEditRefusal = (typeof APPROVAL_EDIT_REFUSALS)[number]
+
+/** The edit refusal an error carries, or null when it is some other failure. */
+export function approvalEditRefusalOf(error: unknown): ApprovalEditRefusal | null {
+  if (!(error instanceof ApiError) || error.code === null) return null
+  return (APPROVAL_EDIT_REFUSALS as readonly string[]).includes(error.code)
+    ? (error.code as ApprovalEditRefusal)
+    : null
+}
+
+/**
+ * A rule an "Always" choice on an MCP tool's approval proposed (build plan WS13 S7). It is not a rule
+ * until the person confirms it: confirming writes a digest-pinned user-scope allow.
+ */
+export type ApprovalRuleProposal = {
+  id: string
+  capabilityId: string
+  toolName: string
+  toolDigest: string
+  createdAt: string
+}
+
+/** The lifetime a confirmed rule gets: ninety days, which the server applies to every rule (K3-10). */
+export const RULE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
+
+/**
+ * The write that confirms a proposed rule (build plan WS13 S7): a user-scope allow pinned to the
+ * digest the person reviewed, lapsing ninety days from `now`. Pure, so what a confirm sends is
+ * checked without a network.
+ */
+export function ruleConfirmationRequest(
+  proposal: ApprovalRuleProposal,
+  now: Date,
+): { capabilityId: string; body: Record<string, unknown> } {
+  return {
+    capabilityId: proposal.capabilityId,
+    body: {
+      scope: 'user',
+      decision: 'allow',
+      pinned_digest: proposal.toolDigest,
+      reason: '',
+      expires_at: new Date(now.getTime() + RULE_LIFETIME_MS).toISOString(),
+    },
+  }
+}
+
+/** Confirm a proposed rule through the tool-policy route. The server checks the digest and the tool. */
+export async function confirmApprovalRule(
+  proposal: ApprovalRuleProposal,
+  now: Date = new Date(),
+  signal?: AbortSignal,
+): Promise<void> {
+  const { capabilityId, body } = ruleConfirmationRequest(proposal, now)
+  await requestJson<unknown>(`/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+    signal,
+  })
+}
+
+/** The capabilities whose tool policies are the connected-app levels (EP-10 S7). */
+export const PROVIDER_READ_CAPABILITY = 'cap.tool.provider.read'
+export const PROVIDER_EXECUTE_CAPABILITY = 'cap.tool.provider.execute'
+
+export type ConnectorPolicyInput = z.infer<typeof integrationsSetConnectorPolicyInput>
+export type ConnectorPolicies = z.infer<typeof integrationsConnectorPoliciesOutput>
+export type ConnectorReadLevel = ConnectorPolicies['read']
+export type ConnectorWriteLevel = ConnectorPolicies['write']
+
+/** The level a stored decision is: no row is the default level, `ask` is ask first, `never` is off. */
+function readLevelOf(decision: string | undefined): ConnectorReadLevel {
+  if (decision === 'never') return 'off'
+  if (decision === 'ask') return 'ask_first'
+  return 'use_without_asking'
+}
+
+function writeLevelOf(decision: string | undefined): ConnectorWriteLevel {
+  return decision === 'never' ? 'off' : 'always_ask'
+}
+
+/**
+ * The connected-app levels in a tool-policy list. The list holds the org's rows and the caller's own,
+ * never another person's. A list without the `enforced` bit is read as not enforced, so a level is never
+ * shown as honoured on a guess.
+ */
+export function connectorPoliciesOf(body: unknown): ConnectorPolicies {
+  const record = body && typeof body === 'object' ? (body as Record<string, unknown>) : {}
+  const rows = Array.isArray(record.policies) ? record.policies : []
+  const decisionOf = (capabilityId: string, scopeKind: 'user' | 'org') => {
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+      const policy = row as Record<string, unknown>
+      if (policy.capability_id === capabilityId && policy.scope_kind === scopeKind && typeof policy.decision === 'string') {
+        return policy.decision
+      }
+    }
+    return undefined
+  }
+  return {
+    enforced: record.enforced === true,
+    read: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'user')),
+    write: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'user')),
+    orgRead: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'org')),
+    orgWrite: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'org')),
+  }
+}
+
+/** The connected-app levels of the caller and their org, and whether they are enforced yet. */
+export async function listConnectorPolicies(signal?: AbortSignal): Promise<ConnectorPolicies> {
+  const body = await requestJson<unknown>('/api/v1/tool-policies', { signal })
+  return connectorPoliciesOf(body)
+}
+
+/**
+ * The request a connected-app level is: the default level revokes the person's own row, any other writes
+ * `ask` or `never` on it. Never an allow and never the org's scope.
+ */
+export function connectorPolicyRequest(input: ConnectorPolicyInput): {
+  capabilityId: string
+  method: 'PUT' | 'DELETE'
+  body?: Record<string, unknown>
+} {
+  const capabilityId = input.kind === 'read' ? PROVIDER_READ_CAPABILITY : PROVIDER_EXECUTE_CAPABILITY
+  if (input.level === 'use_without_asking' || input.level === 'always_ask') {
+    return { capabilityId, method: 'DELETE' }
+  }
+  return {
+    capabilityId,
+    method: 'PUT',
+    body: { scope: 'user', decision: input.level === 'ask_first' ? 'ask' : 'never', reason: '' },
+  }
+}
+
+/** Set the person's own connected-app level. Returning to the default when no row exists is already done. */
+export async function setConnectorPolicy(input: ConnectorPolicyInput, signal?: AbortSignal): Promise<void> {
+  const { capabilityId, method, body } = connectorPolicyRequest(integrationsSetConnectorPolicyInput.parse(input))
+  const path = `/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`
+  if (method === 'DELETE') {
+    try {
+      await requestJson<unknown>(`${path}?scope=user`, { method, signal })
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return
+      throw error
+    }
+    return
+  }
+  await requestJson<unknown>(path, { method, body: JSON.stringify(body), signal })
+}
+
+/** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */
+export const UNTRUSTED_CONTENT_KIND = 'APPROVAL_KIND_UNTRUSTED_CONTENT'
+
+/** The inert preview of held tool output. Plain text only: render it as text, never as markup. */
+export type QuarantinePreview = {
+  text: string
+  truncated: boolean
+  toolKey?: string
+  trustClass?: string
+}
+
+/**
+ * Read the plain-text preview (at most 1 KiB) of output held for review. Answered only to the
+ * person the approval is addressed to while it is pending or granted and unspent; any other case
+ * is a 404, which a caller shows as "no preview available".
+ */
+export async function readQuarantinePreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<QuarantinePreview | null> {
+  const payload = await requestJson<{ preview?: Record<string, unknown> }>(
+    `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/quarantine-preview`,
+    { signal },
+  )
+  const raw = payload.preview
+  if (!raw || typeof raw.text !== 'string') return null
+  return {
+    text: raw.text,
+    truncated: raw.truncated === true,
+    toolKey: str(raw.tool_key),
+    trustClass: str(raw.trust_class),
+  }
+}
+
+/**
+ * The full draft behind a pending write approval (EP-10-S1, action `approvals.preview`). A mail
+ * send carries every recipient, the full subject and the full body; `other` names only the
+ * operation; `none` is an approval with no retained call. Plain text only: render it as text.
+ */
+export type ApprovalPreview = {
+  kind: 'mail_send' | 'other' | 'none'
+  provider: string
+  operation: string
+  connectionId: string
+  to: string[]
+  subject: string
+  bodyText: string
+  hasHtml: boolean
+  isReply: boolean
+  rawOnly: boolean
+  editableFields: string[]
+  actionFingerprint: string
+  revision: number
+  /**
+   * The gateway takes "Send with my edits" for this draft (EP-10-S6): its edit switch is on and the
+   * draft has editable fields. Server-stated, never guessed; absent reads as false.
+   */
+  canEdit?: boolean
+}
+
+const APPROVAL_PREVIEW_KINDS: ReadonlySet<string> = new Set(['mail_send', 'other', 'none'])
+
+const textList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+
+/**
+ * Read the full draft of a pending approval. Answered only to the run's owner while the approval
+ * is pending; every other case (another person, a decided or expired approval, the preview
+ * switched off) is a 404, returned here as `null` so the card says "preview not available". A
+ * zero-retention or waived refusal and every other failure throw, typed, as `ApiError`.
+ */
+export async function getApprovalPreview(
+  approvalId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalPreview | null> {
+  // The `{data: {preview}}` envelope is unwrapped by `requestJson`.
+  let payload: { preview?: Record<string, unknown> }
+  try {
+    payload = await requestJson<{ preview?: Record<string, unknown> }>(
+      `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/preview`,
+      { signal },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return null
+    throw error
+  }
+  const raw = payload.preview
+  if (!raw || typeof raw.kind !== 'string' || !APPROVAL_PREVIEW_KINDS.has(raw.kind)) return null
+  return {
+    kind: raw.kind as ApprovalPreview['kind'],
+    provider: str(raw.provider) ?? '',
+    operation: str(raw.operation) ?? '',
+    connectionId: str(raw.connection_id) ?? '',
+    to: textList(raw.to),
+    subject: typeof raw.subject === 'string' ? raw.subject : '',
+    bodyText: typeof raw.body_text === 'string' ? raw.body_text : '',
+    hasHtml: raw.has_html === true,
+    isReply: raw.is_reply === true,
+    rawOnly: raw.raw_only === true,
+    editableFields: textList(raw.editable_fields),
+    actionFingerprint: str(raw.action_fingerprint) ?? '',
+    revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
+    canEdit: raw.can_edit === true,
+  }
 }
 
 /** Resume a run that paused for approval, after the decision is recorded. */
@@ -478,6 +860,58 @@ export async function getLineage(threadId: string, signal?: AbortSignal): Promis
     `/api/v1/orchestration/threads/${encodeURIComponent(threadId)}/lineage`,
     { signal },
   )
+}
+
+/**
+ * One lineage edge as the wide-research grid reads it back after a reload (EP-2 S9). `goalSummary`
+ * and `batchId` are what the fan-out stored when the item started; `status` is the edge's own
+ * (`attached`/`detached`), not how the item ended, which is the child run's status.
+ */
+export type LineageEdgeSummary = {
+  parentRunId: string
+  childRunId: string
+  goalSummary: string
+  batchId: string
+  status: string
+}
+
+function lineageText(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+/**
+ * The edges of a lineage payload (`{ lineage: { edges } }`, or the inner object). An edge without a
+ * child run id is dropped; a missing goal, batch or status reads as empty, as an edge stored before
+ * those fields existed comes back.
+ */
+export function normalizeLineageEdges(payload: unknown): LineageEdgeSummary[] {
+  if (!payload || typeof payload !== 'object') return []
+  const root = payload as Record<string, unknown>
+  const lineage = root.lineage && typeof root.lineage === 'object'
+    ? root.lineage as Record<string, unknown>
+    : root
+  if (!Array.isArray(lineage.edges)) return []
+  return lineage.edges.flatMap((edge): LineageEdgeSummary[] => {
+    if (!edge || typeof edge !== 'object' || Array.isArray(edge)) return []
+    const raw = edge as Record<string, unknown>
+    const childRunId = lineageText(raw.child_run_id)
+    if (!childRunId) return []
+    return [{
+      parentRunId: lineageText(raw.parent_run_id),
+      childRunId,
+      goalSummary: lineageText(raw.goal_summary),
+      batchId: lineageText(raw.batch_id),
+      status: lineageText(raw.status),
+    }]
+  })
+}
+
+/** A thread's lineage edges, parsed ({@link normalizeLineageEdges}). */
+export async function getLineageEdges(
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<LineageEdgeSummary[]> {
+  return normalizeLineageEdges(await getLineage(threadId, signal))
 }
 
 // ── Run questions (build plan WS14 S3) ───────────────────────────────────────

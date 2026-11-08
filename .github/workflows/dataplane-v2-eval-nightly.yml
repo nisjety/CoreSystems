@@ -55,7 +55,7 @@ jobs:
     runs-on: [self-hosted, dp2-eval]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Run the eval and gate on the result
         # The runner is necessarily Windows (it needs Docker Desktop access to
@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload eval results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dataplane-v2-eval-results-${{ github.run_id }}
           path: |

@@ -1,0 +1,7 @@
+{
+  "raw": "The next step is {\"action\":\"scroll\"} and then we look again.",
+  "expect": {
+    "kind": "action",
+    "type": "scroll"
+  }
+}

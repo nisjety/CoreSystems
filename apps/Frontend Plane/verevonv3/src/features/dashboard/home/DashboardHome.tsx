@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, MessageCircleMore, Minus, MoreHorizontal, Plus } from '@/shared/icons'
+import { ChevronDown, ChevronUp } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, Show } from 'solid-js'
 import { useSearchParams } from '@solidjs/router'
 import { DashboardCardsRail } from '@/features/dashboard/home/DashboardCards'
@@ -12,6 +12,13 @@ import {
   type WorkspaceIdentity,
 } from '@/features/core/lib/shell-data'
 import { useCoreWorkspace } from '@/features/core/lib/workspace-context'
+import { useAssistantNavigation } from '@/features/core/assistant-navigation/assistant-navigation-context'
+import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
+import { DesktopLocalBrowser } from '@/features/browser/desktop/DesktopLocalBrowser'
+import { getDesktopBrowser } from '@/features/browser/desktop/desktop-browser'
+import { AssistantLiveBrowser } from '@/features/core/components/AssistantLiveBrowser'
+import { AssistantRetainedBrowser } from './AssistantRetainedBrowser'
+import { getSession } from '@/shared/session/session-store'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
@@ -20,8 +27,6 @@ import { DashboardSectionOverview } from './DashboardSectionOverview'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
 import { homeTabActionSchema, homeTabParam, parseHomeTab } from '@/shared/actions/home-tab'
 import { resetSearchSession } from './dashboard-search-session'
-import { useHomeDraft } from './home-draft'
-import { useHomeLayout } from './home-layout-state'
 import { useRetentionVerdictProbe } from './local-retention'
 import { homeSectionDescription, type HomeWorkSection } from './home-section-data'
 import './dashboard-overview.css'
@@ -31,31 +36,57 @@ const cardsPerPage = 3
 export default function DashboardHome(props: { workspace?: WorkspaceIdentity } = {}) {
   const i18n = useI18n()
   const shellWorkspace = useCoreWorkspace()
+  const assistantNavigation = useAssistantNavigation()
+  const assistantBrowser = useAssistantBrowser()
+  const desktopBrowser = getDesktopBrowser()
+  const [desktopPageOpen, setDesktopPageOpen] = createSignal(false)
+  const [desktopNavigationError, setDesktopNavigationError] = createSignal<string | null>(null)
+  let desktopNavigation = 0
+  const clearDesktopNavigationError = () => {
+    desktopNavigation += 1
+    setDesktopNavigationError(null)
+  }
+  const [showAgentBrowser, setShowAgentBrowser] = createSignal(true)
+  const localAgentView = () => {
+    const view = assistantBrowser.view()
+    return desktopBrowser && view?.localBrowser && view.status !== 'idle' ? view : null
+  }
+  const localAgentBusy = () => ['starting', 'running', 'stopping'].includes(localAgentView()?.status ?? '')
+  const desktopWorkspace = () => Boolean(desktopBrowser && (desktopPageOpen() || localAgentView()))
+  const browserView = () => {
+    const view = assistantBrowser.view()
+    return view?.kind === 'browser' && !view.localBrowser && view.sessionId && view.runId &&
+      (['starting', 'running', 'stopping', 'disconnected'].includes(view.status) ||
+        (!view.usesExistingTab && (view.status === 'completed' || view.siteHandoffReady))) ? view : null
+  }
+  createEffect(() => browserView()?.runId, (runId) => {
+    if (runId) {
+      setDesktopPageOpen(false)
+      setShowAgentBrowser(true)
+    }
+  })
+  createEffect(() => localAgentView()?.runId, (runId) => {
+    if (runId) {
+      setDesktopPageOpen(true)
+      clearDesktopNavigationError()
+      setShowAgentBrowser(true)
+    }
+  })
+  createEffect(() => assistantBrowser.revealVersion?.() ?? 0, (version) => { if (version > 0) setShowAgentBrowser(true) })
   const [searchParams, setSearchParams] = useSearchParams()
   const [isLaunching, setIsLaunching] = createSignal(false)
-  // The unsent draft is kept for this tab and account, and only while the
-  // composer says the next turn is not zero-retention (see home-draft). The Nett
-  // history (web-history) is kept behind the same gate.
-  const [zeroRetention, setZeroRetention] = createSignal<boolean | undefined>(undefined)
-  const [message, setMessage, discardDraft] = useHomeDraft({ zeroRetention })
+  const [message, setMessage] = createSignal('')
   const [cardPage, setCardPage] = createSignal(0)
   const [searchExpanded, setSearchExpanded] = createSignal(false)
   const [searchPreviewActive, setSearchPreviewActive] = createSignal(false)
+  const [webBrowserActive, setWebBrowserActive] = createSignal(false)
+  // Split chat/browser view (slice 7, behind VITE_WORKSPACE_SPLIT=true): the
+  // composer stays visible next to the agent browser instead of being hidden.
+  const [splitView, setSplitView] = createSignal(false)
   const [knowledgePreviewActive, setKnowledgePreviewActive] = createSignal(false)
   const [cardsRevealed, setCardsRevealed] = createSignal(false)
   // Bumped to remount the search panel, which drops its ~30 local signals at once.
   const [searchResetKey, setSearchResetKey] = createSignal(0)
-  // The dock is remembered per browser and account (see home-layout-state).
-  const [layout, updateLayout] = useHomeLayout()
-  // A prompt card opens the dock for this visit only: it is not a layout choice,
-  // so the remembered state stays as the person left it.
-  const [dockRevealed, setDockRevealed] = createSignal(false)
-  const dockExpanded = () => layout().dockExpanded || dockRevealed()
-  const dockMinimized = () => layout().dockMinimized && !dockRevealed()
-  const setDock = (patch: { dockMinimized: boolean; dockExpanded?: boolean }) => {
-    setDockRevealed(false)
-    updateLayout(patch)
-  }
   const overview = () => chatAppearanceActive('dashboard')
   const section = () => overview() ? parseHomeOverview(searchParams.overview) : 'home'
   const workSection = () => section() !== 'home' ? section() as HomeWorkSection : null
@@ -63,6 +94,11 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   // shared links land on the same tool. ?overview= sections still win.
   const homeTool = () => parseHomeTab(searchParams.tab)
   const activeTab = () => workSection() ? 'Chat' : homeTool()
+  const agentBrowserVisible = (): boolean => !workSection() && activeTab() === 'Søk' && (desktopWorkspace() || Boolean(browserView())) && showAgentBrowser()
+  createEffect(agentBrowserVisible, (visible) => {
+    assistantBrowser.setSurfaceVisible?.(visible)
+    return () => assistantBrowser.setSurfaceVisible?.(false)
+  })
   // The draft, the saved search and the Nett history obey the workspace's retention
   // verdict, which only a threads listing states. The recent-work card lists them on
   // the Chat overview; on every other tab, and without the overview, Home asks itself.
@@ -98,8 +134,8 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   // preview. The expanded Søk results page is excluded — it takes over the stage
   // on its own.
   const resultPresent = () =>
-    !workSection() && !searchExpanded()
-    && ((activeTab() === 'Søk' && searchPreviewActive())
+    !workSection() && (!searchExpanded() || webBrowserActive())
+    && ((activeTab() === 'Søk' && (searchPreviewActive() || webBrowserActive()))
       || (activeTab() === 'Crawl' && knowledgePreviewActive()))
   // Default when a result appears: show the result, hide the cards. The chevron
   // flips `cardsRevealed` → cards come back and the result is tucked away.
@@ -122,6 +158,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
     (tab) => {
       setCardsRevealed(false)
       if (tab !== 'Søk') {
+        setWebBrowserActive(false)
         setSearchExpanded(false)
         setSearchPreviewActive(false)
       }
@@ -131,12 +168,12 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   )
 
   const bandsClass = () => {
-    if (!workSection() && searchExpanded()) return 'verevon-home-bands verevon-home-bands--expanded min-h-0 flex-1'
+    if (!workSection() && searchExpanded() && !webBrowserActive()) return 'verevon-home-bands verevon-home-bands--expanded min-h-0 flex-1'
     if (resultsView()) return 'verevon-home-bands verevon-home-bands--results min-h-0 flex-1'
     return 'verevon-home-bands min-h-0 flex-1'
   }
   const composerSectionClass = () => {
-    if (!workSection() && searchExpanded()) return 'verevon-home-composer-section verevon-home-composer-section--expanded'
+    if (!workSection() && searchExpanded() && !webBrowserActive()) return 'verevon-home-composer-section verevon-home-composer-section--expanded'
     if (knowledgeBrowserHeaderInline()) return 'verevon-home-composer-section verevon-home-composer-section--results verevon-home-composer-section--knowledge-browser'
     if (resultsView()) return 'verevon-home-composer-section verevon-home-composer-section--results'
     return 'verevon-home-composer-section verevon-home-band verevon-home-band-middle px-4 transition-[padding] duration-500'
@@ -152,14 +189,28 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
 
   const applyCardPrompt = (card: DashboardCard) => {
     selectTab('Chat')
-    setMessage(i18n.tr(card.prompt, card.promptEn))
-    setDockRevealed(true)
+    assistantNavigation.openWithPrompt?.(i18n.tr(card.prompt, card.promptEn))
     // The URL settles a navigation after this click, so a timeout (not a
     // microtask) lets the composer show again before it takes focus.
-    setTimeout(() => document.getElementById('verevon-dashboard-input')?.focus(), 0)
+    setTimeout(() => document.getElementById('verevon-assistant-input')?.focus(), 0)
+  }
+
+  const openDesktopBrowser = (url: string) => {
+    if (!desktopBrowser) return
+    setDesktopPageOpen(true)
+    setShowAgentBrowser(true)
+    if (localAgentBusy()) return
+    clearDesktopNavigationError()
+    const attempt = desktopNavigation
+    void desktopBrowser.navigate(url).catch(() => {
+      if (attempt === desktopNavigation) {
+        setDesktopNavigationError(i18n.tr('Kunne ikke åpne nettadressen.', 'Could not open the web address.'))
+      }
+    })
   }
 
   const changeActiveTab = (tab: DashboardTab) => {
+    if (tab === 'Chat') assistantNavigation.open?.()
     // Re-clicking the active tab changes no URL but still returns to the result.
     setCardsRevealed(false)
     selectTab(tab)
@@ -176,7 +227,10 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   }
 
   const handleActiveTabDoubleClick = (tab: DashboardTab) => {
-    if (tab === 'Søk') resetSearch()
+    if (tab === 'Søk') {
+      if (desktopWorkspace()) setShowAgentBrowser(false)
+      resetSearch()
+    }
   }
 
   const showNextCards = () => {
@@ -184,7 +238,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
   }
 
   return (
-    <div class={cn('verevon-dashboard-surface dashboard-home', overview() && 'dashboard-home--overview')} data-home-tab={activeTab()} data-home-section={section()}>
+    <div class={cn('verevon-dashboard-surface dashboard-home', overview() && 'dashboard-home--overview', (webBrowserActive() || agentBrowserVisible()) && 'dashboard-home--web-browser')} data-home-tab={activeTab()} data-home-section={section()}>
       <div class="pointer-events-none absolute inset-0 dashboard-home-grid" aria-hidden="true" />
 
       <div class={cn('verevon-home-stage relative flex h-full min-h-0 flex-col overflow-hidden', isLaunching() && 'verevon-home-launching')}>
@@ -201,41 +255,60 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
             <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} planTrial={workspace().planTrial} title={homeTitle()} />
           </Show>
 
-          <Show when={overview() && !workSection() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview tab={activeTab()} onPrompt={applyCardPrompt} /></Show>
+          <Show when={activeTab() === 'Søk' && !workSection() && (desktopWorkspace() || (browserView() && !browserView()?.usesExistingTab))}>
+            <div class="home-agent-browser-switch" role="group" aria-label={i18n.tr('Nettvisning', 'Web view')}>
+              <button type="button" aria-pressed={showAgentBrowser() ? 'true' : 'false'} onClick={() => setShowAgentBrowser(true)}>{desktopWorkspace()
+                ? i18n.tr('Lokal nettleser', 'Local browser')
+                : browserView()?.browserClaimed ? i18n.tr('Nettleser fra oppgaven', 'Task browser') : i18n.tr('Agentens nettleser', 'Agent browser')}</button>
+              <button type="button" aria-pressed={showAgentBrowser() ? 'false' : 'true'} onClick={() => setShowAgentBrowser(false)}>{i18n.tr('Ditt nettsøk', 'Your web search')}</button>
+              <Show when={import.meta.env.VITE_WORKSPACE_SPLIT === 'true'}>
+                <button type="button" aria-pressed={splitView() ? 'true' : 'false'} onClick={() => setSplitView((value) => !value)}>{splitView() ? i18n.tr('Del visning av', 'Split view on') : i18n.tr('Del visning', 'Split view')}</button>
+              </Show>
+            </div>
+          </Show>
+          <Show when={agentBrowserVisible() && desktopWorkspace() && desktopBrowser}>{bridge => <div class="home-agent-browser-view">
+            <DesktopLocalBrowser
+              bridge={bridge()}
+              agentBusy={localAgentBusy()}
+              stopping={localAgentView()?.status === 'stopping'}
+              navigationError={desktopNavigationError()}
+              onManualCommand={clearDesktopNavigationError}
+              onStop={assistantBrowser.stop}
+            />
+          </div>}</Show>
+          <Show when={agentBrowserVisible() && !desktopWorkspace() && browserView()}>{view => <div class="home-agent-browser-view">
+            <Show when={(view().status === 'completed' || view().siteHandoffReady) && view().receipt && getSession().activeOrg?.id}>{orgId => <AssistantRetainedBrowser orgId={orgId()} sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} claimed={view().browserClaimed} requiresManualAccess={view().siteHandoffReady} onClaim={id => assistantBrowser.claimRetained?.(id) ?? false} />}</Show>
+            <Show when={!view().browserClaimed}><AssistantLiveBrowser surface="workspace" sessionId={view().sessionId!} modelRunId={view().runId!} receipt={view().receipt} action={view().action} finished={view().status === 'completed' || view().siteHandoffReady === true} onStop={assistantBrowser.stop} stopping={view().status === 'stopping'} stopLabel={view().usesExistingTab ? i18n.tr('Stopp og ta over fanen', 'Stop and take over tab') : undefined} /></Show>
+          </div>}</Show>
+          <Show when={!agentBrowserVisible() && overview() && !workSection() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview tab={activeTab()} onPrompt={applyCardPrompt} /></Show>
           <Show when={workSection()}>{(selected) => <DashboardSectionOverview section={selected()} />}</Show>
 
-          <section class={cn(composerSectionClass(), overview() && activeTab() === 'Chat' && 'home-chat-dock')} data-dock-expanded={dockExpanded() ? 'true' : 'false'} data-dock-minimized={dockMinimized() ? 'true' : 'false'} aria-label={overview() && activeTab() === 'Chat' ? i18n.tr('Spør Verevon', 'Ask Verevon') : undefined}>
-            <Show when={overview() && activeTab() === 'Chat'}>
-              <div class="home-chat-dock__header">
-                <button type="button" aria-label={dockMinimized() ? i18n.tr('Åpne skrivefelt', 'Expand chat bar') : i18n.tr('Minimer skrivefelt', 'Minimize chat bar')} aria-expanded={dockMinimized() ? 'false' : 'true'} onClick={() => setDock({ dockMinimized: !dockMinimized() })}><Show when={dockMinimized()} fallback={<Minus size={16} />}><Plus size={16} /></Show></button>
-                <MessageCircleMore size={16} /><strong>{i18n.tr('Spør Verevon', 'Ask Verevon')}</strong><span>{i18n.tr('Ny samtale', 'New conversation')}</span>
-                <button type="button" aria-label={i18n.tr('Flere chattevalg', 'More chat options')} title={i18n.tr('Modell, kontekst og verktøy', 'Model, context and tools')} aria-expanded={dockExpanded() ? 'true' : 'false'} onClick={() => setDock({ dockMinimized: false, dockExpanded: !dockExpanded() })}><MoreHorizontal size={18} /></button>
-              </div>
-            </Show>
+          <Show when={activeTab() !== 'Chat'}>
+          <section class={composerSectionClass()} hidden={agentBrowserVisible() && !splitView()}>
             <DashboardComposerPanel
-              persistentChat={overview()}
-              compactChat={overview() && !dockExpanded()}
               activeTab={activeTab()}
+              browserContextVisible={!agentBrowserVisible()}
               knowledgeInlinePlanLabel={knowledgeBrowserHeaderInline() ? formatPlanBadge(workspace().plan, workspace().planTrial, i18n.tr) : undefined}
               knowledgeInlineTitle={knowledgeBrowserHeaderInline() ? homeTitle() : undefined}
               message={message()}
               onKnowledgePreviewActiveChange={setKnowledgePreviewActive}
               onLaunchStart={() => {
-                discardDraft()
                 setIsLaunching(true)
               }}
               onMessageChange={setMessage}
-              onZeroRetentionChange={setZeroRetention}
               onSearchExpandedChange={setSearchExpanded}
               onSearchPreviewActiveChange={setSearchPreviewActive}
+              onWebBrowserActiveChange={setWebBrowserActive}
+              onOpenDesktopBrowser={desktopBrowser ? openDesktopBrowser : undefined}
               previewCollapsed={cardsRevealed()}
-              rememberSearches={zeroRetention() === false}
+              rememberSearches={assistantNavigation.zeroRetention?.() === false}
               searchResetKey={searchResetKey()}
-              searchExpanded={!workSection() && searchExpanded()}
+              searchExpanded={!workSection() && searchExpanded() && !webBrowserActive()}
             />
           </section>
+          </Show>
 
-          <Show when={!overview() && !searchExpanded()}>
+          <Show when={!agentBrowserVisible() && !overview() && !searchExpanded()}>
             <DashboardCardsRail
               hidden={resultsView()}
               hideNext={resultPresent()}
@@ -246,7 +319,7 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
           </Show>
         </div>
 
-        <Show when={!overview() && resultPresent()}>
+        <Show when={!agentBrowserVisible() && !overview() && resultPresent()}>
           <button
             type="button"
             class="verevon-home-results-toggle"

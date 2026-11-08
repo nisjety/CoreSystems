@@ -24,7 +24,7 @@ importers:
         version: 2.0.0-alpha.0(@solidjs/web@2.0.0-rc.0(solid-js@2.0.0-rc.0))(solid-js@2.0.0-rc.0)
       '@quarry/client':
         specifier: file:../../Ingestion Plane/Quarry-v2/sdks/typescript
-        version: file:../Ingestion Plane/Quarry-v2/sdks/typescript
+        version: file:../../Ingestion Plane/Quarry-v2/sdks/typescript
       '@solidjs/router':
         specifier: ^2.0.0-next.16
         version: 2.0.0-next.16(@solidjs/web@2.0.0-rc.0(solid-js@2.0.0-rc.0))(solid-js@2.0.0-rc.0)
@@ -549,8 +549,8 @@ packages:
     engines: {node: '>=20'}
     hasBin: true
 
-  '@quarry/client@file:../Ingestion Plane/Quarry-v2/sdks/typescript':
-    resolution: {directory: ../Ingestion Plane/Quarry-v2/sdks/typescript, type: directory}
+  '@quarry/client@file:../../Ingestion Plane/Quarry-v2/sdks/typescript':
+    resolution: {directory: ../../Ingestion Plane/Quarry-v2/sdks/typescript, type: directory}
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     resolution: {integrity: sha512-b+jTcARdTiFLI6jB4a5XjTm0RWd6KcRfQj/I2356fxUZemiho9zQLxo0RtCuMDAyKcLo6cEltkgbQp6d1+sjjQ==}
@@ -3222,7 +3222,7 @@ snapshots:
     dependencies:
       playwright: 1.63.0
 
-  '@quarry/client@file:../Ingestion Plane/Quarry-v2/sdks/typescript': {}
+  '@quarry/client@file:../../Ingestion Plane/Quarry-v2/sdks/typescript': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.6':
     optional: true

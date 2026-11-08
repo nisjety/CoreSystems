@@ -795,6 +795,84 @@
         "route": {"provider": "", "connection": null, "explicit_zdr": false}
       },
       "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_browser_do_tools_refused_under_zdr",
+      "title": "A ZDR run that asks for ZDR, with a browser bearer and the browser switch on, is offered no Do browser tool: ZDR.",
+      "tags": [],
+      "note": "The Do loop offers browser.open, browser.observe and browser.close only to a run that is not ZDR, holds a verified browser bearer and has EXECUTION_DO_BROWSER_ENABLED=1. The browser bearer is never minted or forwarded under ZDR, and a call that reaches the dispatch anyway is refused with the feature browser_tool.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": true}
+      },
+      "expect": {"decision": "zdr", "code": "explicit_zdr"}
+    },
+    {
+      "id": "e_zdr_token_web_reader_not_offered",
+      "title": "A ZDR token on a platform provider route, asking for the long-page reader: ZDR, with no reader tool offered and no page held for reading.",
+      "tags": [],
+      "note": "The reader (read_page and find_in_page beside fetch_url) is offered only in the tool loop, and only where a fetched page can be parked. A ZDR turn returns before that loop starts, and external_parking_allowed refuses a ZDR or waived turn, so no page is held for it. The route is a platform provider with no connection, so the row differs from the default-route ZDR row.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_waived_web_reader_keeps_inline_head",
+      "title": "A waiver on exactly the connection it names, asking for the long-page reader: waived, with the fetched page's head inline and no ref or reader tool.",
+      "tags": [],
+      "note": "A waived turn parks nothing (external_parking_allowed refuses it), so fetch_url returns its inline head as it did before the reader existed and offers neither read_page nor find_in_page.",
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-2"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-2", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
+    },
+    {
+      "id": "e_zdr_turn_kb_citation_passage_streams_not_persisted",
+      "title": "A ZDR token that asks for ZDR on a platform provider route, grounded on org knowledge: ZDR, with each knowledge citation's quote and locator streamed live and nothing of them stored.",
+      "tags": [],
+      "note": "Behind MODEL_GATEWAY_CITATION_PASSAGES a knowledge citation carries the fact it was numbered from (quote) and its document_id and chunk_index (locator). A ZDR turn takes the direct stream and writes no thread, and the persistence path strips quote and locator for any ZDR or waived turn (session_flow::persistable_citations). The viewer's 'more' read goes through Data Plane's ACL'd chunk read and stores nothing. The explicit request on a platform provider makes the row differ from the other ZDR rows.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": true}
+      },
+      "expect": {"decision": "zdr", "code": "explicit_zdr"}
+    },
+    {
+      "id": "e_waived_research_metadata_not_persisted",
+      "title": "A waiver on exactly the connection it names, on a turn that cites passages or writes a research report: waived, with quotes, locators and the provenance stamp streamed but not stored.",
+      "tags": [],
+      "note": "D12 (DEC-32): a waived turn keeps its message, citations and artifacts, but session_flow::persistable_citations and persistable_artifacts drop quote, locator and provenance before turn_evidence_metadata, so only the live stream carried them. A third connection makes the row differ from the other waived rows.",
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-3"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-3", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
+    },
+    {
+      "id": "e_waived_deck_manifest_not_persisted",
+      "title": "A waiver on exactly the connection it names, on a turn that builds a slide deck: waived, with the deck manifest streamed but not stored.",
+      "tags": [],
+      "note": "EP-5 S3 (D6, DEC-32): a deck manifest is kept in message metadata like a document, but session_flow::persistable_artifacts drops every deck artifact of a ZDR or waived turn before turn_evidence_metadata, and the revision store refuses a waived turn, so only the live stream carried it and a reload shows no deck. The pptx is never stored on any turn. A ZDR turn has no tool loop, so the deck tool is never reached there. The deck connection makes the row differ from the other waived rows.",
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-deck"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-deck", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
     }
   ]
 }

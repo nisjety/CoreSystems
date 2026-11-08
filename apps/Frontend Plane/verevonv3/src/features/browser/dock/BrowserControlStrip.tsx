@@ -12,6 +12,8 @@ export type BrowserControlStripProps = {
   controlEpoch?: number | null
   /** The agent is running a step or the AI loop right now. */
   agentWorking?: boolean
+  /** The browser was opened for the person's own browsing, not an agent run. */
+  personalBrowsing?: boolean
   /** A control or action request is in flight: the button waits. */
   busy?: boolean
   /** The session cannot be controlled right now (not live, or no session id). */
@@ -19,7 +21,9 @@ export type BrowserControlStripProps = {
   /** Zero Data Retention on: the copy says nothing is stored. */
   zdr?: boolean
   /** Take over (`human_takeover`) or Give back (`agent_control`), with the epoch the strip rendered. */
-  onChangeMode: (mode: BrowserControlMode, expectedEpoch: number | null) => void
+  onChangeMode?: (mode: BrowserControlMode, expectedEpoch: number | null) => void
+  onContinueHere?: () => void
+  continueDisabled?: boolean
 }
 
 export type BrowserControlStripState = 'human' | 'agent_working' | 'agent'
@@ -39,6 +43,7 @@ export function BrowserControlStrip(props: BrowserControlStripProps): JSX.Elemen
   const stateText = () => {
     switch (state()) {
       case 'human':
+        if (props.personalBrowsing && !props.agentWorking) return tr('Du styrer nettleseren.', 'You are in control of the browser.')
         return tr(
           'Du styrer nettleseren. Agenten er satt på pause fordi du tok over.',
           'You are in control. The agent is paused because you took over.',
@@ -46,18 +51,23 @@ export function BrowserControlStrip(props: BrowserControlStripProps): JSX.Elemen
       case 'agent_working':
         return tr('Agenten jobber i nettleseren.', 'The agent is working in the browser.')
       default:
+        if (props.personalBrowsing && !props.agentWorking) return tr('Nettleseren er klar for agentstyring.', 'The browser is ready for agent control.')
         return tr('Agenten har kontrollen over nettleseren.', 'The agent has control of the browser.')
     }
   }
   const actionDisabled = () => props.disabled === true || props.busy === true
   const actionLabel = () =>
-    humanInControl()
-      ? tr('Gi tilbake', 'Give back')
+    props.onContinueHere ? tr('La Verevon fortsette i denne fanen', 'Let Verevon continue in this tab') : humanInControl()
+      ? props.personalBrowsing && !props.agentWorking ? tr('Gi agenten kontroll', 'Give the agent control') : tr('Gi tilbake', 'Give back')
       : tr('Ta over', 'Take over')
   const onAction = () => {
     if (actionDisabled()) return
+    if (props.onContinueHere) {
+      if (!props.continueDisabled) props.onContinueHere()
+      return
+    }
     const next: BrowserControlMode = humanInControl() ? 'agent_control' : 'human_takeover'
-    props.onChangeMode(next, typeof props.controlEpoch === 'number' ? props.controlEpoch : null)
+    props.onChangeMode?.(next, typeof props.controlEpoch === 'number' ? props.controlEpoch : null)
   }
 
   return (
@@ -72,18 +82,20 @@ export function BrowserControlStrip(props: BrowserControlStripProps): JSX.Elemen
           <span class="browser-control-strip__dot" data-state={state()} aria-hidden="true" />
           <span>{stateText()}</span>
         </p>
-        <button
-          type="button"
-          class="browser-control-strip__action"
-          disabled={actionDisabled()}
-          aria-busy={props.busy === true ? 'true' : 'false'}
-          onClick={onAction}
-        >
-          <Show when={humanInControl()} fallback={<Hand class="size-3" aria-hidden="true" />}>
-            <Bot class="size-3" aria-hidden="true" />
-          </Show>
-          <span>{actionLabel()}</span>
-        </button>
+        <Show when={props.onContinueHere || props.onChangeMode}>
+          <button
+            type="button"
+            class="browser-control-strip__action"
+            disabled={actionDisabled() || Boolean(props.onContinueHere && props.continueDisabled)}
+            aria-busy={props.busy === true ? 'true' : 'false'}
+            onClick={onAction}
+          >
+            <Show when={humanInControl()} fallback={<Hand class="size-3" aria-hidden="true" />}>
+              <Bot class="size-3" aria-hidden="true" />
+            </Show>
+            <span>{actionLabel()}</span>
+          </button>
+        </Show>
       </div>
       <Show when={props.zdr === true}>
         <p class="browser-control-strip__zdr">

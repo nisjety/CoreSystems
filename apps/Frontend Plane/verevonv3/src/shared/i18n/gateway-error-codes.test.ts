@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { isModelEntitlementCode } from '@/shared/api/model-entitlement-refusals'
 import { BLOCK_REASON_COPY, ERROR_COPY, describeApiError, translateApiError } from './errors'
 
 // Every error code the Verevon gateway can send to the SPA has end-user copy in
@@ -63,7 +64,14 @@ const NOT_A_CODE_TABLE: Record<string, string> = {
   SHAPE_DENY_KEYS: 'cache_admission.rs: JSON keys that keep a response out of the cache',
   READ_ONLY_BROWSE_OPS: 'domains/integrations/browse.rs: operation names the read-only browse proxy allows',
   READ_ONLY_CONTENT_OPS: 'domains/integrations/browse.rs: operation names the read-only content proxy allows',
-  FORGED_SPACE_AUTHORITY_FIELDS: 'domains/spaces.rs: request body fields a client may not set',
+  FORGED_SPACE_AUTHORITY_FIELDS: 'domains/spaces/mod.rs: request body fields a client may not set',
+  DETAIL_ALLOWLIST: 'domains/spaces/denial.rs: key names of the typed refusal details a Space denial may carry to the browser',
+  RESOLVABLE_BY: 'domains/spaces/denial.rs: values of the resolvable_by hint of a typed Space denial (who can fix it), not error codes',
+  STRING_FIELDS: 'domains/spaces/room_artifacts.rs: JSON field names of an artifact row the room artifacts route keeps',
+  NUMBER_FIELDS: 'domains/spaces/room_artifacts.rs: JSON field names of an artifact row the room artifacts route keeps',
+  RUN_STATES: 'domains/spaces/stream.rs: run state names of a Space stream frame, not error codes',
+  UPDATED_FIELDS: 'domains/spaces/stream.rs: thread field names a thread-updated frame may name, not error codes',
+  CLOSING_CODES: 'domains/spaces/stream.rs: reasons of a stream close frame; the stream client handles them itself and they never come back as an API error response',
   STRIPPED_HEADERS: 'middleware.rs: header names removed from a proxied request',
   RENDERABLE_ARTIFACT_TYPES: 'upstream.rs: media types an artifact may be rendered as',
   SENSITIVE_FIELDS: 'zdr_log.rs: field names the log redaction recognises',
@@ -71,6 +79,7 @@ const NOT_A_CODE_TABLE: Record<string, string> = {
   EVENTS_QUERY: 'domains/audit_compliance.rs: query parameter names the audit events route forwards',
   MANIFEST_QUERY: 'domains/audit_compliance.rs: query parameter names the audit manifest route forwards',
   NO_QUERY: 'domains/audit_compliance.rs: an empty list of query parameters a route forwards',
+  FORGED_WAKE_FIELDS: 'domains/spaces/mod.rs: request body and frame field names a client may not set on a Space wake, not error codes',
   VERIFY_BODY: 'domains/audit_compliance.rs: body field names the audit verify route forwards',
 }
 
@@ -131,6 +140,15 @@ const HELPER_WITHOUT_COPY: Record<string, string> = {
 // operation, and a code-level sentence would override that (and be wrong for another operation).
 const CALLER_WORDS_IT: Record<string, string> = {
   persona_unavailable: 'PersonaSection answers it with "could not save / could not load your persona instructions", which names the operation',
+  audit_scope_denied: 'a 403 for a member who may read only their own audit events; the audit client keeps the typed error and the Trust Center draws its own self-scope notice (the 403 status class answers anywhere else)',
+  room_admin_unavailable: 'SpaceRoomArchive words it for the archive and restore it belongs to ("Nothing was changed"); a code-level sentence would override that',
+  space_policy_admin_disabled: 'a 404 that hides the org Space policy console; OrgSpacePolicySection draws its own "not switched on for this installation" notice',
+  space_room_artifacts_disabled: 'a 404 that turns the room Artifacts tab into its disabled state; SpaceArtifactsTab draws its own notice',
+  edit_requires_grant: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
+  edit_requires_once: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
+  edit_too_large: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, which names the message as too long',
+  invalid_patch: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
+  invalid_base_fingerprint: 'an edited approval refusal (EP-10-S4); ChatMessages words every APPROVAL_EDIT_REFUSALS code through mailEditProblemText, next to the draft it refused',
 }
 
 // Strings the scan meets that are not error codes at all.
@@ -139,6 +157,20 @@ const NOT_AN_ERROR_CODE: Record<string, string> = {
   minio: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   qdrant: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   quickwit: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
+  body: 'the field name of a validation refusal built as a (field, message) pair by the Space policy and room admin helpers; the code sent is the one the helper names',
+  expected_revision: 'the field name of a validation refusal built as a (field, message) pair by the room admin helpers',
+  idempotency_key: 'the field name of a validation refusal built as a (field, message) pair by the room admin helpers',
+  preset_id: 'the field name of a validation refusal built as a (field, message) pair by the Space policy helpers',
+  role: 'the field name of a validation refusal built as a (field, message) pair by the room admin helpers',
+  approval_id: 'a field name of the Space approval decision body, not an error code',
+  decision: 'a field name of the approval and browser evidence bodies, not an error code',
+  grant_id: 'a field name of the owner grant and browser grant payloads, not an error code',
+  history_mode: 'a field name of the room join request, not an error code',
+  join_role: 'a field name of the room join request, not an error code',
+  reason: 'a field name of typed refusals and stream frames, not an error code',
+  scope: 'a field name of the approval scope and the cache entries, not an error code',
+  stable_code: 'a field name of the share redirect body, not an error code',
+  visibility: 'a field name of the ticket dispatcher body, not an error code',
 }
 
 // Codes that sit inside a 200 payload as `unavailable` sections of a Space. The
@@ -168,6 +200,8 @@ const SPACE_SECTION_CODES = [
 // copy must be removed from here (checked below), and one the gateway stops
 // emitting must be removed too.
 const INTERNAL_ONLY: Record<string, string> = {
+  attention_stream_limit:
+    'the shared attention stream opens in the background and falls back to polling when refused; no person reads this code',
   agent_ref_required: 'the agent picker always sends the agent reference; only a hand-made request omits it',
   binding_ref_required: 'the agent row always carries its binding reference; only a hand-made request omits it',
   ambiguous_space_selection: 'the SPA sends one Space reference; two conflicting ones is a client bug',
@@ -188,12 +222,21 @@ const INTERNAL_ONLY: Record<string, string> = {
   operation_required: 'the integration browse operation is always sent by the SPA',
   speech_provider_not_allowed: 'the SPA does not offer another text-to-speech provider',
   unsupported_space_kind: 'the SPA only creates a personal Space or a room',
+  invalid_diagnostic: 'the diagnostics beacon is fire-and-forget; no screen shows its refusal',
+  invalid_report: 'the Content-Security-Policy report endpoint is called by the browser, not by a screen',
+  report_too_large: 'the Content-Security-Policy report endpoint is called by the browser, not by a screen',
+  space_role_insufficient: 'Control Plane names it as the reason of a Space denial; the gateway sends it inside details.reason of a typed refusal and the denial presenter words it',
   mail_task_pipeline_failed: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
   mail_task_pipeline_not_configured: 'the mail-task ingest endpoint is called service to service; no SPA code calls it',
+  capabilities_unavailable: 'the composer capabilities read (EP-3 S8) runs in the background; getComposerCapabilities reads any failure as nothing offered and no person reads the code',
+  invalid_origin: 'the promote-to-document body (EP-3 S8) is built by the SPA with a fixed origin; any other origin is a hand-made request',
+  invalid_source_ref: 'the promote-to-document source reference (EP-3 S8) is built by the SPA from the artifact on screen; a malformed one is a client bug',
 }
 
+// A model-entitlement refusal reads its copy from the model-entitlement catalogue, which
+// `translateApiError` checks before ERROR_COPY, so that catalogue counts as copy here.
 function hasCopy(code: string): boolean {
-  return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code])
+  return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code] ?? isModelEntitlementCode(code))
 }
 
 describe('every code the gateway emits', () => {
@@ -206,7 +249,7 @@ describe('every code the gateway emits', () => {
       ['session_verification_unavailable', 'middleware.rs'],
       ['upstream_error', 'upstream.rs'],
       ['invalid_name', 'onboarding/actions/organization.rs'],
-      ['space_not_found', 'domains/spaces.rs'],
+      ['space_not_found', 'domains/spaces/mod.rs'],
       ['invalid_url', 'domains/browser.rs'],
       ['scrape_failed', 'domains/knowledge/quarry.rs'],
       ['model_error', 'upstream.rs'],
@@ -228,10 +271,10 @@ describe('every code the gateway emits', () => {
         if (!(table.name in NOT_A_CODE_TABLE)) read.push(table.name)
       }
     }
-    // The two tables of upstream.rs are read, so their entries reach the scan; a new
+    // The two tables of upstream.rs and the Space stream's ERROR_CODES are read, so their entries reach the scan; a new
     // table lands here and has to be added to this list (it holds codes) or to
     // NOT_A_CODE_TABLE (it does not).
-    expect(read.sort()).toEqual(['INTEGRATION_ERROR_CODE_ALLOWLIST', 'NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES'])
+    expect(read.sort()).toEqual(['ERROR_CODES', 'INTEGRATION_ERROR_CODE_ALLOWLIST', 'NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES'])
     for (const name of Object.keys(NOT_A_CODE_TABLE)) {
       expect(seen.has(name), `${name} is no longer a table in the gateway, remove it from NOT_A_CODE_TABLE`).toBe(true)
     }
@@ -436,6 +479,10 @@ const ADDED_CODES = [
   'UNSUPPORTED',
   'UNSUPPORTED_MEDIA',
   'BUDGET_EXHAUSTED',
+  // W3-E3.8.5: the fetch reasons of a failed scrape (gateway knowledge/shared.rs).
+  'scrape_host_not_found',
+  'scrape_unreachable',
+  'scrape_tls_failed',
 ] as readonly string[]
 
 // An internal id in a sentence: snake_case or UPPER_SNAKE words, plus the names

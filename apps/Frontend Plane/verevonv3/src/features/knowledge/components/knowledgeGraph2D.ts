@@ -272,7 +272,7 @@ export function createKnowledgeGraph2DScene(
 
     for (const edge of originalEdges) {
       const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-      path.setAttribute('class', 'kg2d__edge-path')
+      path.setAttribute('class', edge.label === 'evidence' ? 'kg2d__edge-path kg2d__edge-path--evidence' : 'kg2d__edge-path')
       path.setAttribute('marker-end', 'url(#kg2d-arrow)')
       edgesSvg.appendChild(path)
       edgeEls.set(edge, path)
@@ -287,12 +287,14 @@ export function createKnowledgeGraph2DScene(
       const el = document.createElement('div')
       el.className = 'kg2d__node'
       el.dataset.nodeId = node.id
+      el.dataset.kind = node.id.startsWith('kg:workflow:') ? 'workflow' : 'source'
       el.innerHTML = `
         <div class="kg2d__node-pill" role="button" tabindex="0" aria-label="${escapeHtml(node.label)}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
             stroke-linecap="round" stroke-linejoin="round" class="kg2d__node-icon" aria-hidden="true">
-            <path d="M12 7v14"></path>
-            <path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>
+            ${el.dataset.kind === 'workflow'
+              ? '<rect x="3" y="3" width="7" height="7" rx="1"></rect><rect x="14" y="14" width="7" height="7" rx="1"></rect><path d="M10 6h5a3 3 0 0 1 3 3v5"></path>'
+              : '<path d="M12 7v14"></path><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"></path>'}
           </svg>
           <span class="kg2d__node-label"></span>
         </div>

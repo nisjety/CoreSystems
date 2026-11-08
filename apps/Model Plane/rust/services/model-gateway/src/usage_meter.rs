@@ -6,6 +6,8 @@
 //! `None` for the rest of the run, never a sum of the calls that happened to be
 //! priced. A call served by a subscription adds its tokens and no dollars.
 
+use mp_contracts::model_plane::v1::InferPurpose;
+
 use crate::pricing::{CategoryCost, CostBasis, Priced, TokenLegs};
 
 /// What a provider call was for. The tokens are the closed vocabulary a progress
@@ -31,6 +33,19 @@ impl CallPhase {
             Self::ToolRound => "tool_round",
             Self::AgentRound => "agent_round",
             Self::Overhead => "overhead",
+        }
+    }
+
+    /// The purpose a call of this phase is counted under. `Overhead` covers the side
+    /// tasks a turn makes about itself (title, follow-ups, judge), and each of those
+    /// names its own purpose on its request, so the phase alone names none.
+    #[must_use]
+    pub fn purpose(self) -> InferPurpose {
+        match self {
+            Self::Answer => InferPurpose::Answer,
+            Self::ToolRound => InferPurpose::ToolRound,
+            Self::AgentRound => InferPurpose::AgentRound,
+            Self::Overhead => InferPurpose::Unspecified,
         }
     }
 }
@@ -170,6 +185,14 @@ impl UsageMeter {
 mod tests {
     use super::*;
     use crate::pricing::PriceSource;
+
+    #[test]
+    fn each_call_phase_names_the_purpose_it_is_counted_under() {
+        assert_eq!(CallPhase::Answer.purpose(), InferPurpose::Answer);
+        assert_eq!(CallPhase::ToolRound.purpose(), InferPurpose::ToolRound);
+        assert_eq!(CallPhase::AgentRound.purpose(), InferPurpose::AgentRound);
+        assert_eq!(CallPhase::Overhead.purpose(), InferPurpose::Unspecified);
+    }
 
     fn call(basis: CostBasis, input: i64, output: i64, read: i64, write: i64) -> CallUsage {
         CallUsage {

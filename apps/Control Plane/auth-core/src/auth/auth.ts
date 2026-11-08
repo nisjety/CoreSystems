@@ -1,5 +1,9 @@
 import { betterAuth, type BetterAuthOptions } from 'better-auth';
-import { APIError, createAuthMiddleware } from 'better-auth/api';
+import {
+  APIError,
+  createAuthMiddleware,
+  getSessionFromCtx,
+} from 'better-auth/api';
 import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import {
   emailOTP,
@@ -33,11 +37,29 @@ import {
   generateAccountDeletionTemplate,
 } from '../email/templates';
 import { TwilioVerifyService } from '../sms/twilio-verify.service';
-import { auditPlugin } from './audit-plugin';
+import { auditPlugin, publishVerevonAuditDurable } from './audit-plugin';
+import {
+  API_KEY_AGENT_MAX_EXPIRY_SECONDS,
+  API_KEY_USER_CONFIG_ID,
+  apiKeyHoldsBrowserAgent,
+  apiKeyRevocationTarget,
+  publishApiKeyRevoked,
+  readApiKeyAgentMetadata,
+  revocationForUpdate,
+  touchesReservedAgentMetadata,
+  type ApiKeyRevocationReason,
+  type ApiKeyRevocationTarget,
+} from './api-key-metadata';
+import { loadApiKeyRevocationRow } from '../nats/api-key-revocation.publisher';
 import { userServiceIntegrationPlugin } from './user-service-integration.plugin';
 import { organizationEventsPlugin } from './organization-events.plugin';
 import { normalizeIdentityEmail } from './account-linking.policy';
 import { withSoleOrganizationActivated } from './sole-org-auto-activation';
+import {
+  enforceSsoOnSessionCreate,
+  recordSsoSignInEvidence,
+  resolveSsoEnforcementCeiling,
+} from './sso-enforcement';
 import { pushMicrosoftSignInHandoff } from './microsoft-signin-handoff';
 import {
   buildInvitationLink,
@@ -248,6 +270,22 @@ function createMockResendService(): MockResendService {
   };
 }
 
+// SSO-provisioned members always join as `member`. Refuse to boot on any
+// other SSO_DEFAULT_ROLE so a stray env value cannot grant admin at sign-in.
+function resolveSsoDefaultRole(): 'member' {
+  const configured = process.env.SSO_DEFAULT_ROLE?.trim();
+  if (configured && configured.toLowerCase() !== 'member') {
+    throw new Error(
+      'SSO_DEFAULT_ROLE must be unset or "member"; SSO users are never provisioned with elevated roles',
+    );
+  }
+  return 'member';
+}
+
+// Validate SSO_ENFORCEMENT at boot so a typo cannot silently weaken or strengthen
+// the platform ceiling (WS05-S7).
+resolveSsoEnforcementCeiling();
+
 function emailFlowsEnabled(): boolean {
   return (
     envFlag('EMAIL_PASSWORD_ENABLED') ||
@@ -381,6 +419,156 @@ async function appleSocialProviderConfig() {
   };
 }
 
+// INNH-10 CP-2 / CP-3: browser:agent key guard and the fail-closed
+// api_key_revoked event for delete and disable. Runs for Better Auth's own
+// /api-key/* routes AND for auth.api.* calls from the oRPC key procedures.
+type ApiKeyHookContext = Parameters<typeof getSessionFromCtx>[0];
+
+const API_KEY_MUTATION_PATHS = new Set([
+  '/api-key/create',
+  '/api-key/update',
+  '/api-key/delete',
+]);
+
+function apiKeyRefusal(code: string, message: string): APIError {
+  return new APIError('BAD_REQUEST', { code, message });
+}
+
+async function publishApiKeyRevokedOrFail(
+  target: ApiKeyRevocationTarget,
+  reason: ApiKeyRevocationReason,
+  actorUserId: string,
+  discriminator: Date | string | null,
+): Promise<void> {
+  try {
+    await publishApiKeyRevoked(
+      (_subject, payload) =>
+        publishVerevonAuditDurable(
+          payload as unknown as Parameters<typeof publishVerevonAuditDurable>[0],
+        ),
+      {
+        target,
+        reason,
+        occurredAt: new Date(),
+        actorUserId,
+        discriminator,
+      },
+    );
+  } catch {
+    // Fail closed BEFORE the mutation: the key stays as it was. A publish
+    // whose mutation then fails only kills grants early (the safe direction).
+    throw new APIError('SERVICE_UNAVAILABLE', {
+      code: 'api_key_revocation_audit_unavailable',
+      message: 'API key revocation could not be recorded; nothing was changed',
+    });
+  }
+}
+
+async function enforceApiKeyAgentMutation(
+  ctx: ApiKeyHookContext,
+): Promise<void> {
+  const path = ctx.path ?? '';
+  if (!API_KEY_MUTATION_PATHS.has(path)) return;
+  const rawBody: unknown = ctx.body as unknown;
+  const body: Record<string, unknown> =
+    rawBody && typeof rawBody === 'object' && !Array.isArray(rawBody)
+      ? (rawBody as Record<string, unknown>)
+      : {};
+  // Better Auth's own definition of a client call (server-only properties).
+  const clientRequest = Boolean(ctx.request || ctx.headers);
+
+  if (path === '/api-key/create') {
+    if (clientRequest && touchesReservedAgentMetadata(body.metadata)) {
+      throw apiKeyRefusal(
+        'api_key_reserved_metadata',
+        'browser:agent key metadata is set through the API key procedures only',
+      );
+    }
+    if (
+      apiKeyHoldsBrowserAgent(body.permissions) &&
+      (body.configId !== API_KEY_USER_CONFIG_ID ||
+        !readApiKeyAgentMetadata(body.metadata) ||
+        typeof body.expiresIn !== 'number' ||
+        body.expiresIn > API_KEY_AGENT_MAX_EXPIRY_SECONDS)
+    ) {
+      throw apiKeyRefusal(
+        'api_key_browser_agent_requires_metadata',
+        'browser:agent needs a user key with org, host ceiling, budget and an expiry of at most 90 days',
+      );
+    }
+    return;
+  }
+
+  const keyId = typeof body.keyId === 'string' ? body.keyId : '';
+  const row = keyId ? await loadApiKeyRevocationRow(keyId) : null;
+  if (!row) return; // the endpoint answers NOT_FOUND itself
+
+  const target = apiKeyRevocationTarget(row);
+  const agentKey = target !== null || apiKeyHoldsBrowserAgent(row.permissions);
+  const session = await getSessionFromCtx(ctx).catch(() => null);
+  const actorUserId =
+    session?.user?.id ??
+    (!clientRequest && typeof body.userId === 'string'
+      ? body.userId
+      : undefined);
+
+  if (path === '/api-key/update') {
+    if (
+      clientRequest &&
+      body.metadata !== undefined &&
+      (agentKey || touchesReservedAgentMetadata(body.metadata))
+    ) {
+      // Better Auth replaces metadata wholesale, which would drop the
+      // ceiling; browser:agent keys are edited through oRPC only.
+      throw apiKeyRefusal(
+        'api_key_reserved_metadata',
+        'browser:agent key metadata is set through the API key procedures only',
+      );
+    }
+    if (
+      agentKey &&
+      body.expiresIn !== undefined &&
+      (typeof body.expiresIn !== 'number' ||
+        body.expiresIn > API_KEY_AGENT_MAX_EXPIRY_SECONDS)
+    ) {
+      throw apiKeyRefusal(
+        'api_key_expiry_too_long',
+        'A browser:agent key expires after at most 90 days',
+      );
+    }
+    const grantsAgent =
+      body.permissions !== undefined
+        ? apiKeyHoldsBrowserAgent(body.permissions)
+        : apiKeyHoldsBrowserAgent(row.permissions);
+    if (
+      grantsAgent &&
+      (row.configId !== API_KEY_USER_CONFIG_ID ||
+        !readApiKeyAgentMetadata(
+          body.metadata !== undefined ? body.metadata : row.metadata,
+        ))
+    ) {
+      throw apiKeyRefusal(
+        'api_key_browser_agent_requires_metadata',
+        'browser:agent needs a user key with org, host ceiling and budget',
+      );
+    }
+    const reason = target ? revocationForUpdate(row, body) : null;
+    if (!target || !reason || !actorUserId) return;
+    if (actorUserId !== row.referenceId) return; // endpoint refuses it
+    await publishApiKeyRevokedOrFail(
+      target,
+      reason,
+      actorUserId,
+      row.updatedAt,
+    );
+    return;
+  }
+
+  // /api-key/delete
+  if (!target || !actorUserId || actorUserId !== row.referenceId) return;
+  await publishApiKeyRevokedOrFail(target, 'deleted', actorUserId, null);
+}
+
 const authOptions: BetterAuthOptions = {
   database: drizzleAdapter(db, {
     provider: 'pg',
@@ -396,7 +584,7 @@ const authOptions: BetterAuthOptions = {
   trustedOrigins,
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
-      await Promise.resolve();
+      await enforceApiKeyAgentMutation(ctx);
       if (ctx.path !== '/organization/accept-invitation') return;
       const requestBody: unknown = ctx.body as unknown;
       const invitationId =
@@ -752,7 +940,10 @@ const authOptions: BetterAuthOptions = {
         // social OAuth, SSO callback, passkey) — unlike the route-matched
         // after-hooks that missed Microsoft logins entirely. See
         // sole-org-auto-activation.ts for the full rationale.
-        async before(session) {
+        async before(session, context) {
+          // SSO enforcement (WS05-S7) runs first: a refused sign-in must not
+          // reach the activation, secondary storage or the cookie cache.
+          await enforceSsoOnSessionCreate(session, context);
           return { data: await withSoleOrganizationActivated(session) };
         },
         // Hand the signed-in user's Microsoft token to integration-corev2 so
@@ -760,10 +951,13 @@ const authOptions: BetterAuthOptions = {
         // itself. Same hook class as the activation above, for the same
         // reason: it runs for every session-creation path, Microsoft OAuth
         // included. Best-effort — never allowed to fail the sign-in.
-        async after(session) {
+        async after(session, context) {
           await pushMicrosoftSignInHandoff(
             session as { userId: string } & Record<string, unknown>,
           );
+          // Proof of a real SSO sign-in, read by org-core before it allows
+          // enforce (WS05-S7). Best effort, never fails the sign-in.
+          await recordSsoSignInEvidence(session, context);
         },
       },
     },
@@ -794,6 +988,17 @@ const authOptions: BetterAuthOptions = {
       },
     },
   },
+
+  // Providers are registered only through org-core's admin path, which proves
+  // the e-mail domain first (WS05-S7); the plugin's own registration and
+  // domain-verification endpoints stay closed.
+  disabledPaths: [
+    '/sso/register',
+    '/sso/update-provider',
+    '/sso/delete-provider',
+    '/sso/request-domain-verification',
+    '/sso/verify-domain',
+  ],
 
   // Session settings for security and responsiveness - Extended persistence
   session: {
@@ -1021,43 +1226,16 @@ const authOptions: BetterAuthOptions = {
           sso({
             provisionUser: ({ user, provider }) => {
               console.log(
-                `🏢 Provisioning SSO user: ${user.email} via ${provider.providerId}`,
+                `🏢 Provisioning SSO user: ${user.id} via ${provider.providerId}`,
               );
               // Custom user provisioning logic can be added here
               // e.g., sync with CRM, create workspaces, assign licenses, etc.
             },
             organizationProvisioning: {
               disabled: process.env.SSO_ORG_PROVISIONING_DISABLED === 'true',
-              defaultRole: (process.env.SSO_DEFAULT_ROLE || 'member') as
-                | 'admin'
-                | 'member',
-              getRole: ({
-                userInfo,
-              }: {
-                userInfo: {
-                  attributes?: { department?: string; jobTitle?: string };
-                };
-              }) => {
-                // Assign roles based on SSO attributes
-                const department = userInfo.attributes?.department;
-                const jobTitle = userInfo.attributes?.jobTitle;
-
-                // Admins based on job title
-                if (
-                  jobTitle?.toLowerCase().includes('manager') ||
-                  jobTitle?.toLowerCase().includes('director') ||
-                  jobTitle?.toLowerCase().includes('admin')
-                ) {
-                  return Promise.resolve<'admin' | 'member'>('admin');
-                }
-
-                // IT department gets admin access
-                if (department?.toLowerCase() === 'it') {
-                  return Promise.resolve<'admin' | 'member'>('admin');
-                }
-
-                return Promise.resolve<'admin' | 'member'>('member');
-              },
+              // Roles are never derived from IdP-asserted attributes (job
+              // title, department): any SSO user provisions as member.
+              defaultRole: resolveSsoDefaultRole(),
             },
           }),
         ]

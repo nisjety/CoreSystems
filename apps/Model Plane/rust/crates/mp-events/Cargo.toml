@@ -28,3 +28,5 @@ optional = true
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# trace_event_type_names_match_the_proto_enum compares the JSON event names to the proto enum.
+mp-contracts = { path = "../mp-contracts" }

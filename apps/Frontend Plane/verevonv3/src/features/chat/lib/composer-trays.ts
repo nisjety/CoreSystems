@@ -14,16 +14,18 @@
  *
  * # Priority
  *
- * approval, then plan, then queue. An approval blocks a run that is already
- * going, a plan blocks one that has not started, and the queue is only a status.
- * The question tray (`ask_user`, WS14-S4) goes between approval and plan when it
- * exists.
+ * approval, then plan, then goal, then queue. An approval blocks a run that is
+ * already going, a plan blocks one that has not started, the goal (EP-7 S1) is
+ * standing context the person may act on, and the queue is only a status.
+ * Pending decisions come first, standing context second. The question tray
+ * (`ask_user`, WS14-S4) goes between approval and plan when it exists.
  */
 
 import { deriveConversationNodes } from '@/shared/chat-nodes'
 import type { ConversationNode, PlanApprovalStatus } from '@/shared/chat-nodes'
 import type { DockedNodes } from '@/shared/chat-nodes/types'
 import type { Approval } from '@/shared/api/orchestration-client'
+import type { ThreadGoal } from '@/shared/api/thread-goal-client'
 import type { ChatTurn, QueuedInput } from '../components/chat-types'
 
 export type PlanApprovalNode = Extract<ConversationNode, { kind: 'plan-approval' }>
@@ -33,6 +35,8 @@ export type DockedTray =
   | { kind: 'approval'; approvals: { turnId: string; approval: Approval }[] }
   /** The latest assistant turn's plan, while it has neither been granted nor rejected. */
   | { kind: 'plan'; turnId: string; plan: PlanApprovalNode }
+  /** The thread's goal (EP-7 S1): open, met or stopped, until the person clears it. */
+  | { kind: 'goal'; goal: ThreadGoal }
   /** Messages sent into the live run, in every state the strip shows. */
   | { kind: 'queue'; entries: QueuedInput[] }
 
@@ -43,6 +47,8 @@ export type DockedTrayInput = {
   queuedInputs: readonly QueuedInput[]
   /** Live status of a plan approval in flight, by turn id. */
   planApproval?: (turnId: string) => PlanApprovalStatus | undefined
+  /** The thread's goal, when it has one (EP-7 S1). */
+  goal?: ThreadGoal | null
 }
 
 export function selectDockedTrays(input: DockedTrayInput): DockedTray[] {
@@ -66,6 +72,8 @@ export function selectDockedTrays(input: DockedTrayInput): DockedTray[] {
       trays.push({ kind: 'plan', turnId: latest.id, plan })
     }
   }
+
+  if (input.goal) trays.push({ kind: 'goal', goal: input.goal })
 
   if (input.queuedInputs.length > 0) trays.push({ kind: 'queue', entries: [...input.queuedInputs] })
   return trays

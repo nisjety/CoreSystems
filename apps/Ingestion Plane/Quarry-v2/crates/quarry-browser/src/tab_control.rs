@@ -8,6 +8,7 @@
 //! capability bits and trait defaults are the only surface (dark by design).
 
 use crate::BrowserEgressPolicy;
+use quarry_core::error::{ErrorCode, QuarryError};
 
 /// Reason carried in `details.reason` when a pinned tab no longer exists.
 /// Such an action fails with NOT_FOUND and never falls back to another tab.
@@ -16,7 +17,8 @@ pub const PINNED_TAB_CLOSED_REASON: &str = "pinned_tab_closed";
 /// How a new tab opens.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenTabOptions {
-    /// Initial navigation. `None` opens a blank tab.
+    /// Initial navigation. `None` opens a blank tab. A navigation that times out keeps
+    /// the tab, and the error names it (see [`timed_out_open_error`]).
     pub url: Option<String>,
     /// Whether the new tab becomes the session's active tab. `false` opens it
     /// in the background. A session that has no active tab yet activates the
@@ -53,6 +55,14 @@ impl TabEgressPolicy {
         self.session.allows_url(raw)
             && self.tab.as_ref().map_or(true, |tab| tab.allows_url(raw))
     }
+
+    /// Each layer can independently refuse a credentialless asset.
+    pub fn allows_public_asset(&self, raw: &str) -> bool {
+        let allows = |policy: &BrowserEgressPolicy| {
+            policy.allows_url(raw) || policy.allows_public_asset(raw)
+        };
+        allows(&self.session) && self.tab.as_ref().map_or(true, allows)
+    }
 }
 
 /// The egress policy for a request made from one tab: the session policy met with
@@ -82,6 +92,30 @@ pub fn visible_through_pin(pin: Option<&str>, tab_id: Option<&str>) -> bool {
     }
 }
 
+/// Whether a failed first navigation of `open_tab` keeps the tab it was made in (W2-U07).
+/// Only a TIMEOUT does: the navigation is abandoned and the tab stays, readable, with its
+/// abandoned navigation drained by the tab's next `goto` (SC4 T3). Any other failure (a
+/// refused URL, a transport or DNS failure) still closes the tab, and the caller gets none.
+pub fn keeps_tab_on_navigation_failure(code: ErrorCode) -> bool {
+    code == ErrorCode::Timeout
+}
+
+/// The error an `open_tab` whose first navigation timed out answers with (W2-U07): the
+/// typed navigate TIMEOUT as the deadline made it, plus `details.tab_id`, so the caller can
+/// act on the tab it still has. The URL is never in it: an error body carries no page
+/// address for a ZDR caller.
+pub fn timed_out_open_error(tab_id: &str, error: QuarryError) -> QuarryError {
+    let mut details = match error.details.clone() {
+        Some(serde_json::Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    details.insert(
+        "tab_id".to_owned(),
+        serde_json::Value::String(tab_id.to_owned()),
+    );
+    error.with_details(serde_json::Value::Object(details))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,6 +134,32 @@ mod tests {
         let resolved = resolve_tab_egress_policy(Some(&tab), Some(&session));
         assert!(resolved.allows_url("https://agent.example/page"));
         assert!(!resolved.allows_url("https://third.example/page"));
+    }
+
+    #[test]
+    fn credentialless_public_assets_respect_session_and_tab_boundaries() {
+        let cdn = "https://cdn.example/site.css";
+        let session = policy(&["shop.example"]).with_public_assets();
+        let tab = policy(&["shop.example"]).with_public_assets();
+        let resolved = resolve_tab_egress_policy(Some(&tab), Some(&session));
+        assert!(resolved.allows_public_asset(cdn));
+        assert!(!resolved.allows_url(cdn));
+        assert!(!resolved.allows_public_asset("http://cdn.example/site.css"));
+        assert!(!resolved.allows_public_asset("https://127.0.0.1/site.css"));
+
+        let deny_all = BrowserEgressPolicy::deny_all().with_public_assets();
+        let narrowed = policy(&["shop.example"]);
+        let denied_cdn = tab
+            .clone()
+            .with_denied_domains(&["cdn.example".to_owned()]);
+        for restrictive_tab in [&deny_all, &narrowed, &denied_cdn] {
+            assert!(!resolve_tab_egress_policy(Some(restrictive_tab), Some(&session))
+                .allows_public_asset(cdn));
+        }
+        for restrictive_session in [None, Some(&deny_all), Some(&narrowed), Some(&denied_cdn)] {
+            assert!(!resolve_tab_egress_policy(Some(&tab), restrictive_session)
+                .allows_public_asset(cdn));
+        }
     }
 
     #[test]
@@ -229,5 +289,68 @@ mod tests {
         assert!(options.url.is_none());
         assert!(!options.activate);
         assert!(options.egress_policy.is_none());
+    }
+
+    // W2-U07: a navigation timeout keeps the tab it was made in, and the error names it.
+
+    #[test]
+    fn only_a_navigation_timeout_keeps_the_tab() {
+        assert!(keeps_tab_on_navigation_failure(ErrorCode::Timeout));
+        for code in [
+            ErrorCode::SecurityBlocked,
+            ErrorCode::BadRequest,
+            ErrorCode::DriverFailed,
+            ErrorCode::RateLimited,
+            ErrorCode::Internal,
+        ] {
+            assert!(!keeps_tab_on_navigation_failure(code), "{code:?}");
+        }
+    }
+
+    #[test]
+    fn the_timed_out_open_names_the_tab_and_keeps_the_navigate_fields() {
+        let mut timeout =
+            QuarryError::new(ErrorCode::Timeout, "browser operation navigate timed out")
+                .with_details(serde_json::json!({
+                    "op": "navigate",
+                    "deadline_ms": 25_000,
+                    "effect": "unknown",
+                }));
+        timeout.retryable = false;
+        let error = timed_out_open_error("tab-7", timeout);
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert!(
+            !error.retryable,
+            "an effectful navigate is not retried blind"
+        );
+        let details = error.details.expect("details");
+        assert_eq!(details["tab_id"], "tab-7");
+        assert_eq!(details["op"], "navigate");
+        assert_eq!(details["deadline_ms"], 25_000);
+        assert_eq!(details["effect"], "unknown");
+        assert!(details.get("url").is_none(), "no page address in the error");
+    }
+
+    #[test]
+    fn a_timeout_without_details_still_names_the_tab() {
+        let error = timed_out_open_error(
+            "tab-2",
+            QuarryError::new(ErrorCode::Timeout, "browser operation navigate timed out"),
+        );
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.details.expect("details")["tab_id"], "tab-2");
+    }
+
+    #[test]
+    fn a_non_object_timeout_detail_is_replaced_by_the_tab_id() {
+        let error = timed_out_open_error(
+            "tab-3",
+            QuarryError::new(ErrorCode::Timeout, "timed out")
+                .with_details(serde_json::json!("opaque")),
+        );
+        assert_eq!(
+            error.details.expect("details"),
+            serde_json::json!({ "tab_id": "tab-3" })
+        );
     }
 }

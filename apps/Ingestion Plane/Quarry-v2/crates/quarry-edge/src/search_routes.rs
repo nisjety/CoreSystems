@@ -32,6 +32,12 @@ use quarry_runtime::serp::{
 use quarry_runtime::smart_router::{classify_intent, QueryIntent};
 use quarry_runtime::vector_index::{VectorHit, VectorOutcome, VectorQuery};
 
+use quarry_core::zdr::ZdrMode;
+use quarry_runtime::answer::FetchFailure;
+use quarry_runtime::job_pricing::{
+    estimate_job_price, BulkJobKind, JobPrice, JobPriceInput, JobRates,
+};
+
 use crate::answer_status::{self, AnswerReason, AnswerStatus};
 use crate::state::AppState;
 
@@ -147,6 +153,11 @@ pub struct SearchRequest {
     /// names the kind in `score_kind`. An unknown kind is refused, not ignored.
     #[serde(default)]
     pub score_kinds: Vec<String>,
+    /// E3.7.7a: hydrate the top results through the scrape path (see [`SearchScrapeBlock`]).
+    /// Read only when `QUARRY_EDGE__SEARCH_SCRAPE` is on; off, the block is ignored and the
+    /// response carries `scrape.status = "disabled"`, so a dark edge never changes a search.
+    #[serde(default)]
+    pub scrape: Option<SearchScrapeBlock>,
     /// Optional client-supplied request ID for tracing.
     #[serde(default)]
     #[allow(dead_code)] // scaffolding: wired in follow-up
@@ -201,6 +212,11 @@ pub struct SearchResponse {
     /// wired in, so a deployment without reranking keeps the response it had.
     #[serde(skip_serializing_if = "RerankReport::is_not_configured")]
     pub rerank: RerankReport,
+    /// E3.7.7a: the hydration of the top results. Present only when the request sent a
+    /// `scrape` block. Page text travels inline in this response only: it is never cached,
+    /// never written to an event and never logged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scrape: Option<SearchScrapeReport>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -763,6 +779,26 @@ async fn search_run(
         )
             .into_response();
     }
+    // E3.7.7a: the scrape block is validated only when the flag is on. Off, it is ignored
+    // (the response names it `disabled`), so turning the flag off can never turn a search
+    // that used to succeed into a 400.
+    let scrape_caps = match (&req.scrape, search_scrape_enabled()) {
+        (Some(block), true) => match resolve_scrape_block(block) {
+            Ok(caps) => Some(caps),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: error.message,
+                        code: error.code.into(),
+                        hint: None,
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        _ => None,
+    };
     // The body flag, raised (never lowered) by the token's ZDR floor for a user of a
     // ZDR org. A service caller's posture is the body flag alone (see above).
     let zdr = claims.effective_zdr(req.zdr.unwrap_or(false));
@@ -841,7 +877,17 @@ async fn search_run(
     let rerank_epoch = provider.rerank_epoch();
     let params_sig = params_signature(&opts, req.include_answer, &rerank_epoch);
     let cache_key = crate::cache::SearchCache::key(&claims.org_id, &effective_query, &params_sig);
-    let scache = state.redis.clone().map(crate::cache::SearchCache::new);
+    // Security review (D2-055): an entry holding an answer is keyed without the web policy, so
+    // it may hold an answer synthesized from pages this run's policy refuses. A run under host
+    // rules that asks for an answer neither reads nor writes the cache (the scrape family's
+    // `is_default` rule); a results-only search is unaffected, its results are not page fetches.
+    let answer_cache_ok =
+        !req.include_answer || crate::web_policy_edge::is_default(&decision);
+    let scache = state
+        .redis
+        .clone()
+        .filter(|_| answer_cache_ok)
+        .map(crate::cache::SearchCache::new);
     let from_cache: Option<CachedSearch> = if zdr {
         None
     } else {
@@ -899,7 +945,10 @@ async fn search_run(
                                 zdr: Some(zdr),
                                 org_id: Some(claims.org_id.clone()),
                             };
-                            match p.answer(areq).await {
+                            // D2-055: the answer's page fetches pass the same web-policy gate
+                            // as `/v1/answer`; a denied result URL is never fetched.
+                            let gate = crate::answer_routes::gate_for(decision.clone());
+                            match p.answer_gated(areq, Some(&gate)).await {
                                 Ok(ar) => {
                                     let outcome = AnswerOutcome::from_result(&ar);
                                     (Some(ar.answer), Some(ar.citations), outcome)
@@ -1060,6 +1109,35 @@ async fn search_run(
         );
     }
 
+    // E3.7.7a: hydrate the top results. Runs after the cache step on every request (hit or
+    // miss), so page text is never written to the search cache, under ZDR or not; ZDR stays
+    // inline-only by construction. Each URL passes the request's web policy and the policy
+    // security engine (preflight) before its fetch; a refusal is a typed per-result failure.
+    let scrape_report = match (&req.scrape, scrape_caps) {
+        (None, _) => None,
+        (Some(_), None) => Some(SearchScrapeReport::disabled()),
+        (Some(_), Some(caps)) => {
+            let gate = crate::answer_routes::gate_for(decision.clone());
+            let engine =
+                crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision);
+            let fetcher = SimpleHttpMarkdownFetcher::new().with_max_bytes(SCRAPE_MAX_BYTES);
+            let zdr_mode = if zdr { ZdrMode::On } else { ZdrMode::Off };
+            let items =
+                hydrate_results(&fetcher, engine.as_ref(), &gate, &results, caps, zdr_mode).await;
+            let report = SearchScrapeReport::from_items(items);
+            // Counts and closed codes only: no URL, no page text.
+            tracing::info!(
+                requested = report.requested,
+                hydrated = report.hydrated,
+                failed = report.failed,
+                fetched = report.fetched_pages(),
+                zdr = zdr,
+                "search.scrape"
+            );
+            Some(report)
+        }
+    };
+
     // format=context — token-bounded RAG context for Verevon.
     let context = match req.format.as_deref() {
         Some("context") => Some(build_context(
@@ -1142,6 +1220,36 @@ async fn search_run(
             .await;
     }
 
+    // E3.7.7a: hydration is metered once per request, by the fetch units that left the edge
+    // (a URL refused by the policy or the preflight was never fetched and is not billed). The
+    // estimate comes from the job pricing helper; its rates are placeholders (X-12, L4).
+    if let Some(report) = &scrape_report {
+        let fetched = report.fetched_pages();
+        if fetched > 0 {
+            let price = scrape_price(fetched);
+            state
+                .usage
+                .meter(quarry_runtime::UsageEvent::new(
+                    format!("search-scrape-{run_id_str_for_answer}"),
+                    claims.org_id.clone(),
+                    quarry_runtime::usage_metrics::SCRAPE_PAGE,
+                    fetched as f64,
+                    serde_json::json!({
+                        "user_id": claims.user_id,
+                        "via": "search.scrape",
+                        "requested": report.requested,
+                        "hydrated": report.hydrated,
+                        "failed": report.failed,
+                        "estimated_micro_usd": price.total_micro_usd,
+                        "cost_source": price.source,
+                        "price_clamped": price.clamped,
+                        "zdr": zdr,
+                    }),
+                ))
+                .await;
+        }
+    }
+
     // 2E — facets computed from clean results (before highlight markup).
     let facets = if req.facets {
         Some(compute_host_facets(&results))
@@ -1182,6 +1290,7 @@ async fn search_run(
             policy_downgrades,
             score_kind,
             rerank,
+            scrape: scrape_report,
         }),
     )
         .into_response()
@@ -1713,6 +1822,7 @@ pub async fn similar(
             policy_downgrades: Vec::new(),
             score_kind: None,
             rerank: RerankReport::default(),
+            scrape: None,
         }),
     )
         .into_response()
@@ -1913,6 +2023,374 @@ fn strip_json_fences(body: &str) -> &str {
         .map(|rest| rest.trim().trim_end_matches("```").trim())
         .unwrap_or(trimmed);
     inner
+}
+
+// ── E3.7.7a: search with a scrape block (hydrate results) ─────────────────────
+//
+// `POST /v1/search` with `"scrape": { ... }` fetches the top results through the edge's
+// markdown fetch path (the one `include_answer` and `/v1/answer` use) and returns each page's
+// markdown inline, next to the results. Rules:
+//
+// - Dark: `QUARRY_EDGE__SEARCH_SCRAPE` (default off, read per request). Off, the block is
+//   ignored and the response says `scrape.status = "disabled"`.
+// - Policy: every URL passes the request's web policy (`gate_url`, D2-055) and then the
+//   policy security engine's preflight (blocklists, private hosts, host rules) before it is
+//   fetched. A refused URL is never fetched and is a typed per-result failure.
+// - Caps: at most `SCRAPE_MAX_LIMIT` results, `SCRAPE_MAX_MAX_CHARS` characters each and one
+//   time budget for the whole block; a body above `SCRAPE_MAX_BYTES` is `too_large`.
+// - ZDR: hydration runs inline only. Nothing is cached (hydration runs after the cache step,
+//   on hits and misses alike), evented or logged; the fetch carries the request's posture.
+// - Metering: one `quarry.scrape.page` event per request, quantity = fetch units that left
+//   the edge, with the job pricing helper's estimate (placeholder rates) in its metadata.
+// - Failure: one closed code per result (`HydrationFailure`); the search itself never fails
+//   because a hydration did.
+//
+// E3.7.7b (runtime `answer.rs`) reuses these hydrated pages for `include_answer`; until then
+// a request that sends both fetches the answer's sources separately.
+
+/// The switch for the scrape block on `/v1/search`.
+pub const ENV_SEARCH_SCRAPE: &str = "QUARRY_EDGE__SEARCH_SCRAPE";
+
+/// Results hydrated when the block names no `limit`.
+const SCRAPE_DEFAULT_LIMIT: u32 = 5;
+/// Most results one search may hydrate.
+const SCRAPE_MAX_LIMIT: u32 = 10;
+/// Characters of markdown kept per result when the block names no `max_chars`.
+const SCRAPE_DEFAULT_MAX_CHARS: u32 = 8_000;
+/// Most characters of markdown one result may carry.
+const SCRAPE_MAX_MAX_CHARS: u32 = 50_000;
+/// Time budget for the whole block when it names no `timeout_ms`.
+const SCRAPE_DEFAULT_TIMEOUT_MS: u32 = 15_000;
+/// Bounds of `timeout_ms` (the same bounds `/v1/scrape` puts on one page).
+const SCRAPE_MIN_TIMEOUT_MS: u32 = 1_000;
+const SCRAPE_MAX_TIMEOUT_MS: u32 = 55_000;
+/// Body cap of one hydrated page.
+const SCRAPE_MAX_BYTES: usize = 2_000_000;
+
+/// Whether the scrape block is enabled. Read per request, so a flip needs no restart.
+pub fn search_scrape_enabled() -> bool {
+    crate::job_results_routes::flag_is_on(std::env::var(ENV_SEARCH_SCRAPE).ok().as_deref())
+}
+
+/// The optional `scrape` block of `POST /v1/search`.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct SearchScrapeBlock {
+    /// How many of the top results to hydrate, 1 to 10. Default 5.
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Characters of markdown kept per result, 1 to 50 000. Default 8 000.
+    #[serde(default, alias = "maxChars")]
+    pub max_chars: Option<u32>,
+    /// Time budget for the whole block in milliseconds, 1 000 to 55 000. Default 15 000.
+    #[serde(default, alias = "timeoutMs")]
+    pub timeout_ms: Option<u32>,
+    /// Output formats. Only `markdown` is supported (and is the default).
+    #[serde(default)]
+    pub formats: Vec<String>,
+}
+
+/// The resolved caps of one scrape block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ScrapeCaps {
+    pub(crate) limit: usize,
+    pub(crate) max_chars: usize,
+    pub(crate) timeout: std::time::Duration,
+}
+
+/// A refused scrape block: a closed code and a message that never echoes caller input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScrapeBlockError {
+    pub(crate) code: &'static str,
+    pub(crate) message: String,
+}
+
+impl ScrapeBlockError {
+    fn bad(message: &str) -> Self {
+        Self {
+            code: "BAD_REQUEST",
+            message: message.to_string(),
+        }
+    }
+}
+
+/// Validate a scrape block and resolve its defaults. Out-of-range values are refused, not
+/// clamped: a caller asking for more than the cap learns it from the 400.
+pub(crate) fn resolve_scrape_block(
+    block: &SearchScrapeBlock,
+) -> Result<ScrapeCaps, ScrapeBlockError> {
+    if block.formats.iter().any(|f| f.trim() != "markdown") {
+        return Err(ScrapeBlockError {
+            code: "UNSUPPORTED_OPTION",
+            message: "scrape.formats: only \"markdown\" is supported on /v1/search".into(),
+        });
+    }
+    let limit = block.limit.unwrap_or(SCRAPE_DEFAULT_LIMIT);
+    if limit == 0 || limit > SCRAPE_MAX_LIMIT {
+        return Err(ScrapeBlockError::bad("scrape.limit must be 1 to 10"));
+    }
+    let max_chars = block.max_chars.unwrap_or(SCRAPE_DEFAULT_MAX_CHARS);
+    if max_chars == 0 || max_chars > SCRAPE_MAX_MAX_CHARS {
+        return Err(ScrapeBlockError::bad("scrape.max_chars must be 1 to 50000"));
+    }
+    let timeout_ms = block.timeout_ms.unwrap_or(SCRAPE_DEFAULT_TIMEOUT_MS);
+    if !(SCRAPE_MIN_TIMEOUT_MS..=SCRAPE_MAX_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(ScrapeBlockError::bad(
+            "scrape.timeout_ms must be 1000 to 55000",
+        ));
+    }
+    Ok(ScrapeCaps {
+        limit: limit as usize,
+        max_chars: max_chars as usize,
+        timeout: std::time::Duration::from_millis(u64::from(timeout_ms)),
+    })
+}
+
+/// Why one result was not hydrated. A closed set: never page text, host or provider text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HydrationFailure {
+    /// The request's web policy refused the URL. Never fetched.
+    PolicyDenied,
+    /// The security preflight refused the URL (blocklist, private host, host rule). Never fetched.
+    Blocked,
+    /// Not an absolute http(s) URL. Never fetched.
+    InvalidUrl,
+    /// The block's time budget ran out before this page finished.
+    DeadlineExceeded,
+    /// The server answered, but not with 2xx (`http_status` carries the code).
+    HttpStatus,
+    /// The body exceeded the per-page byte cap.
+    TooLarge,
+    /// The body could not be decoded as text.
+    Decode,
+    /// Extraction failed on a decoded body.
+    Extract,
+    /// The fetch itself timed out.
+    Timeout,
+    /// DNS, TLS or connection failure.
+    Transport,
+    /// Extraction produced nothing.
+    Empty,
+    /// Extraction produced too little to be the page.
+    TooShort,
+}
+
+impl HydrationFailure {
+    /// The code of a fetcher failure, with the HTTP status when there is one.
+    pub(crate) fn from_fetch(failure: &FetchFailure) -> (Self, Option<u16>) {
+        match failure {
+            FetchFailure::HttpStatus(code) => (Self::HttpStatus, Some(*code)),
+            FetchFailure::TooLarge => (Self::TooLarge, None),
+            FetchFailure::Decode => (Self::Decode, None),
+            FetchFailure::Extract => (Self::Extract, None),
+            FetchFailure::Timeout => (Self::Timeout, None),
+            FetchFailure::Transport => (Self::Transport, None),
+            FetchFailure::Empty => (Self::Empty, None),
+            FetchFailure::TooShort => (Self::TooShort, None),
+            FetchFailure::PolicyDenied => (Self::PolicyDenied, None),
+        }
+    }
+
+    /// Whether a request left the edge for this result (a billable fetch unit). Refusals made
+    /// before the fetch are not billed.
+    pub(crate) fn fetched(self) -> bool {
+        !matches!(self, Self::PolicyDenied | Self::Blocked | Self::InvalidUrl)
+    }
+}
+
+/// The hydration of one result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum HydrationOutcome {
+    Ok {
+        markdown: String,
+        /// Characters in `markdown` (after the cap).
+        chars: usize,
+        /// True when the page had more than `max_chars` characters.
+        truncated: bool,
+    },
+    Failed {
+        code: HydrationFailure,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        http_status: Option<u16>,
+    },
+}
+
+impl HydrationOutcome {
+    fn failed(code: HydrationFailure) -> Self {
+        Self::Failed {
+            code,
+            http_status: None,
+        }
+    }
+}
+
+/// One hydrated result: its URL, its 1-based position in `results`, and the outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HydratedResult {
+    pub url: String,
+    pub position: usize,
+    #[serde(flatten)]
+    pub outcome: HydrationOutcome,
+}
+
+/// Whether the block ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchScrapeStatus {
+    /// The block ran; `items` holds one entry per hydrated result.
+    Ok,
+    /// `QUARRY_EDGE__SEARCH_SCRAPE` is off on this edge; nothing was fetched.
+    Disabled,
+}
+
+/// The `scrape` field of a search response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SearchScrapeReport {
+    pub status: SearchScrapeStatus,
+    /// Results the block tried to hydrate.
+    pub requested: usize,
+    /// Results that came back with markdown.
+    pub hydrated: usize,
+    /// Results that came back with a failure code.
+    pub failed: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<HydratedResult>,
+}
+
+impl SearchScrapeReport {
+    pub(crate) fn disabled() -> Self {
+        Self {
+            status: SearchScrapeStatus::Disabled,
+            requested: 0,
+            hydrated: 0,
+            failed: 0,
+            items: Vec::new(),
+        }
+    }
+
+    pub(crate) fn from_items(items: Vec<HydratedResult>) -> Self {
+        let hydrated = items
+            .iter()
+            .filter(|i| matches!(i.outcome, HydrationOutcome::Ok { .. }))
+            .count();
+        Self {
+            status: SearchScrapeStatus::Ok,
+            requested: items.len(),
+            hydrated,
+            failed: items.len() - hydrated,
+            items,
+        }
+    }
+
+    /// Fetch units that left the edge: hydrated pages plus failures after the fetch began.
+    pub(crate) fn fetched_pages(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| match &i.outcome {
+                HydrationOutcome::Ok { .. } => true,
+                HydrationOutcome::Failed { code, .. } => code.fetched(),
+            })
+            .count()
+    }
+}
+
+/// The job pricing helper's estimate for `fetched` hydrated pages (static fetch, one attempt,
+/// no browser). Placeholder rates: see `quarry_runtime::job_pricing`.
+pub(crate) fn scrape_price(fetched: usize) -> JobPrice {
+    estimate_job_price(
+        JobPriceInput {
+            kind: BulkJobKind::SearchHydration,
+            pages: u32::try_from(fetched).unwrap_or(u32::MAX),
+            browser_pages: 0,
+            attempts_per_page: 1,
+        },
+        JobRates::default(),
+    )
+}
+
+/// The first `max_chars` characters of `text`, its character count and whether it was cut.
+pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> (String, usize, bool) {
+    match text.char_indices().nth(max_chars) {
+        Some((idx, _)) => (text[..idx].to_string(), max_chars, true),
+        None => (text.to_string(), text.chars().count(), false),
+    }
+}
+
+/// Hydrate the first `caps.limit` results concurrently under one deadline. The output keeps
+/// the order of `results`; every entry has an outcome, so a caller can always tell a refused
+/// or failed page from one that was never asked for.
+pub(crate) async fn hydrate_results(
+    fetcher: &dyn MarkdownFetcher,
+    security: &dyn quarry_security::SecurityEngine,
+    gate: &quarry_runtime::answer::UrlGate,
+    results: &[SearchResult],
+    caps: ScrapeCaps,
+    zdr: ZdrMode,
+) -> Vec<HydratedResult> {
+    let deadline = tokio::time::Instant::now() + caps.timeout;
+    let jobs = results
+        .iter()
+        .take(caps.limit)
+        .enumerate()
+        .map(|(i, result)| async move {
+            let outcome = hydrate_one(
+                fetcher,
+                security,
+                gate,
+                &result.url,
+                caps.max_chars,
+                zdr,
+                deadline,
+            )
+            .await;
+            HydratedResult {
+                url: result.url.clone(),
+                position: i + 1,
+                outcome,
+            }
+        });
+    futures::future::join_all(jobs).await
+}
+
+async fn hydrate_one(
+    fetcher: &dyn MarkdownFetcher,
+    security: &dyn quarry_security::SecurityEngine,
+    gate: &quarry_runtime::answer::UrlGate,
+    url: &str,
+    max_chars: usize,
+    zdr: ZdrMode,
+    deadline: tokio::time::Instant,
+) -> HydrationOutcome {
+    // The web policy first: a denied URL is never parsed further, preflighted or fetched.
+    if !gate(url) {
+        return HydrationOutcome::failed(HydrationFailure::PolicyDenied);
+    }
+    let parsed = match url::Url::parse(url) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
+        _ => return HydrationOutcome::failed(HydrationFailure::InvalidUrl),
+    };
+    let run = async {
+        if security.preflight(&parsed).await.decision != quarry_security::Decision::Allow {
+            return Err(HydrationOutcome::failed(HydrationFailure::Blocked));
+        }
+        fetcher.fetch_source(url, zdr).await.map_err(|failure| {
+            let (code, http_status) = HydrationFailure::from_fetch(&failure);
+            HydrationOutcome::Failed { code, http_status }
+        })
+    };
+    match tokio::time::timeout_at(deadline, run).await {
+        Err(_elapsed) => HydrationOutcome::failed(HydrationFailure::DeadlineExceeded),
+        Ok(Err(outcome)) => outcome,
+        Ok(Ok(markdown)) => {
+            let (markdown, chars, truncated) = truncate_chars(&markdown, max_chars);
+            HydrationOutcome::Ok {
+                markdown,
+                chars,
+                truncated,
+            }
+        }
+    }
 }
 
 /// QB-T17: the suggestion route's Model Plane switch.
@@ -2756,6 +3234,7 @@ mod tests {
             policy_downgrades: Vec::new(),
             score_kind: None,
             rerank: RerankReport::default(),
+            scrape: None,
         };
         let plain = serde_json::to_string(&response).unwrap();
         assert!(!plain.contains("answer"), "an unchanged response: {plain}");
@@ -2786,6 +3265,7 @@ mod tests {
             policy_downgrades: Vec::new(),
             score_kind: None,
             rerank: RerankReport::default(),
+            scrape: None,
         };
         let wire = serde_json::to_string(&response).unwrap();
         assert!(
@@ -2942,6 +3422,7 @@ mod tests {
             policy_downgrades: Vec::new(),
             score_kind: None,
             rerank: RerankReport::default(),
+            scrape: None,
         };
         let wire = serde_json::to_string(&response).unwrap();
         assert!(
@@ -3019,5 +3500,320 @@ mod tests {
     #[test]
     fn the_only_score_kind_the_edge_produces_is_cross_encoder_v1() {
         assert_eq!(SCORE_KINDS, &["cross_encoder.v1"]);
+    }
+}
+
+#[cfg(test)]
+mod search_scrape_tests {
+    //! E3.7.7a: the scrape block of `/v1/search`. The flag itself is read from the
+    //! environment per request and is not toggled here (parallel tests would race on it);
+    //! these tests drive the pieces the handler composes.
+
+    use super::*;
+    use async_trait::async_trait;
+    use quarry_security::{SecurityEngine, Verdict};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use url::Url;
+
+    struct FakeFetcher;
+
+    #[async_trait]
+    impl MarkdownFetcher for FakeFetcher {
+        async fn fetch_markdown(&self, url: &str, zdr: ZdrMode) -> Option<String> {
+            self.fetch_source(url, zdr).await.ok()
+        }
+
+        async fn fetch_source(&self, url: &str, _zdr: ZdrMode) -> Result<String, FetchFailure> {
+            if url.contains("ok.test") {
+                Ok("hello world".to_string())
+            } else if url.contains("long.test") {
+                Ok("é".repeat(40))
+            } else if url.contains("missing.test") {
+                Err(FetchFailure::HttpStatus(404))
+            } else if url.contains("slow.test") {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok("too late".to_string())
+            } else {
+                Err(FetchFailure::Transport)
+            }
+        }
+    }
+
+    /// Blocks `blocked.test`, allows everything else.
+    struct FakeSecurity;
+
+    #[async_trait]
+    impl SecurityEngine for FakeSecurity {
+        async fn preflight(&self, url: &Url) -> Verdict {
+            if url.host_str() == Some("blocked.test") {
+                Verdict::block("listed")
+            } else {
+                Verdict::allow()
+            }
+        }
+
+        async fn check_discovered(&self, _parent: &Url, _child: &Url) -> Verdict {
+            Verdict::allow()
+        }
+    }
+
+    fn result(url: &str) -> SearchResult {
+        SearchResult {
+            url: url.into(),
+            provider: "fake".into(),
+            ..Default::default()
+        }
+    }
+
+    fn deny_host(host: &'static str) -> quarry_runtime::answer::UrlGate {
+        Arc::new(move |url: &str| !url.contains(host))
+    }
+
+    fn caps(limit: usize, max_chars: usize, timeout_ms: u64) -> ScrapeCaps {
+        ScrapeCaps {
+            limit,
+            max_chars,
+            timeout: Duration::from_millis(timeout_ms),
+        }
+    }
+
+    #[test]
+    fn an_empty_block_resolves_to_the_defaults() {
+        let caps = resolve_scrape_block(&SearchScrapeBlock::default()).unwrap();
+        assert_eq!(caps.limit, 5);
+        assert_eq!(caps.max_chars, 8_000);
+        assert_eq!(caps.timeout, Duration::from_millis(15_000));
+    }
+
+    #[test]
+    fn out_of_range_caps_are_refused_not_clamped() {
+        for block in [
+            SearchScrapeBlock { limit: Some(0), ..Default::default() },
+            SearchScrapeBlock { limit: Some(11), ..Default::default() },
+            SearchScrapeBlock { max_chars: Some(0), ..Default::default() },
+            SearchScrapeBlock { max_chars: Some(50_001), ..Default::default() },
+            SearchScrapeBlock { timeout_ms: Some(999), ..Default::default() },
+            SearchScrapeBlock { timeout_ms: Some(55_001), ..Default::default() },
+        ] {
+            let err = resolve_scrape_block(&block).unwrap_err();
+            assert_eq!(err.code, "BAD_REQUEST");
+        }
+        let edge = SearchScrapeBlock {
+            limit: Some(10),
+            max_chars: Some(50_000),
+            timeout_ms: Some(55_000),
+            formats: vec!["markdown".into()],
+        };
+        assert!(resolve_scrape_block(&edge).is_ok());
+    }
+
+    #[test]
+    fn a_format_other_than_markdown_is_an_unsupported_option_and_is_not_echoed() {
+        let block = SearchScrapeBlock {
+            formats: vec!["<script>screenshot".into()],
+            ..Default::default()
+        };
+        let err = resolve_scrape_block(&block).unwrap_err();
+        assert_eq!(err.code, "UNSUPPORTED_OPTION");
+        assert!(!err.message.contains("script"), "caller input is not echoed");
+    }
+
+    #[test]
+    fn the_request_reads_the_block_with_camel_case_aliases() {
+        let req: SearchRequest = serde_json::from_value(serde_json::json!({
+            "query": "rust",
+            "scrape": { "limit": 3, "maxChars": 100, "timeoutMs": 2000 }
+        }))
+        .unwrap();
+        let block = req.scrape.expect("block parsed");
+        assert_eq!(block.limit, Some(3));
+        assert_eq!(block.max_chars, Some(100));
+        assert_eq!(block.timeout_ms, Some(2_000));
+        let plain: SearchRequest =
+            serde_json::from_value(serde_json::json!({ "query": "rust" })).unwrap();
+        assert!(plain.scrape.is_none());
+    }
+
+    #[tokio::test]
+    async fn each_result_gets_a_typed_outcome_in_order() {
+        let results = vec![
+            result("https://ok.test/a"),
+            result("https://missing.test/b"),
+            result("https://denied.test/c"),
+            result("https://blocked.test/d"),
+            result("ftp://ok.test/e"),
+            result("https://down.test/f"),
+            result("https://ok.test/not-asked"),
+        ];
+        let items = hydrate_results(
+            &FakeFetcher,
+            &FakeSecurity,
+            &deny_host("denied.test"),
+            &results,
+            caps(6, 100, 2_000),
+            ZdrMode::Off,
+        )
+        .await;
+        assert_eq!(items.len(), 6, "the limit caps the hydrated results");
+        let positions: Vec<usize> = items.iter().map(|i| i.position).collect();
+        assert_eq!(positions, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            items[0].outcome,
+            HydrationOutcome::Ok {
+                markdown: "hello world".into(),
+                chars: 11,
+                truncated: false
+            }
+        );
+        assert_eq!(
+            items[1].outcome,
+            HydrationOutcome::Failed {
+                code: HydrationFailure::HttpStatus,
+                http_status: Some(404)
+            }
+        );
+        assert_eq!(items[2].outcome, HydrationOutcome::failed(HydrationFailure::PolicyDenied));
+        assert_eq!(items[3].outcome, HydrationOutcome::failed(HydrationFailure::Blocked));
+        assert_eq!(items[4].outcome, HydrationOutcome::failed(HydrationFailure::InvalidUrl));
+        assert_eq!(items[5].outcome, HydrationOutcome::failed(HydrationFailure::Transport));
+
+        let report = SearchScrapeReport::from_items(items);
+        assert_eq!(report.status, SearchScrapeStatus::Ok);
+        assert_eq!((report.requested, report.hydrated, report.failed), (6, 1, 5));
+        // ok, 404 and transport left the edge; denied, blocked and invalid never did.
+        assert_eq!(report.fetched_pages(), 3);
+    }
+
+    #[tokio::test]
+    async fn markdown_is_cut_at_the_character_cap_on_a_char_boundary() {
+        let items = hydrate_results(
+            &FakeFetcher,
+            &FakeSecurity,
+            &deny_host("nothing-denied"),
+            &[result("https://long.test/")],
+            caps(1, 7, 2_000),
+            ZdrMode::On,
+        )
+        .await;
+        assert_eq!(
+            items[0].outcome,
+            HydrationOutcome::Ok {
+                markdown: "é".repeat(7),
+                chars: 7,
+                truncated: true
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_past_the_time_budget_is_deadline_exceeded_and_the_rest_still_return() {
+        let items = hydrate_results(
+            &FakeFetcher,
+            &FakeSecurity,
+            &deny_host("nothing-denied"),
+            &[result("https://slow.test/"), result("https://ok.test/")],
+            caps(2, 100, 50),
+            ZdrMode::Off,
+        )
+        .await;
+        assert_eq!(
+            items[0].outcome,
+            HydrationOutcome::failed(HydrationFailure::DeadlineExceeded)
+        );
+        assert!(matches!(items[1].outcome, HydrationOutcome::Ok { .. }));
+        // The slow page's request did leave the edge, so it is billed.
+        assert_eq!(SearchScrapeReport::from_items(items).fetched_pages(), 2);
+    }
+
+    #[test]
+    fn the_wire_shape_names_status_code_and_http_status() {
+        let report = SearchScrapeReport::from_items(vec![
+            HydratedResult {
+                url: "https://ok.test/".into(),
+                position: 1,
+                outcome: HydrationOutcome::Ok {
+                    markdown: "md".into(),
+                    chars: 2,
+                    truncated: false,
+                },
+            },
+            HydratedResult {
+                url: "https://missing.test/".into(),
+                position: 2,
+                outcome: HydrationOutcome::Failed {
+                    code: HydrationFailure::HttpStatus,
+                    http_status: Some(404),
+                },
+            },
+            HydratedResult {
+                url: "https://denied.test/".into(),
+                position: 3,
+                outcome: HydrationOutcome::failed(HydrationFailure::PolicyDenied),
+            },
+        ]);
+        let wire = serde_json::to_value(&report).unwrap();
+        assert_eq!(wire["status"], "ok");
+        assert_eq!(wire["items"][0]["status"], "ok");
+        assert_eq!(wire["items"][0]["markdown"], "md");
+        assert_eq!(wire["items"][1]["status"], "failed");
+        assert_eq!(wire["items"][1]["code"], "http_status");
+        assert_eq!(wire["items"][1]["http_status"], 404);
+        assert_eq!(wire["items"][2]["code"], "policy_denied");
+        assert!(wire["items"][2].get("http_status").is_none());
+
+        let disabled = serde_json::to_value(SearchScrapeReport::disabled()).unwrap();
+        assert_eq!(disabled["status"], "disabled");
+        assert!(disabled.get("items").is_none());
+    }
+
+    #[test]
+    fn a_response_without_a_scrape_block_has_no_scrape_field() {
+        let response = SearchResponse {
+            query: "oslo".into(),
+            provider: "fake".into(),
+            results: vec![],
+            count: 0,
+            answer: None,
+            answer_status: None,
+            answer_reason: None,
+            citations: None,
+            context: None,
+            facets: None,
+            policy_downgrades: Vec::new(),
+            score_kind: None,
+            rerank: RerankReport::default(),
+            scrape: None,
+        };
+        let wire = serde_json::to_string(&response).unwrap();
+        assert!(!wire.contains("scrape"), "unchanged response: {wire}");
+    }
+
+    #[test]
+    fn the_price_uses_the_search_hydration_kind_and_static_fetches_only() {
+        let price = scrape_price(4);
+        assert_eq!(price.pages_priced, 4);
+        assert_eq!(price.browser_pages_priced, 0);
+        assert_eq!(price.attempts_priced, 1);
+        assert_eq!(price.browser_micro_usd, 0);
+        assert_eq!(price.total_micro_usd, price.fetch_micro_usd);
+        assert!(!price.clamped);
+    }
+
+    #[test]
+    fn fetch_failures_map_one_to_one() {
+        assert_eq!(
+            HydrationFailure::from_fetch(&FetchFailure::HttpStatus(503)),
+            (HydrationFailure::HttpStatus, Some(503))
+        );
+        assert_eq!(
+            HydrationFailure::from_fetch(&FetchFailure::PolicyDenied),
+            (HydrationFailure::PolicyDenied, None)
+        );
+        assert!(!HydrationFailure::PolicyDenied.fetched());
+        assert!(!HydrationFailure::Blocked.fetched());
+        assert!(!HydrationFailure::InvalidUrl.fetched());
+        assert!(HydrationFailure::Timeout.fetched());
+        assert!(HydrationFailure::DeadlineExceeded.fetched());
     }
 }

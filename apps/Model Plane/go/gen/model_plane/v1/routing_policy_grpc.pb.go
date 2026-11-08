@@ -19,8 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	RoutingPolicy_GetPolicy_FullMethodName = "/model_plane.v1.RoutingPolicy/GetPolicy"
-	RoutingPolicy_SetPolicy_FullMethodName = "/model_plane.v1.RoutingPolicy/SetPolicy"
+	RoutingPolicy_GetPolicy_FullMethodName                 = "/model_plane.v1.RoutingPolicy/GetPolicy"
+	RoutingPolicy_SetPolicy_FullMethodName                 = "/model_plane.v1.RoutingPolicy/SetPolicy"
+	RoutingPolicy_ProposeCandidate_FullMethodName          = "/model_plane.v1.RoutingPolicy/ProposeCandidate"
+	RoutingPolicy_RecordCandidateEvaluation_FullMethodName = "/model_plane.v1.RoutingPolicy/RecordCandidateEvaluation"
+	RoutingPolicy_PromoteCandidate_FullMethodName          = "/model_plane.v1.RoutingPolicy/PromoteCandidate"
+	RoutingPolicy_ListCandidates_FullMethodName            = "/model_plane.v1.RoutingPolicy/ListCandidates"
 )
 
 // RoutingPolicyClient is the client API for RoutingPolicy service.
@@ -43,6 +47,14 @@ const (
 // defaults). Write path: the Verevon BFF gateway calls SetPolicy on an admin
 // PUT. The gateway's read for the admin UI hits inference-core's effective-view
 // endpoint, not this service, so the UI shows what routing is actually using.
+//
+// Candidate path (EP-14 S10): a change can be proposed as a candidate instead
+// of written to the live row. A candidate carries the proposed config, the
+// offline routing diff, the reviewer's decision and an optional live
+// evaluation. It goes live only through PromoteCandidate, which writes the live
+// row only while the live version is still the one the candidate was proposed
+// against. The candidate RPCs are refused unless
+// SESSION_CORE_ROUTING_CANDIDATES_ENABLED is on.
 type RoutingPolicyClient interface {
 	// Fetch the current policy (singleton). Returns the seeded empty config until
 	// the first SetPolicy write.
@@ -51,6 +63,20 @@ type RoutingPolicyClient interface {
 	// finetune hyperparameters). `version` is server-incremented; `updated_at`
 	// is server-stamped.
 	SetPolicy(ctx context.Context, in *SetRoutingPolicyRequest, opts ...grpc.CallOption) (*RoutingPolicyMessage, error)
+	// Record a proposed policy as a candidate against the live version. Nothing
+	// goes live. inference-core computes the offline diff and passes it in.
+	ProposeCandidate(ctx context.Context, in *ProposeCandidateRequest, opts ...grpc.CallOption) (*ProposeCandidateResponse, error)
+	// Record the reviewer's decision on the offline diff, and the live evaluation
+	// of the candidate. An accepted diff makes the candidate `evaluated`; a
+	// refused one makes it `rejected`. Only a `proposed` candidate takes a review.
+	RecordCandidateEvaluation(ctx context.Context, in *RecordCandidateEvaluationRequest, opts ...grpc.CallOption) (*RecordCandidateEvaluationResponse, error)
+	// Make an evaluated candidate the live policy. Refused unless the candidate
+	// carries a passing live evaluation or a waiver reason. When the live version
+	// has moved on since the candidate was proposed, the candidate becomes
+	// `superseded` and the call answers ABORTED.
+	PromoteCandidate(ctx context.Context, in *PromoteCandidateRequest, opts ...grpc.CallOption) (*PromoteCandidateResponse, error)
+	// List candidates, newest first.
+	ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error)
 }
 
 type routingPolicyClient struct {
@@ -81,6 +107,46 @@ func (c *routingPolicyClient) SetPolicy(ctx context.Context, in *SetRoutingPolic
 	return out, nil
 }
 
+func (c *routingPolicyClient) ProposeCandidate(ctx context.Context, in *ProposeCandidateRequest, opts ...grpc.CallOption) (*ProposeCandidateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposeCandidateResponse)
+	err := c.cc.Invoke(ctx, RoutingPolicy_ProposeCandidate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *routingPolicyClient) RecordCandidateEvaluation(ctx context.Context, in *RecordCandidateEvaluationRequest, opts ...grpc.CallOption) (*RecordCandidateEvaluationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RecordCandidateEvaluationResponse)
+	err := c.cc.Invoke(ctx, RoutingPolicy_RecordCandidateEvaluation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *routingPolicyClient) PromoteCandidate(ctx context.Context, in *PromoteCandidateRequest, opts ...grpc.CallOption) (*PromoteCandidateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PromoteCandidateResponse)
+	err := c.cc.Invoke(ctx, RoutingPolicy_PromoteCandidate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *routingPolicyClient) ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListCandidatesResponse)
+	err := c.cc.Invoke(ctx, RoutingPolicy_ListCandidates_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RoutingPolicyServer is the server API for RoutingPolicy service.
 // All implementations must embed UnimplementedRoutingPolicyServer
 // for forward compatibility.
@@ -101,6 +167,14 @@ func (c *routingPolicyClient) SetPolicy(ctx context.Context, in *SetRoutingPolic
 // defaults). Write path: the Verevon BFF gateway calls SetPolicy on an admin
 // PUT. The gateway's read for the admin UI hits inference-core's effective-view
 // endpoint, not this service, so the UI shows what routing is actually using.
+//
+// Candidate path (EP-14 S10): a change can be proposed as a candidate instead
+// of written to the live row. A candidate carries the proposed config, the
+// offline routing diff, the reviewer's decision and an optional live
+// evaluation. It goes live only through PromoteCandidate, which writes the live
+// row only while the live version is still the one the candidate was proposed
+// against. The candidate RPCs are refused unless
+// SESSION_CORE_ROUTING_CANDIDATES_ENABLED is on.
 type RoutingPolicyServer interface {
 	// Fetch the current policy (singleton). Returns the seeded empty config until
 	// the first SetPolicy write.
@@ -109,6 +183,20 @@ type RoutingPolicyServer interface {
 	// finetune hyperparameters). `version` is server-incremented; `updated_at`
 	// is server-stamped.
 	SetPolicy(context.Context, *SetRoutingPolicyRequest) (*RoutingPolicyMessage, error)
+	// Record a proposed policy as a candidate against the live version. Nothing
+	// goes live. inference-core computes the offline diff and passes it in.
+	ProposeCandidate(context.Context, *ProposeCandidateRequest) (*ProposeCandidateResponse, error)
+	// Record the reviewer's decision on the offline diff, and the live evaluation
+	// of the candidate. An accepted diff makes the candidate `evaluated`; a
+	// refused one makes it `rejected`. Only a `proposed` candidate takes a review.
+	RecordCandidateEvaluation(context.Context, *RecordCandidateEvaluationRequest) (*RecordCandidateEvaluationResponse, error)
+	// Make an evaluated candidate the live policy. Refused unless the candidate
+	// carries a passing live evaluation or a waiver reason. When the live version
+	// has moved on since the candidate was proposed, the candidate becomes
+	// `superseded` and the call answers ABORTED.
+	PromoteCandidate(context.Context, *PromoteCandidateRequest) (*PromoteCandidateResponse, error)
+	// List candidates, newest first.
+	ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error)
 	mustEmbedUnimplementedRoutingPolicyServer()
 }
 
@@ -124,6 +212,18 @@ func (UnimplementedRoutingPolicyServer) GetPolicy(context.Context, *GetRoutingPo
 }
 func (UnimplementedRoutingPolicyServer) SetPolicy(context.Context, *SetRoutingPolicyRequest) (*RoutingPolicyMessage, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetPolicy not implemented")
+}
+func (UnimplementedRoutingPolicyServer) ProposeCandidate(context.Context, *ProposeCandidateRequest) (*ProposeCandidateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeCandidate not implemented")
+}
+func (UnimplementedRoutingPolicyServer) RecordCandidateEvaluation(context.Context, *RecordCandidateEvaluationRequest) (*RecordCandidateEvaluationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordCandidateEvaluation not implemented")
+}
+func (UnimplementedRoutingPolicyServer) PromoteCandidate(context.Context, *PromoteCandidateRequest) (*PromoteCandidateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PromoteCandidate not implemented")
+}
+func (UnimplementedRoutingPolicyServer) ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListCandidates not implemented")
 }
 func (UnimplementedRoutingPolicyServer) mustEmbedUnimplementedRoutingPolicyServer() {}
 func (UnimplementedRoutingPolicyServer) testEmbeddedByValue()                       {}
@@ -182,6 +282,78 @@ func _RoutingPolicy_SetPolicy_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RoutingPolicy_ProposeCandidate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeCandidateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoutingPolicyServer).ProposeCandidate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RoutingPolicy_ProposeCandidate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoutingPolicyServer).ProposeCandidate(ctx, req.(*ProposeCandidateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RoutingPolicy_RecordCandidateEvaluation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordCandidateEvaluationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoutingPolicyServer).RecordCandidateEvaluation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RoutingPolicy_RecordCandidateEvaluation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoutingPolicyServer).RecordCandidateEvaluation(ctx, req.(*RecordCandidateEvaluationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RoutingPolicy_PromoteCandidate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PromoteCandidateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoutingPolicyServer).PromoteCandidate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RoutingPolicy_PromoteCandidate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoutingPolicyServer).PromoteCandidate(ctx, req.(*PromoteCandidateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RoutingPolicy_ListCandidates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListCandidatesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoutingPolicyServer).ListCandidates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RoutingPolicy_ListCandidates_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoutingPolicyServer).ListCandidates(ctx, req.(*ListCandidatesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RoutingPolicy_ServiceDesc is the grpc.ServiceDesc for RoutingPolicy service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -196,6 +368,22 @@ var RoutingPolicy_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetPolicy",
 			Handler:    _RoutingPolicy_SetPolicy_Handler,
+		},
+		{
+			MethodName: "ProposeCandidate",
+			Handler:    _RoutingPolicy_ProposeCandidate_Handler,
+		},
+		{
+			MethodName: "RecordCandidateEvaluation",
+			Handler:    _RoutingPolicy_RecordCandidateEvaluation_Handler,
+		},
+		{
+			MethodName: "PromoteCandidate",
+			Handler:    _RoutingPolicy_PromoteCandidate_Handler,
+		},
+		{
+			MethodName: "ListCandidates",
+			Handler:    _RoutingPolicy_ListCandidates_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

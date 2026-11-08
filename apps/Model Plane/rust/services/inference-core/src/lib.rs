@@ -10,4 +10,5 @@ pub mod metered;
 pub mod metrics;
 pub mod provider;
 pub mod readiness;
+pub mod request_capture;
 pub mod streaming;

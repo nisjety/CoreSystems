@@ -49,16 +49,47 @@ export interface CronSchedule {
   updated_at?: string
   space_ref?: string
   creator_subject_id?: string
+  /** The newest fire's status and closed outcome token, when the schedule has fired. */
+  last_fire_status?: string
+  last_outcome?: string
 }
 
-export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[] }> {
+/** Server capabilities the schedule list reports, so the UI never offers a missing route. */
+export interface CronFeatures {
+  run_now?: boolean
+}
+
+export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[]; features?: CronFeatures }> {
   // capability-core serialises an empty Go slice as `"schedules": null`, so an
   // org with no schedules yet answered with null and every caller that did
   // `result.schedules.filter(...)` threw — the chat's "Planlagte kjøringer"
   // panel showed "Kunne ikke laste" instead of "Ingen planlagte kjøringer".
-  return requestJson<{ schedules: CronSchedule[] | null }>('/api/v1/cron', {
+  return requestJson<{ schedules: CronSchedule[] | null; features?: CronFeatures }>('/api/v1/cron', {
     headers: { 'x-verevon-org-id': orgId },
   }).then((result) => ({ ...result, schedules: result.schedules ?? [] }))
+}
+
+/** The manual fire Run now made, or found again for a retried `requestId`. */
+export interface ScheduleRunNowResult {
+  fire_id: string
+  fire_key: string
+  task_id: string
+  status: string
+  deduplicated: boolean
+}
+
+/**
+ * Run one of the caller's own schedules now (EP-6-S2): one manual fire under
+ * the creator's existing approval, through the same Control fire check as a
+ * scheduled fire. `requestId` is generated once per press and reused on retry,
+ * so a retry returns the first fire instead of making a second one.
+ */
+export function runScheduleNow(orgId: string, cronId: string, requestId: string): Promise<ScheduleRunNowResult> {
+  return requestJson<{ data: ScheduleRunNowResult }>(`/api/v1/cron/${encodeURIComponent(cronId)}/run`, {
+    method: 'POST',
+    body: JSON.stringify({ request_id: requestId }),
+    headers: { 'x-verevon-org-id': orgId },
+  }).then((result) => result.data)
 }
 
 /**
@@ -122,6 +153,8 @@ export interface CronScheduleFire {
   run_id?: string | null
   thread_id?: string | null
   withheld_effects: number
+  /** The fire's key: the schedule slot's time, or manual:<request id> for a Run now (EP-6-S3). */
+  fire_key?: string
 }
 
 /** The most recent fires of one schedule, newest first. */

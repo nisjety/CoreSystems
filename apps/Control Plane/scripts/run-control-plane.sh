@@ -440,7 +440,10 @@ set_if_missing VEREVON_PUBLIC_ORIGIN http://localhost:5173
 # name in docker-compose.yml, so an ephemeral-only default is invisible to
 # build-verevon-services.sh's direct `docker compose config` interpolation.
 persist_if_missing AUTH_CORE_ISSUER http://localhost:3011/api/convex-auth
-set_if_missing BETTER_AUTH_TRUSTED_ORIGINS 'http://localhost:3185,http://127.0.0.1:3185,http://localhost:5173,http://127.0.0.1:5173'
+# The same list as auth-core's default in docker-compose.yml. This value wins over
+# that default, so a shorter list here silently untrusts the e2e SPA on :5199
+# (Playwright setup then fails 403 INVALID_ORIGIN, register D1-814).
+set_if_missing BETTER_AUTH_TRUSTED_ORIGINS 'http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:5201,http://127.0.0.1:5201'
 
 # Compose's development overlay requires pairwise-distinct values for these
 # scoped NATS and HTTP/gRPC principals. They are generated once into the 0600
@@ -529,6 +532,20 @@ required_credentials=(
   # principals' keys are NOT listed here: plane_principals_registry mints them
   # from their consumerEnv (config/plane-service-principals.json).
   USER_CORE_MAIL_TASK_WORKER_TOKEN
+  # Quarry static service credentials (R-13 PR 2). Each is presented BY a Quarry
+  # service and validated HERE, in the registry of the Control core it calls, so the
+  # value is minted ONCE in this store and then MIRRORED (never re-minted) into
+  # Ingestion's .env.generated-secrets under the same name:
+  #   QUARRY_ORG_CORE_SERVICE_TOKEN           quarry-edge -> org-core (retention
+  #                                           posture read; org key wrap/unwrap)
+  #   QUARRY_BILLING_CORE_SERVICE_TOKEN       quarry-edge -> billing-core (quota and
+  #                                           plan-cap read, billing:quota:read:any)
+  #   QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN quarry-control -> audit-core
+  #                                           (audit:write, plane ingestion only)
+  # Each core refuses to start on a registry that lacks its row's variable, so they
+  # are listed here and in validate-release-credentials.sh.
+  QUARRY_ORG_CORE_SERVICE_TOKEN QUARRY_BILLING_CORE_SERVICE_TOKEN
+  QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN
 )
 for key in "${required_credentials[@]}"; do
   case "$key" in
@@ -543,6 +560,26 @@ for key in "${required_credentials[@]}"; do
       ;;
   esac
 done
+
+# Prometheus scrape token for the Quarry edge's /metrics listener (U48, R-13 PR 2).
+# QUARRY_EDGE_METRICS_TOKEN is the SAME name and value the edge reads, so mirroring it
+# into Ingestion's .env.generated-secrets is a copy, not a translation. The edge only
+# serves /metrics when QUARRY_EDGE_METRICS_ENABLED=1 (default 0, the owner flip), so
+# minting the token changes nothing until then. Prometheus reads it from a FILE
+# (authorization.credentials_file), which must exist for Prometheus to load its
+# configuration: write it under the gitignored observability/.secrets/ and point
+# QUARRY_METRICS_TOKEN_FILE at it (relative, so Docker on Windows can resolve it). The
+# file is 0644 on purpose: Prometheus runs as `nobody` and must read a bind mount; this
+# runner is development-only and refuses the production overlay above.
+persist_if_missing QUARRY_EDGE_METRICS_TOKEN "$(random_value)"
+if quarry_metrics_token=$(lookup_value QUARRY_EDGE_METRICS_TOKEN); then
+  metrics_secrets_dir="$root/observability/.secrets"
+  mkdir -p "$metrics_secrets_dir"
+  (umask 022; printf '%s' "$quarry_metrics_token" >"$metrics_secrets_dir/quarry_metrics_token")
+  chmod 644 "$metrics_secrets_dir/quarry_metrics_token" 2>/dev/null || true
+  set_if_missing QUARRY_METRICS_TOKEN_FILE ./observability/.secrets/quarry_metrics_token
+fi
+unset quarry_metrics_token
 
 set_if_missing DB_NAME controlplane
 

@@ -213,6 +213,26 @@ func (sp *SharedPublisher) PublishSpaceMembershipChanged(ctx context.Context, sp
 	})
 }
 
+// PublishSpaceMembershipEvent is PublishSpaceMembershipChanged with the
+// additive ledger fields (WS04-S4): the same subject, the same current-fact
+// `active` statement, plus event_id (the ledger row), space_seq (the
+// authority revision after the change), action, role and actor_kind. No actor
+// id, no names, no topic. Consumers ignore unknown fields, so existing
+// subscribers are unaffected.
+func (sp *SharedPublisher) PublishSpaceMembershipEvent(ctx context.Context, spaceRef, orgID, subjectID string, active bool, eventID string, spaceSeq int64, action, role, actorKind string) {
+	sp.Publish(ctx, "controlplane.space.membership_changed", map[string]any{
+		"space_ref":  spaceRef,
+		"org_id":     orgID,
+		"subject_id": subjectID,
+		"active":     active,
+		"event_id":   eventID,
+		"space_seq":  spaceSeq,
+		"action":     action,
+		"role":       role,
+		"actor_kind": actorKind,
+	})
+}
+
 // PublishDocumentAclChanged is the document-scoped back-compat wrapper around
 // PublishResourceGrantsChanged. permission_level is normalized to a role.
 func (sp *SharedPublisher) PublishDocumentAclChanged(ctx context.Context, aclID, orgID, documentID, userID, permissionLevel, action string) {
@@ -264,6 +284,39 @@ func (sp *SharedPublisher) PublishGDPRErasure(ctx context.Context, eventID strin
 	}
 	if ack == nil || ack.Stream != "CONTROLPLANE" || ack.Sequence == 0 {
 		return fmt.Errorf("publish GDPR fan-out: invalid JetStream PubAck")
+	}
+	return nil
+}
+
+// PublishWithAck publishes a cross-plane event and waits until the shared
+// broker has accepted the write (JetStream PubAck). msgID becomes Nats-Msg-Id,
+// the stream's deduplication key, so a retry of the same event is accepted
+// once. Unlike Publish it reports failure: the caller (the WS04-S10 membership
+// outbox) keeps the row pending and retries. Same enrichment as Publish.
+func (sp *SharedPublisher) PublishWithAck(ctx context.Context, subject, msgID string, payload map[string]any) error {
+	if sp == nil || sp.gdprJS == nil {
+		return fmt.Errorf("shared NATS is unavailable")
+	}
+	if strings.TrimSpace(subject) == "" || strings.TrimSpace(msgID) == "" {
+		return fmt.Errorf("publish with ack: subject and message id are required")
+	}
+	enriched := make(map[string]any, len(payload)+2)
+	maps.Copy(enriched, payload)
+	enriched["_source"] = sp.sourceName
+	enriched["_published_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	data, err := json.Marshal(enriched)
+	if err != nil {
+		return fmt.Errorf("publish with ack: marshal %s: %w", subject, err)
+	}
+	message := nats.NewMsg(subject)
+	message.Header.Set("Nats-Msg-Id", msgID)
+	message.Data = data
+	ack, err := sp.gdprJS.PublishMsg(ctx, message)
+	if err != nil {
+		return fmt.Errorf("publish with ack %s: %w", subject, err)
+	}
+	if ack == nil || ack.Stream != "CONTROLPLANE" || ack.Sequence == 0 {
+		return fmt.Errorf("publish with ack %s: invalid JetStream PubAck", subject)
 	}
 	return nil
 }

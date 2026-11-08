@@ -22,6 +22,7 @@ use serde_json::{json, Value};
 
 use crate::loop_fold::switch_from;
 use crate::model_plane::v1::{Approval, ApprovalCause, ApprovalState};
+use crate::tool_class::SideEffectClass;
 
 /// The `execute_provider_action` tool, the one whose key carries its operation.
 const PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
@@ -55,13 +56,16 @@ pub enum CauseCode {
     BrowserActionRisk,
     /// A provider write the chat posture approved on the person's behalf.
     AutoPostureProviderWrite,
+    /// The person holds the run's browser, or the agent asked them for help in it (EP-1). The
+    /// approval is the hand-back: consuming it lets the held browser call run again.
+    BrowserHumanAssist,
     /// A gate that did not say why, or a code this reader does not know.
     UnclassifiedGate,
 }
 
 impl CauseCode {
     /// Every code, in the order the golden lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::OwnerEffectReserved,
         Self::ConsentToDisclose,
         Self::RiskyEffectUnderAsk,
@@ -71,6 +75,7 @@ impl CauseCode {
         Self::HookAsk,
         Self::BrowserActionRisk,
         Self::AutoPostureProviderWrite,
+        Self::BrowserHumanAssist,
         Self::UnclassifiedGate,
     ];
 
@@ -87,6 +92,7 @@ impl CauseCode {
             Self::HookAsk => "hook_ask",
             Self::BrowserActionRisk => "browser_action_risk",
             Self::AutoPostureProviderWrite => "auto_posture_provider_write",
+            Self::BrowserHumanAssist => "browser_human_assist",
             Self::UnclassifiedGate => "unclassified_gate",
         }
     }
@@ -109,11 +115,99 @@ impl CauseCode {
     }
 }
 
-/// The scopes a decider may grant for `code`. Every cause offers `once` until grants
-/// exist (WS13 S6), where the eligibility table replaces this stub.
+/// The scopes a code offers on its own: `once`. A call's own facts can widen them, see
+/// [`eligible_scopes`]; this is the answer for a cause that carries no facts.
 #[must_use]
 pub fn scope_options_for(_code: CauseCode) -> &'static [&'static str] {
     &[SCOPE_ONCE]
+}
+
+/// A standing grant covers its call for the rest of the thread (build plan WS13 S6).
+pub const SCOPE_THREAD: &str = "thread";
+/// A standing grant covers its call for the rest of the run.
+pub const SCOPE_RUN: &str = "run";
+/// The prefix every MCP tool name carries.
+const MCP_TOOL_PREFIX: &str = "mcp__";
+/// Tools whose writes are bound to their own single-use receipt, never to a grant.
+const PROVIDER_WRITE_TOOLS: [&str; 3] =
+    [PROVIDER_ACTION_TOOL, "book_shipment", "publish_social_post"];
+
+/// The scopes a decider may grant for a pause, from its code and the call's facts (build plan
+/// WS13 S6, D4 and K3-3). Closed: `thread` and `run` are offered only where the pause is a
+/// consent, risky-call or capability gate and the call's declared class is a read, a sandbox
+/// computation or a context write. An external write is offered the same only for a pinned MCP
+/// tool, the one kind whose definition a person reviewed, and never under the high-risk capability
+/// gate. Every other pause is `once`: provider writes, owner effects, browser actions, destructive
+/// and unclassified effects, unpinned MCP tools, and the shell and process tools. A cause that
+/// names no class, tool or key is `once`.
+#[must_use]
+pub fn eligible_scopes(cause: &ApprovalCause) -> Vec<String> {
+    let code = CauseCode::from_wire(&cause.code);
+    let widening_code = matches!(
+        code,
+        CauseCode::RiskyEffectUnderAsk
+            | CauseCode::ConsentToDisclose
+            | CauseCode::CapabilityHighRisk
+    );
+    let class = SideEffectClass::from_wire(&cause.effect_class);
+    let pinned_external_write = class == SideEffectClass::ExternalWrite
+        && code != CauseCode::CapabilityHighRisk
+        && is_pinned_mcp(cause);
+    let standing_class = matches!(
+        class,
+        SideEffectClass::Read | SideEffectClass::SandboxCompute | SideEffectClass::ContextWrite
+    ) || pinned_external_write;
+    let keyed = !cause.tool.trim().is_empty()
+        && !cause.action_key.is_empty()
+        && !is_standing_excluded(cause);
+    if widening_code && standing_class && keyed {
+        vec![
+            SCOPE_ONCE.to_owned(),
+            SCOPE_THREAD.to_owned(),
+            SCOPE_RUN.to_owned(),
+        ]
+    } else {
+        vec![SCOPE_ONCE.to_owned()]
+    }
+}
+
+/// Whether a cause's tool is an MCP tool whose definition is pinned: `tool_digest` is the sha256
+/// of the definition a person reviewed (build plan WS05 S5, WS13 S7). An unpinned MCP tool has no
+/// digest to bind a rule or a grant to, so it is never offered a standing scope or a rule.
+#[must_use]
+pub fn is_pinned_mcp(cause: &ApprovalCause) -> bool {
+    cause.tool.trim().starts_with(MCP_TOOL_PREFIX) && is_sha256_hex(&cause.tool_digest)
+}
+
+/// Whether a cause may become a standing rule (build plan WS13 S7): it must offer a thread grant,
+/// name a pinned MCP tool, and declare a class a person may relax, which is at most an external
+/// write (capability-core's `CanRelax` for a person). A built-in tool is never offered one.
+#[must_use]
+pub fn rule_offered(cause: &ApprovalCause) -> bool {
+    cause
+        .scope_options
+        .iter()
+        .any(|scope| scope == SCOPE_THREAD)
+        && is_pinned_mcp(cause)
+        && SideEffectClass::from_wire(&cause.effect_class) <= SideEffectClass::ExternalWrite
+}
+
+/// A sha256 digest as the registry writes it: 64 lowercase hex characters.
+fn is_sha256_hex(candidate: &str) -> bool {
+    candidate.len() == 64
+        && candidate
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Tools no standing grant may cover, whatever their class. An MCP tool is covered only while its
+/// definition is pinned.
+fn is_standing_excluded(cause: &ApprovalCause) -> bool {
+    let tool = cause.tool.trim();
+    if tool.starts_with(MCP_TOOL_PREFIX) {
+        return !is_pinned_mcp(cause);
+    }
+    tool == "shell" || tool.starts_with("process_") || PROVIDER_WRITE_TOOLS.contains(&tool)
 }
 
 /// The key a standing grant would match: the tool, plus the operation for the one tool
@@ -197,30 +291,55 @@ fn sorted(value: &Value) -> Value {
 /// run-salted digest of the call. The scope options are the code's.
 #[must_use]
 pub fn for_call(code: CauseCode, run_id: &str, tool_name: &str, tool_input: &str) -> ApprovalCause {
-    ApprovalCause {
+    for_call_with_class(code, run_id, tool_name, tool_input, "")
+}
+
+/// [`for_call`] with the call's declared effect class, which the scope eligibility reads. An
+/// empty class, or one outside the vocabulary, makes the cause `once` only.
+#[must_use]
+pub fn for_call_with_class(
+    code: CauseCode,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    effect_class: &str,
+) -> ApprovalCause {
+    for_call_with_tool(code, run_id, tool_name, tool_input, effect_class, "")
+}
+
+/// [`for_call_with_class`] for a call whose tool definition is known: `tool_digest` is the sha256
+/// of the MCP definition the person reviewed, and empty for any other call (build plan WS13 S7).
+#[must_use]
+pub fn for_call_with_tool(
+    code: CauseCode,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    effect_class: &str,
+    tool_digest: &str,
+) -> ApprovalCause {
+    let mut cause = ApprovalCause {
         code: code.as_str().to_owned(),
         tool: tool_name.trim().to_owned(),
+        effect_class: effect_class.to_owned(),
         action_key: action_key(tool_name, tool_input),
         call_digest: call_digest(run_id, tool_name, tool_input),
-        scope_options: scope_options_for(code)
-            .iter()
-            .map(|scope| (*scope).to_owned())
-            .collect(),
+        tool_digest: tool_digest.to_owned(),
         ..ApprovalCause::default()
-    }
+    };
+    cause.scope_options = eligible_scopes(&cause);
+    cause
 }
 
 /// A cause that names only its code, for a gate with no tool call to describe.
 #[must_use]
 pub fn for_code(code: CauseCode) -> ApprovalCause {
-    ApprovalCause {
+    let mut cause = ApprovalCause {
         code: code.as_str().to_owned(),
-        scope_options: scope_options_for(code)
-            .iter()
-            .map(|scope| (*scope).to_owned())
-            .collect(),
         ..ApprovalCause::default()
-    }
+    };
+    cause.scope_options = eligible_scopes(&cause);
+    cause
 }
 
 /// What a store may keep of a cause a caller sent: an unknown code becomes
@@ -232,10 +351,6 @@ pub fn normalized(mut cause: ApprovalCause) -> (ApprovalCause, bool) {
     let known = CauseCode::is_known(&cause.code);
     let code = CauseCode::from_wire(&cause.code);
     cause.code = code.as_str().to_owned();
-    cause.scope_options = scope_options_for(code)
-        .iter()
-        .map(|scope| (*scope).to_owned())
-        .collect();
     for field in [
         &mut cause.tool,
         &mut cause.effect_class,
@@ -248,7 +363,66 @@ pub fn normalized(mut cause: ApprovalCause) -> (ApprovalCause, bool) {
             *field = field.chars().take(MAX_FIELD_CHARS).collect();
         }
     }
+    // A digest that is not sha256 hex pins nothing: the tool reads as unpinned.
+    if !is_sha256_hex(&cause.tool_digest) {
+        cause.tool_digest.clear();
+    }
+    keep_browser_assist_facts(&mut cause, code);
+    cause.scope_options = eligible_scopes(&cause);
     (cause, known)
+}
+
+/// `assist_kind` of a pause raised because the person took the browser (EP-1).
+pub const ASSIST_KIND_USER_TAKEOVER: &str = "user_takeover";
+/// Every `assist_kind` a `browser_human_assist` pause may state: the takeover, and the challenges
+/// the agent may ask help with (EP-1 D4).
+pub const ASSIST_KINDS: [&str; 5] =
+    [ASSIST_KIND_USER_TAKEOVER, "login", "captcha", "consent", "waf"];
+/// `assist_origin` of a pause the person started by taking the browser.
+pub const ASSIST_ORIGIN_PERSON: &str = "person";
+/// `assist_origin` of a pause the agent raised to ask for help.
+pub const ASSIST_ORIGIN_AGENT: &str = "agent";
+
+/// The cause of a pause on a browser call the person holds or was asked to help with (EP-1): the
+/// call's cause under `browser_human_assist`, with the closed kind and origin and the session's
+/// host. A word outside the closed sets is dropped, never stored.
+#[must_use]
+pub fn for_browser_assist(
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    assist_kind: &str,
+    assist_origin: &str,
+    host: &str,
+) -> ApprovalCause {
+    let cause = ApprovalCause {
+        assist_kind: assist_kind.to_owned(),
+        assist_origin: assist_origin.to_owned(),
+        host: host.to_owned(),
+        ..for_call(CauseCode::BrowserHumanAssist, run_id, tool_name, tool_input)
+    };
+    normalized(cause).0
+}
+
+/// The browser-assist facts a cause may keep: only a `browser_human_assist` cause states them, only
+/// closed words for the kind and origin, and a bounded host. Any other cause keeps none, so a
+/// creator cannot attach a host to a pause whose card does not show one.
+fn keep_browser_assist_facts(cause: &mut ApprovalCause, code: CauseCode) {
+    if code != CauseCode::BrowserHumanAssist {
+        cause.assist_kind.clear();
+        cause.assist_origin.clear();
+        cause.host.clear();
+        return;
+    }
+    if !ASSIST_KINDS.contains(&cause.assist_kind.as_str()) {
+        cause.assist_kind.clear();
+    }
+    if ![ASSIST_ORIGIN_PERSON, ASSIST_ORIGIN_AGENT].contains(&cause.assist_origin.as_str()) {
+        cause.assist_origin.clear();
+    }
+    if cause.host.chars().count() > MAX_FIELD_CHARS {
+        cause.host = cause.host.chars().take(MAX_FIELD_CHARS).collect();
+    }
 }
 
 /// The stored shape, `approvals.metadata.cause`. Empty strings and an unset
@@ -264,6 +438,10 @@ pub fn to_metadata(cause: &ApprovalCause) -> Value {
         ("risk_category", &cause.risk_category),
         ("action_key", &cause.action_key),
         ("call_digest", &cause.call_digest),
+        ("tool_digest", &cause.tool_digest),
+        ("assist_kind", &cause.assist_kind),
+        ("assist_origin", &cause.assist_origin),
+        ("host", &cause.host),
     ] {
         if !value.is_empty() {
             map.insert(key.to_owned(), Value::String(value.clone()));
@@ -311,6 +489,12 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
             .unwrap_or(false),
         action_key: text("action_key"),
         call_digest: text("call_digest"),
+        tool_digest: text("tool_digest"),
+        // Write-only (see the proto): a stored cause never carries it.
+        host_class: String::new(),
+        assist_kind: text("assist_kind"),
+        assist_origin: text("assist_origin"),
+        host: text("host"),
     };
     Some(normalized(cause).0)
 }
@@ -330,6 +514,45 @@ pub fn denial_memory_from(value: Option<&str>) -> bool {
 #[must_use]
 pub fn denial_memory_enabled() -> bool {
     denial_memory_from(std::env::var(DENIAL_MEMORY_ENV).ok().as_deref())
+}
+
+/// The environment switch for approval scope grants (build plan WS13 S6). Default off; only the
+/// literal `true` enables it, read through the one strict parser.
+pub const SCOPE_GRANTS_ENV: &str = "APPROVAL_SCOPE_GRANTS_ENABLED";
+/// The environment setting for a standing grant's lifetime, in seconds (build plan K3-3).
+pub const THREAD_GRANT_TTL_ENV: &str = "APPROVAL_THREAD_GRANT_TTL_SECS";
+/// The lifetime a standing grant gets when the setting is unset, malformed or not positive.
+pub const THREAD_GRANT_TTL_DEFAULT_SECS: i64 = 3600;
+/// The longest lifetime a standing grant may be given.
+pub const THREAD_GRANT_TTL_MAX_SECS: i64 = 28800;
+
+/// Parse the scope-grants switch: `true` in any case and with surrounding whitespace, and nothing
+/// else. An unset or malformed value leaves grants off.
+#[must_use]
+pub fn scope_grants_from(value: Option<&str>) -> bool {
+    switch_from(value)
+}
+
+/// Whether approval scope grants are on in this process.
+#[must_use]
+pub fn scope_grants_enabled() -> bool {
+    scope_grants_from(std::env::var(SCOPE_GRANTS_ENV).ok().as_deref())
+}
+
+/// The lifetime in seconds of a standing grant: the setting, capped at the maximum. Unset,
+/// malformed and non-positive values get the default.
+#[must_use]
+pub fn thread_grant_ttl_from(value: Option<&str>) -> i64 {
+    match value.and_then(|text| text.trim().parse::<i64>().ok()) {
+        Some(secs) if secs > 0 => secs.min(THREAD_GRANT_TTL_MAX_SECS),
+        _ => THREAD_GRANT_TTL_DEFAULT_SECS,
+    }
+}
+
+/// The lifetime of a standing grant in this process.
+#[must_use]
+pub fn thread_grant_ttl_secs() -> i64 {
+    thread_grant_ttl_from(std::env::var(THREAD_GRANT_TTL_ENV).ok().as_deref())
 }
 
 /// Whether a listed approval is a decision that declined this exact call in this run. The
@@ -526,6 +749,341 @@ mod tests {
         assert!(
             !declines_call(&uncaused, "run_1", &digest),
             "an approval that states no cause never matches"
+        );
+    }
+
+    fn scopes(cause: &ApprovalCause) -> Vec<&str> {
+        cause.scope_options.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn capability_high_risk_destructive_is_once_only() {
+        for class in [
+            "destructive",
+            "external_write",
+            "owner_effect",
+            "unclassified",
+            "",
+        ] {
+            let cause = for_call_with_class(
+                CauseCode::CapabilityHighRisk,
+                "run_1",
+                "delete_records",
+                r#"{"id":"r-1"}"#,
+                class,
+            );
+            assert_eq!(scopes(&cause), ["once"], "{class}");
+        }
+        let read = for_call_with_class(
+            CauseCode::CapabilityHighRisk,
+            "run_1",
+            "knowledge_search",
+            r#"{"q":"x"}"#,
+            "read",
+        );
+        assert_eq!(scopes(&read), ["once", "thread", "run"]);
+    }
+
+    #[test]
+    fn a_read_sandbox_or_context_write_under_a_widening_code_offers_thread_and_run() {
+        for code in [
+            CauseCode::RiskyEffectUnderAsk,
+            CauseCode::ConsentToDisclose,
+            CauseCode::CapabilityHighRisk,
+        ] {
+            for class in ["read", "sandbox_compute", "context_write"] {
+                let cause = for_call_with_class(code, "run_1", "knowledge_search", "{}", class);
+                assert_eq!(
+                    scopes(&cause),
+                    ["once", "thread", "run"],
+                    "{code:?} {class}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn owner_effects_and_unwidening_codes_are_once_whatever_the_class() {
+        for code in [
+            CauseCode::OwnerEffectReserved,
+            CauseCode::ProviderWrite,
+            CauseCode::AutoPostureProviderWrite,
+            CauseCode::BrowserActionRisk,
+            CauseCode::HookAsk,
+            CauseCode::CapabilityPolicyAsk,
+            CauseCode::UnclassifiedGate,
+        ] {
+            let cause = for_call_with_class(code, "run_1", "knowledge_search", "{}", "read");
+            assert_eq!(scopes(&cause), ["once"], "{code:?}");
+        }
+    }
+
+    #[test]
+    fn provider_writes_mcp_shell_and_process_tools_are_once_whatever_the_class() {
+        for tool in [
+            "execute_provider_action",
+            "book_shipment",
+            "publish_social_post",
+            "mcp__srv__lookup",
+            "shell",
+            "process_start",
+        ] {
+            let cause =
+                for_call_with_class(CauseCode::ConsentToDisclose, "run_1", tool, "{}", "read");
+            assert_eq!(scopes(&cause), ["once"], "{tool}");
+        }
+    }
+
+    #[test]
+    fn a_cause_without_a_class_tool_or_key_is_once() {
+        let no_class = for_call(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_1",
+            "knowledge_search",
+            "{}",
+        );
+        assert_eq!(scopes(&no_class), ["once"], "a call that states no class");
+        let differently_cased = for_call_with_class(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_1",
+            "knowledge_search",
+            "{}",
+            "Read",
+        );
+        assert_eq!(
+            scopes(&differently_cased),
+            ["once"],
+            "the class is matched exactly"
+        );
+        let no_tool = ApprovalCause {
+            code: "risky_effect_under_ask".to_owned(),
+            effect_class: "read".to_owned(),
+            action_key: "knowledge_search".to_owned(),
+            ..ApprovalCause::default()
+        };
+        assert_eq!(eligible_scopes(&no_tool), ["once"]);
+        let no_key = ApprovalCause {
+            code: "risky_effect_under_ask".to_owned(),
+            tool: "knowledge_search".to_owned(),
+            effect_class: "read".to_owned(),
+            ..ApprovalCause::default()
+        };
+        assert_eq!(eligible_scopes(&no_key), ["once"]);
+    }
+
+    #[test]
+    fn normalising_recomputes_the_scopes_from_the_facts() {
+        let sent_wide = ApprovalCause {
+            code: "provider_write".to_owned(),
+            tool: "knowledge_search".to_owned(),
+            effect_class: "read".to_owned(),
+            action_key: "knowledge_search".to_owned(),
+            scope_options: vec!["once".to_owned(), "thread".to_owned(), "run".to_owned()],
+            ..ApprovalCause::default()
+        };
+        let (cause, known) = normalized(sent_wide);
+        assert!(known);
+        assert_eq!(
+            scopes(&cause),
+            ["once"],
+            "a provider write is never offered a standing scope, whatever the sender states"
+        );
+        let read = ApprovalCause {
+            code: "consent_to_disclose".to_owned(),
+            tool: "knowledge_search".to_owned(),
+            effect_class: "read".to_owned(),
+            action_key: "knowledge_search".to_owned(),
+            scope_options: vec!["once".to_owned()],
+            ..ApprovalCause::default()
+        };
+        let (cause, _) = normalized(read);
+        assert_eq!(scopes(&cause), ["once", "thread", "run"]);
+    }
+
+    #[test]
+    fn the_scope_grants_switch_is_strict() {
+        assert!(scope_grants_from(Some("true")));
+        assert!(scope_grants_from(Some(" TRUE ")));
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("false"),
+        ] {
+            assert!(!scope_grants_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn the_thread_grant_lifetime_defaults_and_caps_at_the_maximum() {
+        assert_eq!(thread_grant_ttl_from(None), 3600);
+        assert_eq!(thread_grant_ttl_from(Some("nonsense")), 3600);
+        assert_eq!(thread_grant_ttl_from(Some("0")), 3600);
+        assert_eq!(thread_grant_ttl_from(Some("-5")), 3600);
+        assert_eq!(thread_grant_ttl_from(Some(" 900 ")), 900);
+        assert_eq!(thread_grant_ttl_from(Some("28800")), 28800);
+        assert_eq!(thread_grant_ttl_from(Some("604800")), 28800);
+    }
+
+    const PINNED: &str = "2b6a1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a";
+
+    fn mcp_call(code: CauseCode, class: &str, digest: &str) -> ApprovalCause {
+        for_call_with_tool(
+            code,
+            "run_1",
+            "mcp__fixture__create_note",
+            r#"{"title":"x"}"#,
+            class,
+            digest,
+        )
+    }
+
+    #[test]
+    fn a_pinned_mcp_external_write_offers_thread_and_run_under_a_widening_code() {
+        for code in [CauseCode::RiskyEffectUnderAsk, CauseCode::ConsentToDisclose] {
+            let cause = mcp_call(code, "external_write", PINNED);
+            assert_eq!(scopes(&cause), ["once", "thread", "run"], "{code:?}");
+        }
+        let high_risk_read = mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED);
+        assert_eq!(scopes(&high_risk_read), ["once", "thread", "run"]);
+    }
+
+    #[test]
+    fn an_unpinned_or_malformed_mcp_digest_leaves_the_tool_once() {
+        let uppercase = PINNED.to_uppercase();
+        for digest in ["", "not-a-digest", uppercase.as_str()] {
+            for class in ["read", "external_write"] {
+                let cause = mcp_call(CauseCode::RiskyEffectUnderAsk, class, digest);
+                assert_eq!(scopes(&cause), ["once"], "{digest:?} {class}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_mcp_destructive_owner_or_high_risk_external_write_stays_once() {
+        for (code, class) in [
+            (CauseCode::RiskyEffectUnderAsk, "destructive"),
+            (CauseCode::RiskyEffectUnderAsk, "owner_effect"),
+            (CauseCode::CapabilityHighRisk, "external_write"),
+        ] {
+            let cause = mcp_call(code, class, PINNED);
+            assert_eq!(scopes(&cause), ["once"], "{code:?} {class}");
+        }
+    }
+
+    #[test]
+    fn a_digest_on_a_built_in_tool_pins_nothing() {
+        let cause = for_call_with_tool(
+            CauseCode::RiskyEffectUnderAsk,
+            "run_1",
+            "execute_provider_action",
+            r#"{"operation":"message.send"}"#,
+            "external_write",
+            PINNED,
+        );
+        assert_eq!(scopes(&cause), ["once"]);
+        assert!(!is_pinned_mcp(&cause));
+    }
+
+    #[test]
+    fn the_pin_survives_the_stored_shape_and_a_malformed_digest_is_dropped() {
+        let cause = mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", PINNED);
+        let metadata = json!({ "cause": to_metadata(&cause) });
+        assert_eq!(from_metadata(&metadata), Some(cause.clone()));
+        let (malformed, _) = normalized(ApprovalCause {
+            tool_digest: "not-a-digest".to_owned(),
+            ..cause
+        });
+        assert!(malformed.tool_digest.is_empty());
+        assert_eq!(scopes(&malformed), ["once"]);
+    }
+
+    #[test]
+    fn a_rule_is_offered_only_for_a_pinned_mcp_tool_the_person_may_relax() {
+        let offered = [
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", PINNED),
+            mcp_call(CauseCode::ConsentToDisclose, "read", PINNED),
+            mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED),
+        ];
+        for cause in &offered {
+            assert!(rule_offered(cause), "{cause:?}");
+        }
+        let refused = [
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "destructive", PINNED),
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "owner_effect", PINNED),
+            mcp_call(CauseCode::CapabilityHighRisk, "external_write", PINNED),
+            mcp_call(CauseCode::HookAsk, "external_write", PINNED),
+            mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", ""),
+            for_call_with_tool(
+                CauseCode::RiskyEffectUnderAsk,
+                "run_1",
+                "write_file",
+                "{}",
+                "external_write",
+                PINNED,
+            ),
+        ];
+        for cause in &refused {
+            assert!(!rule_offered(cause), "{cause:?}");
+        }
+    }
+
+    #[test]
+    fn a_browser_assist_cause_is_once_and_keeps_its_closed_facts_through_the_stored_shape() {
+        let cause = for_browser_assist(
+            "run_1",
+            "browser.observe",
+            "{}",
+            ASSIST_KIND_USER_TAKEOVER,
+            ASSIST_ORIGIN_PERSON,
+            "example.com",
+        );
+        assert_eq!(cause.code, "browser_human_assist");
+        assert_eq!(scopes(&cause), ["once"]);
+        assert_eq!(
+            (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
+            ("user_takeover", "person", "example.com")
+        );
+        let metadata = json!({ "cause": to_metadata(&cause) });
+        assert_eq!(from_metadata(&metadata), Some(cause));
+    }
+
+    #[test]
+    fn browser_assist_words_outside_the_closed_sets_are_dropped() {
+        let cause = for_browser_assist(
+            "run_1",
+            "browser.observe",
+            "{}",
+            "type your password here",
+            "page",
+            &"h".repeat(MAX_FIELD_CHARS + 10),
+        );
+        assert_eq!(cause.assist_kind, "");
+        assert_eq!(cause.assist_origin, "");
+        assert_eq!(cause.host.chars().count(), MAX_FIELD_CHARS);
+        for kind in ASSIST_KINDS {
+            let kept =
+                for_browser_assist("run_1", "browser.observe", "{}", kind, ASSIST_ORIGIN_AGENT, "");
+            assert_eq!(kept.assist_kind, kind);
+            assert_eq!(kept.assist_origin, "agent");
+        }
+    }
+
+    #[test]
+    fn only_a_browser_assist_cause_may_state_a_host_or_assist_facts() {
+        let (cause, known) = normalized(ApprovalCause {
+            code: "risky_effect_under_ask".to_owned(),
+            assist_kind: ASSIST_KIND_USER_TAKEOVER.to_owned(),
+            assist_origin: ASSIST_ORIGIN_PERSON.to_owned(),
+            host: "example.com".to_owned(),
+            ..ApprovalCause::default()
+        });
+        assert!(known);
+        assert_eq!(
+            (cause.assist_kind.as_str(), cause.assist_origin.as_str(), cause.host.as_str()),
+            ("", "", "")
         );
     }
 }

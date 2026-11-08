@@ -1,5 +1,7 @@
+import { useLocation } from '@solidjs/router'
 import { createEffect, Show } from 'solid-js'
-import { Languages, MoreHorizontal, MoonStar, Sparkles, Sun } from '@/shared/icons'
+import { Languages, MessageCircleMore, MoreHorizontal, MoonStar, Sparkles, Sun } from '@/shared/icons'
+import { OPEN_FEEDBACK_EVENT } from './FeedbackWidget'
 import { useI18n } from '@/shared/i18n'
 import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
 import type { ThemePayload } from '@/shared/api/navbar-client'
@@ -10,6 +12,7 @@ export function CoreNavbarMore(props: {
   onAssistant: () => void
 }) {
   const i18n = useI18n()
+  const location = useLocation()
   let root: HTMLDetailsElement | undefined
   let trigger: HTMLElement | undefined
   createEffect(() => undefined, () => {
@@ -47,6 +50,10 @@ export function CoreNavbarMore(props: {
           <button type="button" aria-pressed={props.theme === 'system' ? 'true' : 'false'} onClick={() => props.onThemeChange('system')}>{i18n.tr('System', 'System')}</button>
         </fieldset>
         <button type="button" onClick={() => { if (root) root.open = false; props.onAssistant() }}><Sparkles size={18} /><span>{i18n.tr('AI-assistent', 'AI assistant')}</span></button>
+        {/* The support inbox draws no feedback control (its composer owns that corner), so no item there. */}
+        <Show when={!location.pathname.startsWith('/support')}>
+          <button type="button" onClick={() => { if (root) root.open = false; window.dispatchEvent(new Event(OPEN_FEEDBACK_EVENT)) }}><MessageCircleMore size={18} /><span>{i18n.tr('Tilbakemelding', 'Feedback')}</span></button>
+        </Show>
       </section>
     </details>
   )

@@ -44,6 +44,14 @@ type Server struct {
 	toolDB              toolBindingDatabase // optional: enables tool-level binding
 	skillBundles        skillBundleReader
 	skillBundlesEnabled bool
+
+	// deckTemplatesEnabled reports which bundles are deck templates (SKILL_DECK_TEMPLATES_ENABLED).
+	deckTemplatesEnabled bool
+
+	// skillBundleRetention is SKILL_BUNDLE_RETENTION (EP-11 S5): on, GetSkillBundleManifest
+	// honours manifest_sha256 and reads the bundle a pinned version named; off, the field is
+	// ignored and the live bundle is read, as before.
+	skillBundleRetention bool
 }
 
 // modelCapabilitySource is the narrow slice of the models registry the
@@ -62,6 +70,12 @@ type skillBundleReader interface {
 	List(ctx context.Context, orgID string, skillIDs []string) ([]skillbundle.Summary, error)
 	Manifest(ctx context.Context, orgID, skillID string) (skillbundle.Manifest, error)
 	Blob(ctx context.Context, orgID, skillID, digest string) ([]byte, error)
+}
+
+// skillBundleVersionReader reads a skill's bundle by its manifest digest (EP-11 S5).
+// *skillbundle.Store satisfies it; a reader without it serves the live bundle only.
+type skillBundleVersionReader interface {
+	ManifestAt(ctx context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error)
 }
 
 type toolDefinitionSearcher interface {
@@ -180,6 +194,20 @@ func (s *Server) WithToolBindingDatabase(db toolBindingDatabase) *Server {
 func (s *Server) WithSkillBundles(store skillBundleReader, enabled bool) *Server {
 	s.skillBundles = store
 	s.skillBundlesEnabled = enabled && store != nil
+	return s
+}
+
+// WithSkillBundleRetention lets GetSkillBundleManifest read a kept bundle by its manifest digest
+// (EP-11 S5). The switch arrives already parsed by skillbundle.RetentionFromLookup.
+func (s *Server) WithSkillBundleRetention(enabled bool) *Server {
+	s.skillBundleRetention = enabled
+	return s
+}
+
+// WithDeckTemplates turns on the deck_template flag of ListSkillBundles (EP-5 S6). The switch
+// arrives already parsed by skillbundle.DeckTemplatesFromLookup; off, every summary reports false.
+func (s *Server) WithDeckTemplates(enabled bool) *Server {
+	s.deckTemplatesEnabled = enabled
 	return s
 }
 
@@ -638,6 +666,7 @@ func (s *Server) policyResponse(req *mpv1.EvaluatePolicyRequest, orgID string, c
 				approvalFloor:     floor,
 				policySource:      result.PolicySource,
 				toolDigest:        digest,
+				toolPolicyChecked: result.ToolPolicyChecked,
 			},
 		))
 		if err == nil {
@@ -693,7 +722,8 @@ type toolBindingDatabase interface {
 // built-in name can never resolve to an MCP row and the other way round.
 const toolBindingSQL = `
 SELECT ct.capability_id, ct.tool_name, COALESCE(ct.qualified_name, ''), ct.side_effect_class,
-       ct.approval_floor, COALESCE(ct.pinned_digest, ''), COALESCE(ct.review_state, ''), c.version
+       ct.approval_floor, COALESCE(ct.pinned_digest, ''), COALESCE(ct.review_state, ''), c.version,
+       COALESCE(ct.server_id, '')
 FROM capability_tools ct
 JOIN capabilities c
   ON c.id = ct.capability_id
@@ -740,8 +770,8 @@ func (s *Server) lookupToolBindings(ctx context.Context, orgID string, names []s
 	defer rows.Close()
 	found := toolBindings{}
 	for rows.Next() {
-		var capabilityID, toolName, qualifiedName, class, floor, digest, reviewState, version string
-		if err := rows.Scan(&capabilityID, &toolName, &qualifiedName, &class, &floor, &digest, &reviewState, &version); err != nil {
+		var capabilityID, toolName, qualifiedName, class, floor, digest, reviewState, version, serverID string
+		if err := rows.Scan(&capabilityID, &toolName, &qualifiedName, &class, &floor, &digest, &reviewState, &version, &serverID); err != nil {
 			return nil, fmt.Errorf("scan tool binding: %w", err)
 		}
 		name := toolName
@@ -764,6 +794,8 @@ func (s *Server) lookupToolBindings(ctx context.Context, orgID string, names []s
 			ApprovalFloor:     models.NormalizeApprovalFloor(floor),
 			ToolDigest:        digest,
 			ReviewState:       reviewState,
+			// WS25-S9: the org extension allow-list matches MCP tools by server; empty for a built-in tool.
+			ServerID: serverID,
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -940,6 +972,8 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
 	if err != nil {
 		return nil, skillBundleErr(err)
 	}
+	// DeckTemplate stays false while SKILL_DECK_TEMPLATES_ENABLED is off, so the response is the
+	// same bytes as before the field existed.
 	bundles := make([]*mpv1.SkillBundleSummary, 0, len(summaries))
 	for _, summary := range summaries {
 		bundles = append(bundles, &mpv1.SkillBundleSummary{
@@ -949,6 +983,7 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
 			TotalBytes:     summary.TotalBytes,
 			CreatedBy:      summary.CreatedBy,
 			CreatedAt:      summary.CreatedAt.UTC().Format(time.RFC3339),
+			DeckTemplate:   s.deckTemplatesEnabled && summary.DeckTemplate,
 		})
 	}
 	return &mpv1.ListSkillBundlesResponse{Bundles: bundles}, nil
@@ -956,6 +991,7 @@ func (s *Server) ListSkillBundles(ctx context.Context, req *mpv1.ListSkillBundle
 
 // GetSkillBundleManifest returns the digest and file metadata of the org's bundle for a skill,
 // never a file body. While SKILL_BUNDLES_ENABLED is off every skill reads as having no bundle.
+// With SKILL_BUNDLE_RETENTION on, a manifest_sha256 in the request names the kept bundle to read.
 func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillBundleManifestRequest) (*mpv1.SkillBundleManifest, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetSkillBundleManifest")))
 	orgID, err := verifiedOrganizationID(ctx)
@@ -965,7 +1001,7 @@ func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillB
 	if !s.skillBundlesEnabled {
 		return nil, skillBundleErr(skillbundle.ErrNotFound)
 	}
-	manifest, err := s.skillBundles.Manifest(ctx, orgID, req.SkillId)
+	manifest, err := s.readSkillBundleManifest(ctx, orgID, req.SkillId, req.ManifestSha256)
 	if err != nil {
 		return nil, skillBundleErr(err)
 	}
@@ -980,6 +1016,33 @@ func (s *Server) GetSkillBundleManifest(ctx context.Context, req *mpv1.GetSkillB
 		})
 	}
 	return &mpv1.SkillBundleManifest{SkillId: req.SkillId, ManifestSha256: manifest.ManifestSHA256, Files: files}, nil
+}
+
+// readSkillBundleManifest reads the live bundle, or with retention on and a manifest digest named,
+// the skill's bundle with that digest (a run pinned to an older version reads its own files). A
+// digest that is not lowercase hex SHA-256 is NotFound before any read.
+func (s *Server) readSkillBundleManifest(ctx context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error) {
+	if !s.skillBundleRetention || manifestSHA256 == "" {
+		return s.skillBundles.Manifest(ctx, orgID, skillID)
+	}
+	versions, ok := s.skillBundles.(skillBundleVersionReader)
+	if !ok || !isSHA256Hex(manifestSHA256) {
+		return skillbundle.Manifest{}, skillbundle.ErrNotFound
+	}
+	return versions.ManifestAt(ctx, orgID, skillID, manifestSHA256)
+}
+
+// isSHA256Hex reports whether value is the lowercase hex spelling every bundle digest uses.
+func isSHA256Hex(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // GetSkillBlob returns one file body of the org's bundle for a skill, addressed by digest. A

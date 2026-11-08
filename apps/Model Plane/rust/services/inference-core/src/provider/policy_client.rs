@@ -200,6 +200,7 @@ impl PolicyClient {
             .authed_request(SetRoutingPolicyRequest {
                 config_json,
                 updated_by: updated_by.to_owned(),
+                expected_version: 0,
             })
             .await;
         let resp = client

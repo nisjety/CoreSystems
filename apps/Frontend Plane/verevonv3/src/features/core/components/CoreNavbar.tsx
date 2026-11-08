@@ -1,4 +1,4 @@
-import { useNavigate, useSearchParams } from '@solidjs/router'
+import { useLocation, useNavigate, useSearchParams } from '@solidjs/router'
 import {
   Bell,
   Building2,
@@ -46,6 +46,12 @@ import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearance
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { CoreNavbarMore } from './CoreNavbarMore'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
+import { CommandPalette } from '@/features/command/CommandPalette'
+import { ShortcutSheet } from '@/features/command/ShortcutSheet'
+import { commandPaletteEnabled, registerCommands, type CommandContext } from '@/features/command/command-registry'
+import { createDefaultCommands } from '@/features/command/default-commands'
+import { installHotkeys } from '@/features/command/hotkeys'
+import { spaceRefFromPathname } from '@/features/command/palette-providers'
 
 type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
 
@@ -68,6 +74,8 @@ export function CoreNavbar(props: {
   homeHref?: string
   navbarData?: NavbarPayload | null
   onNavbarRefresh?: () => void
+  onAssistantToggle?: () => void
+  assistantOpen?: boolean
   onSearchOpenChange?: (open: boolean) => void
   searchOpen?: boolean
   sidebarExpanded?: boolean
@@ -77,6 +85,7 @@ export function CoreNavbar(props: {
   let headerRef: HTMLElement | undefined
   const i18n = useI18n()
   const navigate = useNavigate()
+  const location = useLocation()
   const [searchParams] = useSearchParams()
   const session = getSession()
   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
@@ -111,10 +120,39 @@ export function CoreNavbar(props: {
     return panel && panel !== 'workspace' ? panel as CoreNavbarPanelKind : null
   }
 
+  // WS13-S6: with `space_command_palette_ui` on, the palette and shortcut sheet
+  // replace the knowledge-only dialog and the hotkey layer owns Cmd/Ctrl+K and `/`.
+  const [sheetOpen, setSheetOpen] = createSignal(false)
+  const [paletteQuery, setPaletteQuery] = createSignal<string | undefined>(undefined)
+  const commandContext = (): CommandContext => ({
+    spaceRef: spaceRefFromPathname(location.pathname),
+    offline: offline(),
+    navigate: (href) => navigate(href),
+    openPalette: (query) => {
+      setPaletteQuery(query)
+      setSearchOpen(true)
+    },
+    openShortcutSheet: () => setSheetOpen(true),
+  })
+
   const closeShellOverlays = () => {
     setOpenPanel(null)
     setSearchOpen(false)
+    setSheetOpen(false)
   }
+
+  createEffect(
+    () => undefined,
+    () => {
+      if (!commandPaletteEnabled()) return undefined
+      const dispose = registerCommands(createDefaultCommands({ deferSlash: shouldDeferGlobalSlashSearch }))
+      const removeHotkeys = installHotkeys(commandContext)
+      return () => {
+        removeHotkeys()
+        dispose()
+      }
+    },
+  )
 
   createEffect(
     () => props.navbarData?.theme,
@@ -132,12 +170,15 @@ export function CoreNavbar(props: {
         const target = event.target as HTMLElement | null
         const isTyping = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable
 
-        if (!offline() && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        // Flag on: the hotkey layer (features/command/hotkeys) owns these two keys.
+        const legacyKeys = !commandPaletteEnabled()
+
+        if (legacyKeys && !offline() && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
           event.preventDefault()
           setSearchOpen(true)
         }
 
-        if (!offline() && !isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
+        if (legacyKeys && !offline() && !isTyping && event.key === '/' && !shouldDeferGlobalSlashSearch()) {
           event.preventDefault()
           setSearchOpen(true)
         }
@@ -165,6 +206,11 @@ export function CoreNavbar(props: {
   )
 
   const openExclusivePanel = (panel: OpenPanel) => {
+    if (panel === 'assistant' && props.onAssistantToggle) {
+      setOpenPanel(null)
+      props.onAssistantToggle()
+      return
+    }
     setOpenPanel((current) => (current === panel ? null : panel))
   }
 
@@ -291,7 +337,7 @@ export function CoreNavbar(props: {
                 <NavbarActionButton
                   label={i18n.tr('Åpne AI-assistent', 'Open AI assistant')}
                   tooltip={i18n.tr('AI-assistent for gjeldende side', 'AI assistant for current page')}
-                  active={openPanel() === 'assistant'}
+                  active={props.assistantOpen || openPanel() === 'assistant'}
                   onClick={() => openExclusivePanel('assistant')}
                 >
                   <Sparkles class="size-[18px]" strokeWidth={1.85} />
@@ -348,6 +394,7 @@ export function CoreNavbar(props: {
                   when={!offline()}
                   fallback={<span class="core-navbar__offline-badge">{i18n.tr('Lokal demo', 'Local demo')}</span>}
                 >
+                <NavbarActionButton label={i18n.tr('Åpne Verevon-assistent', 'Open Verevon assistant')} tooltip={i18n.tr('Spør Verevon', 'Ask Verevon')} active={props.assistantOpen || openPanel() === 'assistant'} onClick={() => openExclusivePanel('assistant')}><Sparkles size={19} strokeWidth={1.8} /></NavbarActionButton>
                 <button type="button" aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')} title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
                   onClick={() => openExclusivePanel('profile')} class="core-navbar__profile">
                   <span aria-hidden="true" class="core-navbar__profile-ring" />
@@ -396,13 +443,27 @@ export function CoreNavbar(props: {
       </header>
 
       <Show when={searchOpen()}>
-        <GlobalSearchDialog
-          onClose={() => setSearchOpen(false)}
-          onNavigate={(href) => {
-            setSearchOpen(false)
-            navigate(href)
-          }}
-        />
+        <Show
+          when={commandPaletteEnabled()}
+          fallback={
+            <GlobalSearchDialog
+              onClose={() => setSearchOpen(false)}
+              onNavigate={(href) => {
+                setSearchOpen(false)
+                navigate(href)
+              }}
+            />
+          }
+        >
+          <CommandPalette
+            context={commandContext()}
+            initialQuery={paletteQuery()}
+            onClose={() => setSearchOpen(false)}
+          />
+        </Show>
+      </Show>
+      <Show when={sheetOpen() && commandPaletteEnabled()}>
+        <ShortcutSheet onClose={() => setSheetOpen(false)} />
       </Show>
     </>
   )

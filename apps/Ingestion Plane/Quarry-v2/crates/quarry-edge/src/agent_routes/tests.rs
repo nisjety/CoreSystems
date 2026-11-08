@@ -89,6 +89,7 @@ async fn admission_refuses_an_agents_reload_before_the_budget_and_spends_nothing
                 initiator,
                 action: &reload,
                 enforce_takeover: true,
+                consented_tab_control: false,
                 last_observation: None,
             },
         )
@@ -899,13 +900,14 @@ fn normalize_viewport_rejects_unbounded_sizes() {
 #[test]
 fn frame_stream_query_accepts_url_encoded_numbers() {
     let uri: axum::http::Uri =
-        "/frames/ws?format=jpeg&quality=55&maxWidth=640&maxHeight=480&everyNthFrame=2&timeoutMs=750&intervalMs=150&maxFrames=8"
+        "/frames/ws?tabId=tab-2&format=jpeg&quality=55&maxWidth=640&maxHeight=480&everyNthFrame=2&timeoutMs=750&intervalMs=150&maxFrames=8"
             .parse()
             .expect("valid uri");
     let Query(query) = Query::<FrameStreamQuery>::try_from_uri(&uri)
         .expect("browser query numbers should parse");
 
     assert_eq!(query.frame.format.as_deref(), Some("jpeg"));
+    assert_eq!(query.frame.tab_id.as_deref(), Some("tab-2"));
     assert_eq!(query.frame.quality, Some(55));
     assert_eq!(query.frame.max_width, Some(640));
     assert_eq!(query.frame.max_height, Some(480));
@@ -919,6 +921,7 @@ fn frame_stream_query_accepts_url_encoded_numbers() {
 fn live_frame_options_clamp_stream_parameters() {
     let options = live_frame_options(
         &FrameQuery {
+            tab_id: None,
             format: Some("jpeg".to_owned()),
             quality: Some(0),
             max_width: Some(99_999),
@@ -1007,6 +1010,7 @@ fn input(initiator: StepInitiator, action: &AgentAction, enforce: bool) -> Admit
         initiator: initiator.into(),
         action,
         enforce_takeover: enforce,
+        consented_tab_control: false,
         last_observation: None,
     }
 }
@@ -1016,6 +1020,7 @@ fn input_observed<'a>(initiator: StepInitiator, action: &'a AgentAction, enforce
         initiator: initiator.into(),
         action,
         enforce_takeover: enforce,
+        consented_tab_control: false,
         last_observation: lane.last_observation.as_deref(),
     }
 }
@@ -1380,6 +1385,21 @@ async fn agent_step_is_refused_during_takeover_with_user_took_over() {
     let details = error.details.expect("details");
     assert_eq!(details["control_mode"], "human_takeover");
     assert_eq!(details["control_epoch"], 1);
+}
+
+#[tokio::test]
+async fn a_consented_tab_uses_its_own_control_during_a_global_takeover() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 1);
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::GetContent;
+    let mut request = input(StepInitiator::Agent, &action, true);
+    request.consented_tab_control = true;
+    let admitted = admit_action(&state, &handle, &mut entry, request).await.unwrap();
+    assert_eq!(admitted.initiator, StepInitiator::Agent);
+    assert_eq!(admitted.control_epoch, 1);
+    assert_eq!(handle.live.snapshot().mode, BrowserControlMode::HumanTakeover);
 }
 
 #[tokio::test]
@@ -2147,6 +2167,8 @@ fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRun
         budget: None,
         policy_mode: None,
         next_step: 2,
+        trace_seq: 0,
+        policy_ask: None,
     }
 }
 
@@ -2247,12 +2269,12 @@ async fn a_step_on_a_released_run_carries_the_hint() {
 fn the_live_owner_projection_carries_the_session_grant_id() {
     let mut entry = entry_with_budget(None);
     entry.grant_id = Some("grant-live-abc".into());
-    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new()))
+    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None))
         .expect("projection serializes");
     assert_eq!(json["grantId"], "grant-live-abc");
 
     entry.grant_id = None;
-    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new()))
+    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None))
         .expect("projection serializes");
     assert!(json.get("grantId").is_none(), "{json}");
 }
@@ -2328,6 +2350,7 @@ fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::Gra
         absolute_expires_at: None,
         resource_id: String::new(),
         key_id: String::new(),
+        web_policy: None,
     }
 }
 
@@ -2678,7 +2701,7 @@ async fn projection_does_not_wait_for_a_running_step() {
     let entry = tokio::time::timeout(Duration::from_secs(1), handle.entry.lock())
         .await
         .expect("the entry is free while a step runs");
-    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new()))
+    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None))
         .expect("the projection serializes");
     assert_eq!(json["step"], serde_json::json!(entry.summary.step));
 }

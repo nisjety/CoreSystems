@@ -60,6 +60,22 @@ pub struct ExpireVerdict {
     pub age_s: u64,
 }
 
+/// W3-E3.4-2/3: the durable status a run's checkpoint takes when the sweeper releases it on
+/// its idle or absolute TTL (the `expired` step of the D8-10 `expired` -> `resumable` ->
+/// `live` arc). A run that persisted its profile is `Suspended` (WS17: a suspend is a release
+/// plus a persisted profile), any other non-ZDR run `Expired`; both stay resumable with
+/// `resume_run_id`. A ZDR run keeps no checkpoint, so it has no arc: `None`.
+pub fn released_checkpoint_status(zdr_active: bool, persist_profile: bool) -> Option<AgentRunStatus> {
+    if zdr_active {
+        return None;
+    }
+    Some(if persist_profile {
+        AgentRunStatus::Suspended
+    } else {
+        AgentRunStatus::Expired
+    })
+}
+
 /// Who is driving an action: a person at the keyboard, an agent proposing it, or
 /// the edge itself (the run sweeper, later). The same three values the audit
 /// trail already uses for control transitions.
@@ -237,6 +253,11 @@ pub struct RunLive {
     /// WS7.D: the run's web-policy decision, resolved at start (see `agent_policy_gate`).
     /// `None` only for a run built outside `start_run`.
     policy: Option<crate::policy_baseline::Decision>,
+    /// D2-051: the `policy` ask the run was started with (merged with the ask of every
+    /// earlier segment), kept so each checkpoint stores it and a resume re-applies it.
+    policy_ask: Option<quarry_core::web_policy::RequestAsk>,
+    /// D2-061: the run's event trace, read for the next seq each checkpoint stores.
+    trace: Option<(quarry_runtime::EventSink, RunKind)>,
     /// WS8.F: who holds each tab, and the run's attach. Locked for one read or change only.
     pub(super) tabs: StdMutex<TabLedger>,
     pub(super) attaches: StdMutex<AttachRegistry>,
@@ -264,6 +285,8 @@ impl RunLive {
             in_flight: AtomicU32::new(0),
             explicit_runtime_s: None,
             policy: None,
+            policy_ask: None,
+            trace: None,
             tabs: StdMutex::new(TabLedger::new()),
             attaches: StdMutex::new(AttachRegistry::default()),
             steps_reserved: AtomicU32::new(0),
@@ -304,6 +327,33 @@ impl RunLive {
         self
     }
 
+    /// D2-051: keep the ask the run's policy was resolved with, for its checkpoints.
+    pub fn with_policy_ask(mut self, ask: Option<quarry_core::web_policy::RequestAsk>) -> Self {
+        self.policy_ask = ask;
+        self
+    }
+
+    /// D2-051: the ask a checkpoint stores, or `None` when the run has none.
+    pub fn policy_ask(&self) -> Option<&quarry_core::web_policy::RequestAsk> {
+        self.policy_ask.as_ref()
+    }
+
+    /// D2-061: attach the run's event trace, so a checkpoint can store its next seq.
+    pub fn with_trace(mut self, sink: quarry_runtime::EventSink, run_id: RunKind) -> Self {
+        self.trace = Some((sink, run_id));
+        self
+    }
+
+    /// D2-061: the seq the run's trace mints next, or 0 when it has no open trace (a run
+    /// built outside `start_run`, or one whose trace is closed): a checkpoint then stores
+    /// nothing, and a resume starts at 1 as before.
+    pub fn trace_seq(&self) -> u64 {
+        self.trace
+            .as_ref()
+            .and_then(|(sink, run_id)| sink.next_seq(run_id))
+            .unwrap_or(0)
+    }
+
     /// WS7.D: the run's web-policy decision, or `None` for a run built outside `start_run`.
     pub fn policy(&self) -> Option<&crate::policy_baseline::Decision> {
         self.policy.as_ref()
@@ -323,6 +373,13 @@ impl RunLive {
     /// When the run started, in ms since the epoch (the clock `new` set).
     pub fn started_ms(&self) -> u64 {
         self.started_ms
+    }
+
+    /// W3-E3.4-2/3: when the run's owner last acted, in ms since the epoch. With
+    /// [`started_ms`](Self::started_ms) these are the two clocks the idle and absolute TTLs
+    /// read (`verdict`, `idle_and_age_s`).
+    pub fn last_activity_ms(&self) -> u64 {
+        self.last_activity_ms.load(Ordering::Acquire)
     }
 
     pub fn org_id(&self) -> &str {
@@ -565,5 +622,35 @@ mod run_duration_tests {
     #[test]
     fn a_clock_that_reads_earlier_than_the_start_gives_zero() {
         assert_eq!(run_duration_seconds(5_000, 4_000), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod released_checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn a_released_run_is_expired_or_suspended_and_a_zdr_run_keeps_nothing() {
+        assert_eq!(released_checkpoint_status(false, false), Some(AgentRunStatus::Expired));
+        assert_eq!(released_checkpoint_status(false, true), Some(AgentRunStatus::Suspended));
+        assert_eq!(released_checkpoint_status(true, false), None);
+        assert_eq!(released_checkpoint_status(true, true), None);
+        // Both are on the resumable side of the arc, and neither is terminal.
+        for status in [AgentRunStatus::Expired, AgentRunStatus::Suspended] {
+            assert!(status.is_resumable());
+            assert!(!status.is_terminal());
+        }
+    }
+
+    #[test]
+    fn the_run_clocks_are_readable_for_the_ttls() {
+        let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0).with_clock(1_000);
+        assert_eq!((live.started_ms(), live.last_activity_ms()), (1_000, 1_000));
+        live.touch_at(5_000);
+        assert_eq!(live.last_activity_ms(), 5_000);
+        // A clock that reads earlier never moves the activity mark back.
+        live.touch_at(2_000);
+        assert_eq!(live.last_activity_ms(), 5_000);
+        assert_eq!(live.idle_and_age_s(7_000), (2, 6));
     }
 }

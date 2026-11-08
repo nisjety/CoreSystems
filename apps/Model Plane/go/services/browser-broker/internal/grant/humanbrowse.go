@@ -131,8 +131,12 @@ func absoluteFrom(now time.Time, ttl, absoluteTTL time.Duration) time.Time {
 	return now.Add(absoluteTTL)
 }
 
-// renewable reports whether a kind can be renewed.
-func renewable(k Kind) bool { return k == KindSession || k == KindHumanBrowse }
+// renewable reports whether a grant can be renewed: a session or human_browse
+// grant, never a key grant (INNH-10: its lifetime is fixed at issue, even for
+// the key's owner).
+func renewable(g *Grant) bool {
+	return (g.Kind == KindSession || g.Kind == KindHumanBrowse) && g.KeyID == ""
+}
 
 // renewedExpiry computes the expiry a renewal at now gives g, or
 // ErrAbsoluteCapReached when there is nothing to give. The caller has already
@@ -254,7 +258,9 @@ func planDerive(ctx context.Context, p DeriveParams, parent *Grant) (derivePlan,
 	default:
 		return derivePlan{}, ErrParentNotDerivable
 	}
-	if !ok || len(parent.AllowedActions) != 0 {
+	// A key grant (INNH-10) is never a parent: neither the key nor its owner
+	// can widen or lengthen it through a child.
+	if !ok || len(parent.AllowedActions) != 0 || parent.KeyID != "" {
 		return derivePlan{}, ErrParentNotDerivable
 	}
 	if plan.kind == KindAttach {
@@ -301,7 +307,7 @@ func planDerive(ctx context.Context, p DeriveParams, parent *Grant) (derivePlan,
 // none may be under the parent's deny-list.
 func deriveDomainsFrom(parent *Grant, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
 	if parent.PolicyMode != PolicyModeOpenWeb {
-		return deriveDomains(parent.AllowedDomains, requested, maxRun, explicitRequired)
+		return deriveDomains(parent, requested, maxRun, explicitRequired)
 	}
 	if len(requested) == 0 {
 		return nil, ErrDeriveNeedsExplicitDomains
@@ -368,7 +374,7 @@ func (s *MemoryRepository) Renew(_ context.Context, p RenewParams) (*Grant, erro
 	if err != nil {
 		return nil, err
 	}
-	if !renewable(g.Kind) {
+	if !renewable(g) {
 		return nil, ErrRenewNotAllowed
 	}
 	next, err := renewedExpiry(g, s.now(), p.TTL)

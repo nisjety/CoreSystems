@@ -121,6 +121,11 @@ pub(crate) struct MemorySearchRow {
     pub score: f32,
     pub updated_at: DateTime<Utc>,
     pub provenance: MemoryProvenance,
+    /// Space a withheld legacy row was learned in; empty for every ordinary row (WS17-S2).
+    pub origin_space_ref: String,
+    /// `memory_scope::WITHHELD_ROOM_ORIGIN` when the row is listed but never recalled;
+    /// empty otherwise (WS17-S2).
+    pub withheld_reason: String,
     /// True when `query` literally appears in this row's content or key.
     ///
     /// pgstore's candidate pool is ordered by `confidence` — a self-reported
@@ -142,6 +147,12 @@ struct PendingMessage {
     org_id: String,
     user_id: String,
     conversation_only: bool,
+    /// WS17-S1: the thread is a shared-room thread (contained), so nothing in it is learned.
+    contained: bool,
+    /// An assistant message written inside a run that read web, browser or third-party content
+    /// (`runs.external_content_at`, WS11.S7). Always false for a user message, and always false
+    /// when `SESSION_CORE_DREAMING_SKIP_EXTERNAL_CONTENT` is switched off.
+    external_content: bool,
 }
 
 pub(crate) async fn run(pool: PgPool, letta: Option<LettaMemoryAdapter>) -> anyhow::Result<()> {
@@ -211,6 +222,10 @@ pub(crate) async fn dream_once(
     }
     let messages = load_pending_messages(pool, limit).await?;
     let mut processed = 0i64;
+    // EP-8 S4: the people whose personal memory this cycle wrote, for one profile rebuild each at
+    // the end. Empty, and never filled, while the profile is switched off.
+    let profiles_enabled = crate::user_profile::enabled();
+    let mut profile_owners: Vec<(String, String)> = Vec::new();
 
     // Grouped by thread because extraction needs a conversation, not a line.
     // The ledger stays per-message — every message still gets its `dream_runs`
@@ -228,6 +243,38 @@ pub(crate) async fn dream_once(
             continue;
         }
 
+        // EP-8 S6: with Space memory switched on, a shared room's messages are mined for the room
+        // instead (deterministic extractor only, `scope = 'space'`), never for its owner. Every
+        // message is still ledgered, so the pending query moves on exactly as with the skip below.
+        if last.contained && crate::space_memory::enabled() {
+            let turns: Vec<crate::space_memory::RoomTurn<'_>> = group
+                .iter()
+                .map(|message| crate::space_memory::RoomTurn {
+                    message_id: &message.message_id,
+                    role: &message.role,
+                    content: &message.content,
+                    external_content: message.external_content,
+                })
+                .collect();
+            processed += crate::space_memory::mine_room_turns(pool, &org_id, &last.user_id, &thread_id, &turns).await?;
+            continue;
+        }
+
+        // WS17-S1 C3: a shared room's messages are never read into the owner's memory. The skip is
+        // written to the ledger exactly like the conversation-only skip, so the pending query
+        // does not select them again.
+        if last.contained {
+            let mut tx = pool.begin().await?;
+            for message in &group {
+                record_dream_run(&mut tx, &org_id, &thread_id, "skipped_space_scope", 0, 0, Some(&message.message_id)).await?;
+                processed += 1;
+            }
+            tx.commit().await?;
+            crate::space::memory_scope::record_contained("dream_skip");
+            info!(%thread_id, messages = group.len(), "memory extraction skipped: shared Space room");
+            continue;
+        }
+
         if last.conversation_only {
             let mut tx = pool.begin().await?;
             for message in &group {
@@ -238,6 +285,24 @@ pub(crate) async fn dream_once(
             info!(%thread_id, messages = group.len(), "memory extraction skipped: conversation-only source scope");
             continue;
         }
+
+        // WS11.S7: an assistant message written inside a run that read web, browser or third-party
+        // content may paraphrase a page that carried instructions, so it is never mined and never
+        // shown to the extractor. It is ledgered like any other handled message, so the pending
+        // query stops selecting it. User messages (and later runs that read nothing external) stay
+        // eligible.
+        let (group, tainted): (Vec<PendingMessage>, Vec<PendingMessage>) =
+            group.into_iter().partition(|message| !message.external_content);
+        if !tainted.is_empty() {
+            let mut tx = pool.begin().await?;
+            for message in &tainted {
+                record_dream_run(&mut tx, &org_id, &thread_id, "skipped_external_content", 0, 0, Some(&message.message_id)).await?;
+                processed += 1;
+            }
+            tx.commit().await?;
+            info!(%thread_id, messages = tainted.len(), "memory extraction skipped: assistant text written after external content");
+        }
+        let Some(last) = group.last() else { continue };
 
         // Attached to the newest message of the group: that is the turn whose
         // arrival justified re-reading the window, and source_links should point
@@ -331,6 +396,16 @@ pub(crate) async fn dream_once(
                 tx.commit().await?;
                 result
             };
+            if profiles_enabled
+                && persisted
+                    .iter()
+                    .any(|row| candidates.get(row.candidate_index).is_some_and(|c| c.scope == "user"))
+            {
+                let owner = (message.org_id.clone(), message.user_id.clone());
+                if !profile_owners.contains(&owner) {
+                    profile_owners.push(owner);
+                }
+            }
             if grounding.is_some() {
                 sync_persisted_candidates_to_letta_for_grounding(
                     pool,
@@ -370,6 +445,7 @@ pub(crate) async fn dream_once(
         }
     }
 
+    crate::user_profile::rebuild_after_cycle(pool, &profile_owners).await;
     Ok(processed)
 }
 
@@ -1308,13 +1384,24 @@ async fn load_pending_messages(
     // The org's own policy, on top of the user's: an org that disabled memory is
     // not mined, nor is the period it had memory off after it is switched back on.
     let org_filter = crate::org_policy::pending_filter(3, 4, 5);
+    let tainted = crate::external_content::tainted_assistant_sql(7);
     let gate = crate::org_policy::pending_gate();
-    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool)>(
-        &format!("SELECT m.id, m.thread_id, m.role, m.content, t.org_id, t.user_id, t.source_scope = 'conversation' \
+    // The agent-run exclusion below is the set `memory_control::thread_containment` names for
+    // the gate; a source-scan test there pins the two to each other. A thread in a Space is
+    // read and then skipped by the Space plan's `contained` flag (WS17-S1), which records why.
+    let rows = sqlx::query_as::<_, (String, String, String, String, String, String, bool, bool, bool)>(
+        &format!("SELECT m.id, m.thread_id, m.role, {fold_content}, t.org_id, t.user_id, t.source_scope = 'conversation', \
+                {contained} AND $6, {tainted} \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
+         {fold_join} \
          WHERE m.role IN ('user', 'assistant') \
            AND m.on_active_path \
+           AND m.copied_from_message_id IS NULL \
+           AND NOT (t.origin = 'agent_run' OR (t.origin = 'space' AND t.space_id IS NULL)) \
+           AND m.post_kind <> 'post' \
+           AND {not_deleted} \
+           AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $2) \
            AND (NOT $2 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
@@ -1330,7 +1417,10 @@ async fn load_pending_messages(
            ) \
            {org_filter} \
          ORDER BY m.created_at ASC, m.sequence ASC \
-         LIMIT $1"),
+         LIMIT $1", contained = crate::space::memory_scope::CONTAINED_SQL,
+            fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+            fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+            not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL),
     )
     .bind(limit)
     // A paused or off user's messages are not read at all, so none reaches the
@@ -1340,13 +1430,15 @@ async fn load_pending_messages(
     .bind(gate.active)
     .bind(gate.fail_closed)
     .bind(gate.max_stale_secs)
+    .bind(crate::space::memory_scope::containment_on())
+    .bind(crate::external_content::skip_enabled())
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(message_id, thread_id, role, content, org_id, user_id, conversation_only)| PendingMessage {
+            |(message_id, thread_id, role, content, org_id, user_id, conversation_only, contained, external_content)| PendingMessage {
                 message_id,
                 thread_id,
                 role,
@@ -1354,6 +1446,8 @@ async fn load_pending_messages(
                 org_id,
                 user_id,
                 conversation_only,
+                contained,
+                external_content,
             },
         )
         .collect())
@@ -1376,23 +1470,34 @@ async fn load_preceding_context(
     // for are not shown to the extractor as context either, and nor are the turns
     // a thread had off before it was resumed.
     let org_filter = crate::org_policy::pending_filter(5, 6, 7);
+    // WS11.S7: the turns the extractor reads exclude assistant text written after external content.
+    let tainted = crate::external_content::tainted_assistant_sql(9);
     let gate = crate::org_policy::pending_gate();
     let mut rows = sqlx::query_as::<_, (String, String)>(
-        &format!("SELECT m.role, m.content \
+        &format!("SELECT m.role, {fold_content} \
          FROM messages m \
          JOIN threads t ON t.id = m.thread_id \
+         {fold_join} \
          WHERE m.thread_id = $1 \
            AND m.on_active_path \
+           AND {not_deleted} \
            AND m.role IN ('user', 'assistant') \
+           AND m.post_kind <> 'post' \
+           AND (m.author_subject_id IS NULL OR m.author_subject_id = t.user_id) \
+           AND NOT {tainted} \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND m.created_at <= c.extract_after) \
            AND NOT EXISTS (SELECT 1 FROM user_memory_controls c WHERE c.org_id = t.org_id AND c.user_id = t.user_id AND c.memory_state <> 'on' AND $4) \
            AND (NOT $4 OR t.memory_resumed_at IS NULL OR m.created_at > t.memory_resumed_at) \
            {org_filter} \
+           AND NOT ({contained} AND $8) \
            AND (m.created_at, m.sequence) < ( \
              SELECT b.created_at, b.sequence FROM messages b WHERE b.id = $2 \
            ) \
          ORDER BY m.created_at DESC, m.sequence DESC \
-         LIMIT $3"),
+         LIMIT $3", contained = crate::space::memory_scope::CONTAINED_SQL,
+            fold_content = crate::space::revisions::FOLD_CONTENT_SQL,
+            fold_join = crate::space::revisions::fold_join_sql("NULL::BIGINT"),
+            not_deleted = crate::space::revisions::FOLD_NOT_DELETED_SQL),
     )
     .bind(thread_id)
     .bind(before_message_id)
@@ -1401,6 +1506,8 @@ async fn load_preceding_context(
     .bind(gate.active)
     .bind(gate.fail_closed)
     .bind(gate.max_stale_secs)
+    .bind(crate::space::memory_scope::containment_on())
+    .bind(crate::external_content::skip_enabled())
     .fetch_all(pool)
     .await?;
     rows.reverse();
@@ -1420,14 +1527,39 @@ pub(crate) async fn load_agent_memory_context_rows(
     if access == MemoryAccess::None {
         return Ok(Vec::new());
     }
-    let Some((org_id, thread_user_id)) =
-        sqlx::query_as::<_, (String, String)>("SELECT org_id, user_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await?
+    let Some((org_id, thread_user_id, space_id, space_kind, audience_hash)) =
+        sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>)>(
+            "SELECT org_id, user_id, space_id, space_kind, recipient_audience_hash FROM threads WHERE id = $1",
+        )
+        .bind(thread_id)
+        .fetch_optional(pool)
+        .await?
     else {
         return Ok(Vec::new());
     };
+    // WS17-S1 C5: a shared-room thread recalls only its own rows, never user, org or global
+    // memory. C7: a legacy row learned in a shared room is left out of every other thread.
+    let contained =
+        crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref());
+    if contained {
+        crate::space::memory_scope::record_contained("read_context");
+    }
+    // EP-8 S7: with Space memory on, a shared room recalls the room's memory and nothing else
+    // (D4), and only what was said in front of the room as it is now (D5).
+    if let Some(target) = space_recall_target(
+        crate::space_memory::enabled(),
+        contained,
+        space_id.as_deref(),
+        audience_hash.as_deref(),
+    ) {
+        let recall = recall_space_memory(pool, &org_id, thread_id, &target, "", limit).await?;
+        return Ok(recall
+            .rows
+            .into_iter()
+            .map(|row| (row.topic, format!("{SPACE_RECALL_SOURCE}: {}", row.content)))
+            .collect());
+    }
+    let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$7", "$2");
 
     let user_id = user_id_hint
         .map(str::trim)
@@ -1435,17 +1567,18 @@ pub(crate) async fn load_agent_memory_context_rows(
         .unwrap_or(thread_user_id.as_str());
 
     let rows = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT scope, kind, key, content, COALESCE(session_id, '') \
+        &format!("SELECT scope, kind, key, content, COALESCE(session_id, '') \
          FROM agent_memory \
          WHERE org_id = $1 \
            AND review_state = 'accepted' \
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND ( \
-                (session_id IS NULL AND scope IN ('org', 'global')) \
+                (session_id IS NULL AND scope IN ('org', 'global') AND NOT $6) \
                 OR ($5 AND session_id = $2) \
-                OR ($5 AND session_id IS NULL AND scope = 'user' AND owner = $3) \
+                OR ($5 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $6) \
            ) \
+           AND {legacy_exclusion} \
          ORDER BY \
            CASE scope \
              WHEN 'user' THEN 0 \
@@ -1455,13 +1588,15 @@ pub(crate) async fn load_agent_memory_context_rows(
              ELSE 4 \
            END, \
            updated_at DESC \
-         LIMIT $4",
+         LIMIT $4"),
     )
     .bind(&org_id)
     .bind(thread_id)
     .bind(user_id)
     .bind(limit)
     .bind(access == MemoryAccess::Full)
+    .bind(contained)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
@@ -1528,6 +1663,16 @@ pub(crate) async fn search_agent_memory(
     let candidate_limit = MAX_CANDIDATE_POOL.max(limit);
     let filters = normalize_topic_filters(request.topic_filter);
     let query = request.query.trim();
+    // WS17-S1 C5/C7: see `load_agent_memory_context_rows`. A lookup failure reads as contained.
+    let contained =
+        crate::space::memory_scope::thread_is_contained_by_id(pool, request.thread_id).await;
+    if contained {
+        crate::space::memory_scope::record_contained("read_search");
+    }
+    let legacy_exclusion = crate::space::memory_scope::legacy_room_origin_exclusion("$9", "$2");
+    // Space and agent rows have owner '' and no session, so the unowned branch below would hand
+    // every room's memory to every thread of the org; only their own readers return them
+    // (`recall_space_memory`, `space_memory::recall_agent_memory`, EP-8 S7/S10).
 
     let rows = sqlx::query_as::<
         _,
@@ -1543,7 +1688,7 @@ pub(crate) async fn search_agent_memory(
             Vec<String>,
         ),
     >(
-        "SELECT id, COALESCE(session_id, ''), scope, kind, key, content, confidence, updated_at, \
+        &format!("SELECT id, COALESCE(session_id, ''), scope, kind, key, content, confidence, updated_at, \
          source_links \
          FROM agent_memory \
          WHERE org_id = $1 \
@@ -1551,8 +1696,9 @@ pub(crate) async fn search_agent_memory(
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
            AND (($7 AND session_id = $2) \
-                OR (session_id IS NULL AND scope <> 'user') \
-                OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3)) \
+                OR (session_id IS NULL AND scope NOT IN ('user', 'space', 'agent') AND NOT $8) \
+                OR ($7 AND session_id IS NULL AND scope = 'user' AND owner = $3 AND NOT $8)) \
+           AND {legacy_exclusion} \
            AND ($4::timestamptz IS NULL OR updated_at > $4) \
            AND (cardinality($5::text[]) = 0 \
                 OR CASE \
@@ -1563,7 +1709,7 @@ pub(crate) async fn search_agent_memory(
                     ELSE 'MEMORY' \
                   END = ANY($5::text[])) \
          ORDER BY confidence DESC, updated_at DESC \
-         LIMIT $6",
+         LIMIT $6"),
     )
     .bind(request.org_id)
     .bind(request.thread_id)
@@ -1572,6 +1718,8 @@ pub(crate) async fn search_agent_memory(
     .bind(&filters)
     .bind(candidate_limit)
     .bind(request.access == MemoryAccess::Full)
+    .bind(contained)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
@@ -1612,6 +1760,8 @@ pub(crate) async fn search_agent_memory(
                     // surface built to display them: every recalled memory
                     // rendered as pre-provenance no matter how it was written.
                     provenance: MemoryProvenance::classify(&source_links),
+                    origin_space_ref: String::new(),
+                    withheld_reason: String::new(),
                     content,
                     score: memory_score(confidence, exact_bonus),
                     updated_at,
@@ -1645,15 +1795,24 @@ pub(crate) async fn index_agent_memory(
     content: &str,
 ) -> Result<String, sqlx::Error> {
     let topic = normalize_topic(topic);
-    let thread_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3)",
+    let thread_row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT space_id, space_kind FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3",
     )
     .bind(thread_id)
     .bind(org_id)
     .bind(owner_user_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    if !thread_exists {
+    let Some((space_id, space_kind)) = thread_row else {
+        return Ok(String::new());
+    };
+    // WS17-S1 C4: a shared room writes only thread-scope rows. The handler refuses the wider
+    // topics with a typed error first; this is the same rule for any other caller, answered as
+    // "nothing written" (the empty id).
+    if crate::space::memory_scope::thread_is_contained(space_id.as_deref(), space_kind.as_deref())
+        && crate::space::memory_scope::topic_writes_beyond_thread(&topic)
+    {
+        crate::space::memory_scope::record_contained("index_refused");
         return Ok(String::new());
     }
 
@@ -1812,8 +1971,11 @@ pub(crate) async fn list_user_memory(
     limit: i64,
 ) -> Result<Vec<MemorySearchRow>, sqlx::Error> {
     let limit = limit.clamp(1, 200);
-    let rows = sqlx::query_as::<_, (String, String, String, f64, DateTime<Utc>, Vec<String>)>(
-        "SELECT id, kind, content, confidence, updated_at, source_links \
+    // WS17-S2: a row learned in a shared room before containment existed is still the
+    // owner's to see (and keep or delete) but is never recalled; flag it with its Space.
+    let origin_space = crate::space::memory_scope::legacy_room_origin_space("$4");
+    let sql = format!(
+        "SELECT id, kind, content, confidence, updated_at, source_links, {origin_space} \
          FROM agent_memory \
          WHERE org_id = $1 \
            AND owner = $2 \
@@ -1822,21 +1984,32 @@ pub(crate) async fn list_user_memory(
            AND is_latest = true \
            AND (expires_at IS NULL OR expires_at > now()) \
          ORDER BY updated_at DESC \
-         LIMIT $3",
-    )
+         LIMIT $3"
+    );
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, f64, DateTime<Utc>, Vec<String>, Option<String>),
+    >(&sql)
     .bind(org_id)
     .bind(owner_user_id)
     .bind(limit)
+    .bind(crate::space::memory_scope::containment_on())
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
         .map(
-            |(id, kind, content, confidence, updated_at, source_links)| MemorySearchRow {
+            |(id, kind, content, confidence, updated_at, source_links, origin_space)| MemorySearchRow {
                 id,
                 thread_id: String::new(),
                 provenance: MemoryProvenance::classify(&source_links),
+                withheld_reason: if origin_space.is_some() {
+                    crate::space::memory_scope::WITHHELD_ROOM_ORIGIN.to_owned()
+                } else {
+                    String::new()
+                },
+                origin_space_ref: origin_space.unwrap_or_default(),
                 topic: memory_topic("user", &kind).to_owned(),
                 content,
                 score: memory_score(confidence, 0.0),
@@ -1955,8 +2128,10 @@ pub(crate) async fn delete_user_memory(
         for ancestor in &ancestors {
             crate::memory_control::record_forgetting(&mut tx, org_id, owner_user_id, ancestor).await?;
         }
-        tx.commit().await?;
         ids.extend(ancestors);
+        // EP-8 S4: a built profile line from a deleted memory goes in the same transaction.
+        crate::user_profile::drop_sources(&mut tx, org_id, owner_user_id, &ids).await?;
+        tx.commit().await?;
         return Ok(MemoryDeletion::Deleted { ids });
     }
 
@@ -2042,6 +2217,8 @@ pub(crate) async fn reset_user_memory(
     .bind(i64::try_from(erased.len()).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await?;
+    // EP-8 S4: the standing profile is derived from what was just erased, so it goes too.
+    crate::user_profile::delete_in_tx(&mut tx, org_id, owner_user_id).await?;
     tx.commit().await?;
     Ok(erased)
 }
@@ -2164,7 +2341,7 @@ fn take_value(raw: &str, max_words: usize) -> Option<String> {
     }
 }
 
-fn collapse_whitespace(value: &str) -> String {
+pub(crate) fn collapse_whitespace(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -2194,7 +2371,7 @@ fn title_name(value: &str) -> String {
         .join(" ")
 }
 
-fn stable_fragment(value: &str) -> String {
+pub(crate) fn stable_fragment(value: &str) -> String {
     let mut fragment = value
         .chars()
         .filter_map(|c| {
@@ -2266,6 +2443,238 @@ pub(crate) fn scope_for_topic(topic: &str) -> &'static str {
         "POLICY" | "AGENT" | "WORKSPACE" => "org",
         _ => "thread",
     }
+}
+
+/// How a recalled Space row is introduced in a room turn's context: the room's memory, never the
+/// person's (EP-8 S7).
+const SPACE_RECALL_SOURCE: &str = "from this Space";
+
+/// The Space and audience a shared-room reader recalls under (EP-8 S7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SpaceRecallTarget {
+    pub(crate) space_id: String,
+    /// The thread's current `recipient_audience_hash`. Empty matches no row: everything is withheld.
+    pub(crate) audience_hash: String,
+}
+
+/// Which reader a thread gets, pure. `None` keeps every reader as it was: the switch is off, or the
+/// thread is not a shared room (a personal Space keeps the owner's memory, WS17-S1).
+pub(crate) fn space_recall_target(
+    enabled: bool,
+    contained: bool,
+    space_id: Option<&str>,
+    audience_hash: Option<&str>,
+) -> Option<SpaceRecallTarget> {
+    if !enabled || !contained {
+        return None;
+    }
+    let space_id = space_id.map(str::trim).filter(|id| !id.is_empty())?;
+    Some(SpaceRecallTarget {
+        space_id: space_id.to_owned(),
+        audience_hash: audience_hash.map(str::trim).unwrap_or_default().to_owned(),
+    })
+}
+
+/// What a shared room recalled: the rows said in front of its current audience, how many of the
+/// Space's rows were left out for audience (D5), and whether the thread is waived (D11: nothing).
+#[derive(Debug, Default)]
+pub(crate) struct SpaceRecall {
+    pub(crate) rows: Vec<MemorySearchRow>,
+    pub(crate) withheld: u32,
+    pub(crate) waived: bool,
+}
+
+/// The rows a shared room may recall: its own Space, current, accepted, and learned in front of the
+/// audience the thread has now. No user, org, thread or other Space row can match (D4).
+const SPACE_RECALL_SQL: &str = "SELECT id, kind, key, content, confidence, updated_at, source_links \
+     FROM agent_memory \
+     WHERE org_id = $1 \
+       AND scope = 'space' \
+       AND scope_id = $2 \
+       AND review_state = 'accepted' \
+       AND is_latest = true \
+       AND (expires_at IS NULL OR expires_at > now()) \
+       AND $3 <> '' \
+       AND audience_hash = $3 \
+     ORDER BY confidence DESC, updated_at DESC \
+     LIMIT $4";
+
+/// The Space's rows the same reader may not see because the room's audience changed since.
+const SPACE_WITHHELD_SQL: &str = "SELECT COUNT(*) \
+     FROM agent_memory \
+     WHERE org_id = $1 \
+       AND scope = 'space' \
+       AND scope_id = $2 \
+       AND review_state = 'accepted' \
+       AND is_latest = true \
+       AND (expires_at IS NULL OR expires_at > now()) \
+       AND audience_hash IS DISTINCT FROM $3";
+
+/// Recall for a shared-room thread with Space memory on (EP-8 S7). A thread with a waived run
+/// recalls nothing (D11), the same test the Space writers apply. `query` only ranks; an empty one
+/// keeps the stored order.
+pub(crate) async fn recall_space_memory(
+    pool: &PgPool,
+    org_id: &str,
+    thread_id: &str,
+    target: &SpaceRecallTarget,
+    query: &str,
+    limit: i64,
+) -> Result<SpaceRecall, sqlx::Error> {
+    let waived: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class = 'zdr_waived')",
+    )
+    .bind(thread_id)
+    .fetch_one(pool)
+    .await?;
+    if waived {
+        metrics::counter!("mp_session_space_memory_recall_total", "outcome" => "waived").increment(1);
+        return Ok(SpaceRecall { waived: true, ..SpaceRecall::default() });
+    }
+    let limit = limit.clamp(1, 50);
+    let rows = sqlx::query_as::<_, (String, String, String, String, f64, DateTime<Utc>, Vec<String>)>(
+        SPACE_RECALL_SQL,
+    )
+    .bind(org_id)
+    .bind(&target.space_id)
+    .bind(&target.audience_hash)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    let withheld: i64 = sqlx::query_scalar(SPACE_WITHHELD_SQL)
+        .bind(org_id)
+        .bind(&target.space_id)
+        .bind(&target.audience_hash)
+        .fetch_one(pool)
+        .await?;
+    let query = query.trim().to_ascii_lowercase();
+    let mut scored: Vec<MemorySearchRow> = rows
+        .into_iter()
+        .map(|(id, kind, key, content, confidence, updated_at, source_links)| {
+            let exact_match = !query.is_empty()
+                && (content.to_ascii_lowercase().contains(&query)
+                    || key.to_ascii_lowercase().contains(&query));
+            let exact_bonus = if query.is_empty() || exact_match { 0.15 } else { 0.0 };
+            MemorySearchRow {
+                id,
+                thread_id: space_row_thread(&source_links).unwrap_or_else(|| thread_id.to_owned()),
+                topic: memory_topic("space", &kind).to_owned(),
+                provenance: MemoryProvenance::classify(&source_links),
+                origin_space_ref: String::new(),
+                withheld_reason: String::new(),
+                content,
+                score: memory_score(confidence, exact_bonus),
+                updated_at,
+                exact_match,
+            }
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    metrics::counter!("mp_session_space_memory_recall_total", "outcome" => "read").increment(1);
+    Ok(SpaceRecall {
+        rows: scored,
+        withheld: u32::try_from(withheld).unwrap_or(u32::MAX),
+        waived: false,
+    })
+}
+
+/// The thread a Space row was learned in, from its `thread:<id>` link.
+fn space_row_thread(source_links: &[String]) -> Option<String> {
+    source_links
+        .iter()
+        .find_map(|link| link.strip_prefix("thread:"))
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// `MemoryEntry.withheld_reason` of a Space row its owner sees listed but the room's current
+/// audience does not recall (EP-8 S7, D5). Closed vocabulary, next to `room_origin_unverified`.
+pub(crate) const WITHHELD_AUDIENCE_CHANGED: &str = "audience_changed";
+
+/// One row of a Space's memory as its owner or admin lists it.
+#[derive(Debug)]
+pub(crate) struct SpaceMemoryRow {
+    pub(crate) id: String,
+    pub(crate) thread_id: String,
+    pub(crate) topic: String,
+    pub(crate) content: String,
+    pub(crate) source_label: String,
+    pub(crate) provenance: MemoryProvenance,
+    pub(crate) updated_at: DateTime<Utc>,
+    /// Learned in front of another audience than the Space's current one: not recalled.
+    pub(crate) withheld: bool,
+}
+
+/// Lists one Space's memory for its owner or admin (EP-8 S7). The caller has verified the Control
+/// Space memory decision; `current_audience_hash` is the audience that decision signed.
+pub(crate) async fn list_space_memory(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    current_audience_hash: &str,
+    limit: i64,
+) -> Result<Vec<SpaceMemoryRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<
+        _,
+        (String, String, String, Option<String>, DateTime<Utc>, Vec<String>, Option<String>),
+    >(
+        "SELECT id, kind, content, source_label, updated_at, source_links, audience_hash \
+         FROM agent_memory \
+         WHERE org_id = $1 \
+           AND scope = 'space' \
+           AND scope_id = $2 \
+           AND review_state = 'accepted' \
+           AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now()) \
+         ORDER BY updated_at DESC \
+         LIMIT $3",
+    )
+    .bind(org_id)
+    .bind(space_id)
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+    let current = current_audience_hash.trim();
+    Ok(rows
+        .into_iter()
+        .map(|(id, kind, content, source_label, updated_at, source_links, audience_hash)| SpaceMemoryRow {
+            id,
+            thread_id: space_row_thread(&source_links).unwrap_or_default(),
+            topic: memory_topic("space", &kind).to_owned(),
+            content,
+            source_label: source_label.unwrap_or_default(),
+            provenance: MemoryProvenance::classify(&source_links),
+            updated_at,
+            withheld: current.is_empty() || audience_hash.as_deref() != Some(current),
+        })
+        .collect())
+}
+
+/// Deletes one row of one Space's memory (EP-8 S7). The Space and org are in the `WHERE` clause,
+/// so a guessed id of another Space, of a person's memory or of another org deletes nothing.
+/// Space rows have no Letta copy (EP-8 S6), so the durable delete is the whole erasure.
+pub(crate) async fn delete_space_memory(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    memory_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let deleted: Option<String> = sqlx::query_scalar(
+        "DELETE FROM agent_memory \
+         WHERE org_id = $1 AND scope = 'space' AND scope_id = $2 AND id = $3 \
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(space_id)
+    .bind(memory_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(deleted.is_some())
 }
 
 fn memory_topic(scope: &str, kind: &str) -> &'static str {
@@ -2380,12 +2789,14 @@ mod tests {
     fn pending(thread_id: &str, message_id: &str) -> PendingMessage {
         PendingMessage {
             conversation_only: false,
+            contained: false,
             message_id: message_id.to_owned(),
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),
             content: "hei".to_owned(),
             org_id: "org-1".to_owned(),
             user_id: "user-1".to_owned(),
+            external_content: false,
         }
     }
 
@@ -3011,6 +3422,100 @@ mod tests {
         assert_eq!(pending, vec![active]);
     }
 
+    /// A fork's copied turns are the source's turns again. Dreaming extracts from the source
+    /// alone: a copied turn is never pending, even though it sits on its thread's active path.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_skips_copied_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("copied-rows-{}", new_ulid());
+        let source = seed_thread(&pool, &org, "user-a").await;
+        let fork = seed_thread(&pool, &org, "user-a").await;
+        let (original, copied) = (new_ulid(), new_ulid());
+        sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'Jeg heter Ima.')")
+            .bind(&original)
+            .bind(&source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, copied_from_message_id)
+             VALUES ($1, $2, 'user', 'Jeg heter Ima.', $3)",
+        )
+        .bind(&copied)
+        .bind(&fork)
+        .bind(&original)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == source || message.thread_id == fork)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(pending, vec![original]);
+    }
+
+    /// K3-5: a Space thread is the room's record and an agent run's thread is the run's, so
+    /// neither is mined into the person's own memory; an ordinary chat thread still is.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn space_thread_messages_never_reach_user_memory() {
+        let pool = disposable_pool().await;
+        let org = format!("space-threads-{}", new_ulid());
+        let chat = seed_thread(&pool, &org, "user-a").await;
+        let (space, agent_run) = (new_ulid(), new_ulid());
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, $2, 'user-a', 'space-room', 'decision-1', 'audience-1', 'policy-1', \
+             'resource-1', 1, 1, 'audience-hash-1', 'space')",
+        )
+        .bind(&space)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, origin) VALUES ($1, $1, $2, 'user-a', 'agent_run')",
+        )
+        .bind(&agent_run)
+        .bind(&org)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut said = Vec::new();
+        for thread in [&chat, &space, &agent_run] {
+            let id = new_ulid();
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'Jeg heter Ima.')")
+                .bind(&id)
+                .bind(thread)
+                .execute(&pool)
+                .await
+                .unwrap();
+            said.push(id);
+        }
+
+        // Since the merge of main (2026-11-02) a Space room's message is read and marked
+        // contained, so the loop skips it and records why (WS17-S1); an agent run's is not read.
+        let pending: Vec<(String, bool)> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| [&chat, &space, &agent_run].contains(&&message.thread_id))
+            .map(|message| (message.message_id, message.contained))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![(said[0].clone(), false), (said[1].clone(), true)],
+            "only the chat message is minable; the room's is contained; the agent run's is not read"
+        );
+    }
+
     /// D1-570: Dreaming neither reads nor is shown what a thread said while it was off, once the
     /// thread is back on, and what was said after the resume is still read. Needs a disposable
     /// Postgres.
@@ -3193,5 +3698,499 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(latest, [target_id], "the target stays the only current row");
+    }
+
+    /// WS01-S1: a human post, and anything another member wrote, is not the thread owner's
+    /// words, so neither the pending read nor the preceding-context read ever hands it to the
+    /// extractor.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn dreaming_pending_messages_skip_posts_and_member_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("dream-posts-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        let rows: [(&str, &str, Option<&str>, &str, &str); 6] = [
+            ("m1", "user", None, "turn", "Husk at jeg heter Kari."),
+            ("m2", "user", Some("user-a"), "post", "owner post text"),
+            ("m3", "user", Some("user-b"), "turn", "member turn text"),
+            ("m4", "user", Some("user-b"), "post", "member post text"),
+            ("m5", "assistant", None, "turn", "assistant answer"),
+            ("m6", "user", None, "turn", "later question"),
+        ];
+        let mut ids = std::collections::BTreeMap::new();
+        for (name, role, author, kind, content) in rows {
+            let id = format!("{thread}-{name}");
+            sqlx::query(
+                "INSERT INTO messages (id, thread_id, role, content, author_subject_id, post_kind) \
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&id)
+            .bind(&thread)
+            .bind(role)
+            .bind(content)
+            .bind(author)
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .unwrap();
+            ids.insert(name, id);
+        }
+        let pending: Vec<String> = load_pending_messages(&pool, 100_000)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.thread_id == thread)
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(
+            pending,
+            vec![ids["m1"].clone(), ids["m5"].clone(), ids["m6"].clone()],
+            "only the owner's own turns are mined: no post, no other member's row"
+        );
+        let context = load_preceding_context(&pool, &thread, Some(ids["m6"].as_str()))
+            .await
+            .unwrap();
+        let context: Vec<(String, String)> = context
+            .into_iter()
+            .map(|message| (message.role, message.content))
+            .collect();
+        assert_eq!(
+            context,
+            vec![
+                ("user".to_owned(), "Husk at jeg heter Kari.".to_owned()),
+                ("assistant".to_owned(), "assistant answer".to_owned()),
+            ],
+            "the extractor's context holds neither posts nor member rows"
+        );
+        sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // ---- WS11.S7: assistant text written after external content is not mined ----
+
+    /// A run of `thread` that started `started_ago_secs` ago and ended `ended_ago_secs` ago,
+    /// tainted or not.
+    async fn seed_run_window(
+        pool: &PgPool,
+        org: &str,
+        thread: &str,
+        started_ago_secs: i64,
+        ended_ago_secs: i64,
+        tainted: bool,
+    ) {
+        sqlx::query(
+            "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, created_at, ended_at, external_content_at) \
+             VALUES ($1, $2, 'g', $3, 'user-a', 'completed', \
+                     now() - make_interval(secs => $4), now() - make_interval(secs => $5), \
+                     CASE WHEN $6 THEN now() - make_interval(secs => $5 + 1) END)",
+        )
+        .bind(new_ulid())
+        .bind(thread)
+        .bind(org)
+        .bind(started_ago_secs as f64)
+        .bind(ended_ago_secs as f64)
+        .bind(tainted)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seed_message_at(pool: &PgPool, thread: &str, role: &str, content: &str, ago_secs: i64) -> String {
+        let id = new_ulid();
+        sqlx::query(
+            "INSERT INTO messages (id, thread_id, role, content, created_at) \
+             VALUES ($1, $2, $3, $4, now() - make_interval(secs => $5))",
+        )
+        .bind(&id)
+        .bind(thread)
+        .bind(role)
+        .bind(content)
+        .bind(ago_secs as f64)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn seed_memory_thread(pool: &PgPool, org: &str) -> String {
+        let thread = seed_thread(pool, org, "user-a").await;
+        sqlx::query("INSERT INTO user_memory_controls (org_id, user_id) VALUES ($1, 'user-a') ON CONFLICT DO NOTHING")
+            .bind(org)
+            .execute(pool)
+            .await
+            .unwrap();
+        thread
+    }
+
+    /// `(trigger, message_id)` of the thread's dream ledger, oldest first.
+    async fn ledger(pool: &PgPool, thread: &str) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT trigger, metadata ->> 'message_id' FROM dream_runs WHERE thread_id = $1 ORDER BY id",
+        )
+        .bind(thread)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn thread_memories(pool: &PgPool, org: &str, thread: &str) -> Vec<String> {
+        sqlx::query_scalar("SELECT content FROM agent_memory WHERE org_id = $1 AND session_id = $2 ORDER BY content")
+            .bind(org)
+            .bind(thread)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_dreaming_skips_assistant_rows_in_the_window_and_ledgers_them() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-skip-{}", new_ulid());
+        let tainted_thread = seed_memory_thread(&pool, &org).await;
+        let control_thread = seed_memory_thread(&pool, &org).await;
+        // Run window: started 600 s ago, ended 300 s ago. The grace is 60 s.
+        seed_run_window(&pool, &org, &tainted_thread, 600, 300, true).await;
+        seed_run_window(&pool, &org, &control_thread, 600, 300, false).await;
+
+        let mut inside = String::new();
+        let mut late = String::new();
+        let mut control = String::new();
+        for thread in [&tainted_thread, &control_thread] {
+            // 270 s ago is 30 s after the run ended: inside the grace. 180 s ago is 120 s after: outside.
+            let a = seed_message_at(&pool, thread, "assistant", "Generated image artifact: inside-png", 270).await;
+            let b = seed_message_at(&pool, thread, "assistant", "Generated image artifact: late-png", 180).await;
+            if thread == &tainted_thread {
+                inside = a;
+                late = b;
+            } else {
+                control = a;
+            }
+        }
+
+        dream_once(&pool, None, None, None, 1_000).await.unwrap();
+
+        let tainted_ledger = ledger(&pool, &tainted_thread).await;
+        assert!(
+            tainted_ledger.contains(&("skipped_external_content".to_owned(), inside.clone())),
+            "the assistant row inside the window is ledgered as skipped: {tainted_ledger:?}"
+        );
+        assert!(
+            tainted_ledger.contains(&("background_scan".to_owned(), late.clone())),
+            "an assistant row after the window plus grace is mined as before: {tainted_ledger:?}"
+        );
+        assert_eq!(
+            thread_memories(&pool, &org, &tainted_thread).await,
+            vec!["Assistant generated image artifact late-png."],
+            "the tainted row wrote no memory, the late row did"
+        );
+        // The same text in a thread whose run read nothing external IS mined (the baseline).
+        assert!(ledger(&pool, &control_thread).await.contains(&("background_scan".to_owned(), control)));
+        // (Both rows write the thread's one `last_image_artifact` slot, so the later one is what stays.)
+        assert!(!thread_memories(&pool, &org, &control_thread).await.is_empty());
+        assert!(ledger(&pool, &control_thread).await.iter().all(|(trigger, _)| trigger != "skipped_external_content"));
+        // Ledgered, so the next cycle does not select it again.
+        let again = dream_once(&pool, None, None, None, 1_000).await.unwrap();
+        let _ = again;
+        let skipped = ledger(&pool, &tainted_thread)
+            .await
+            .into_iter()
+            .filter(|(trigger, id)| trigger == "skipped_external_content" && *id == inside)
+            .count();
+        assert_eq!(skipped, 1, "skipped once, not once per cycle");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_dreaming_keeps_user_rows_eligible() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-user-{}", new_ulid());
+        let thread = seed_memory_thread(&pool, &org).await;
+        seed_run_window(&pool, &org, &thread, 600, 300, true).await;
+        // A user message inside the tainted window, and an assistant one beside it.
+        let user = seed_message_at(&pool, &thread, "user", "Husk at jeg heter Kari.", 400).await;
+        let assistant = seed_message_at(&pool, &thread, "assistant", "Generated image artifact: page-png", 350).await;
+
+        dream_once(&pool, None, None, None, 1_000).await.unwrap();
+
+        let entries = ledger(&pool, &thread).await;
+        assert!(entries.contains(&("background_scan".to_owned(), user)), "{entries:?}");
+        assert!(entries.contains(&("skipped_external_content".to_owned(), assistant)), "{entries:?}");
+        let user_memory: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM agent_memory WHERE org_id = $1 AND scope = 'user'",
+        )
+        .bind(&org)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(
+            user_memory.iter().any(|content| content.contains("Kari")),
+            "the user's own statement is still remembered: {user_memory:?}"
+        );
+        assert!(thread_memories(&pool, &org, &thread).await.is_empty(), "the assistant row wrote nothing");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_extractor_window_excludes_tainted_assistant_rows() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-window-{}", new_ulid());
+        let thread = seed_memory_thread(&pool, &org).await;
+        seed_run_window(&pool, &org, &thread, 1_200, 900, true).await;
+        // Consolidated context before the pending message: a user turn and a tainted assistant turn
+        // inside the tainted window, then an assistant turn long after it.
+        seed_message_at(&pool, &thread, "user", "Search the web for tide tables.", 1_100).await;
+        seed_message_at(&pool, &thread, "assistant", "TAINTED paraphrase of a web page.", 1_000).await;
+        seed_message_at(&pool, &thread, "assistant", "A later answer that read nothing.", 100).await;
+        let pending_id = seed_message_at(&pool, &thread, "user", "Husk at jeg heter Ima.", 50).await;
+
+        let pending = PendingMessage {
+            message_id: pending_id,
+            thread_id: thread.clone(),
+            role: "user".to_owned(),
+            content: "Husk at jeg heter Ima.".to_owned(),
+            org_id: org.clone(),
+            user_id: "user-a".to_owned(),
+            conversation_only: false,
+            contained: false,
+            external_content: false,
+        };
+        let window = extraction_window(&pool, &thread, &[pending]).await;
+        let contents: Vec<&str> = window.iter().map(|m| m.content.as_str()).collect();
+        assert!(!contents.iter().any(|c| c.contains("TAINTED")), "{contents:?}");
+        assert_eq!(
+            contents,
+            vec![
+                "Search the web for tide tables.",
+                "A later answer that read nothing.",
+                "Husk at jeg heter Ima.",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn external_content_thread_without_external_runs_is_unchanged() {
+        let pool = disposable_pool().await;
+        let org = format!("ec-none-{}", new_ulid());
+        let thread = seed_memory_thread(&pool, &org).await;
+        seed_run_window(&pool, &org, &thread, 600, 300, false).await;
+        let user = seed_message_at(&pool, &thread, "user", "Husk at jeg heter Ola.", 500).await;
+        let assistant = seed_message_at(&pool, &thread, "assistant", "Generated image artifact: plain-png", 400).await;
+
+        let pending = load_pending_messages(&pool, 1_000).await.unwrap();
+        let ours: Vec<&PendingMessage> = pending.iter().filter(|m| m.thread_id == thread).collect();
+        assert_eq!(ours.len(), 2);
+        assert!(ours.iter().all(|m| !m.external_content), "no run is tainted, so no row is flagged");
+
+        dream_once(&pool, None, None, None, 1_000).await.unwrap();
+        let entries = ledger(&pool, &thread).await;
+        assert!(entries.iter().all(|(trigger, _)| trigger != "skipped_external_content"), "{entries:?}");
+        assert!(entries.contains(&("background_scan".to_owned(), user)));
+        assert!(entries.contains(&("background_scan".to_owned(), assistant)));
+        assert_eq!(
+            thread_memories(&pool, &org, &thread).await,
+            vec!["Assistant generated image artifact plain-png."]
+        );
+    }
+}
+
+/// Space memory recall (EP-8 S7). The DB tier is `#[ignore]`d and needs `DATABASE_URL` to a
+/// disposable `*test*` Postgres (the Space test helpers refuse any other database).
+#[cfg(test)]
+mod space_recall_tests {
+    use super::*;
+    use crate::space::test_support;
+
+    const OWNER: &str = "owner-1";
+    const AUDIENCE: &str = "sha256:audience-1";
+
+    #[test]
+    fn space_recall_target_only_for_a_contained_thread_with_the_switch_on() {
+        let target = space_recall_target(true, true, Some("space-1"), Some(AUDIENCE));
+        assert_eq!(
+            target,
+            Some(SpaceRecallTarget { space_id: "space-1".to_owned(), audience_hash: AUDIENCE.to_owned() })
+        );
+        assert_eq!(space_recall_target(false, true, Some("space-1"), Some(AUDIENCE)), None, "switch off: readers unchanged");
+        assert_eq!(space_recall_target(true, false, Some("space-1"), Some(AUDIENCE)), None, "a personal Space keeps today's reader");
+        assert_eq!(space_recall_target(true, true, Some("  "), Some(AUDIENCE)), None);
+        assert_eq!(
+            space_recall_target(true, true, Some("space-1"), None).map(|t| t.audience_hash),
+            Some(String::new()),
+            "no audience matches no row: everything is withheld"
+        );
+    }
+
+    #[test]
+    fn space_recall_sql_reads_only_the_space_scope_of_one_space() {
+        for sql in [SPACE_RECALL_SQL, SPACE_WITHHELD_SQL] {
+            assert!(sql.contains("AND scope = 'space'"));
+            assert!(sql.contains("AND scope_id = $2"));
+            assert!(sql.contains("AND is_latest = true"));
+            for other in ["'user'", "'org'", "'thread'", "'global'", "session_id", "owner"] {
+                assert!(!sql.contains(other), "{other} must not reach a Space reader");
+            }
+        }
+        assert!(SPACE_RECALL_SQL.contains("AND audience_hash = $3"));
+        assert!(SPACE_WITHHELD_SQL.contains("audience_hash IS DISTINCT FROM $3"));
+    }
+
+    struct Seeded {
+        pool: PgPool,
+        org: String,
+        space: String,
+        thread: String,
+    }
+
+    async fn seed() -> Option<Seeded> {
+        let pool = test_support::connect().await?;
+        let nonce = new_ulid();
+        let org = format!("space-recall-org-{nonce}");
+        let space = format!("space-recall-{nonce}");
+        let thread = format!("space-recall-thread-{nonce}");
+        test_support::seed_space_thread(&pool, &org, &space, &thread, OWNER).await;
+        Some(Seeded { pool, org, space, thread })
+    }
+
+    async fn insert(seeded: &Seeded, scope: &str, scope_id: Option<&str>, owner: &str, hash: Option<&str>, content: &str) {
+        let label = (scope == "space").then_some("room_statement");
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+             source_links, review_state, audience_hash, audience_revision, source_label) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'fact', 0.9, $7, $8, 'accepted', $9, \
+             CASE WHEN $9::text IS NULL THEN NULL ELSE 1 END, $10)",
+        )
+        .bind(new_ulid())
+        .bind(&seeded.org)
+        .bind(scope)
+        .bind(scope_id)
+        .bind(format!("k-{}", new_ulid()))
+        .bind(content)
+        .bind(owner)
+        .bind(vec![format!("thread:{}", seeded.thread)])
+        .bind(hash)
+        .bind(label)
+        .execute(&seeded.pool)
+        .await
+        .expect("seed memory row");
+    }
+
+    fn target(seeded: &Seeded, hash: &str) -> SpaceRecallTarget {
+        SpaceRecallTarget { space_id: seeded.space.clone(), audience_hash: hash.to_owned() }
+    }
+
+    async fn recall(seeded: &Seeded, hash: &str) -> SpaceRecall {
+        recall_space_memory(&seeded.pool, &seeded.org, &seeded.thread, &target(seeded, hash), "", 20)
+            .await
+            .expect("recall")
+    }
+
+    fn contents(recall: &SpaceRecall) -> Vec<&str> {
+        recall.rows.iter().map(|row| row.content.as_str()).collect()
+    }
+
+    async fn cleanup(seeded: &Seeded) {
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+            .bind(&seeded.org)
+            .execute(&seeded.pool)
+            .await
+            .ok();
+        test_support::clean_space(&seeded.pool, &seeded.org, &seeded.space).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn space_recall_returns_only_this_space() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "Vi leverer til Bergen på fredager.").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert_eq!(contents(&recalled), vec!["Vi leverer til Bergen på fredager."]);
+        assert_eq!(recalled.withheld, 0);
+        assert!(!recalled.waived);
+        assert_eq!(recalled.rows[0].thread_id, seeded.thread, "the row links back to the thread it was said in");
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn space_recall_never_returns_user_or_org_rows() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "user", None, OWNER, None, "PERSONAL canary").await;
+        insert(&seeded, "org", None, "", None, "ORG canary").await;
+        insert(&seeded, "global", None, "", None, "GLOBAL canary").await;
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "room fact").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert_eq!(contents(&recalled), vec!["room fact"], "isolation: the room reads its own memory only (D4)");
+        assert_eq!(recalled.withheld, 0, "personal and org rows are not counted as withheld either");
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn audience_change_withholds_old_rows() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "said before the new member").await;
+        insert(&seeded, "space", Some(&space), "", Some("sha256:audience-2"), "said in front of everyone").await;
+        let after_join = recall(&seeded, "sha256:audience-2").await;
+        assert_eq!(contents(&after_join), vec!["said in front of everyone"]);
+        assert_eq!(after_join.withheld, 1, "the older row is counted, never shown (D5)");
+        let no_audience = recall(&seeded, "").await;
+        assert!(no_audience.rows.is_empty(), "a thread without an audience recalls nothing");
+        assert_eq!(no_audience.withheld, 2);
+
+        let listed = list_space_memory(&seeded.pool, &seeded.org, &space, "sha256:audience-2", 50)
+            .await
+            .expect("list");
+        assert_eq!(listed.len(), 2, "the owner sees every row of the Space");
+        assert_eq!(listed.iter().filter(|row| row.withheld).count(), 1, "and which one the room does not recall");
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn other_space_rows_never_returned() {
+        let Some(seeded) = seed().await else { return };
+        let other = format!("{}-other", seeded.space);
+        insert(&seeded, "space", Some(&other), "", Some(AUDIENCE), "Room B fact").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert!(recalled.rows.is_empty(), "Room A never recalls Room B");
+        assert_eq!(recalled.withheld, 0, "nor counts it");
+        let other_id: String = sqlx::query_scalar("SELECT id FROM agent_memory WHERE org_id = $1 AND scope_id = $2")
+            .bind(&seeded.org)
+            .bind(&other)
+            .fetch_one(&seeded.pool)
+            .await
+            .unwrap();
+        assert!(
+            !delete_space_memory(&seeded.pool, &seeded.org, &seeded.space, &other_id).await.unwrap(),
+            "a delete under Room A's decision cannot reach Room B's row"
+        );
+        cleanup(&seeded).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn waived_space_thread_recalls_nothing() {
+        let Some(seeded) = seed().await else { return };
+        let space = seeded.space.clone();
+        insert(&seeded, "space", Some(&space), "", Some(AUDIENCE), "room fact").await;
+        let run = format!("space-recall-run-{}", new_ulid());
+        test_support::seed_space_run(&seeded.pool, &seeded.org, &space, &seeded.thread, &run, "completed", "zdr_waived").await;
+        let recalled = recall(&seeded, AUDIENCE).await;
+        assert!(recalled.waived);
+        assert!(recalled.rows.is_empty(), "D11: a waived thread recalls no Space memory");
+        cleanup(&seeded).await;
     }
 }

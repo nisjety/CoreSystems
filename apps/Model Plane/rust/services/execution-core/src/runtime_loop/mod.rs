@@ -19,6 +19,9 @@ pub mod subagent_results;
 // WS24-S8. The file lives at the crate root; lib.rs should declare it there (shared edit).
 #[path = "../owner_reads.rs"]
 pub mod owner_reads;
+// WS14 S4. The file lives at the crate root; lib.rs should declare it there (shared edit).
+#[path = "../ask.rs"]
+pub(crate) mod ask;
 
 #[cfg(test)]
 pub(crate) mod session_core_rules_double;
@@ -29,10 +32,12 @@ use std::sync::Arc;
 
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
-    self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
+    self as pb, approval_scope_grant_service_client::ApprovalScopeGrantServiceClient,
+    orchestration_core_service_client::OrchestrationCoreServiceClient,
 };
 use tonic::transport::Channel;
 
+use crate::browser_session;
 use crate::hook;
 use crate::permission::{self, PermissionDecision, PermissionMode};
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
@@ -56,11 +61,36 @@ const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
 /// Tool name that drives the live agentic browser loop through Quarry
 /// (`/v1/agent/*`). Async, like `shell` — dispatched off the async path below.
 const BROWSER_AGENT_TOOL: &str = "browser_agent";
+
+/// Apply the signed browser class as an additional ceiling, without changing
+/// the legacy decision for any other tool. The class never loosens that answer.
+fn browser_scoped_permission(
+    enforced: bool,
+    tool_name: &str,
+    tool_input: &str,
+    mode: PermissionMode,
+    legacy: PermissionDecision,
+    signed: &crate::mcp_gateway::SignedToolClass,
+) -> PermissionDecision {
+    if !enforced || tool_name != BROWSER_AGENT_TOOL {
+        return legacy;
+    }
+    let view = permission::ToolClassView::from_registry(tool_name, &signed.class, &signed.floor, "");
+    let declared = permission::evaluate_call_with_class(mode, &view, tool_input);
+    match (legacy, declared) {
+        (PermissionDecision::Deny, _) | (_, PermissionDecision::Deny) => PermissionDecision::Deny,
+        (PermissionDecision::AwaitApproval, _) | (_, PermissionDecision::AwaitApproval) => PermissionDecision::AwaitApproval,
+        _ => PermissionDecision::Allow,
+    }
+}
 /// Thin Model-Plane MCP aliases for an existing Quarry browser run. Unlike
 /// `browser_agent`, these do not plan, acquire, or expose a browser; they
 /// execute one grant-bound observation or opaque snapshot-ref action.
 const QUARRY_MCP_BROWSER_OBSERVE_TOOL: &str = "browser.observe";
 const QUARRY_MCP_BROWSER_ACT_TOOL: &str = "browser.act";
+/// WS9.E: a bounded, scrubbed read of the run's console. Read-only; no lease,
+/// no action.
+const QUARRY_MCP_BROWSER_CONSOLE_TOOL: &str = "browser.console";
 
 /// Read-only research tools backed by the Quarry edge (`web_tools`). Async.
 /// Not in `permission::is_risky_tool`, so they run under `ask` without a gate.
@@ -383,6 +413,95 @@ mod connector_taint_tests {
     }
 }
 
+/// The call a standing grant (build plan WS13 S6) may release from a pause, and whose owner it is.
+/// Carries the identifiers, the declared class and the run's retention, never an argument value.
+#[derive(Clone, Copy)]
+struct StandingCall<'a> {
+    channel: Option<&'a Channel>,
+    org_id: &'a str,
+    user_id: &'a str,
+    thread_id: &'a str,
+    run_id: &'a str,
+    tool_name: &'a str,
+    tool_input: &'a str,
+    effect_class: &'a str,
+    zdr: bool,
+    waived: bool,
+}
+
+impl StandingCall<'_> {
+    /// Whether a pause of `cause` on this call may be lifted by a standing grant at all: the switch
+    /// is on, the run is neither ZDR nor waived, and the cause, tool and declared class are
+    /// eligible.
+    fn grantable(&self, cause: CauseCode) -> bool {
+        self.grantable_with_switch(approval_cause::scope_grants_enabled(), cause)
+    }
+
+    /// `grantable` with the switch given, so the gate is tested without reading the environment. A
+    /// ZDR or waived run never asks: a release would write an audit row naming the run, which the
+    /// ZDR clause forbids, and a waived run counts as ZDR (DEC-32).
+    fn grantable_with_switch(&self, switch_on: bool, cause: CauseCode) -> bool {
+        switch_on
+            && !self.zdr
+            && !self.waived
+            && offers_standing_scope(cause, self.tool_name, self.tool_input, self.effect_class)
+    }
+
+    /// Ask the session whether a live grant releases this call. Asked once for the whole pause. An
+    /// absent session, a missing owner or a failed call leaves the pause in place.
+    async fn released(&self) -> bool {
+        let Some(channel) = self.channel else {
+            return false;
+        };
+        if self.user_id.trim().is_empty() || self.thread_id.is_empty() {
+            return false;
+        }
+        match ApprovalScopeGrantServiceClient::new(channel.clone())
+            .use_approval_scope_grant(standing_request(self))
+            .await
+        {
+            Ok(response) => !response.into_inner().grant_id.is_empty(),
+            Err(status) => {
+                tracing::warn!(
+                    run_id = self.run_id,
+                    tool = self.tool_name,
+                    code = ?status.code(),
+                    "standing grant not used; the call pauses"
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Whether a pause of `cause` on this call offers a standing scope (build plan WS13 S6), by the
+/// eligibility rule in mp-contracts. The switch is not read here, so the rule stands on its own.
+fn offers_standing_scope(
+    cause: CauseCode,
+    tool_name: &str,
+    tool_input: &str,
+    effect_class: &str,
+) -> bool {
+    approval_cause::for_call_with_class(cause, "", tool_name, tool_input, effect_class)
+        .scope_options
+        .iter()
+        .any(|scope| scope.as_str() != approval_cause::SCOPE_ONCE)
+}
+
+/// The request a standing grant is asked with: the owner, the run's thread and the call's tool,
+/// action key and class. The action key names the tool and its operation, never an argument.
+fn standing_request(call: &StandingCall<'_>) -> pb::UseApprovalScopeGrantRequest {
+    pb::UseApprovalScopeGrantRequest {
+        org_id: call.org_id.to_owned(),
+        user_id: call.user_id.to_owned(),
+        thread_id: call.thread_id.to_owned(),
+        run_id: call.run_id.to_owned(),
+        tool_name: call.tool_name.trim().to_owned(),
+        action_key: approval_cause::action_key(call.tool_name, call.tool_input),
+        effect_class: call.effect_class.to_owned(),
+    }
+}
+
 /// Why the permission gate held a call for a person. The gate answers
 /// `AwaitApproval` for exactly three reasons, and this names which: an owner-plane
 /// tool (a durable approval on every posture), a disclosure read (the same), or a
@@ -471,8 +590,12 @@ pub async fn execute_step(
         sandbox,
         None,
         None,
+        None,
         true,
         &[],
+        // The compatibility entry point has no run, so no Space retrieval was authorised for it.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
     )
     .await
 }
@@ -513,6 +636,7 @@ pub(crate) async fn execute_step_with_browser_grant(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -537,10 +661,14 @@ pub(crate) async fn execute_step_with_browser_grant(
         browser_grant,
         None,
         sandbox,
+        thread_scope,
         None,
         None,
         true,
         &[],
+        // The direct single-step RPC has no run, so no Space retrieval was authorised for it.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
     )
     .await
 }
@@ -609,10 +737,15 @@ pub(crate) async fn execute_step_with_subagent(
         capability_policy,
         subagent_dispatch,
         sandbox,
+        None,
         release,
         None,
         true,
         &[],
+        // Only tests call this wrapper. The agent loop calls `execute_step_with_result_handles`
+        // directly with its run's own Space retrieval, so this one authorises none.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
     )
     .await
 }
@@ -654,6 +787,7 @@ pub(crate) async fn execute_step_with_result_handles(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
     release: Option<&resume::ApprovedRelease>,
     result_store: Option<&result_handles::ResultHandles>,
     // Whether the step may read the files its run attached (`run_inputs`). Only the root loop
@@ -662,6 +796,12 @@ pub(crate) async fn execute_step_with_result_handles(
     // The connections the run's person selected (WS23-S4). A caller with no run passes none, so a
     // connector read through it is refused.
     connector_scope: &[String],
+    // The run's Space retrieval for `knowledge_search` (WS18-S5). The agent loop passes its run's; a
+    // caller with no run passes `Organisation`.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
+    // The run's browser page dispatch (WS21-S5a). Only the agent loop of a run holding a verified
+    // browser sign-in passes one; every other caller passes none.
+    browser: Option<&browser_session::BrowserDispatch<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -686,10 +826,13 @@ pub(crate) async fn execute_step_with_result_handles(
         None,
         subagent_dispatch,
         sandbox,
+        thread_scope,
         release,
         result_store,
         read_run_inputs,
         connector_scope,
+        space_retrieval,
+        browser,
     )
     .await
 }
@@ -707,6 +850,21 @@ fn policy_reason_code(reason: &str) -> &str {
     } else {
         "policy_denied"
     }
+}
+
+/// The notice a write's result is replaced with when a post-tool rule denies it (WS25-S3).
+const WITHHELD_RESULT_NOTICE: &str =
+    "The action DID execute; its result is withheld by org policy.";
+
+/// What a post-tool deny does (WS25-S3, DEC-15 D7). A write has already run, so its step stays
+/// successful with the result withheld: a failed step would invite the model to repeat the write.
+/// A read-class call keeps the failure it has always had. Until WS05 declares tool classes, the
+/// class is `permission::is_risky_call`.
+fn post_tool_denied(tool_name: &str, tool_input: &str, reason: &str) -> StepOutcome {
+    if permission::is_risky_call(tool_name, tool_input) {
+        return StepOutcome::completed(WITHHELD_RESULT_NOTICE.to_owned());
+    }
+    StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"))
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -743,6 +901,10 @@ async fn execute_step_inner(
     // `sandbox_lease::SandboxLeaseContext`'s own doc. Read by exactly one
     // dispatch arm, `code_interpreter`, below.
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    // The thread a thread-scope `code_interpreter` keeps its files in (WS22-S2). Present only for a
+    // step `workspace_sync::thread_for_step` admitted, which is never a Space step. The memory tools
+    // never read it; they keep the `thread_id` above, which the direct RPC leaves empty.
+    thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
     // The one call a continuation segment may release after an approval (build
     // plan WS03 S3). `None` everywhere but the resume boundary. It lifts only the
     // three `ask` gates below, for exactly this step, tool and arguments; it
@@ -756,8 +918,21 @@ async fn execute_step_inner(
     read_run_inputs: bool,
     // The connections the run's person selected (WS23-S4); see `execute_step_with_result_handles`.
     connector_scope: &[String],
+    // The run's Space retrieval for `knowledge_search` (WS18-S5); see `execute_knowledge_search`.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
+    // The run's browser page dispatch (WS21-S5a); see `execute_step_with_result_handles`.
+    browser: Option<&browser_session::BrowserDispatch<'_>>,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
+    // A Do run's `browser.act` (WS21-S5b): served only while the act switch is on and the run holds its
+    // page dispatch, which is never the case under zero retention. Every other call keeps its path.
+    let browser_act = !zdr
+        && browser.is_some()
+        && tool_name == browser_session::ACT_TOOL
+        && agent::do_browser_act_enabled();
+    // A capability pause that a standing grant may cover (build plan WS13 S6). It is held until the
+    // hook and permission gates have answered, so a grant is never spent on a call a later gate holds.
+    let mut deferred_pause: Option<CauseCode> = None;
     // An MCP tool carries the call's content to a third-party server, so it is
     // never reached under ZDR or on a waived route. Refused before the registry
     // is asked about it: once `TOOL_CLASS_GATE` binds `mcp__` names, the
@@ -799,6 +974,21 @@ async fn execute_step_inner(
             "{tool_name} is not available on this run: workspace tools need a Space-scoped run on a deployment that switches them on, and never run under zero data retention"
         ));
     }
+    // E3.7.10: the bulk-acquisition tools run only where the deployment switched them on, and the
+    // two that start a durable Quarry job never run under zero data retention or on a waived route
+    // (Quarry's own `durable_jobs` row refuses them too). Refused before the capability gate.
+    if crate::web_tools::is_crawl_tool(tool_name) {
+        if !crate::web_tools::crawl_tools_enabled() {
+            return StepOutcome::failed(&format!(
+                "{tool_name} is not available on this deployment: the crawl tools are switched off"
+            ));
+        }
+        if (zdr || waived) && crate::web_tools::is_durable_crawl_tool(tool_name) {
+            return StepOutcome::failed(&format!(
+                "{tool_name} is not available on this run: it starts a stored background job, which zero data retention forbids"
+            ));
+        }
+    }
     // The owner document listing reads on the user's bearer, so it runs only under the admission
     // switch and never under retention (WS24-S8). Refused before the capability gate is asked.
     if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME
@@ -817,6 +1007,16 @@ async fn execute_step_inner(
     // Set when the user's broker-validated run grant satisfied the high-risk ask
     // (`browser_grant_approval`); recorded on the run once every later gate passed.
     let mut grant_approval: Option<browser_grant_approval::GrantApproval> = None;
+    // Build plan WS10 S3: on a Space-scoped step the three existing `ask` gates below become inputs
+    // to one fold with Control's per-tool level instead of returning at once (enforce), or are
+    // observed against it (shadow). `off`, and every non-Space step, keeps today's returns.
+    let gate_mode = if sandbox.is_some() && !released {
+        crate::space_gate::GateMode::from_env()
+    } else {
+        crate::space_gate::GateMode::Off
+    };
+    let gate_enforced = gate_mode == crate::space_gate::GateMode::Enforce;
+    let mut deferred_ask: Option<CauseCode> = None;
     match capability_policy
         .evaluate_tool_call(tool_name, run_id, org_id, user_id)
         .await
@@ -848,6 +1048,7 @@ async fn execute_step_inner(
                 &evaluation.approval_floor,
             );
             if !released {
+              {
                 // A managed browser run's start was already approved by its user, in
                 // a narrower form: a derived run grant the broker just validated.
                 // That satisfies only this ask; the hook and permission gates below
@@ -860,7 +1061,7 @@ async fn execute_step_inner(
                     user_id,
                     run_id,
                 );
-                let Some(approval) = &grant_approval else {
+                if grant_approval.is_none() {
                     // capability-core answers `ask` for a high-risk capability, and,
                     // once the tool class gate names the tool, for a tool whose class
                     // or approval floor asks. The second is the same pause the
@@ -874,20 +1075,43 @@ async fn execute_step_inner(
                     } else {
                         CauseCode::CapabilityHighRisk
                     };
-                    return StepOutcome::awaiting_approval(cause);
-                };
-                // Metadata only: no URL, domain, goal or prompt.
-                tracing::info!(
-                    run_id,
-                    step_id,
-                    plan_id = %approval.plan_id,
-                    decision_id = %approval.decision_id,
-                    capability_version = %approval.capability_version,
-                    approval_basis = "browser_run_grant",
-                    grant_kind = "run",
-                    grant_ref = %approval.grant_ref,
-                    "high-risk capability ask satisfied by a broker-validated browser run grant"
-                );
+                    if gate_enforced {
+                        // The Space gate folds this ask with Control's level below.
+                        deferred_ask.get_or_insert(cause);
+                    } else {
+                        let standing = StandingCall {
+                            channel: session_channel.as_ref(),
+                            org_id,
+                            user_id,
+                            thread_id,
+                            run_id,
+                            tool_name,
+                            tool_input,
+                            effect_class: &signed_class.class,
+                            zdr,
+                            waived,
+                        };
+                        if !standing.grantable(cause) {
+                            return StepOutcome::awaiting_approval(cause);
+                        }
+                        deferred_pause = Some(cause);
+                    }
+                }
+                if let Some(approval) = &grant_approval {
+                    // Metadata only: no URL, domain, goal or prompt.
+                    tracing::info!(
+                        run_id,
+                        step_id,
+                        plan_id = %approval.plan_id,
+                        decision_id = %approval.decision_id,
+                        capability_version = %approval.capability_version,
+                        approval_basis = "browser_run_grant",
+                        grant_kind = "run",
+                        grant_ref = %approval.grant_ref,
+                        "high-risk capability ask satisfied by a broker-validated browser run grant"
+                    );
+                }
+              }
             }
             // The user approved this exact call: the ask gate is satisfied.
         }
@@ -951,11 +1175,22 @@ async fn execute_step_inner(
             return StepOutcome::failed(&format!("blocked by pre-tool hook: {reason}"));
         }
         hook::HookDecision::Ask { .. } if !released => {
-            return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+            if !gate_enforced {
+                return StepOutcome::awaiting_approval(CauseCode::HookAsk);
+            }
+            deferred_ask.get_or_insert(CauseCode::HookAsk);
         }
         hook::HookDecision::Ask { .. } | hook::HookDecision::Allow => {}
     }
 
+    // A browser act is refused before anyone is asked to approve it when its page holds a read-level
+    // grant. The check runs for a released call too, since the grant may have changed while it waited.
+    let act_dispatch = browser.filter(|_| browser_act);
+    if let Some(dispatch) = act_dispatch {
+        if let Err(refusal) = tool_bridge::browser_act_precheck(dispatch, tool_input).await {
+            return StepOutcome::failed(&refusal.text());
+        }
+    }
     let mode = PermissionMode::from_wire(permission_mode);
     // Operation-aware gate: `execute_provider_action` is classified by the
     // `operation` embedded in `tool_input` (a read proceeds, a write pauses)
@@ -965,15 +1200,103 @@ async fn execute_step_inner(
     // Under `TOOL_CLASS_GATE` the run's declared class and approval floor decide
     // instead of the name (`permission::RunGate`); with the gate off this is
     // `evaluate_call` exactly.
-    match permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input) {
-        PermissionDecision::Deny => return StepOutcome::permission_denied(),
-        PermissionDecision::AwaitApproval if !released => {
-            return StepOutcome::awaiting_approval(permission_pause_cause(
+    let legacy_permission =
+        permission::RunGate::for_run(org_id, run_id).evaluate_call(mode, tool_name, tool_input);
+    let permission_decision = browser_scoped_permission(
+        crate::capability_policy::browser_agent_policy_enforced(),
+        tool_name, tool_input, mode, legacy_permission, &signed_class,
+    );
+    if matches!(permission_decision, PermissionDecision::Deny) {
+        return StepOutcome::permission_denied();
+    }
+    // Every browser act waits for the person whatever the permission mode says: a click can change the
+    // page, and its one answer is the typed `browser_action_risk` cause (WS21-S5b).
+    let permission_pause = (!released
+        && (act_dispatch.is_some()
+            || matches!(permission_decision, PermissionDecision::AwaitApproval)))
+    .then(|| {
+        if act_dispatch.is_some() {
+            CauseCode::BrowserActionRisk
+        } else {
+            permission_pause_cause(permission::RunGate::for_run(org_id, run_id), tool_name)
+        }
+    });
+    if gate_enforced {
+        // On an enforced Space step the permission ask joins the fold below (WS10 S3). A browser
+        // act never does: no standing rule there may pass it, so it pauses here.
+        if let Some(cause) = permission_pause {
+            if act_dispatch.is_some() {
+                return StepOutcome::awaiting_approval(cause);
+            }
+            deferred_ask.get_or_insert(cause);
+        }
+    } else if let Some(cause) = deferred_pause.or(permission_pause) {
+        // The pause the gate returns is the capability pause when there is one, as it always was. A
+        // standing grant releases it only when every pause held for this call is one a grant may cover.
+        let standing = StandingCall {
+            channel: session_channel.as_ref(),
+            org_id,
+            user_id,
+            thread_id,
+            run_id,
+            tool_name,
+            tool_input,
+            effect_class: &signed_class.class,
+            zdr,
+            waived,
+        };
+        let mut covered = standing.grantable(cause);
+        if let (Some(_), Some(second)) = (deferred_pause, permission_pause) {
+            covered = covered && standing.grantable(second);
+        }
+        if !covered || !standing.released().await {
+            return StepOutcome::awaiting_approval(cause);
+        }
+    }
+
+    // Build plan WS10 S3: the Space approval gate. Every source that asked is folded with
+    // Control's level for this call (`allow < ask < block`, the most restrictive wins). An ask
+    // is then passed by a spent once-approval or a Control standing rule, or pauses as it
+    // always did; a `block` refuses. Shadow only reads the view and counts where it differs.
+    if gate_mode != crate::space_gate::GateMode::Off {
+        let gate_call = crate::space_gate::GateCall {
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            zdr,
+            waived,
+            session_channel: session_channel.as_ref(),
+            session_bearer,
+            fallback_cause: permission_pause_cause(
                 permission::RunGate::for_run(org_id, run_id),
                 tool_name,
-            ));
+            ),
+        };
+        if gate_enforced {
+            match crate::space_gate::resolve(&gate_call, deferred_ask).await {
+                crate::space_gate::GateOutcome::Pass => {}
+                crate::space_gate::GateOutcome::Pause(cause) => {
+                    return StepOutcome::awaiting_approval(cause);
+                }
+                crate::space_gate::GateOutcome::Block(source) => {
+                    return StepOutcome::permission_denied_with_reason(format!(
+                        "permission denied by policy (space_tool_policy: {source})"
+                    ));
+                }
+            }
+        } else {
+            crate::space_gate::observe_shadow(&gate_call).await;
         }
-        PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
+    }
+
+    // E3.7.10: a crawl or a batch over the page threshold (default 50, tighten-only) needs a
+    // person, on every posture. Decided here from the call's own arguments rather than from the
+    // declared class, which is registry-global and cannot see the page count.
+    if !released && crate::web_tools::crawl_needs_page_approval(tool_name, tool_input) {
+        return StepOutcome::awaiting_approval(CauseCode::RiskyEffectUnderAsk);
     }
 
     // Browser-agent returns a structured lifecycle result, not a generic tool
@@ -993,7 +1316,7 @@ async fn execute_step_inner(
             tool_bridge::execute_browser_agent(
                 tool_input,
                 org_id,
-                zdr,
+                zdr || waived,
                 browser_event_sink,
                 state,
                 inference_bearer,
@@ -1011,6 +1334,13 @@ async fn execute_step_inner(
     // `result_query` reads a result this run held, so it is answered from the run's own
     // store and never reaches a tool. It passed the capability, hook and permission
     // gates above like any other read. Without a store the name falls through as it did.
+    // The long-page reader (EP-2-S10) answers read_page and find_in_page from the pages this run holds, as result_query answers from its own store. Off, the names fall through as before.
+    if let Some(read) = result_handles::execute_reader_tool(tool_name, tool_input, org_id, run_id, result_store) {
+        return match read {
+            Ok(output) => StepOutcome::completed(output),
+            Err(error) => StepOutcome::failed(&error),
+        };
+    }
     if tool_name == result_handles::RESULT_QUERY_TOOL && result_store.is_some() {
         return match result_handles::execute_result_query(tool_input, org_id, run_id, result_store) {
             Ok(output) => StepOutcome::completed(output),
@@ -1022,14 +1352,32 @@ async fn execute_step_inner(
     // every other tool keeps the deterministic tool_bridge path. The permission
     // and hook gates above apply uniformly, so a shell call is still subject to
     // the same approval/deny policy.
-    let exec = if matches!(
+    // The Do loop's browser tools run on the run's own page session, and only for a run holding a
+    // verified browser sign-in outside zero retention (WS21-S5a). The grant-backed MCP aliases keep
+    // their ExecuteStep path, and a Do name with no session is refused with its own typed answer.
+    let exec = if let Some(dispatch) =
+        browser.filter(|_| !zdr && (browser_session::is_do_tool(tool_name) || browser_act))
+    {
+        tool_bridge::execute_browser_do_tool(tool_name, tool_input, dispatch).await
+    } else if matches!(
         tool_name,
-        QUARRY_MCP_BROWSER_OBSERVE_TOOL | QUARRY_MCP_BROWSER_ACT_TOOL
+        QUARRY_MCP_BROWSER_OBSERVE_TOOL
+            | QUARRY_MCP_BROWSER_ACT_TOOL
+            | QUARRY_MCP_BROWSER_CONSOLE_TOOL
     ) {
-        tool_bridge::execute_quarry_browser_mcp(tool_name, tool_input, org_id, zdr, browser_grant)
-            .await
+        tool_bridge::execute_quarry_browser_mcp(
+            tool_name,
+            tool_input,
+            org_id,
+            zdr,
+            browser_grant,
+            run_id,
+        )
+        .await
+    } else if browser_session::is_do_tool(tool_name) {
+        tool_bridge::browser_do_unavailable(zdr)
     } else if tool_name == SHELL_TOOL {
-        execute_shell(tool_input).await
+        execute_shell(tool_input, org_id, user_id, run_id, state, sandbox).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
         let workspace_root = if let Some(sandbox) = sandbox {
             let Some(state) = state else {
@@ -1044,6 +1392,11 @@ async fn execute_step_inner(
         } else {
             None
         };
+        // The lease `ensure_space_workspace` just cached: the spawn is admitted on it (WS06-S9).
+        let lease_id: Option<String> = sandbox
+            .and(state)
+            .and_then(|state| state.sandbox_lease(run_id))
+            .map(|lease| lease.lease_id);
         // The files the request carrying this step attached, registered under the
         // run for the length of the call (`ExecuteStep`). Read here, not passed
         // down, so the model's own tool input cannot name or replace them. A
@@ -1060,25 +1413,59 @@ async fn execute_step_inner(
         } else {
             None
         };
-        // A Space run's code may write the Space tree, so it holds the run's workspace exclusively
-        // for the call: no workspace read or edit of this run interleaves with it (WS24-S4). The call
-        // can run to its timeout, and the exclusion is as long as that. A run with no Space has no tree.
-        let workspace_lock = sandbox.and(state).map(|state| state.workspace_lock(run_id));
-        let _exclusive = match &workspace_lock {
-            Some(lock) => Some(lock.write().await),
-            None => None,
-        };
-        execute_code_interpreter(
-            tool_input,
-            run_id,
-            step_id,
-            workspace_root.as_deref(),
-            ro_inputs,
-            skill_tree
-                .as_deref()
-                .map(crate::skill_mounts::SkillTree::path),
-        )
-        .await
+        // A thread-scope call (WS22-S2) holds its thread's workspace. Its lock is taken inside
+        // `execute_thread_code_interpreter`, from hydrate to save.
+        if let (Some(thread), None) = (thread_scope, sandbox) {
+            let Some(state) = state else {
+                return StepOutcome::failed("thread workspace requires run state tracking");
+            };
+            execute_thread_code_interpreter(
+                *thread,
+                state,
+                zdr || waived,
+                org_id,
+                run_id,
+                step_id,
+                tool_input,
+                ro_inputs,
+                skill_tree
+                    .as_deref()
+                    .map(crate::skill_mounts::SkillTree::path),
+            )
+            .await
+        } else {
+            // A Space run's code may write the Space tree, so it holds the run's workspace exclusively
+            // for the call: no workspace read or edit of this run interleaves with it (WS24-S4). The call
+            // can run to its timeout, and the exclusion is as long as that. A run with no Space has no tree.
+            let workspace_lock = sandbox.and(state).map(|state| state.workspace_lock(run_id));
+            let _exclusive = match &workspace_lock {
+                Some(lock) => Some(lock.write().await),
+                None => None,
+            };
+            let egress = crate::egress_proxy::run_egress().call_egress(org_id, run_id);
+            let execution = execute_code_interpreter(
+                tool_input,
+                run_id,
+                step_id,
+                workspace_root.as_deref(),
+                ro_inputs,
+                skill_tree
+                    .as_deref()
+                    .map(crate::skill_mounts::SkillTree::path),
+                lease_id.as_deref(),
+                &egress,
+            )
+            .await;
+            // The step's changes are recorded before the lock is released, so the record holds
+            // exactly what this call wrote (WS22-S4).
+            match (sandbox, state) {
+                (Some(sandbox), Some(state)) => {
+                    record_space_overlay(sandbox, state, run_id, org_id, zdr || waived, execution)
+                        .await
+                }
+                _ => execution,
+            }
+        }
     } else if crate::process_tools::is_process_tool(tool_name) {
         execute_process_tool(
             tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
@@ -1093,6 +1480,8 @@ async fn execute_step_inner(
         execute_web_search(tool_input, org_id, zdr).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         execute_web_fetch(tool_input, org_id, zdr).await
+    } else if crate::web_tools::is_crawl_tool(tool_name) {
+        execute_web_crawl_tool(tool_name, tool_input, org_id).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
         crate::runtime_loop::owner_reads::execute(
             tool_input,
@@ -1111,6 +1500,7 @@ async fn execute_step_inner(
             waived,
             min_privacy_tier,
             data_plane_bearer,
+            space_retrieval,
         )
         .await
     } else if tool_name == SAVE_MEMORY_TOOL {
@@ -1134,6 +1524,18 @@ async fn execute_step_inner(
             thread_id,
             run_id,
             zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
+    } else if tool_name == ask::ASK_TOOL {
+        execute_ask_user(
+            tool_input,
+            org_id,
+            run_id,
+            step_id,
+            thread_id,
+            zdr || waived,
             session_channel.as_ref(),
             session_bearer,
         )
@@ -1266,7 +1668,7 @@ async fn execute_step_inner(
     if let hook::HookDecision::Deny { reason } =
         hook::evaluate(hook_context, hook::HookEvent::PostToolUse, tool_name)
     {
-        return StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"));
+        return post_tool_denied(tool_name, tool_input, &reason);
     }
 
     let output = exec.output;
@@ -1282,7 +1684,7 @@ async fn execute_step_inner(
     // rendered, parked or measured, so a withheld result never reaches the model (WS26-S7).
     let compaction_triggered = output.len() > 2048;
     let local = crate::provenance::assess(tool_name, &output);
-    let screened = crate::provenance::screening_client::screen_result(
+    let mut screened = crate::provenance::screening_client::screen_result(
         crate::provenance::screening_client::production(),
         tool_name,
         output,
@@ -1294,7 +1696,42 @@ async fn execute_step_inner(
     )
     .await;
     crate::provenance::audit(tool_name, org_id, run_id, zdr, &screened.provenance);
-    let rendered = crate::provenance::render(&screened.output, &screened.provenance);
+    // Build plan WS10 S8: a flagged external result of a Space run may be held for a person's
+    // review (the model gets a placeholder with no content) or, when a person released this exact
+    // call, handed over once. `off`, and every non-Space step, renders exactly as before.
+    match crate::quarantine::apply(
+        &crate::quarantine::QuarantineCall {
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            space_scoped: sandbox.is_some(),
+            zdr,
+            waived,
+            session_channel: session_channel.as_ref(),
+            session_bearer,
+        },
+        &screened.output,
+        &screened.provenance,
+    )
+    .await
+    {
+        crate::quarantine::Verdict::Unchanged => {}
+        crate::quarantine::Verdict::Withheld(placeholder) => {
+            return StepOutcome::completed(placeholder);
+        }
+        crate::quarantine::Verdict::Released { content } => {
+            // Re-read in full: the released content is framed and flagged on its own evidence.
+            screened.provenance = crate::provenance::assess(tool_name, &content);
+            screened.output = content;
+        }
+    }
+    let rendered = crate::provenance::render(
+        &result_handles::inline_text(tool_name, &screened.output),
+        &screened.provenance,
+    );
     // An oversized read-class result is held by the run and the model gets its handle
     // (WS25-S5). The label is the render prefix alone, so the held body is exactly the
     // tool's output, and every read repeats the same verdict.
@@ -1303,19 +1740,47 @@ async fn execute_step_inner(
         .and_then(|store| {
             let prefix = crate::provenance::render("", &screened.provenance);
             let label = prefix.strip_suffix('\n').unwrap_or(&prefix);
-            store
-                .park(org_id, run_id, label, &screened.output)
-                .ok()
-                .map(|handle_id| {
-                    result_handles::handle_envelope(&handle_id, label, &screened.output)
-                })
+            result_handles::hold_for_model(store, org_id, run_id, tool_name, label, &screened.output)
         });
-    let mut outcome = StepOutcome::completed(parked.unwrap_or(rendered));
+    let mut outcome = StepOutcome::completed(with_edit_note(
+        parked.unwrap_or(rendered),
+        tool_name,
+        release.filter(|_| released),
+    ));
     outcome.compaction_triggered = compaction_triggered;
     outcome.screening_taint = (tool_name == READ_PROVIDER_ACTION_TOOL
         && screened.provenance.is_audit_worthy())
         || screened.taint;
     outcome
+}
+
+/// The result of a provider write the person edited before approving it (EP-10-S5, D8), with the
+/// note that says so first: the field names only, from the release the resume boundary built,
+/// never from the model's own arguments. The note sits outside the provenance-labelled result, as
+/// the executor's own words. Every other result is returned as it is.
+fn with_edit_note(
+    output: String,
+    tool_name: &str,
+    release: Option<&resume::ApprovedRelease>,
+) -> String {
+    match release.and_then(resume::ApprovedRelease::edit) {
+        Some(edit) if tool_name == EXECUTE_PROVIDER_ACTION_TOOL => {
+            format!("{}\n{output}", edit.sentence())
+        }
+        _ => output,
+    }
+}
+
+/// What a provider write's step record adds for an edited call (EP-10-S5): ` edited=<names>`
+/// when the result opens with the edit note [`with_edit_note`] wrote, else nothing. Field names
+/// only; the persisted record keeps no value of the edit.
+pub(crate) fn edit_step_note(output: &str) -> String {
+    output
+        .lines()
+        .next()
+        .and_then(resume::EditNote::from_sentence)
+        .map(|edit| edit.step_note())
+        .unwrap_or_default()
 }
 
 /// Run a `subagent.*` call as a REAL nested agent loop through the dispatch
@@ -1358,7 +1823,20 @@ async fn execute_subagent(
 /// privileges; a broader per-call policy is a future extension (the input
 /// contract can grow a `policy` field). Output is already secret-scrubbed by
 /// the executor before it returns here.
-async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
+///
+/// WS06-S9: a Space-scoped call (`sandbox` is `Some`) takes the run's sandbox
+/// lease first and is admitted on it. `EXECUTION_CORE_SPACE_SHELL_LEASE=enforce`
+/// refuses a call that cannot get one; `observe` (the default) runs it as before
+/// and counts it. The command starts from `/` with `PATH` as its whole
+/// environment, so no service credential reaches it.
+async fn execute_shell(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    state: Option<&crate::state::StateStore>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct ShellInput {
         program: String,
@@ -1377,10 +1855,54 @@ async fn execute_shell(tool_input: &str) -> tool_bridge::ToolExecution {
     let policy = MpSandboxPolicy::ReadOnly {
         network: MpNetworkPolicy::Disabled,
     };
-    match crate::executor::execute_sandboxed(&policy, &input.program, &input.args).await {
+    let enforce = crate::policy::ShellLeaseMode::current() == crate::policy::ShellLeaseMode::Enforce;
+    let mut lease_id: Option<String> = None;
+    if let Some(sandbox) = sandbox {
+        let leased = match state {
+            Some(state) => {
+                crate::sandbox_lease::ensure_sandbox_lease(sandbox, state, run_id, org_id, user_id)
+                    .await
+                    .map(|lease| lease.lease_id)
+                    .map_err(|status| status.message().to_owned())
+            }
+            None => Err("a Space-scoped shell call requires a sandbox lease, and run state \
+                         tracking is unavailable"
+                .to_owned()),
+        };
+        match leased {
+            Ok(id) => lease_id = Some(id),
+            Err(message) if enforce => {
+                return tool_bridge::ToolExecution {
+                    output: String::new(),
+                    error: Some(message),
+                };
+            }
+            Err(_) => crate::executor::record_shell_unleased(),
+        }
+    }
+    // Observe mode runs a call that could not get a lease as the unscoped spawn it was before.
+    let admission = crate::executor::SpawnAdmission {
+        space_scoped: lease_id.is_some(),
+        lease_id: lease_id.as_deref(),
+    };
+    match crate::executor::execute_sandboxed_in_dir_with_ro_binds(
+        &policy,
+        &input.program,
+        &input.args,
+        Path::new("/"),
+        &crate::code_interpreter::shell_env(),
+        &[],
+        crate::executor::exec_timeout(),
+        &admission,
+    )
+    .await
+    {
         Ok(o) => tool_bridge::ToolExecution {
             output: o.stdout,
-            error: if o.exit_code == 0 {
+            error: if let Some(hit) = o.limit_hit {
+                // WS06-S8: a stopped-for-limit command is a typed, non-retryable failure.
+                Some(hit.describe())
+            } else if o.exit_code == 0 {
                 None
             } else if o.stderr.is_empty() {
                 Some(format!("shell exited with code {}", o.exit_code))
@@ -1411,14 +1933,18 @@ async fn execute_code_interpreter(
     workspace_root: Option<&Path>,
     ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
     skills: Option<&Path>,
+    lease_id: Option<&str>,
+    egress: &crate::egress_proxy::CallEgress,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run_with_skills(
+    match crate::code_interpreter::run_with_egress(
         tool_input,
         run_id,
         step_id,
         workspace_root,
         ro_inputs,
         skills,
+        lease_id,
+        egress,
     )
     .await
     {
@@ -1428,6 +1954,72 @@ async fn execute_code_interpreter(
         },
         Err(error) => tool_error(error),
     }
+}
+
+/// Run a thread-scope `code_interpreter` call (WS22-S2). The thread's files are hydrated into a fresh
+/// directory for the call, and what the call changed is saved after it, whatever the program did. The
+/// thread's lock is held from hydrate to save, so two calls of one thread never interleave.
+///
+/// A workspace that cannot be opened fails the call: it never runs without the files the thread holds.
+#[allow(clippy::too_many_arguments)]
+async fn execute_thread_code_interpreter(
+    thread: crate::sandbox_lease::workspace_sync::ThreadScope<'_>,
+    state: &crate::state::StateStore,
+    persistence_free: bool,
+    org_id: &str,
+    run_id: &str,
+    step_id: &str,
+    tool_input: &str,
+    ro_inputs: Option<std::sync::Arc<crate::run_inputs::InputSet>>,
+    skills: Option<&Path>,
+) -> tool_bridge::ToolExecution {
+    let lock = state.thread_lock(org_id, thread.thread_id);
+    let _exclusive = lock.write().await;
+    let lease = match crate::sandbox_lease::ensure_thread_lease(
+        thread.sandbox_manager_client,
+        thread.bearer,
+        state,
+        run_id,
+        org_id,
+        thread.thread_id,
+        persistence_free,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(status) => return tool_error(status.message().to_owned()),
+    };
+    let workspace = match crate::sandbox_lease::workspace_sync::open(
+        thread,
+        &lease,
+        org_id,
+        persistence_free,
+    )
+    .await
+    {
+        Ok(workspace) => workspace,
+        Err(failure) => {
+            return tool_error(format!("thread workspace unavailable: {}", failure.message))
+        }
+    };
+    let execution = execute_code_interpreter(
+        tool_input,
+        run_id,
+        step_id,
+        Some(workspace.path()),
+        ro_inputs,
+        skills,
+        // The thread's own lease: a workspace-rooted spawn is refused without one (WS06-S9).
+        Some(lease.lease_id.as_str()),
+        // Thread leases are not tiered until D2-145/147/149 close.
+        &crate::egress_proxy::CallEgress::off(),
+    )
+    .await;
+    let report = match workspace.commit().await {
+        Ok(report) => report.to_json(),
+        Err(failure) => failure.to_json(),
+    };
+    crate::sandbox_lease::workspace_sync::attach_workspace(execution, report)
 }
 
 /// The S4.2 `process_*` family ([`crate::process_tools`]). Space-scoped by
@@ -1553,6 +2145,48 @@ async fn ensure_space_workspace(
         .map_err(|status| status.message().to_owned())
 }
 
+/// Records one inline Space step's changes as this run's overlay before the step returns (WS22-S4).
+/// Nothing runs unless `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH` is `enabled` and the step keeps
+/// content. The service credential is minted only when the write-through applies, so a switched-off
+/// deployment makes no extra call.
+async fn record_space_overlay(
+    sandbox: &crate::sandbox_lease::SandboxLeaseContext<'_>,
+    state: &crate::state::StateStore,
+    run_id: &str,
+    org_id: &str,
+    persistence_free: bool,
+    execution: tool_bridge::ToolExecution,
+) -> tool_bridge::ToolExecution {
+    let write_through = crate::sandbox_lease::workspace_sync::write_through_applies(
+        crate::sandbox_lease::workspace_sync::space_write_through_switched_on(),
+        persistence_free,
+    );
+    if !write_through {
+        return execution;
+    }
+    let (Some(lease), Some(workspace)) =
+        (state.sandbox_lease(run_id), state.hydrated_workspace(run_id))
+    else {
+        return execution;
+    };
+    let token = match sandbox.sandbox_tokens.token(org_id).await {
+        Ok(token) => Some(token),
+        Err(error) => {
+            tracing::warn!(%error, "Space step overlay not recorded: service credential unavailable");
+            None
+        }
+    };
+    crate::sandbox_lease::workspace_sync::record_space_step(
+        sandbox.sandbox_manager_client,
+        sandbox.cas_client,
+        token.as_deref(),
+        &lease,
+        &workspace,
+        execution,
+    )
+    .await
+}
+
 /// Runs a workspace read tool (WS24-S3) against the Space's hydrated tree. A run with no Space has
 /// no tree to read, so it is refused rather than given an empty one.
 async fn execute_workspace_tool(
@@ -1602,6 +2236,92 @@ const MAX_WEB_SEARCH_RESULTS: u32 = 8;
 /// Same treatment for the news tool, whose upstream is a third-party feed.
 const DEFAULT_NEWS_RESULTS: u32 = 10;
 const MAX_NEWS_RESULTS: u32 = 25;
+
+/// `knowledge.map`, `knowledge.crawl_site` and `knowledge.batch` (E3.7.10). The gates (switch,
+/// ZDR, the page-count approval) ran before this; here the model's numbers are clamped and the
+/// Quarry call is made on the run's org. A crawl or batch returns a job handoff, not pages.
+async fn execute_web_crawl_tool(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+) -> tool_bridge::ToolExecution {
+    use crate::web_tools::{BATCH_TOOL, CRAWL_SITE_TOOL, MAP_TOOL, MAX_BATCH_URLS};
+    #[derive(serde::Deserialize)]
+    struct CrawlInput {
+        #[serde(default)]
+        url: String,
+        #[serde(default)]
+        urls: Vec<String>,
+        #[serde(default)]
+        search: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        include_subdomains: bool,
+        #[serde(default)]
+        max_pages: Option<u32>,
+        #[serde(default)]
+        max_depth: Option<u32>,
+        #[serde(default)]
+        ingest: bool,
+    }
+    let input: CrawlInput = match serde_json::from_str(tool_input) {
+        Ok(input) => input,
+        Err(error) => return tool_error(format!("invalid {tool_name} input: {error}")),
+    };
+    let client = match crate::web_tools::WebToolsClient::from_env() {
+        Ok(Some(client)) => client,
+        Ok(None) => {
+            return tool_error(format!(
+                "{tool_name} unavailable: QUARRY_EDGE_URL not configured"
+            ));
+        }
+        Err(error) => return tool_error(format!("{tool_name} unavailable: {error}")),
+    };
+    let result = match tool_name {
+        MAP_TOOL if input.url.trim().is_empty() => Err("knowledge.map needs a url".to_owned()),
+        MAP_TOOL => {
+            client
+                .map_site(
+                    input.url.trim(),
+                    input.search.as_deref(),
+                    input.limit.unwrap_or(crate::web_tools::DEFAULT_MAP_LIMIT),
+                    input.include_subdomains,
+                    org_id,
+                )
+                .await
+        }
+        CRAWL_SITE_TOOL if input.url.trim().is_empty() => {
+            Err("knowledge.crawl_site needs a url".to_owned())
+        }
+        CRAWL_SITE_TOOL => {
+            client
+                .start_crawl(
+                    input.url.trim(),
+                    input
+                        .max_pages
+                        .unwrap_or(crate::web_tools::DEFAULT_APPROVAL_PAGES),
+                    input.max_depth,
+                    input.ingest,
+                    org_id,
+                )
+                .await
+        }
+        BATCH_TOOL if input.urls.is_empty() => Err("knowledge.batch needs urls".to_owned()),
+        BATCH_TOOL if input.urls.len() > MAX_BATCH_URLS => Err(format!(
+            "knowledge.batch takes at most {MAX_BATCH_URLS} urls per call"
+        )),
+        BATCH_TOOL => client.start_batch(&input.urls, input.ingest, org_id).await,
+        other => Err(format!("{other} is not a crawl tool")),
+    };
+    match result {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(error) => tool_error(error),
+    }
+}
 
 async fn execute_web_search(
     tool_input: &str,
@@ -1768,6 +2488,8 @@ async fn execute_governed_mcp(
     let Some(governed) = crate::mcp_gateway::GovernedMcp::shared() else {
         return tool_error("MCP gateway credential is not configured; the tool was not run".to_owned());
     };
+    // EP-4 S7: a server's form needs a run that can pause for its owner's answer (WS14-S5's
+    // executor input pause), which no run has yet, so no call allows one: the wire stays as it was.
     match governed
         .proxy(
             org_id,
@@ -1776,15 +2498,47 @@ async fn execute_governed_mcp(
             remote_tool,
             tool_input,
             view.digest(),
+            false,
         )
         .await
     {
-        Ok(output) => tool_bridge::ToolExecution {
+        Ok(crate::mcp_gateway::McpProxyOutcome::Output(output)) => tool_bridge::ToolExecution {
             output,
             error: None,
         },
+        Ok(crate::mcp_gateway::McpProxyOutcome::Elicitation(pending)) => {
+            cancel_unasked_form(governed, org_id, user_id, &pending).await
+        }
         Err(e) => tool_error(e),
     }
+}
+
+/// A form the gateway returned although the call did not allow one: a gateway fault. The held
+/// call is cancelled at once, so the server is not left waiting for an answer no one was asked
+/// for, and the model reads that the call did not complete.
+async fn cancel_unasked_form(
+    governed: &crate::mcp_gateway::GovernedMcp,
+    org_id: &str,
+    user_id: &str,
+    pending: &pb::McpElicitationPending,
+) -> tool_bridge::ToolExecution {
+    metrics::counter!("mcp_elicitation_unasked_total").increment(1);
+    let cancel = crate::mcp_gateway::ElicitationReply {
+        action: crate::mcp_gateway::ELICITATION_CANCEL,
+        answers: Vec::new(),
+    };
+    if let Err(error) = governed
+        .answer_elicitation(org_id, user_id, &pending.elicitation_id, cancel)
+        .await
+    {
+        // Ids and lengths only: the server's message and schema never reach a log.
+        tracing::warn!(
+            elicitation_id = %pending.elicitation_id,
+            error_len = error.len(),
+            "an unasked MCP form could not be cancelled; the gateway's hold expires it"
+        );
+    }
+    tool_error(crate::mcp_gateway::UNASKED_FORM.to_owned())
 }
 
 /// `web_fetch` tool — input JSON `{"url": String}`. Returns the page's cleaned
@@ -1876,11 +2630,15 @@ struct KnowledgeInputValidated {
     route: KnowledgeRoute,
 }
 
+/// The typed reason a Space-scoped run's search is refused when it holds no decision (WS18-S5).
+const PROJECT_KNOWLEDGE_UNAVAILABLE: &str = "project knowledge unavailable";
+
 /// `knowledge_search` tool — input JSON
 /// `{"query": String, "top_k"?: i32, "route"?: "hybrid"}`.
 /// Retrieves the org's own ingested knowledge (RAG) via Data Plane v2. `org_id`
 /// comes from the run context (verified), never the model's input, so a tool
 /// call cannot cross tenant boundaries. Read-only (no approval gate).
+#[allow(clippy::too_many_arguments)]
 async fn execute_knowledge_search(
     tool_input: &str,
     org_id: &str,
@@ -1895,10 +2653,23 @@ async fn execute_knowledge_search(
     // `knowledge_tools::build_request`.
     min_privacy_tier: i32,
     data_plane_bearer: Option<&str>,
+    // The run's Space retrieval (WS18-S5). A Space-scoped run with no decision is
+    // refused here, before any call, so it can never fall through to the
+    // organisation-wide search below.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
 ) -> tool_bridge::ToolExecution {
     let input = match parse_knowledge_input(tool_input) {
         Ok(i) => i,
         Err(e) => return tool_error(e),
+    };
+    let space_decision = match space_retrieval {
+        crate::knowledge_tools::SpaceRetrieval::Organisation => None,
+        crate::knowledge_tools::SpaceRetrieval::Scoped(decision) => Some(decision),
+        crate::knowledge_tools::SpaceRetrieval::Withheld => {
+            return tool_error(crate::knowledge_tools::format_degraded_error(
+                PROJECT_KNOWLEDGE_UNAVAILABLE,
+            ));
+        }
     };
     if org_id.trim().is_empty() {
         return tool_error("knowledge_search requires a run org_id (tenant scope)".to_owned());
@@ -1925,6 +2696,7 @@ async fn execute_knowledge_search(
             waived,
             min_privacy_tier,
             data_plane_bearer,
+            space_decision,
         )
         .await
     {
@@ -1969,6 +2741,33 @@ mod knowledge_route_tests {
     fn blank_query_is_rejected_before_retrieval() {
         let error = parse_knowledge_input(r#"{"query":"  "}"#).expect_err("blank query rejected");
         assert!(error.contains("non-empty"));
+    }
+
+    /// A Space-scoped run with no decision is refused before any call, with the typed degraded
+    /// envelope (WS18-S5). It is refused whatever the endpoint is configured as, because the
+    /// refusal comes before the endpoint is read: the search can never fall through to the
+    /// organisation's own.
+    #[tokio::test]
+    async fn a_space_run_with_no_decision_refuses_knowledge_search_before_any_call() {
+        let input = r#"{"query":"quarterly revenue"}"#;
+        let out = execute_knowledge_search(
+            input,
+            "org-1",
+            "user-1",
+            false,
+            false,
+            0,
+            Some("user-token"),
+            crate::knowledge_tools::SpaceRetrieval::Withheld,
+        )
+        .await;
+        assert!(out.output.is_empty(), "no result is produced: {}", out.output);
+        let error = out.error.expect("a withheld search is a tool error");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&error).expect("the refusal is a typed JSON envelope");
+        assert_eq!(parsed["status"], "degraded");
+        assert_eq!(parsed["degraded"], true);
+        assert_eq!(parsed["reason"], PROJECT_KNOWLEDGE_UNAVAILABLE);
     }
 }
 
@@ -2567,6 +3366,16 @@ async fn resolve_write_approval(
                 cause: Some(approval_cause::for_call(
                     cause, run_id, tool_name, tool_input,
                 )),
+                tool_key: String::new(),
+                action_digest: String::new(),
+                turn_origin: String::new(),
+                grant_use_token: String::new(),
+                context_json: crate::space_gate::card_context_json(
+                    tool_name,
+                    tool_input,
+                    crate::space_gate::RESUME_NONE,
+                ),
+                ..Default::default()
             },
             bearer,
         )?)
@@ -2644,6 +3453,8 @@ fn auto_posture_decision_request(
         org_id: org_id.to_owned(),
         decision_source: pb::ApprovalDecisionSource::PostureAuto as i32,
         scope: pb::ApprovalScope::Once as i32,
+        rule_proposed: false,
+        ..Default::default()
     }
 }
 
@@ -2706,8 +3517,11 @@ mod connector_tool_tests {
                     tool, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "", None, None,
                     None, zdr, waived, 0, None, None, None, &NoPolicy, None, None, None, None,
                     None,
+                    None,
                     true,
                     &[],
+                    crate::knowledge_tools::SpaceRetrieval::Organisation,
+                    None,
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -2752,7 +3566,7 @@ mod connector_tool_tests {
         let out = execute_step_inner(
             EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
-            None, true, &selected,
+            None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation, None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -3014,6 +3828,8 @@ async fn execute_reattach_skill(
             // if the row comes back.
             enabled_only: false,
             for_user_id: String::new(),
+            kinds: Vec::new(),
+            thread_id: String::new(),
         },
         bearer,
     ) {
@@ -3340,6 +4156,85 @@ async fn execute_propose_plan(
     }
 }
 
+/// `ask_user` — input JSON `{"questions": [...]}` (WS14 S4). The contract is in `crate::ask`.
+///
+/// Puts the questions to the run's owner as one `next_turn` question in session-core's
+/// `run_questions`. An answer is information, never a grant, so nothing here reads as one. A call
+/// under zero retention is refused before anything is written. A call that succeeds ends the turn
+/// in `run_rounds`, which answers with the questions as prose.
+async fn execute_ask_user(
+    tool_input: &str,
+    org_id: &str,
+    run_id: &str,
+    step_id: &str,
+    thread_id: &str,
+    zdr: bool,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    if zdr {
+        return tool_error(format!(
+            "{} unavailable: this run is Zero-Data-Retention, so a question cannot be kept. Answer \
+             from the conversation itself.",
+            ask::ASK_TOOL
+        ));
+    }
+    let items = match ask::parse(tool_input) {
+        Ok(items) => items,
+        Err(problem) => return tool_error(problem),
+    };
+    let (channel, bearer) = match memory_tool_preflight(
+        ask::ASK_TOOL,
+        org_id,
+        thread_id,
+        zdr,
+        session_channel,
+        session_bearer,
+    ) {
+        Ok(ok) => ok,
+        Err(refusal) => return refusal,
+    };
+    // A retry of the same call (same run and step) returns the question it stored.
+    let request = pb::CreateRunQuestionRequest {
+        run_id: run_id.to_owned(),
+        step_id: step_id.to_owned(),
+        org_id: org_id.to_owned(),
+        delivery: mp_contracts::user_question::DELIVERY_NEXT_TURN.to_owned(),
+        items: items.iter().map(ask::to_wire_item).collect(),
+        expires_in_seconds: 0,
+        idempotency_key: format!("{run_id}:{step_id}"),
+        // The run's own model asks here; an MCP elicitation sets these (EP-4 S5).
+        origin: String::new(),
+        origin_label: String::new(),
+    };
+    let request = match authenticated_session_request(request, &bearer) {
+        Ok(request) => request,
+        Err(error) => return tool_error(format!("{} unavailable: {error}", ask::ASK_TOOL)),
+    };
+    match OrchestrationCoreServiceClient::new(channel.clone())
+        .create_run_question(request)
+        .await
+    {
+        Ok(response) => {
+            let question_id = response
+                .into_inner()
+                .question
+                .map(|question| question.id)
+                .unwrap_or_default();
+            tool_bridge::ToolExecution {
+                output: serde_json::json!({
+                    "question_id": question_id,
+                    "state": "requested",
+                    "delivery": mp_contracts::user_question::DELIVERY_NEXT_TURN,
+                })
+                .to_string(),
+                error: None,
+            }
+        }
+        Err(status) => tool_error(format!("{} failed: {}", ask::ASK_TOOL, status.message())),
+    }
+}
+
 /// `recall_memory` — input JSON `{"query": string, "limit"?: u32}`.
 ///
 /// The active twin of the chat path's passive per-turn prefetch: a deployed
@@ -3448,6 +4343,21 @@ fn recall_memory_output(entries: Vec<serde_json::Value>, skip_reason: &str) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn post_deny_on_a_write_withholds_and_never_fails_the_step() {
+        let out = post_tool_denied("shell", r#"{"command":"make clean"}"#, "output policy");
+        assert_eq!(out.status, "completed");
+        assert_eq!(out.output, WITHHELD_RESULT_NOTICE);
+        assert!(out.error.is_empty());
+    }
+
+    #[test]
+    fn post_deny_on_a_read_keeps_the_failure_it_has_always_had() {
+        let out = post_tool_denied("web_search", r#"{"query":"x"}"#, "output policy");
+        assert_eq!(out.status, "failed");
+        assert_eq!(out.error, "blocked by post-tool hook: output policy");
+    }
 
     /// A paused user's `save_memory` comes back as a plain refusal naming the
     /// reason, and any other failure keeps its old text.
@@ -3719,6 +4629,7 @@ mod tests {
             policy,
             grant,
             None,
+            None,
         )
         .await
     }
@@ -3838,6 +4749,7 @@ mod tests {
             None,
             &policy,
             Some(&grant),
+            None,
             None,
         )
         .await;
@@ -4803,5 +5715,602 @@ mod tests {
         // The decision that agrees with the view goes on as far as the credential.
         let agreed = call(SignedToolClass::new("read", "none"), "run-stale-view").await;
         assert!(agreed.contains("credential"), "{agreed}");
+    }
+
+    // -- WS06-S9 postponed tests -------------------------------------------
+
+    /// Invariant `space_scoped_spawn_tools_always_receive_a_sandbox_context`:
+    /// the predicate that decides which tools get a `SandboxLeaseContext` in
+    /// the agent loop names every spawn tool. A new spawn tool that is left out
+    /// of it would run Space-scoped work without a lease, so the predicate's
+    /// text is pinned here (the repo's cross-file mutation-guard pattern).
+    #[test]
+    fn space_scoped_spawn_tools_always_receive_a_sandbox_context() {
+        let source = include_str!("agent.rs").replace("\r\n", "\n");
+        let start = source
+            .find("let reads_sandbox =")
+            .expect("agent.rs decides which tools read the sandbox context");
+        let predicate = &source[start..start + source[start..].find(';').expect("statement end")];
+        assert!(
+            predicate.contains("\"code_interpreter\""),
+            "code_interpreter must get the context: {predicate}"
+        );
+        assert!(
+            predicate.contains("\"shell\""),
+            "shell must get the context: {predicate}"
+        );
+        assert!(
+            predicate.contains("is_process_tool"),
+            "the process_* family must get the context: {predicate}"
+        );
+        // The context is withheld only for a run without a Space.
+        let after = &source[start..start + 1500.min(source.len() - start)];
+        assert!(
+            after.contains("reads_sandbox && !ctx.req.space_id.is_empty()"),
+            "the context must be built exactly for Space-scoped runs: {after}"
+        );
+        // And the spawn tools named are the ones the loop dispatches.
+        assert!(crate::process_tools::is_process_tool("process_start"));
+        assert_eq!(SHELL_TOOL, "shell");
+        assert_eq!(CODE_INTERPRETER_TOOL, "code_interpreter");
+    }
+
+    fn unroutable_lease_context_parts() -> (
+        crate::sandbox_manager_client::SandboxManagerClient,
+        crate::sandbox_lease::SandboxManagerTokenProvider,
+    ) {
+        (
+            crate::sandbox_manager_client::SandboxManagerClient::new(
+                tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                    .expect("valid endpoint")
+                    .connect_lazy(),
+            ),
+            crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                "http://127.0.0.1:1",
+                "execution-core",
+                "test-service-secret-at-least-32-bytes",
+            ),
+        )
+    }
+
+    fn unleased_count() -> u64 {
+        crate::executor::limit_hit_metrics()
+            .lines()
+            .find_map(|line| line.strip_prefix("space_shell_unleased_total "))
+            .and_then(|n| n.parse().ok())
+            .expect("space_shell_unleased_total is always rendered")
+    }
+
+    /// Observe mode (the default): a Space-scoped shell call that cannot get a
+    /// lease is counted and still goes on to the unscoped spawn, so the result
+    /// is never the lease refusal.
+    #[tokio::test]
+    async fn observe_mode_counts_an_unleased_space_shell_call_and_still_runs_it() {
+        if crate::policy::ShellLeaseMode::current() != crate::policy::ShellLeaseMode::Observe {
+            eprintln!("skipping: EXECUTION_CORE_SPACE_SHELL_LEASE is not observe in this process");
+            return;
+        }
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let before = unleased_count();
+        // No run state: the lease cannot be taken.
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-unleased",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        assert!(unleased_count() > before, "the unleased call must be counted");
+        if let Some(error) = &exec.error {
+            assert!(
+                !error.contains("requires a sandbox lease"),
+                "observe mode must not refuse on the lease: {error}"
+            );
+        }
+    }
+
+    /// Enforce mode needs the process-wide `OnceLock`, which tests cannot flip
+    /// (env mutation is forbidden in this crate). Run with
+    /// `EXECUTION_CORE_SPACE_SHELL_LEASE=enforce cargo test ... -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_SHELL_LEASE=enforce in the process environment"]
+    async fn enforce_mode_refuses_a_space_shell_call_without_a_lease() {
+        assert_eq!(
+            crate::policy::ShellLeaseMode::current(),
+            crate::policy::ShellLeaseMode::Enforce,
+            "run this test with EXECUTION_CORE_SPACE_SHELL_LEASE=enforce"
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let before = unleased_count();
+        // No run state tracking at all.
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-enforce",
+            None,
+            Some(&ctx),
+        )
+        .await;
+        let error = exec.error.expect("enforce refuses");
+        assert!(error.contains("requires a sandbox lease"), "{error}");
+        assert!(exec.output.is_empty());
+        // Refused, not run: nothing is counted as "ran unleased".
+        assert_eq!(unleased_count(), before);
+
+        // A state store with no cached lease and no capability client: the
+        // acquire fails closed, which enforce turns into a refusal.
+        let state = crate::state::StateStore::new();
+        let exec = execute_shell(
+            r#"{"program":"true"}"#,
+            "org-a",
+            "user-a",
+            "run-enforce-2",
+            Some(&state),
+            Some(&ctx),
+        )
+        .await;
+        assert!(exec.error.is_some(), "lease failure must refuse under enforce");
+    }
+
+    /// Linux with bwrap only: the shell command starts in `/` with `PATH` as its
+    /// whole environment, so no service credential reaches it.
+    #[tokio::test]
+    async fn the_shell_environment_is_path_only_and_the_cwd_is_root() {
+        if !crate::sandbox::is_supported() {
+            eprintln!("skipping: bwrap is not usable on this host");
+            return;
+        }
+        let exec = execute_shell(
+            r#"{"program":"sh","args":["-c","env; echo CWD=$(pwd)"]}"#,
+            "org-a",
+            "user-a",
+            "run-env",
+            None,
+            None,
+        )
+        .await;
+        assert!(exec.error.is_none(), "shell failed: {:?}", exec.error);
+        let lines: Vec<&str> = exec.output.lines().collect();
+        assert!(
+            lines.contains(&"CWD=/"),
+            "the command must start in /: {lines:?}"
+        );
+        // `sh` itself may add PWD/SHLVL/_ ; nothing else may appear.
+        let unexpected: Vec<&&str> = lines
+            .iter()
+            .filter(|line| !line.starts_with("CWD="))
+            .filter(|line| {
+                let name = line.split('=').next().unwrap_or("");
+                !matches!(name, "PATH" | "PWD" | "SHLVL" | "_" | "OLDPWD")
+            })
+            .collect();
+        assert!(unexpected.is_empty(), "leaked environment: {unexpected:?}");
+        assert!(lines.iter().any(|l| l.starts_with("PATH=")), "{lines:?}");
+    }
+
+    // -- WS10-S3 postponed tests: the three early awaiting_approval returns --------------
+
+    struct AllowAllPolicy;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowAllPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    /// A risky tool under the `ask` posture, optionally as a Space step (a sandbox context).
+    async fn ask_posture_step(
+        tool: &str,
+        sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    ) -> StepOutcome {
+        execute_step(
+            tool,
+            "{}",
+            "ask",
+            "",
+            "org-1",
+            "user-1",
+            "run-gate-fold",
+            "step-gate-fold",
+            "",
+            None,
+            None,
+            None,
+            false,
+            0,
+            None,
+            None,
+            None,
+            &AllowAllPolicy,
+            sandbox,
+        )
+        .await
+    }
+
+    fn space_step_context<'a>(
+        client: &'a crate::sandbox_manager_client::SandboxManagerClient,
+        tokens: &'a crate::sandbox_lease::SandboxManagerTokenProvider,
+    ) -> crate::sandbox_lease::SandboxLeaseContext<'a> {
+        crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: tokens,
+            process_host: None,
+        }
+    }
+
+    /// Gate off (the default) and every non-Space step keep today's early return: the ask pauses
+    /// the step at once, with no fold and no Control read.
+    #[tokio::test]
+    async fn gate_off_and_non_space_steps_keep_the_early_awaiting_approval_return() {
+        let non_space = ask_posture_step("delete_account", None).await;
+        assert_eq!(non_space.status, "awaiting_approval");
+        assert_eq!(non_space.cause, Some(CauseCode::RiskyEffectUnderAsk));
+
+        if crate::space_gate::GateMode::from_env() == crate::space_gate::GateMode::Enforce {
+            eprintln!("skipping the Space half: the gate is enforcing in this process");
+            return;
+        }
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let space = ask_posture_step("delete_account", Some(&ctx)).await;
+        assert_eq!(space.status, "awaiting_approval");
+        assert_eq!(space.cause, Some(CauseCode::RiskyEffectUnderAsk));
+    }
+
+    async fn block_row_control() -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/internal/spaces/tool-gate-view"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"tools": {"delete_account": {"level": "block", "source": "org_policy"}}}
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Enforce folds the ask with Control's level, so a `block` row refuses the call that the
+    /// early return would have paused. Needs `EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce` in the
+    /// process environment (the mode is read from it per call and the crate forbids env mutation).
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce in the process environment"]
+    async fn enforce_defers_the_ask_into_one_fold_with_control() {
+        assert_eq!(
+            crate::space_gate::GateMode::from_env(),
+            crate::space_gate::GateMode::Enforce,
+            "run with EXECUTION_CORE_SPACE_APPROVAL_GATE=enforce"
+        );
+        let server = block_row_control().await;
+        crate::space_gate::tests_support::install(
+            crate::space_gate::tests_support::client_for(&server.uri()),
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let outcome = ask_posture_step("delete_account", Some(&ctx)).await;
+        crate::space_gate::tests_support::uninstall();
+        assert_ne!(outcome.status, "awaiting_approval", "the block row must win over the ask");
+        assert!(
+            outcome.error.contains("space_tool_policy: org_policy"),
+            "error: {}",
+            outcome.error
+        );
+        // A non-Space step is never folded: it still pauses.
+        assert_eq!(ask_posture_step("delete_account", None).await.status, "awaiting_approval");
+    }
+
+    /// Shadow reads the view and counts; it changes nothing, so the early return stands.
+    #[tokio::test]
+    #[ignore = "needs EXECUTION_CORE_SPACE_APPROVAL_GATE=shadow in the process environment"]
+    async fn shadow_changes_nothing() {
+        assert_eq!(
+            crate::space_gate::GateMode::from_env(),
+            crate::space_gate::GateMode::Shadow,
+            "run with EXECUTION_CORE_SPACE_APPROVAL_GATE=shadow"
+        );
+        let server = block_row_control().await;
+        crate::space_gate::tests_support::install(
+            crate::space_gate::tests_support::client_for(&server.uri()),
+        );
+        let (client, tokens) = unroutable_lease_context_parts();
+        let ctx = space_step_context(&client, &tokens);
+        let outcome = ask_posture_step("delete_account", Some(&ctx)).await;
+        crate::space_gate::tests_support::uninstall();
+        assert_eq!(outcome.status, "awaiting_approval");
+        assert_eq!(outcome.cause, Some(CauseCode::RiskyEffectUnderAsk));
+    }
+}
+
+#[cfg(test)]
+mod standing_grant_gate_tests {
+    use super::*;
+
+    fn call<'a>(tool_name: &'a str, tool_input: &'a str, effect_class: &'a str) -> StandingCall<'a> {
+        StandingCall {
+            channel: None,
+            org_id: "org-standing",
+            user_id: "u1",
+            thread_id: "t1",
+            run_id: "r1",
+            tool_name,
+            tool_input,
+            effect_class,
+            zdr: false,
+            waived: false,
+        }
+    }
+
+    #[test]
+    fn a_standing_release_passes_only_the_exact_tool_and_operation() {
+        let send = r#"{"operation":"message.send","body":{"text":"hi"}}"#;
+        let request = standing_request(&call("execute_provider_action", send, "external_write"));
+        assert_eq!(request.action_key, "execute_provider_action:message.send");
+        assert_eq!(request.tool_name, "execute_provider_action");
+        assert_eq!(request.org_id, "org-standing");
+        assert_eq!(request.user_id, "u1");
+        let delete = standing_request(&call(
+            "execute_provider_action",
+            r#"{"operation":"message.delete"}"#,
+            "external_write",
+        ));
+        assert_ne!(
+            request.action_key, delete.action_key,
+            "another operation is another key"
+        );
+        let read = standing_request(&call("knowledge_search", "{}", "read"));
+        assert_eq!(read.action_key, "knowledge_search");
+        assert!(!request.action_key.contains("text"), "no argument value is sent");
+    }
+
+    #[test]
+    fn owner_effect_is_never_released_by_a_grant() {
+        for (tool, class) in [
+            ("tickets.create", "read"),
+            ("tickets.create", "external_write"),
+            ("mcp__srv__pay", "read"),
+        ] {
+            assert!(
+                !offers_standing_scope(CauseCode::OwnerEffectReserved, tool, "{}", class),
+                "{tool} {class}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_provider_write_is_never_released_by_a_grant() {
+        let write = r#"{"operation":"message.send"}"#;
+        for code in [CauseCode::ProviderWrite, CauseCode::AutoPostureProviderWrite] {
+            assert!(
+                !offers_standing_scope(code, "execute_provider_action", write, "external_write"),
+                "{code:?}"
+            );
+        }
+        assert!(
+            !offers_standing_scope(CauseCode::ConsentToDisclose, "execute_provider_action", write, "read"),
+            "a connected-account write is bound to its own receipt, whatever the class"
+        );
+    }
+
+    #[test]
+    fn a_hook_ask_is_not_satisfied_by_a_grant() {
+        assert!(!offers_standing_scope(CauseCode::HookAsk, "knowledge_search", "{}", "read"));
+        assert!(!offers_standing_scope(
+            CauseCode::BrowserActionRisk,
+            "browser_agent",
+            "{}",
+            "read"
+        ));
+    }
+
+    #[test]
+    fn a_read_under_a_consent_pause_is_offered_a_standing_scope() {
+        assert!(offers_standing_scope(
+            CauseCode::ConsentToDisclose,
+            "knowledge_search",
+            "{}",
+            "read"
+        ));
+        assert!(
+            !offers_standing_scope(CauseCode::ConsentToDisclose, "knowledge_search", "{}", ""),
+            "a call that states no class is offered once only"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_standing_grant_needs_a_session_to_ask() {
+        assert!(
+            !call("knowledge_search", "{}", "read").released().await,
+            "with no session there is nothing to ask, so the call pauses"
+        );
+    }
+
+    #[test]
+    fn a_zdr_or_waived_run_never_asks_for_a_standing_release() {
+        let read = call("knowledge_search", "{}", "read");
+        assert!(
+            read.grantable_with_switch(true, CauseCode::ConsentToDisclose),
+            "the control: an eligible read on an ordinary run is offered a standing scope"
+        );
+        for (zdr, waived) in [(true, false), (false, true), (true, true)] {
+            let retained = StandingCall { zdr, waived, ..read };
+            assert!(
+                !retained.grantable_with_switch(true, CauseCode::ConsentToDisclose),
+                "zdr={zdr} waived={waived}: eligible and switched on, yet no release is asked"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod space_overlay_tests {
+    use super::*;
+
+    /// With the write-through off, which is every process that does not set
+    /// `EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled`, an inline Space step's result is the
+    /// result the step returned, byte for byte, and no service credential is minted for it.
+    #[tokio::test]
+    async fn space_path_flag_off_is_byte_identical() {
+        // Nothing listens on the token endpoint: a credential request would fail and the result would
+        // carry a refused workspace part, so the equality below would catch the request.
+        let client = crate::sandbox_manager_client::SandboxManagerClient::new(
+            tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                .expect("valid endpoint")
+                .connect_lazy(),
+        );
+        let tokens = crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "test-credential",
+        );
+        let sandbox = crate::sandbox_lease::SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: None,
+            sandbox_manager_client: &client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let state = crate::state::StateStore::new();
+        state.cache_sandbox_lease(
+            "run-1",
+            crate::state::SandboxLease {
+                lease_id: "lease-1".to_owned(),
+                backend_id: "backend-1".to_owned(),
+                processes_permitted: false,
+            },
+        );
+        state.cache_hydrated_workspace(
+            "run-1",
+            crate::state::HydratedWorkspace {
+                path: std::env::temp_dir().join("execution-core-space-flag-off"),
+                baseline: std::collections::HashMap::new(),
+            },
+        );
+        let execution = tool_bridge::ToolExecution {
+            output: "{\"exit_code\":0}".to_owned(),
+            error: None,
+        };
+
+        let recorded =
+            record_space_overlay(&sandbox, &state, "run-1", "org-1", false, execution.clone()).await;
+
+        assert_eq!(recorded, execution);
+    }
+
+    #[test]
+    fn browser_scoped_signed_class_only_tightens_that_tool() {
+        let ask = crate::mcp_gateway::SignedToolClass::new("external_write", "ask");
+        let none = crate::mcp_gateway::SignedToolClass::new("read", "none");
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::AwaitApproval);
+        assert_eq!(browser_scoped_permission(false, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::Allow);
+        assert_eq!(browser_scoped_permission(true, "web_fetch", "{}", PermissionMode::Auto, PermissionDecision::Allow, &ask), PermissionDecision::Allow);
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Ask, PermissionDecision::AwaitApproval, &none), PermissionDecision::AwaitApproval);
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Deny, PermissionDecision::Deny, &none), PermissionDecision::Deny);
+        let unknown = crate::mcp_gateway::SignedToolClass::new("", "");
+        assert_eq!(browser_scoped_permission(true, BROWSER_AGENT_TOOL, "{}", PermissionMode::Auto, PermissionDecision::Allow, &unknown), PermissionDecision::AwaitApproval);
+    }
+
+}
+
+#[cfg(test)]
+mod edit_note_tests {
+    //! EP-10-S5: the released result of a provider write the person edited says so, by field
+    //! name, and its step record keeps the names and nothing of the values.
+    use super::*;
+
+    const SEND: &str = r#"{"connection_id":"conn-1","operation":"gmail.send","body":{"to":["a@example.com"],"subject":"New","bodyText":"edited"}}"#;
+    const RESULT: &str = "Executed gmail.send. Result:\n{\"id\":\"msg-1\"}";
+
+    fn release(edit: Option<resume::EditNote>) -> resume::ApprovedRelease {
+        let gate = crate::permission::RunGate::with_gate(
+            crate::capability_policy::ToolClassGate::Off,
+            "org-1",
+            "run-1",
+        );
+        resume::ApprovedRelease::new(gate, "s2.tool_1_approved", EXECUTE_PROVIDER_ACTION_TOOL, SEND)
+            .expect("a provider write is releasable")
+            .with_edit(edit)
+    }
+
+    fn subject_and_body() -> resume::EditNote {
+        let sentence = "The person edited subject, body before approving; the sent version differs \
+                        from your draft. Do not quote your draft as what was sent.";
+        resume::EditNote::from_sentence(sentence).expect("a sentence the note builds")
+    }
+
+    #[test]
+    fn an_edited_release_opens_its_result_with_the_field_names() {
+        let noted = release(Some(subject_and_body()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
+        let (first, rest) = output.split_once('\n').expect("the note is a line of its own");
+        assert_eq!(first, subject_and_body().sentence());
+        assert_eq!(rest, RESULT, "the provider's result follows unchanged");
+        assert!(!output.contains("New") && !output.contains("edited\""), "names only, never values");
+        // The verdict line a write's step record keeps stays the last line.
+        assert_eq!(output.lines().last(), RESULT.lines().last());
+    }
+
+    #[test]
+    fn an_unedited_release_and_every_other_call_keep_their_result() {
+        let plain = release(None);
+        let noted = release(Some(subject_and_body()));
+        assert_eq!(
+            with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&plain)),
+            RESULT
+        );
+        assert_eq!(with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, None), RESULT);
+        assert_eq!(with_edit_note(RESULT.to_owned(), "shell", Some(&noted)), RESULT);
+    }
+
+    #[test]
+    fn the_step_record_keeps_the_edited_names_and_nothing_else() {
+        let noted = release(Some(subject_and_body()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&noted));
+        assert_eq!(edit_step_note(&output), " edited=subject,body_text");
+        let unnamed = release(Some(resume::EditNote::unnamed()));
+        let output = with_edit_note(RESULT.to_owned(), EXECUTE_PROVIDER_ACTION_TOOL, Some(&unnamed));
+        assert_eq!(edit_step_note(&output), " edited=unnamed");
+        // A result with no note adds nothing, so a write's record is byte-identical to before.
+        assert_eq!(edit_step_note(RESULT), "");
+        assert_eq!(edit_step_note(""), "");
+        // A line that only resembles the note is not taken for one.
+        assert_eq!(edit_step_note("The person edited subject before approving.\nx"), "");
     }
 }

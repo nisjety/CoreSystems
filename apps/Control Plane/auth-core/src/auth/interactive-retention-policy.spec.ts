@@ -7,6 +7,7 @@ import {
   RetentionPostureUnavailableError,
   resetInteractiveRetentionCacheForTests,
   resolveInteractiveRetentionPosture,
+  resolveFreshExecutionRetentionProof,
 } from './interactive-retention-policy';
 
 const SERVICE_TOKEN = 'unit-spec-service-token-0123456789abcdef0123';
@@ -110,6 +111,42 @@ describe('resolveInteractiveRetentionPosture', () => {
     jest.useRealTimers();
     jest.restoreAllMocks();
     process.env = { ...originalEnv };
+  });
+
+  it('issues fresh execution proof only for an explicitly non-ZDR current org-core result', async () => {
+    const fetchSpy = servesPostures({ plain: PLAIN_ORG, zdr: ZDR_ORG, lapsed: LAPSED_ORG });
+    expect(await resolveFreshExecutionRetentionProof('plain')).toEqual({
+      orgId: 'plain', authority: 'fresh-interactive-org-retention-policy', zdr: false,
+    });
+    expect(await resolveFreshExecutionRetentionProof('zdr')).toBeUndefined();
+    expect(await resolveFreshExecutionRetentionProof('lapsed')).toBeUndefined();
+    expect(await resolveFreshExecutionRetentionProof('missing')).toBeUndefined();
+    expect(await resolveFreshExecutionRetentionProof('invalid/org')).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('never treats a cached or stale false posture as fresh execution proof', async () => {
+    let available = true;
+    const fetchSpy = fakeOrgCore(() => available
+      ? { body: PLAIN_ORG }
+      : { error: new Error('org-core unavailable') });
+    expect(await resolveInteractiveRetentionPosture('org-a')).toEqual(NOT_ZDR);
+    available = false;
+    expect(await resolveInteractiveRetentionPosture('org-a')).toEqual(NOT_ZDR);
+    expect(await resolveFreshExecutionRetentionProof('org-a')).toBeUndefined();
+    jest.advanceTimersByTime(RETENTION_POSTURE_FRESH_TTL_MS + 1);
+    expect(await resolveInteractiveRetentionPosture('org-a')).toEqual(NOT_ZDR);
+    expect(await resolveFreshExecutionRetentionProof('org-a')).toBeUndefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('never upgrades the missing-org default or malformed responses into proof', async () => {
+    fakeOrgCore((id) => id === 'missing'
+      ? { status: 404, body: { error: 'organization not found' } }
+      : { body: { zdrIntent: false } });
+    expect(await resolveInteractiveRetentionPosture('missing')).toEqual(NOT_ZDR);
+    expect(await resolveFreshExecutionRetentionProof('missing')).toBeUndefined();
+    expect(await resolveFreshExecutionRetentionProof('malformed')).toBeUndefined();
   });
 
   describe('the org-core request', () => {

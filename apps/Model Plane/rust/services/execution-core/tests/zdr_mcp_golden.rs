@@ -37,10 +37,10 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 /// The enforcement rows of the canonical matrix when this test was written, and how they split by
 /// decision (the counts `loop_fold_zdr_matrix.rs` pins). A row added or removed without this file being
 /// read is a change nobody reviewed against the MCP gate.
-const ENFORCEMENT_ROWS: usize = 27;
-const ZDR: usize = 4;
+const ENFORCEMENT_ROWS: usize = 33;
+const ZDR: usize = 7;
 const PERSISTENT: usize = 3;
-const WAIVED: usize = 2;
+const WAIVED: usize = 5;
 const REFUSE: usize = 18;
 
 /// The tool every row is driven with: a registry tool, which the gate refuses by its `mcp__` prefix.

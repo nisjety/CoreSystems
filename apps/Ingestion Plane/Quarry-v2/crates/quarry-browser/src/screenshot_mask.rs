@@ -14,9 +14,14 @@
 //! - an image with nothing to paint is returned untouched, byte for byte.
 //!
 //! Flags: `QUARRY_BROWSER_SCREENSHOT_MASK=on|off` (default on; `off` is honoured
-//! only outside `ENVIRONMENT=production`) and `QUARRY_BROWSER_SCREENSHOT_OOPIF=
-//! allow|mask` (default `allow`: cross-origin iframes are counted, not looked
-//! into; `mask` blanks every cross-origin iframe rectangle).
+//! only outside `ENVIRONMENT=production`), `QUARRY_BROWSER_SCREENSHOT_OOPIF=
+//! allow|mask|withhold` (default `allow`: cross-origin iframes are counted, not
+//! looked into; `mask` blanks every cross-origin iframe rectangle; `withhold`
+//! refuses the image when a cross-origin iframe is in it, because its content
+//! cannot be scanned) and `QUARRY_BROWSER_SCREENSHOT_SCAN_WORLD=main|isolated`
+//! (default `main`: the scan script runs in the page's own JavaScript world;
+//! `isolated` runs it in a CDP isolated world a hostile page cannot tamper with,
+//! and withholds when that world cannot be made).
 
 // Without the Chromium feature nothing calls the plan, so the helpers are
 // exercised only by the unit tests.
@@ -24,7 +29,7 @@
 
 use std::io::Cursor;
 
-use crate::sensitive_rects::{CssRect, RectScan};
+use crate::sensitive_rects::{CssRect, RectScan, ScanTransport, ScanWorld};
 
 /// The fill colour, `#1f2937`.
 pub const MASK_RGB: [u8; 3] = [0x1f, 0x29, 0x37];
@@ -190,6 +195,10 @@ pub enum OopifMode {
     Allow,
     /// Blank every cross-origin iframe rectangle.
     Mask,
+    /// Refuse the image when a cross-origin iframe with an area lies inside it:
+    /// its content cannot be looked into, so it cannot be shown as it is. A frame
+    /// with no area shows nothing and does not count.
+    Withhold,
 }
 
 /// The two flags.
@@ -197,6 +206,8 @@ pub enum OopifMode {
 pub struct MaskConfig {
     pub mask: bool,
     pub oopif: OopifMode,
+    /// Which JavaScript world the scan script runs in.
+    pub world: ScanWorld,
 }
 
 impl Default for MaskConfig {
@@ -204,6 +215,7 @@ impl Default for MaskConfig {
         Self {
             mask: true,
             oopif: OopifMode::Allow,
+            world: ScanWorld::Main,
         }
     }
 }
@@ -211,17 +223,25 @@ impl Default for MaskConfig {
 impl MaskConfig {
     /// Read the flag values. Only `off`, `0`, `false` and `no` turn masking off,
     /// and only when `production` is false; anything else leaves it on. Only
-    /// `mask` turns the strict iframe mode on.
+    /// `mask` and `withhold` turn a strict iframe mode on, and only `isolated`
+    /// selects the isolated scan world.
     #[must_use]
-    pub fn from_values(mask: Option<&str>, oopif: Option<&str>, production: bool) -> Self {
+    pub fn from_values(
+        mask: Option<&str>,
+        oopif: Option<&str>,
+        world: Option<&str>,
+        production: bool,
+    ) -> Self {
         let lower = |raw: Option<&str>| raw.map(|value| value.trim().to_ascii_lowercase());
         let off = matches!(lower(mask).as_deref(), Some("off" | "0" | "false" | "no"));
         Self {
             mask: production || !off,
             oopif: match lower(oopif).as_deref() {
                 Some("mask") => OopifMode::Mask,
+                Some("withhold") => OopifMode::Withhold,
                 _ => OopifMode::Allow,
             },
+            world: ScanWorld::from_value(world),
         }
     }
 
@@ -242,6 +262,9 @@ impl MaskConfig {
             std::env::var("QUARRY_BROWSER_SCREENSHOT_OOPIF")
                 .ok()
                 .as_deref(),
+            std::env::var("QUARRY_BROWSER_SCREENSHOT_SCAN_WORLD")
+                .ok()
+                .as_deref(),
             production,
         )
     }
@@ -260,6 +283,9 @@ pub enum Withheld {
     ImageUnsupported,
     /// The painting failed.
     MaskFailed,
+    /// A cross-origin iframe is in the image and `QUARRY_BROWSER_SCREENSHOT_OOPIF=
+    /// withhold` is set: its content cannot be scanned.
+    OopifUnscannable,
 }
 
 impl Withheld {
@@ -271,6 +297,7 @@ impl Withheld {
             Self::ImageTooLarge => "screenshot_withheld:image_too_large",
             Self::ImageUnsupported => "screenshot_withheld:image_unsupported",
             Self::MaskFailed => "screenshot_withheld:mask_failed",
+            Self::OopifUnscannable => "screenshot_withheld:oopif_unscannable",
         }
     }
 }
@@ -315,6 +342,17 @@ pub fn plan_mask(
         css.extend(scan.oopif_rects.iter().copied());
     }
     let local = (origin.0 - scan.scroll_x, origin.1 - scan.scroll_y);
+    if config.oopif == OopifMode::Withhold {
+        // `oopif_rects` holds the frames that have an area; one with none shows
+        // nothing. A frame that lies wholly outside this image is not in it.
+        let in_image = scan
+            .oopif_rects
+            .iter()
+            .any(|frame| scale_rect(*frame, local, scan.dpr, 0.0, image).is_some());
+        if in_image {
+            return Err(Withheld::OopifUnscannable);
+        }
+    }
     let rects = css
         .into_iter()
         .filter_map(|rect| scale_rect(rect, local, scan.dpr, PADDING_CSS_PX, image))
@@ -349,7 +387,6 @@ pub fn apply_plan(
 }
 
 /// Where the image's top-left corner is on the page.
-#[cfg(feature = "chromiumoxide")]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Origin {
     /// Decide from the image size and the scan (`legacy_origin`): the capture took no clip.
@@ -359,7 +396,6 @@ pub enum Origin {
 }
 
 /// What one masked capture produced.
-#[cfg(feature = "chromiumoxide")]
 #[derive(Debug)]
 pub enum Captured<M> {
     Image {
@@ -377,7 +413,6 @@ pub enum Captured<M> {
     },
 }
 
-#[cfg(feature = "chromiumoxide")]
 impl<M> Captured<M> {
     /// The image and what came with it, or the `SecurityBlocked` error a caller
     /// that needs the image gets when it was withheld.
@@ -425,14 +460,14 @@ impl<M> Captured<M> {
 /// moved the rectangles, so the scan is redone once; a second scroll withholds.
 /// With `config.mask` off (outside production only) the image is captured as it
 /// is and the state is `none`. `mask_ms` is the time spent outside `capture`.
-#[cfg(feature = "chromiumoxide")]
-pub async fn capture_masked<M, F, Fut>(
-    page: &::chromiumoxide::Page,
+pub async fn capture_masked<T, M, F, Fut>(
+    page: &T,
     config: &MaskConfig,
     origin: Origin,
     mut capture: F,
 ) -> quarry_core::QuarryResult<Captured<M>>
 where
+    T: ScanTransport + ?Sized,
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = quarry_core::QuarryResult<(Vec<u8>, M)>>,
 {
@@ -455,7 +490,7 @@ where
     let mut spent = Duration::ZERO;
     for _attempt in 0..2 {
         let scan_started = Instant::now();
-        let Some(scan) = scan_page(page).await else {
+        let Some(scan) = scan_page(page, config.world).await else {
             return Ok(Captured::Withheld {
                 reason: Withheld::SensitiveFieldUnresolved,
                 oopif_frames: 0,
@@ -468,9 +503,9 @@ where
         // Only a scan with something to paint depends on where the page was
         // scrolled; with nothing sensitive on the page a scroll changes nothing.
         let depends_on_scroll = !scan.rects.is_empty()
-            || (config.oopif == OopifMode::Mask && !scan.oopif_rects.is_empty());
+            || (config.oopif != OopifMode::Allow && !scan.oopif_rects.is_empty());
         let still = if depends_on_scroll {
-            scroll_now(page)
+            scroll_now(page, config.world)
                 .await
                 .is_some_and(|now| same_scroll((scan.scroll_x, scan.scroll_y), now))
         } else {
@@ -530,17 +565,21 @@ where
 /// is refused when a rendered sensitive field holds a value, when a sensitive
 /// field's rectangle is unknown, or when the scan failed. With masking off
 /// (outside production only) it is allowed.
-#[cfg(feature = "chromiumoxide")]
-pub async fn pdf_allowed(
-    page: &::chromiumoxide::Page,
+/// With `QUARRY_BROWSER_SCREENSHOT_OOPIF=withhold` it is also refused when a
+/// cross-origin iframe with an area is on the page.
+pub async fn pdf_allowed<T: ScanTransport + ?Sized>(
+    page: &T,
     config: &MaskConfig,
 ) -> Result<(), &'static str> {
     if !config.mask {
         return Ok(());
     }
-    match crate::sensitive_rects::scan_page(page).await {
+    match crate::sensitive_rects::scan_page(page, config.world).await {
         None => Err(PDF_WITHHELD_UNRESOLVED),
         Some(scan) if scan.unresolved_visible > 0 => Err(PDF_WITHHELD_UNRESOLVED),
+        Some(scan) if config.oopif == OopifMode::Withhold && !scan.oopif_rects.is_empty() => {
+            Err(PDF_WITHHELD_OOPIF)
+        }
         Some(scan) if scan.sensitive_with_value > 0 => Err(PDF_WITHHELD_VALUE),
         Some(_) => Ok(()),
     }
@@ -549,12 +588,13 @@ pub async fn pdf_allowed(
 /// The closed reasons a PDF is refused.
 pub const PDF_WITHHELD_VALUE: &str = "pdf_withheld:sensitive_field_value";
 pub const PDF_WITHHELD_UNRESOLVED: &str = "pdf_withheld:sensitive_field_unresolved";
+pub const PDF_WITHHELD_OOPIF: &str = "pdf_withheld:oopif_unscannable";
 
 /// The error a refused PDF returns: `SecurityBlocked`, 403, with the closed reason.
 pub fn pdf_withheld_error(reason: &'static str) -> quarry_core::error::QuarryError {
     quarry_core::error::QuarryError::new(
         quarry_core::error::ErrorCode::SecurityBlocked,
-        "the pdf was withheld because a sensitive field holds a value",
+        "the pdf was withheld because a sensitive field holds a value or a cross-origin frame cannot be scanned",
     )
     .with_details(serde_json::json!({ "reason": reason }))
 }
@@ -855,7 +895,7 @@ mod tests {
             w: 50.0,
             h: 50.0,
         }];
-        let strict = MaskConfig::from_values(None, Some("mask"), true);
+        let strict = MaskConfig::from_values(None, Some("mask"), None, true);
         let viewport_origin = (0.0, 300.0);
         let plan = plan_mask(&s, &strict, viewport_origin, (200, 200)).expect("plan");
         assert_eq!(plan.rects.len(), 1);
@@ -950,18 +990,348 @@ mod tests {
 
     #[test]
     fn the_flags_default_on_and_off_is_ignored_in_production() {
-        assert!(MaskConfig::from_values(None, None, false).mask);
-        assert!(!MaskConfig::from_values(Some("off"), None, false).mask);
-        assert!(!MaskConfig::from_values(Some(" FALSE "), None, false).mask);
-        assert!(MaskConfig::from_values(Some("off"), None, true).mask);
-        assert!(MaskConfig::from_values(Some("garbage"), None, false).mask);
+        assert!(MaskConfig::from_values(None, None, None, false).mask);
+        assert!(!MaskConfig::from_values(Some("off"), None, None, false).mask);
+        assert!(!MaskConfig::from_values(Some(" FALSE "), None, None, false).mask);
+        assert!(MaskConfig::from_values(Some("off"), None, None, true).mask);
+        assert!(MaskConfig::from_values(Some("garbage"), None, None, false).mask);
         assert_eq!(
-            MaskConfig::from_values(None, None, true).oopif,
+            MaskConfig::from_values(None, None, None, true).oopif,
             OopifMode::Allow
         );
         assert_eq!(
-            MaskConfig::from_values(None, Some("Mask"), true).oopif,
+            MaskConfig::from_values(None, Some("Mask"), None, true).oopif,
             OopifMode::Mask
+        );
+    }
+
+    #[test]
+    fn the_new_flags_default_to_the_behaviour_as_built() {
+        let default = MaskConfig::from_values(None, None, None, true);
+        assert_eq!(default, MaskConfig::default());
+        assert_eq!(default.oopif, OopifMode::Allow);
+        assert_eq!(default.world, ScanWorld::Main);
+        // Garbage in either flag is the default, never a stricter or looser mode.
+        let junk = MaskConfig::from_values(None, Some("on"), Some("yes"), true);
+        assert_eq!(junk, MaskConfig::default());
+        assert_eq!(
+            MaskConfig::from_values(None, Some(" WITHHOLD "), None, true).oopif,
+            OopifMode::Withhold
+        );
+        assert_eq!(
+            MaskConfig::from_values(None, None, Some("Isolated"), false).world,
+            ScanWorld::Isolated
+        );
+        // The world flag is not a production-only switch: it stays as set.
+        assert_eq!(
+            MaskConfig::from_values(None, None, Some("isolated"), true).world,
+            ScanWorld::Isolated
+        );
+    }
+
+    fn frame(x: f64, y: f64, w: f64, h: f64) -> CssRect {
+        CssRect { x, y, w, h }
+    }
+
+    #[test]
+    fn withhold_mode_refuses_an_image_that_has_a_cross_origin_frame_in_it() {
+        let mut s = scan(vec![]);
+        s.oopif_frames = 1;
+        s.oopif_rects = vec![frame(10.0, 10.0, 50.0, 50.0)];
+        let config = MaskConfig::from_values(None, Some("withhold"), None, true);
+        let viewport_origin = (0.0, 300.0);
+        let refused = plan_mask(&s, &config, viewport_origin, (200, 200)).expect_err("refused");
+        assert_eq!(refused, Withheld::OopifUnscannable);
+        assert_eq!(refused.note(), "screenshot_withheld:oopif_unscannable");
+        // Allow mode still returns the image, counting the frame.
+        let allow =
+            plan_mask(&s, &MaskConfig::default(), viewport_origin, (200, 200)).expect("plan");
+        assert_eq!(allow.oopif_frames, 1);
+    }
+
+    #[test]
+    fn withhold_mode_ignores_a_frame_with_no_area_and_a_frame_outside_the_image() {
+        let config = MaskConfig::from_values(None, Some("withhold"), None, true);
+        // Counted but with no usable rectangle (zero area): it shows nothing.
+        let mut s = scan(vec![]);
+        s.oopif_frames = 1;
+        let plan = plan_mask(&s, &config, (0.0, 300.0), (200, 200)).expect("plan");
+        assert!(plan.rects.is_empty());
+        assert_eq!(plan.oopif_frames, 1, "it is still counted");
+        // A frame 2000 px down is not in a 200 px viewport image at scroll 300.
+        s.oopif_rects = vec![frame(10.0, 2000.0, 50.0, 50.0)];
+        s.oopif_frames = 1;
+        assert!(plan_mask(&s, &config, (0.0, 300.0), (200, 200)).is_ok());
+        // The same frame is in a whole-page image.
+        assert_eq!(
+            plan_mask(&s, &config, (0.0, 0.0), (400, 3000)),
+            Err(Withheld::OopifUnscannable)
+        );
+    }
+
+    #[test]
+    fn withhold_mode_still_masks_the_fields_it_can_see_and_unresolved_wins() {
+        let config = MaskConfig::from_values(None, Some("withhold"), None, true);
+        let mut s = scan(vec![frame(20.0, 50.0, 100.0, 20.0)]);
+        // No frame: the field is painted as in any mode.
+        let plan = plan_mask(&s, &config, (0.0, 300.0), (1280, 800)).expect("plan");
+        assert_eq!(plan.rects.len(), 1);
+        // An unresolved field withholds first, with its own note.
+        s.unresolved_visible = 1;
+        s.oopif_rects = vec![frame(0.0, 0.0, 50.0, 50.0)];
+        assert_eq!(
+            plan_mask(&s, &config, (0.0, 300.0), (1280, 800)),
+            Err(Withheld::SensitiveFieldUnresolved)
+        );
+    }
+
+    // The mock driver: a page that answers the scan script with a canned answer,
+    // and a capture closure that returns a PNG.
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct MockPage {
+        main: serde_json::Value,
+        isolated: Option<serde_json::Value>,
+        scroll: serde_json::Value,
+        worlds: Mutex<Vec<ScanWorld>>,
+        scans: AtomicUsize,
+    }
+
+    impl MockPage {
+        fn new(main: serde_json::Value, isolated: Option<serde_json::Value>) -> Self {
+            Self {
+                main,
+                isolated,
+                scroll: serde_json::json!([0.0, 0.0]),
+                worlds: Mutex::new(Vec::new()),
+                scans: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ScanTransport for MockPage {
+        async fn scan_eval(&self, script: &str, world: ScanWorld) -> Option<serde_json::Value> {
+            self.worlds.lock().expect("worlds").push(world);
+            if script == crate::sensitive_rects::SCROLL_SCRIPT {
+                return Some(self.scroll.clone());
+            }
+            self.scans.fetch_add(1, Ordering::SeqCst);
+            match world {
+                ScanWorld::Main => Some(self.main.clone()),
+                ScanWorld::Isolated => self.isolated.clone(),
+            }
+        }
+    }
+
+    fn scan_json(
+        fields: Vec<serde_json::Value>,
+        oopif: Vec<serde_json::Value>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "ok": true, "truncated": false, "scroll": [0.0, 0.0],
+            "viewport": [100.0, 100.0], "dpr": 1.0,
+            "fields": fields, "oopif": oopif,
+        })
+    }
+
+    fn password_json() -> serde_json::Value {
+        serde_json::json!({
+            "facts": { "input_type": "password", "name_attr": "pw" },
+            "has_value": true,
+            "rect": { "x": 10.0, "y": 10.0, "w": 40.0, "h": 20.0 },
+        })
+    }
+
+    fn frame_json() -> serde_json::Value {
+        serde_json::json!({ "x": 5.0, "y": 60.0, "w": 80.0, "h": 30.0 })
+    }
+
+    async fn run_capture(
+        page: &MockPage,
+        config: &MaskConfig,
+    ) -> quarry_core::QuarryResult<Captured<()>> {
+        capture_masked(page, config, Origin::Page(0.0, 0.0), || async {
+            Ok((gradient_png(100, 100), ()))
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn mock_driver_the_isolated_world_masks_what_a_hostile_main_world_hides() {
+        // The page's own world reports a clean page; the isolated world is truthful.
+        let page = MockPage::new(
+            scan_json(vec![], vec![]),
+            Some(scan_json(vec![password_json()], vec![])),
+        );
+        let isolated = MaskConfig::from_values(None, None, Some("isolated"), true);
+        match run_capture(&page, &isolated).await.expect("capture") {
+            Captured::Image { state, rects, .. } => {
+                assert_eq!(state, quarry_core::redaction::ScreenshotState::Masked);
+                assert_eq!(rects.len(), 1);
+            }
+            other => panic!("expected a masked image, got {other:?}"),
+        }
+        assert!(
+            page.worlds
+                .lock()
+                .expect("worlds")
+                .iter()
+                .all(|w| *w == ScanWorld::Isolated),
+            "the scan and the scroll check both ran in the isolated world"
+        );
+        // The default (main world, as built) is fooled: this is the exposure.
+        let page = MockPage::new(
+            scan_json(vec![], vec![]),
+            Some(scan_json(vec![password_json()], vec![])),
+        );
+        match run_capture(&page, &MaskConfig::default())
+            .await
+            .expect("capture")
+        {
+            Captured::Image { state, rects, .. } => {
+                assert_eq!(
+                    state,
+                    quarry_core::redaction::ScreenshotState::NotApplicable
+                );
+                assert!(rects.is_empty());
+            }
+            other => panic!("expected an unmasked image, got {other:?}"),
+        }
+        assert!(page
+            .worlds
+            .lock()
+            .expect("worlds")
+            .iter()
+            .all(|w| *w == ScanWorld::Main));
+    }
+
+    #[tokio::test]
+    async fn mock_driver_an_isolated_world_that_cannot_be_made_withholds_the_image() {
+        let page = MockPage::new(scan_json(vec![], vec![]), None);
+        let isolated = MaskConfig::from_values(None, None, Some("isolated"), true);
+        match run_capture(&page, &isolated).await.expect("capture") {
+            Captured::Withheld { reason, .. } => {
+                assert_eq!(reason, Withheld::SensitiveFieldUnresolved);
+            }
+            other => panic!("expected a withheld image, got {other:?}"),
+        }
+        assert!(
+            page.worlds
+                .lock()
+                .expect("worlds")
+                .iter()
+                .all(|w| *w == ScanWorld::Isolated),
+            "no fallback to the main world"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_driver_withhold_mode_refuses_a_capture_with_a_cross_origin_frame() {
+        let page = MockPage::new(scan_json(vec![], vec![frame_json()]), None);
+        let withhold = MaskConfig::from_values(None, Some("withhold"), None, true);
+        match run_capture(&page, &withhold).await.expect("capture") {
+            Captured::Withheld {
+                reason,
+                oopif_frames,
+                ..
+            } => {
+                assert_eq!(reason, Withheld::OopifUnscannable);
+                assert_eq!(oopif_frames, 1);
+            }
+            other => panic!("expected a withheld image, got {other:?}"),
+        }
+        // As a record the runtime stamps from, and as the error an explicit
+        // screenshot action gets.
+        let record = run_capture(&page, &withhold)
+            .await
+            .expect("capture")
+            .into_masked_screenshot();
+        assert!(record.bytes.is_none());
+        assert_eq!(
+            record.state,
+            quarry_core::redaction::ScreenshotState::Withheld
+        );
+        assert_eq!(record.note, Some("screenshot_withheld:oopif_unscannable"));
+        assert!(run_capture(&page, &withhold)
+            .await
+            .expect("capture")
+            .into_image()
+            .is_err());
+        // Allow (the default) and Mask keep returning an image.
+        assert!(matches!(
+            run_capture(&page, &MaskConfig::default())
+                .await
+                .expect("capture"),
+            Captured::Image {
+                oopif_frames: 1,
+                ..
+            }
+        ));
+        let mask = MaskConfig::from_values(None, Some("mask"), None, true);
+        assert!(matches!(
+            run_capture(&page, &mask).await.expect("capture"),
+            Captured::Image {
+                state: quarry_core::redaction::ScreenshotState::Masked,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_driver_withhold_mode_sees_the_frame_that_the_isolated_scan_finds() {
+        // The page's own world hides its iframe; the isolated world reports it.
+        let page = MockPage::new(
+            scan_json(vec![], vec![]),
+            Some(scan_json(vec![], vec![frame_json()])),
+        );
+        let config = MaskConfig::from_values(None, Some("withhold"), Some("isolated"), true);
+        assert!(matches!(
+            run_capture(&page, &config).await.expect("capture"),
+            Captured::Withheld {
+                reason: Withheld::OopifUnscannable,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_driver_masking_off_scans_nothing() {
+        let page = MockPage::new(scan_json(vec![password_json()], vec![]), None);
+        let off = MaskConfig::from_values(Some("off"), None, Some("isolated"), false);
+        match run_capture(&page, &off).await.expect("capture") {
+            Captured::Image { state, .. } => {
+                assert_eq!(
+                    state,
+                    quarry_core::redaction::ScreenshotState::NotApplicable
+                );
+            }
+            other => panic!("expected the image as it is, got {other:?}"),
+        }
+        assert_eq!(page.scans.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mock_driver_pdf_follows_the_world_and_the_withhold_mode() {
+        let hidden = scan_json(vec![], vec![]);
+        let seen = scan_json(vec![password_json()], vec![frame_json()]);
+        // Main world fooled, isolated truthful: only the isolated config refuses.
+        let page = MockPage::new(hidden, Some(seen));
+        assert_eq!(pdf_allowed(&page, &MaskConfig::default()).await, Ok(()));
+        let isolated = MaskConfig::from_values(None, None, Some("isolated"), true);
+        assert_eq!(pdf_allowed(&page, &isolated).await, Err(PDF_WITHHELD_VALUE));
+        // A page with only a cross-origin frame: refused under withhold, not otherwise.
+        let page = MockPage::new(scan_json(vec![], vec![frame_json()]), None);
+        assert_eq!(pdf_allowed(&page, &MaskConfig::default()).await, Ok(()));
+        let withhold = MaskConfig::from_values(None, Some("withhold"), None, true);
+        assert_eq!(pdf_allowed(&page, &withhold).await, Err(PDF_WITHHELD_OOPIF));
+        // An isolated config whose world cannot be made fails closed.
+        let page = MockPage::new(scan_json(vec![], vec![]), None);
+        assert_eq!(
+            pdf_allowed(&page, &isolated).await,
+            Err(PDF_WITHHELD_UNRESOLVED)
         );
     }
 }

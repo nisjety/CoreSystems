@@ -23,6 +23,19 @@ import { join } from 'node:path';
 // test (quarry-edge tests/zdr_claim_floor.rs) re-signs these exact claim sets
 // and drives the real router; this spec keeps them honest against the mint.
 //
+// WS7.I: the same tokens also carry the org web policy (`web_policy`, beside
+// and independent of `zdr`). The golden is minted with WEB_POLICY_CLAIM_ENABLED
+// on and an org-core double that answers the web-policy route: one org holds a
+// policy (the answer of org-core's own contract golden,
+// org-core/internal/http/testdata/auth-core-org-core-web-policy.contract.json),
+// every other org has none (`{"v":1,"rev":"0"}`). W3 E3.2-f adds one org whose
+// policy states only per-origin consent defaults (`browser.consent.max_scope`
+// in caps), so the edge sees the version 1 claim carry them. The `zdr` values
+// of the four original cases are unchanged by the claim; the spec says so
+// explicitly.
+// A third copy lives in the Model Plane tree (model-gateway's tests); it is
+// re-vendored by that plane's owner from the bytes this spec writes.
+//
 // Each consuming tree holds its own copy, so each side runs from its own Docker
 // build context and reads nothing outside it:
 //   - canonical copy: src/auth/fixtures/quarry-token-claims.golden.json (+ the
@@ -61,6 +74,7 @@ jest.mock('./interactive-retention-policy', () => ({
 import { ConvexTokenService } from './convex-token.service';
 import { resetInteractiveRetentionCacheForTests } from './interactive-retention-policy';
 import { PlaneTokenController } from './plane-token.controller';
+import { resetWebPolicyCacheForTests } from './web-policy';
 
 const GOLDEN_NAME = 'quarry-token-claims.golden.json';
 const SHA_NAME = 'quarry-token-claims.golden.sha256';
@@ -71,6 +85,42 @@ const quarryFixtures = join(
   '../../../../Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/auth-core',
 );
 const ORG_CORE_TOKEN = 'quarry-golden-org-core-token-0123456789abcdef';
+const WEB_POLICY_ORG = 'org-web-policy-golden';
+const NO_WEB_POLICY_ORG = 'org-without-web-policy-golden';
+const WEB_ENTITLEMENTS = {
+  'web.paid_search': true,
+  'web.proxy_pool': true,
+  'web.robots_override': false,
+};
+// org-core's internal web-policy answer for the org that holds a policy: the
+// body of org-core's contract golden (WS7.H), so both sides read one shape.
+const WEB_POLICY_ANSWER = {
+  data: {
+    revision: 2,
+    rev: '0123456789ab',
+    policy: {
+      caps: { 'browser.act.upload': 'disabled' },
+      robots_max: 'respect',
+    },
+    entitlements: WEB_ENTITLEMENTS,
+  },
+};
+// W3 E3.2-f: an org whose policy states per-origin consent defaults only.
+const ORIGIN_CONSENT_ORG = 'org-origin-consent-golden';
+const ORIGIN_CONSENT_ANSWER = {
+  data: {
+    revision: 1,
+    rev: 'abcdef012345',
+    policy: {
+      caps: { 'browser.consent.max_scope': 'conversation' },
+    },
+    entitlements: WEB_ENTITLEMENTS,
+  },
+};
+// ...and for every org that never wrote one.
+const NO_WEB_POLICY_ANSWER = {
+  data: { revision: 0, rev: '0', policy: {}, entitlements: WEB_ENTITLEMENTS },
+};
 const policyPath = join(
   __dirname,
   '../../../config/plane-service-principals.json',
@@ -130,6 +180,8 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
     for (const name of keyEnvNames) delete process.env[name];
     delete process.env.QUARRY_AUTH_AUDIENCE;
     delete process.env.PLANE_TOKEN_TTL_QUARRY_SECONDS;
+    delete process.env.WEB_POLICY_TOKEN_TTL_CAP_SECONDS;
+    process.env.WEB_POLICY_CLAIM_ENABLED = '1';
     // The deployed issuer: the same default the compose files resolve for
     // PLANE_TOKEN_ISSUER / AUTH_CORE_ISSUER, so the golden pins what Quarry's
     // AUTH_CORE_ISSUER is compared against.
@@ -161,25 +213,38 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
     delete process.env.ORG_CORE_URL;
     process.env.ORG_CORE_SERVICE_TOKEN = ORG_CORE_TOKEN;
     resetInteractiveRetentionCacheForTests();
+    resetWebPolicyCacheForTests();
     jest
       .spyOn(global, 'fetch')
       .mockImplementation((input: unknown, init?: RequestInit) => {
         const headers = new Headers(init?.headers);
+        const path = new URL(String(input)).pathname;
+        const retention = /^\/internal\/orgs\/[^/]+\/retention-posture$/.test(
+          path,
+        );
+        const webPolicy = /^\/internal\/orgs\/([^/]+)\/web-policy$/.exec(
+          path,
+        );
         const authenticated =
           headers.get('x-service-id') === 'auth-core' &&
           headers.get('x-service-token') === ORG_CORE_TOKEN &&
-          /^\/internal\/orgs\/[^/]+\/retention-posture$/.test(
-            new URL(String(input)).pathname,
-          );
+          (retention || webPolicy !== null);
+        let body: unknown = { error: 'unauthorized' };
+        if (authenticated && retention) {
+          body = { zdrIntent: false, entitled: true };
+        } else if (authenticated && webPolicy) {
+          const orgId = decodeURIComponent(webPolicy[1]);
+          body =
+            orgId === WEB_POLICY_ORG
+              ? WEB_POLICY_ANSWER
+              : orgId === ORIGIN_CONSENT_ORG
+                ? ORIGIN_CONSENT_ANSWER
+                : NO_WEB_POLICY_ANSWER;
+        }
         return Promise.resolve({
           ok: authenticated,
           status: authenticated ? 200 : 401,
-          json: () =>
-            Promise.resolve(
-              authenticated
-                ? { zdrIntent: false, entitled: true }
-                : { error: 'unauthorized' },
-            ),
+          json: () => Promise.resolve(body),
         } as never);
       });
   });
@@ -187,6 +252,7 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
   afterEach(() => {
     jest.restoreAllMocks();
     resetInteractiveRetentionCacheForTests();
+    resetWebPolicyCacheForTests();
     process.env = { ...originalEnv };
   });
 
@@ -213,12 +279,13 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
     serviceId: string,
     scopes: string[],
     reason: string,
+    orgId = 'org-standard-golden',
   ): Promise<string> {
     const bundle = await controller.issueInternalToken(
       'quarry',
       serviceId,
       `test-only-${serviceId}-credential-key`,
-      { orgId: 'org-standard-golden', scopes, reason },
+      { orgId, scopes, reason },
     );
     return (bundle as { token: string }).token;
   }
@@ -248,6 +315,35 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
             'agent web tools',
           ),
         ),
+      ),
+      user_in_org_with_web_policy: withoutTimes(
+        payloadOf(await userToken(WEB_POLICY_ORG, false)),
+      ),
+      user_in_org_without_policy: withoutTimes(
+        payloadOf(await userToken(NO_WEB_POLICY_ORG, false)),
+      ),
+      service_execution_core_with_web_policy: withoutTimes(
+        payloadOf(
+          await serviceToken(
+            'execution-core',
+            ['browser:execute', 'extract:read', 'scrape:write', 'search:read'],
+            'agent web tools',
+            WEB_POLICY_ORG,
+          ),
+        ),
+      ),
+      service_model_gateway_with_web_policy: withoutTimes(
+        payloadOf(
+          await serviceToken(
+            'model-gateway',
+            ['scrape:read', 'search:read'],
+            'chat web search',
+            WEB_POLICY_ORG,
+          ),
+        ),
+      ),
+      user_in_org_with_origin_consent_defaults: withoutTimes(
+        payloadOf(await userToken(ORIGIN_CONSENT_ORG, false)),
       ),
     };
     const document = {
@@ -345,5 +441,49 @@ describeIfAvailable('Quarry-audience token claims, real mint', () => {
     }
     expect(gateway.service_id).toBe('service:model-gateway');
     expect(execution.service_id).toBe('service:execution-core');
+  });
+  it('carries the org web policy beside zdr, for users and for the tenant service rows, and never changes zdr', async () => {
+    const expectedPolicy = {
+      v: 1,
+      rev: '0123456789ab',
+      caps: { 'browser.act.upload': 'disabled' },
+      robots_max: 'respect',
+    };
+    const withPolicy = payloadOf(await userToken(WEB_POLICY_ORG, false));
+    expect(withPolicy.web_policy).toEqual(expectedPolicy);
+    expect(withPolicy.zdr).toBe(false);
+    const zdrUser = payloadOf(await userToken('org-zdr-golden', true));
+    expect(zdrUser.web_policy).toEqual({ v: 1, rev: '0' });
+    expect(zdrUser.zdr).toBe(true);
+
+    for (const serviceId of ['execution-core', 'model-gateway']) {
+      const claims = payloadOf(
+        await serviceToken(serviceId, ['search:read'], 'web', WEB_POLICY_ORG),
+      );
+      expect(claims.web_policy).toEqual(expectedPolicy);
+      // The registry row (quarry: zdr) still decides zdr, whatever the org's
+      // web policy says.
+      expect(claims.zdr).toBe(true);
+    }
+  });
+
+  it('carries per-origin consent defaults in the version 1 claim caps (E3.2-f)', async () => {
+    const claims = payloadOf(await userToken(ORIGIN_CONSENT_ORG, false));
+    expect(claims.web_policy).toEqual({
+      v: 1,
+      rev: 'abcdef012345',
+      caps: { 'browser.consent.max_scope': 'conversation' },
+    });
+    expect(claims.zdr).toBe(false);
+  });
+
+  it('every case of the committed golden carries a version 1 web_policy claim', () => {
+    const golden = JSON.parse(readFileSync(goldenPath, 'utf8')) as {
+      cases: Record<string, { claims: Claims }>;
+    };
+    for (const [name, entry] of Object.entries(golden.cases)) {
+      const claim = entry.claims.web_policy as Claims | undefined;
+      expect({ name, v: claim?.v }).toEqual({ name, v: 1 });
+    }
   });
 });

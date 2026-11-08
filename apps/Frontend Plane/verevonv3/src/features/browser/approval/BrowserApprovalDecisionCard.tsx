@@ -14,10 +14,11 @@ import {
 import './browser-approval-card.css'
 
 /**
- * The one keyboard-first approval card (E3.2-b). It is meant to replace the
- * browser-action gate (BrowserApprovalCard in BrowserChrome.tsx) and the chat
- * approval deck (ApprovalRequests in ChatMessages.tsx). Neither is swapped yet:
- * that waits for W2 U62 (H12), so nothing mounts this card at runtime.
+ * The one keyboard-first approval card (E3.2-b). With VITE_BROWSER_APPROVAL_CARD
+ * set to `1` (default off) it replaces the browser-action gate
+ * (BrowserApprovalCard in BrowserChrome.tsx, in the AI bubble and the evidence
+ * drawer) and, for approvals it can express, the chat approval deck
+ * (ApprovalRequests in ChatMessages.tsx). Both callers pass their own `decide`.
  *
  * Keys (only inside the card, see matchApprovalShortcut):
  *   Cmd/Ctrl+Enter approve, Cmd/Ctrl+Shift+Enter reject,

@@ -25,6 +25,7 @@ mod audience_tokens;
 mod auth;
 mod cache;
 mod cache_admission;
+mod client_contract;
 mod config;
 mod contracts;
 mod domains;
@@ -94,18 +95,23 @@ fn build_router(state: config::AppState) -> Router {
         .route("/version", get(version))
         .merge(domains::actions::router(state.clone()))
         .merge(domains::agent_actions::router(state.clone()))
+        // EP-12 S8: empty unless GATEWAY_AGENT_API_ENABLED is exactly `true`.
+        .merge(domains::agent_api::router(state.clone()))
         .merge(domains::agents::router(state.clone()))
         .merge(domains::agents_runs::router(state.clone()))
         .merge(domains::ag_ui::router(state.clone()))
         .merge(domains::ai::router(state.clone()))
         .merge(domains::audit::router(state.clone()))
         .merge(domains::audit_compliance::router(state.clone()))
+        .merge(domains::org_identity::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
         .merge(domains::browser_evidence::router(state.clone()))
+        .merge(domains::browser_context::router(state.clone()))
         .merge(domains::billing::router(state.clone()))
         .merge(domains::briefs::router(state.clone()))
         .merge(domains::chat::router(state.clone()))
+        .merge(domains::client_config::router())
         .merge(domains::cost::router(state.clone()))
         .merge(domains::eval::router(state.clone()))
         .merge(domains::finetune::router(state.clone()))
@@ -119,8 +125,11 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::learning::router(state.clone()))
         .merge(domains::mail_task::router(state.clone()))
         .merge(domains::anbud::router(state.clone()))
+        .merge(domains::attention::router(state.clone()))
         .merge(domains::marketing::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
+        .merge(domains::agent_policy::router(state.clone()))
+        .merge(domains::policy_effective::router(state.clone()))
         .merge(domains::memory::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
         .merge(domains::navbar::router(state.clone()))
@@ -134,6 +143,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::remote_support::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
         .merge(domains::run_watchers::router(state.clone()))
+        .merge(domains::scim::router(state.clone()))
         .merge(domains::search::router(state.clone()))
         .merge(domains::settings::router(state.clone()))
         .merge(domains::shares::router(state.clone()))
@@ -348,6 +358,7 @@ mod tests {
             enforcement_mode: "off".to_string(),
             browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
             browser_human_browse: false,
+            browser_live_view_only: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -421,6 +432,7 @@ mod tests {
             continue_park_form: false,
             model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
+            space_features: Default::default(),
         }
     }
 

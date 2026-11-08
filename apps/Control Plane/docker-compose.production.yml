@@ -233,6 +233,16 @@ services:
 
   controlplane-prometheus:
     ports: !reset []
+    # Quarry edge scrape token (R-13 PR 2, U48). The base file mounts
+    # ${QUARRY_METRICS_TOKEN_FILE} at /etc/prometheus/secrets/quarry_metrics_token and falls
+    # back to an empty tracked placeholder (so Prometheus can load its configuration while
+    # the edge's QUARRY_EDGE_METRICS_ENABLED is 0, its default). To turn the edge's metrics
+    # on in a release: set QUARRY_EDGE_METRICS_ENABLED=1 and QUARRY_EDGE_METRICS_TOKEN
+    # (at least 32 characters; the edge refuses to start in production with less) on the
+    # Ingestion stack, and point QUARRY_METRICS_TOKEN_FILE here at the secret manager's file
+    # holding the SAME value. validate-release-credentials.sh checks the file when the
+    # variable is set. No other production change: the file is not a Compose secret because
+    # the base volume entry already owns that mount point.
 
   controlplane-grafana:
     ports: !reset []

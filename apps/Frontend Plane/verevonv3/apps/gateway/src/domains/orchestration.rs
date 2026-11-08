@@ -91,6 +91,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(get_approval),
         )
         .route(
+            "/api/v1/orchestration/approvals/{approval_id}/quarantine-preview",
+            get(get_quarantine_preview),
+        )
+        .route(
+            "/api/v1/orchestration/approvals/{approval_id}/preview",
+            get(get_approval_preview),
+        )
+        .route(
             "/api/v1/orchestration/threads/{thread_id}/lineage",
             get(get_lineage),
         )
@@ -250,7 +258,7 @@ const DECIDE_RETRY_TIMEOUT: Duration = Duration::from_secs(8);
 /// placeholder: it 502s only on the literal Requested->Granted transition, and
 /// by the second attempt the DB row is already Granted, so that branch is
 /// skipped.
-async fn mg_post_decide_with_retry(
+pub(crate) async fn mg_post_decide_with_retry(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
@@ -474,6 +482,45 @@ async fn get_approval(
     .await
 }
 
+/// The inert preview of tool output held for review (build plan WS10 S8). A plain pass-through:
+/// model-gateway verifies the caller's org and Session Core answers only the run owner while the
+/// approval is pending or granted and unspent, so the gateway adds no authority of its own.
+async fn get_quarantine_preview(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(approval_id): Path<String>,
+) -> impl IntoResponse {
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!(
+            "/v1/orchestration/approvals/{}/quarantine-preview",
+            enc(&approval_id)
+        ),
+    )
+    .await
+}
+
+/// The full draft behind a pending write approval (EP-10-S1). A plain pass-through: model-gateway
+/// owns the switch and refuses a zero-retention caller, and Session Core answers only the run's
+/// owner while the approval is pending, so the gateway adds no authority of its own.
+async fn get_approval_preview(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(approval_id): Path<String>,
+) -> impl IntoResponse {
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!("/v1/orchestration/approvals/{}/preview", enc(&approval_id)),
+    )
+    .await
+}
+
 async fn get_lineage(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -495,8 +542,8 @@ async fn get_lineage(
 /// browser-action decision surface (a granted decision lets execution-core's
 /// in-loop poller in `browser_agent.rs` proceed with the exact action that
 /// was gated; a denial/timeout aborts the run without dispatching it).
-/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once"}`; see
-/// [`DecideBody`].
+/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once",
+/// "edit"?: {"patch": {...}, "baseFingerprint": string}}`; see [`DecideBody`].
 pub(crate) async fn decide_approval(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -523,8 +570,9 @@ const DECIDE_REASON_MAX_CHARS: usize = 500;
 
 /// The body a decision accepts (build plan WS13 S2). Nothing else crosses: who decides is the
 /// verified credential's, so a client field naming a decider, a decision source or a grant is
-/// refused, not forwarded. `scope` is how far the decision reaches; only `once` exists until
-/// standing grants do.
+/// refused, not forwarded. `scope` is how far the decision reaches: `once`, or `thread` and `run`
+/// for a standing grant, which the gateway offers only where the cause allows it (WS13 S6).
+/// `promote` is "Always" (WS13 S7): a rule proposed from a thread grant, for the person to confirm.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecideBody {
@@ -533,14 +581,81 @@ struct DecideBody {
     reason: String,
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    promote: bool,
+    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send. Forwarded
+    /// as `edit {patch, base_fingerprint}`; model-gateway and Session Core decide whether it is
+    /// allowed (both refuse it while APPROVAL_EDIT_ENABLED is off).
+    #[serde(default)]
+    edit: Option<DecideEditBody>,
+}
+
+/// The edit a decision may carry, in the SPA's camelCase. `patch` holds the mail fields the
+/// person changed (`to`, `subject`, `bodyText`); Session Core refuses any other key.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DecideEditBody {
+    patch: Value,
+    base_fingerprint: String,
+}
+
+/// The largest edit patch forwarded: the 48 KiB body cap plus room for recipients and subject.
+const DECIDE_EDIT_PATCH_MAX_BYTES: usize = 64 * 1024;
+
+fn edit_refusal(code: &'static str, message: &'static str) -> (StatusCode, Json<Value>) {
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(error(code, message)))
+}
+
+/// The upstream form of a decision's edit (EP-10-S4): an approval for this one call only, a JSON
+/// object patch within the cap and a 64-hex base fingerprint.
+fn decide_upstream_edit(
+    edit: DecideEditBody,
+    decision: &str,
+    scope: Option<&str>,
+    promote: bool,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    if decision != "approve" {
+        return Err(edit_refusal(
+            "edit_requires_grant",
+            "An edit is sent with an approval only.",
+        ));
+    }
+    if !matches!(scope, None | Some("once")) || promote {
+        return Err(edit_refusal(
+            "edit_requires_once",
+            "An edited action is approved for this one time only.",
+        ));
+    }
+    if !edit.patch.is_object() {
+        return Err(edit_refusal(
+            "invalid_patch",
+            "The edit is not in the expected shape.",
+        ));
+    }
+    if edit.patch.to_string().len() > DECIDE_EDIT_PATCH_MAX_BYTES {
+        return Err(edit_refusal(
+            "edit_too_large",
+            "The edited message is too long.",
+        ));
+    }
+    let base = edit.base_fingerprint.trim();
+    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(edit_refusal(
+            "invalid_base_fingerprint",
+            "The edit does not say which draft it changes.",
+        ));
+    }
+    Ok(serde_json::json!({ "patch": edit.patch, "base_fingerprint": base }))
 }
 
 /// The upstream body, rebuilt from the accepted fields alone, or the refusal to send. An
-/// unknown key, an unknown decision or an over-long reason is a 400; a scope other than
-/// `once` is a typed 422, so a client never believes it granted more than it did.
+/// unknown key, an unknown decision or an over-long reason is a 400; a scope the gateway does not
+/// know is a typed 422, and so is an Always that is not an approval of a thread grant, so a client
+/// never believes it granted or proposed more than it did.
 fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> {
-    let body: DecideBody = serde_json::from_value(raw)
-        .map_err(|_| invalid_chat_request("a decision takes a decision, a reason and a scope"))?;
+    let body: DecideBody = serde_json::from_value(raw).map_err(|_| {
+        invalid_chat_request("a decision takes a decision, a reason, a scope and promote")
+    })?;
     if !matches!(body.decision.as_str(), "approve" | "reject") {
         return Err(invalid_chat_request("the decision is approve or reject"));
     }
@@ -549,16 +664,33 @@ fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)> 
     }
     let mut upstream = serde_json::json!({ "decision": body.decision, "reason": body.reason });
     if let Some(scope) = body.scope {
-        if scope != "once" {
+        if !matches!(scope.as_str(), "once" | "thread" | "run") {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(error(
                     "scope_not_enabled",
-                    "Only a decision for this one call is available.",
+                    "Only a decision for this one call, this thread or this run is available.",
                 )),
             ));
         }
         upstream["scope"] = Value::String(scope);
+    }
+    if body.promote {
+        if body.decision != "approve" || upstream["scope"] != "thread" {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(error(
+                    "rule_requires_thread_scope",
+                    "An Always applies to an approval for this thread.",
+                )),
+            ));
+        }
+        upstream["promote"] = Value::Bool(true);
+    }
+    if let Some(edit) = body.edit {
+        let scope = upstream["scope"].as_str().map(str::to_owned);
+        let edit = decide_upstream_edit(edit, &body.decision, scope.as_deref(), body.promote)?;
+        upstream["edit"] = edit;
     }
     Ok(upstream)
 }
@@ -890,6 +1022,68 @@ mod tests {
         );
     }
 
+    /// EP-10-S4: an edit crosses as `{patch, base_fingerprint}` for a once-approval only; an
+    /// unknown key inside the edit is refused like one beside it.
+    #[test]
+    fn decide_body_accepts_edit_and_refuses_unknown_keys() {
+        let base = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let forwarded = decide_upstream_body(json!({
+            "decision": "approve",
+            "scope": "once",
+            "edit": { "patch": { "subject": "New", "bodyText": "Hei" }, "baseFingerprint": base },
+        }))
+        .expect("an edited approval");
+        assert_eq!(
+            forwarded,
+            json!({
+                "decision": "approve",
+                "reason": "",
+                "scope": "once",
+                "edit": { "patch": { "subject": "New", "bodyText": "Hei" }, "base_fingerprint": base },
+            })
+        );
+        let plain = decide_upstream_body(json!({"decision": "approve"})).expect("no edit");
+        assert!(plain.get("edit").is_none(), "an edit is sent only when made");
+
+        for edit in [
+            json!({ "patch": {}, "baseFingerprint": base, "connectionId": "conn-2" }),
+            json!({ "patch": {}, "base_fingerprint": base }),
+            json!({ "patch": {} }),
+        ] {
+            let (status, Json(refusal)) =
+                decide_upstream_body(json!({"decision": "approve", "edit": edit}))
+                    .expect_err("an unknown or missing edit key is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(refusal["error"]["code"], "invalid_request");
+        }
+
+        let cases = [
+            (json!({"decision": "reject"}), "edit_requires_grant"),
+            (json!({"decision": "approve", "scope": "thread"}), "edit_requires_once"),
+            (json!({"decision": "approve", "scope": "thread", "promote": true}), "edit_requires_once"),
+        ];
+        for (mut body, code) in cases {
+            body["edit"] = json!({ "patch": { "subject": "New" }, "baseFingerprint": base });
+            let (status, Json(refusal)) = decide_upstream_body(body.clone()).expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(refusal["error"]["code"], code, "{body}");
+        }
+        for (edit, code) in [
+            (json!({ "patch": ["subject"], "baseFingerprint": base }), "invalid_patch"),
+            (json!({ "patch": { "subject": "New" }, "baseFingerprint": "abc" }), "invalid_base_fingerprint"),
+            (
+                json!({ "patch": { "bodyText": "x".repeat(64 * 1024) }, "baseFingerprint": base }),
+                "edit_too_large",
+            ),
+        ] {
+            let (status, Json(refusal)) =
+                decide_upstream_body(json!({"decision": "approve", "edit": edit}))
+                    .expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(refusal["error"]["code"], code);
+        }
+    }
+
     #[test]
     fn a_decision_with_a_field_the_client_does_not_own_is_a_400() {
         for extra in [
@@ -925,14 +1119,54 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_other_than_once_is_a_typed_422_until_grants_exist() {
-        for scope in ["thread", "run", "", "ONCE"] {
+    fn the_known_scopes_are_forwarded_and_an_unknown_scope_is_a_typed_422() {
+        for scope in ["once", "thread", "run"] {
+            let forwarded = decide_upstream_body(json!({"decision": "approve", "scope": scope}))
+                .expect("the gateway decides what each scope may do");
+            assert_eq!(forwarded["scope"], scope);
+        }
+        for scope in ["", "ONCE", "forever"] {
             let (status, Json(refusal)) =
                 decide_upstream_body(json!({"decision": "approve", "scope": scope}))
-                    .expect_err("a standing scope is refused");
+                    .expect_err("an unknown scope is refused");
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
             assert_eq!(refusal["error"]["code"], "scope_not_enabled", "{scope}");
         }
+    }
+
+    #[test]
+    fn an_always_is_forwarded_only_for_an_approval_of_a_thread_grant() {
+        let forwarded = decide_upstream_body(
+            json!({"decision": "approve", "scope": "thread", "promote": true}),
+        )
+        .expect("an Always on a thread grant");
+        assert_eq!(forwarded["promote"], true);
+        let plain = decide_upstream_body(json!({"decision": "approve", "scope": "thread"}))
+            .expect("a thread grant without an Always");
+        assert!(
+            plain.get("promote").is_none(),
+            "promote is sent only when asked for"
+        );
+        for body in [
+            json!({"decision": "approve", "scope": "once", "promote": true}),
+            json!({"decision": "approve", "promote": true}),
+            json!({"decision": "approve", "scope": "run", "promote": true}),
+            json!({"decision": "reject", "scope": "thread", "promote": true}),
+        ] {
+            let (status, Json(refusal)) = decide_upstream_body(body.clone()).expect_err("refused");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(
+                refusal["error"]["code"], "rule_requires_thread_scope",
+                "{body}"
+            );
+        }
+        assert!(
+            decide_upstream_body(
+                json!({"decision": "approve", "scope": "thread", "promote": "yes"})
+            )
+            .is_err(),
+            "promote is a boolean"
+        );
     }
 
     #[test]
@@ -994,6 +1228,7 @@ mod tests {
             enforcement_mode: "off".to_string(),
             browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
             browser_human_browse: false,
+            browser_live_view_only: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -1065,6 +1300,7 @@ mod tests {
             continue_park_form: false,
             model_entitlement_admin_enabled: false,
             mail_task_pipeline: None,
+            space_features: Default::default(),
         }
     }
 
@@ -1973,5 +2209,67 @@ mod tests {
         assert!(source.contains(
             "\"/api/v1/orchestration/questions/{question_id}/answer\",\n            post(answer_run_question),"
         ));
+    }
+
+    /// EP-10-S1: the preview route is a GET pass-through to model-gateway's preview route.
+    #[test]
+    fn orchestration_approval_preview_route_is_registered_as_a_get() {
+        let source = include_str!("orchestration.rs").replace("\r\n", "\n");
+        assert!(source.contains(
+            "\"/api/v1/orchestration/approvals/{approval_id}/preview\",\n            get(get_approval_preview),"
+        ));
+    }
+
+    /// EP-10-S1: the owner's session bearer reaches model-gateway's preview route, and its answer
+    /// (the preview, or the typed 404 with the switch off) reaches the browser unchanged.
+    #[tokio::test]
+    async fn orchestration_approval_preview_passes_the_answer_through_unchanged() {
+        use axum::{
+            extract::{Path, State},
+            response::IntoResponse,
+            Extension,
+        };
+        use http_body_util::BodyExt;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        for (upstream_status, upstream_body) in [
+            (
+                200_u16,
+                json!({"data": {"preview": {"kind": "mail_send", "to": ["a@example.com"], "body_text": "Hei"}}}),
+            ),
+            (
+                404_u16,
+                json!({"error": {"code": "preview_unavailable", "message": "the approval preview is not available"}}),
+            ),
+        ] {
+            let server = MockServer::start().await;
+            mount_token_mocks(&server).await;
+            Mock::given(method("GET"))
+                .and(path("/v1/orchestration/approvals/apr-1/preview"))
+                .and(header("x-session-authorization", "Bearer session-test-token"))
+                .respond_with(ResponseTemplate::new(upstream_status).set_body_json(upstream_body.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let mut state = test_state(false);
+            state.auth_core_url = server.uri();
+            state.model_gateway_url = server.uri();
+            let response = super::get_approval_preview(
+                State(state),
+                Extension(test_user()),
+                HeaderMap::new(),
+                Path("apr-1".to_owned()),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status().as_u16(), upstream_status);
+            let bytes = response.into_body().collect().await.expect("body").to_bytes();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+            assert_eq!(body, upstream_body);
+        }
     }
 }

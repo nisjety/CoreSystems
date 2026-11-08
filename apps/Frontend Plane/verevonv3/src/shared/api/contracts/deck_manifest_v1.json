@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "deck_id": "deck-01jbx3q9k2m4n5p6r7s8t9v0wx",
+  "title": "Kvartalstall Q3",
+  "locale": "nb-NO",
+  "slides": [
+    {
+      "id": "s1",
+      "layout": "title",
+      "title": "Kvartalstall Q3",
+      "bullets": ["Styremøte oktober"],
+      "left": [],
+      "right": [],
+      "image": null,
+      "notes": null,
+      "state": "ok",
+      "findings": []
+    },
+    {
+      "id": "s3",
+      "layout": "title_bullets",
+      "title": "Salget økte i alle regioner",
+      "bullets": ["Omsetning 12,4 MNOK, opp 8 %", "Nord vokste mest", "Marginen holdt seg"],
+      "left": [],
+      "right": [],
+      "image": null,
+      "notes": "Kilde: regnskapsrapport Q3, side 4.",
+      "state": "warn",
+      "findings": [
+        {"id": "text_may_overflow", "message": "text may not fit its box; shorten it or split the slide"}
+      ]
+    },
+    {
+      "id": "s4",
+      "layout": "two_column",
+      "title": "Mål og resultat",
+      "bullets": [],
+      "left": ["Mål: 11 MNOK"],
+      "right": ["Resultat: 12,4 MNOK"],
+      "image": null,
+      "notes": "Kilde: budsjett 2026 og regnskapsrapport Q3.",
+      "state": "draft",
+      "findings": []
+    },
+    {
+      "id": "s5",
+      "layout": "image",
+      "title": "Omsetning per måned",
+      "bullets": [],
+      "left": [],
+      "right": [],
+      "image": "omsetning.png",
+      "notes": null,
+      "state": "error",
+      "findings": [
+        {"id": "image_missing", "message": "omsetning.png is not in the working directory"}
+      ]
+    }
+  ],
+  "revision": 5,
+  "next_slide": 6
+}

@@ -174,7 +174,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Depth control | ✅ | ✅ BFS in Go orchestrator | Equivalent |
 | Page limit | ✅ | ✅ | Equivalent |
 | Include / exclude paths | ✅ (regex + glob) | ❌ Not wired. The Rust crawl frontier has pattern fields but no production caller; the Go orchestrator crawl input has no include or exclude field and filters nothing. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
-| Sitemap-guided crawl | ✅ | ❌ Not wired. The crawl request accepts only `sitemap: skip` (`crawl_request.rs`), the Go orchestrator has no sitemap activity, and nothing seeds a crawl from a sitemap. `/v1/map` reads `/sitemap.xml` for its own URL list (`map_routes.rs`). Corrected 2026-10-23 (WS14.S0) and 2026-10-27 (D2-037). | Open - see WS14 |
+| Sitemap-guided crawl | ✅ | ⚠ Flag-gated, off by default. `sitemap: include` or `only` seeds the crawl from the site's sitemaps only when `QUARRY_EDGE__CRAWL_SITEMAP` is on and the crawl scope switch is not `off` (`crawl_request.rs`, `routes.rs`). Otherwise `sitemap: skip` is the only value accepted, and `include` or `only` get a 400 `unsupported_option`. The orchestrator's `SitemapSeeds` activity (`crawl_sitemap.go`) runs only for a job that asks for it. `/v1/map` reads `/sitemap.xml` for its own URL list (`map_routes.rs`). Corrected 2026-10-23 (WS14.S0), 2026-10-27 (D2-037) and 2026-11-03 (W2-U47-69a). | Open - flag-gated, default off (INNH-6); see WS14 |
 | Robots.txt respect | ✅ | ❌ Not enforced in the crawl or batch path. `/v1/map` applies a path-only robots matcher; no `check_robots` route is served and the orchestrator emits no `page.blocked` for robots. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Allow external links | ✅ | ❌ Not scoped. The orchestrator follows cross-host links today; pinned by `TestCrawlJobWF_CharacterizesExternalLinkFollowing_Legacy`. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Allow subdomains | ✅ | ❌ Not scoped. The crawl path has no host or subdomain rule. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
@@ -198,7 +198,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Scheduled / cron crawl | ❌ | ✅ | **Firecrawl gap** |
 | Crawl durability (restart-safe) | ❌ Redis-only | ✅ Postgres + checkpoints | **V2 structural advantage** |
 | SSE streaming | ❌ | ✅ | **Firecrawl gap** |
-| Sitemap-guided | ✅ | ❌ Not wired into crawl BFS. The crawl request accepts only `sitemap: skip`, and `/v1/map` reads `/sitemap.xml` without seeding any crawl. Corrected 2026-10-23 (WS14.S0) and 2026-10-27 (D2-037). | Open - see WS14 |
+| Sitemap-guided | ✅ | ⚠ Seeding is flag-gated, off by default: `sitemap: include` or `only` is accepted only with `QUARRY_EDGE__CRAWL_SITEMAP` on and the crawl scope switch not `off`. `/v1/map` reads `/sitemap.xml` without seeding any crawl. Corrected 2026-10-23 (WS14.S0), 2026-10-27 (D2-037) and 2026-11-03 (W2-U47-69a). | Open - flag-gated, default off; see WS14 |
 | Robots.txt | ✅ | ❌ Not wired into crawl BFS. `quarry-runtime/src/robots_cache.rs` has no production caller and no `check_robots` route is served. Corrected 2026-10-23 (WS14.S0). | Open - see WS14 |
 | Natural language prompt | ✅ | ✅ Model Plane NL ranking when configured (`x-quarry-search-mode: model-ranked`); term-match fallback otherwise | Closed |
 

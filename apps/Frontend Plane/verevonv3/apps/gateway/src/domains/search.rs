@@ -76,11 +76,16 @@ pub(crate) async fn search_web(
         .and_then(Value::as_u64)
         .unwrap_or(8)
         .clamp(1, 50);
-    let include_answer = body
-        .get("includeAnswer")
-        .or_else(|| body.get("include_answer"))
+    let public_only = body
+        .get("publicOnly")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let include_answer = !public_only
+        && body
+            .get("includeAnswer")
+            .or_else(|| body.get("include_answer"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     // Exa-style filters (accepted in camelCase or snake_case) → forwarded to
     // quarry-edge's SmartSearchRouter, which maps them to each provider's
     // native params (topic→category, time_range→freshness) and `site:`
@@ -102,6 +107,18 @@ pub(crate) async fn search_web(
         .or_else(|| body.get("exact_match"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    // Two-letter market (`NO`) and language (`no`) hints; quarry-edge applies them
+    // to the provider query. Blank values are dropped, never forwarded.
+    let country = body
+        .get("country")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| s.len() == 2 && s.chars().all(|c| c.is_ascii_alphabetic()));
+    let language = body
+        .get("language")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| (2..=3).contains(&s.len()) && s.chars().all(|c| c.is_ascii_alphabetic()));
     let include_domains = string_array(
         body.get("includeDomains")
             .or_else(|| body.get("include_domains")),
@@ -124,7 +141,7 @@ pub(crate) async fn search_web(
     let zdr = admission.zdr_established();
 
     // URL / bare-domain path → scrape the page so the searchbar can "open" links.
-    if is_url_input(&query) {
+    if !public_only && is_url_input(&query) {
         let target = normalize_url(&query);
         let url = format!("{}/v1/scrape", state.quarry_edge_url);
         let mut browser_payload = json!({
@@ -230,8 +247,17 @@ pub(crate) async fn search_web(
         include_domains.join(","),
         exclude_domains.join(","),
     );
+    let filters_sig = format!(
+        "{filters_sig}|{}|{}",
+        country.as_deref().unwrap_or(""),
+        language.as_deref().unwrap_or(""),
+    );
     let key = admission.key(
-        "search-web",
+        if public_only {
+            "search-web-public"
+        } else {
+            "search-web"
+        },
         &[
             &query,
             &limit.to_string(),
@@ -259,6 +285,10 @@ pub(crate) async fn search_web(
         "include_answer": include_answer,
         "safe_search": true,
     });
+    if public_only {
+        // Quarry's live SERP path skips the tenant's private index.
+        payload["intent"] = json!("fresh");
+    }
     if let Some(t) = &topic {
         payload["topic"] = json!(t);
     }
@@ -270,6 +300,12 @@ pub(crate) async fn search_web(
     }
     if exact_match {
         payload["exact_match"] = json!(true);
+    }
+    if let Some(country) = &country {
+        payload["country"] = json!(country);
+    }
+    if let Some(language) = &language {
+        payload["language"] = json!(language);
     }
     if !include_domains.is_empty() {
         payload["include_domains"] = json!(include_domains);
@@ -291,20 +327,37 @@ pub(crate) async fn search_web(
     .await
     {
         Ok(data) => {
-            let results = data.get("results").cloned().unwrap_or_else(|| json!([]));
-            let answer = data
-                .get("answer")
-                .and_then(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-                .map(Value::from)
-                .unwrap_or(Value::Null);
-            let citations = data.get("citations").cloned().unwrap_or_else(|| json!([]));
-            let cached_payload = json!({
-                "mode": "search",
-                "results": results,
-                "answer": answer,
-                "citations": citations,
-            });
+            let cached_payload = if public_only {
+                let results = data.get("results").and_then(Value::as_array).into_iter().flatten()
+                    .filter(|hit| {
+                        matches!(
+                            hit.get("provider").and_then(Value::as_str),
+                            Some("searxng" | "stract" | "brave" | "serper")
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                json!({ "mode": "search", "results": results })
+            } else {
+                let results = data.get("results").cloned().unwrap_or_else(|| json!([]));
+                let answer = data
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(Value::from)
+                    .unwrap_or(Value::Null);
+                let citations = data.get("citations").cloned().unwrap_or_else(|| json!([]));
+                // INNH-8: why there is or is not an answer (ok, no_sources, skipped_zdr, unavailable).
+                let answer_status = data.get("answer_status").cloned().unwrap_or(Value::Null);
+                let answer_reason = data.get("answer_reason").cloned().unwrap_or(Value::Null);
+                json!({
+                    "mode": "search",
+                    "results": results,
+                    "answer": answer,
+                    "citations": citations,
+                    "answerStatus": answer_status,
+                    "answerReason": answer_reason,
+                })
+            };
             if let (Some(key), Some(scope), true) =
                 (key.as_deref(), admission.scope(), admission.may_write)
             {
@@ -1172,7 +1225,10 @@ mod tests {
         Mock::given(wm_method("POST"))
             .and(wm_path("/v1/search"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "results": [{ "title": "r", "url": "https://example.invalid/r" }],
+                "results": [
+                    { "title": "r", "url": "https://example.invalid/r", "provider": "tantivy_local" },
+                    { "title": "public", "url": "https://example.invalid/public", "provider": "searxng" }
+                ],
                 "answer": "answer built from the caller's private corpus",
                 "citations": []
             })))
@@ -1353,6 +1409,29 @@ mod tests {
             1,
             "second call is a cache hit"
         );
+    }
+
+    #[tokio::test]
+    async fn public_search_uses_live_serps_and_excludes_workspace_results() {
+        let w = world(&[], &["org-a"]).await;
+        search_as(&w, "org-a", &[], json!({ "query": "public docs" })).await;
+        let (status, value) = search_as(
+            &w,
+            "org-a",
+            &[],
+            json!({ "query": "public docs", "publicOnly": true, "includeAnswer": true }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["data"]["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(value["data"]["results"][0]["provider"], "searxng");
+        assert!(value["data"].get("answer").is_none());
+
+        let requests = w.quarry.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 2, "a workspace cache hit must not serve public search");
+        let sent: Value = serde_json::from_slice(&requests[1].body).unwrap();
+        assert_eq!(sent["intent"], "fresh");
+        assert_eq!(sent["include_answer"], false);
     }
 
     #[tokio::test]

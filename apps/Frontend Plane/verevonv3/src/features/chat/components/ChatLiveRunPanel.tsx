@@ -34,6 +34,8 @@ import {
 import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { listRunEventReplay, streamRunEvents } from '@/shared/api/run-console-client'
 import { controlBrowserAiRun, type BrowserAiRunControlAction } from '@/shared/api/browser-run-client'
+import type { BrowserControlMode } from '@/shared/api/browser-client'
+import { STALE_CONTROL_COPY, changeBrowserControl } from '@/features/browser/dock/browser-control'
 import type {
   BrowserActionApprovalRequiredEvent,
   RunPausedForApprovalEvent,
@@ -45,6 +47,7 @@ import {
   applyBrowserObservation,
   applyDurableRunEvent,
   appendActivity,
+  applyBrowserControl,
   browserSessionFromChatRun,
   chatRunHostname,
   closeChatRunWatch,
@@ -53,6 +56,7 @@ import {
   latestBrowserStep,
   markScreenshotFailed,
   screenshotStateFor,
+  type ChatRunBrowserControl,
   type ChatRunBrowserStep,
   type ChatRunScreenshotState,
   type ChatRunWatchState,
@@ -60,6 +64,8 @@ import {
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
+import { RunCostMeter } from './RunCostMeter'
+import type { RunMeter } from './chat-types'
 
 // The run stores its error as this Norwegian text; the reader's language is chosen where it is shown.
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
@@ -79,6 +85,18 @@ const TERMINAL_RUN_STATUSES = new Set([
   'rejected',
   'expired',
 ])
+
+/**
+ * Take over and Give back of the chat Do run's browser (EP-1 S1). Off by default: it needs Quarry
+ * to accept the person as the run's owner of record (Q-1) and the turn's browser binding (WS21-S6).
+ */
+export const chatBrowserTakeoverEnabled = () => import.meta.env.VITE_CHAT_BROWSER_TAKEOVER === 'true'
+
+/**
+ * The longest note the person may hand back with the browser (EP-1 S3, D6). The note is the
+ * person's own words to the agent; execution-core holds the model to the same cap.
+ */
+export const GIVE_BACK_NOTE_MAX_CHARS = 500
 
 function isTerminalRunStatus(status?: string): boolean {
   return TERMINAL_RUN_STATUSES.has((status ?? '').trim().toLowerCase())
@@ -216,6 +234,11 @@ export function ChatLiveRunPanel(props: {
   wideResearch?: JSX.Element
   /** Local workspace tabs shown when Work owns the contextual canvas. */
   navigation?: JSX.Element
+  /**
+   * The browser dock's layout picker (WS9.G). Shown in the header while the panel is open and the
+   * Work tab does not own the rail. Absent while the dock is off, so the header is unchanged.
+   */
+  dockControls?: JSX.Element
   /** Close Work without collapsing the background run watcher. */
   onCloseWork?: () => void
   /**
@@ -224,6 +247,22 @@ export function ChatLiveRunPanel(props: {
    * panel only observes the run stream; it never manufactures approval rows.
    */
   onRefreshApprovals?: (runId: string) => void
+  /** The watched turn's running cost and usage (WS27-S4). Shown here while no Work panel is open. */
+  meter?: RunMeter
+  /**
+   * The Quarry run the turn's browser runs on and who holds it (EP-1 S1), from the owner-only
+   * `browser_session_opened` binding (WS21-S6). Absent until the turn is bound; read only while
+   * `VITE_CHAT_BROWSER_TAKEOVER` is on.
+   */
+  browserBinding?: ChatRunBrowserControl
+  /**
+   * The person gave the browser back (EP-1 S1). The owning chat turn decides the open
+   * `browser_human_assist` approval and continues the run; the panel never decides approvals.
+   * `note` is the person's optional hand-back note (EP-1 S3), trimmed and capped, empty when they
+   * wrote none: the turn sends it as the approval's decision reason, the one way it reaches the
+   * model. Nothing typed into the page is ever sent.
+   */
+  onBrowserGiveBack?: (runId: string, note: string) => void
 }) {
   const i18n = useI18n()
   // One name for two attributes: the button carries the same text as its
@@ -437,6 +476,62 @@ export function ChatLiveRunPanel(props: {
     },
   )
 
+  // The turn's browser binding (EP-1 S1). Applied to the watched run only; a zero-retention turn
+  // ignores it (`applyBrowserControl`).
+  createEffect(
+    () => ({ binding: props.browserBinding, runId: props.runId }),
+    ({ binding, runId }) => {
+      if (!binding || !runId) return
+      update(runId, (state) => applyBrowserControl(state, binding))
+    },
+  )
+
+  const [takeoverPending, setTakeoverPending] = createSignal(false)
+  /** The person's hand-back note (EP-1 S3), kept until the give-back is accepted. */
+  const [giveBackNote, setGiveBackNote] = createSignal('')
+  /** Take over and Give back are offered only with the switch on, for a non-ZDR turn, in an org. */
+  const takeover = () => chatBrowserTakeoverEnabled() && !zdr() && Boolean(props.orgId?.trim())
+  /** The note field shows only while the person holds the turn's browser. */
+  const personHolds = () => takeover() && watch()?.browserControl?.controlMode === 'human_takeover'
+  /**
+   * Flips who holds the turn's browser through the existing BFF control route, compare-and-set on
+   * the epoch the person saw. Quarry answers with the new control, which the panel shows; a stale
+   * epoch shows what Quarry now says and changes nothing. After a give-back the owning turn spends
+   * the takeover approval: the executor re-checks control before it acts, so the order is safe.
+   */
+  const changeTakeover = async (mode: BrowserControlMode, expectedEpoch?: number | null) => {
+    const orgId = props.orgId?.trim()
+    const currentRunId = props.runId?.trim()
+    const sessionId = watch()?.browserControl?.sessionId
+    if (!orgId || !currentRunId || !sessionId || takeoverPending()) return
+    setTakeoverPending(true)
+    setControlError(null)
+    try {
+      const outcome = await changeBrowserControl(orgId, sessionId, mode, expectedEpoch)
+      const control = outcome.response.session.control
+      if (control) {
+        update(currentRunId, (state) => applyBrowserControl(state, {
+          controlEpoch: control.epoch ?? null,
+          controlMode: control.mode,
+          sessionId,
+        }))
+      }
+      if (outcome.stale) {
+        setControlError(i18n.tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
+        return
+      }
+      if (mode === 'agent_control') {
+        const note = giveBackNote().trim().slice(0, GIVE_BACK_NOTE_MAX_CHARS)
+        setGiveBackNote('')
+        props.onBrowserGiveBack?.(currentRunId, note)
+      }
+    } catch (error) {
+      setControlError(translateApiError(error, i18n.tr, { no: 'Styringen av nettleseren kunne ikke endres.', en: 'Browser control could not be changed.' }))
+    } finally {
+      setTakeoverPending(false)
+    }
+  }
+
   const browserControl = async (action: BrowserAiRunControlAction) => {
     const orgId = props.orgId?.trim()
     const currentRunId = props.runId?.trim()
@@ -465,7 +560,7 @@ export function ChatLiveRunPanel(props: {
   })
   const session = createMemo(() => {
     const current = watch()
-    return current ? browserSessionFromChatRun(current) : null
+    return current ? browserSessionFromChatRun(current, { takeover: takeover() }) : null
   })
   const statusLabel = () => {
     const current = watch()
@@ -523,6 +618,7 @@ export function ChatLiveRunPanel(props: {
                       <span>{statusLabel()}</span>
                     </div>
                     <code class="verevon-chat-run-panel__runid" title={runId()}>{runId()}</code>
+                    {props.dockControls}
                   </>
                 )}
               >
@@ -580,7 +676,11 @@ export function ChatLiveRunPanel(props: {
 
           <Show when={!props.collapsed}>
             <div class="verevon-chat-run-panel__body">
-              <Show when={props.workContent}>
+              {/* The Work panel carries the meter itself, so the live rail shows it only while Work is closed. */}
+              <Show
+                when={props.workContent}
+                fallback={<RunCostMeter meter={props.meter} quotaRefreshKey={props.runId ?? undefined} />}
+              >
                 <section
                   id="verevon-chat-tabpanel-steps"
                   class="verevon-chat-run-panel__work"
@@ -605,7 +705,30 @@ export function ChatLiveRunPanel(props: {
                   />
                 )}
               >
-                {(model) => <BrowserChrome compact session={model()} />}
+                {(model) => (
+                  <>
+                    <BrowserChrome
+                      compact
+                      session={model()}
+                      browserBusy={takeoverPending()}
+                      onBrowserControlMode={takeover() && model().sessionId
+                        ? (mode, expectedEpoch) => void changeTakeover(mode, expectedEpoch)
+                        : undefined}
+                    />
+                    <Show when={personHolds() && model().sessionId}>
+                      <label class="verevon-chat-run-panel__give-back-note">
+                        <span>{i18n.tr('Beskjed til agenten når du gir tilbake (valgfritt)', 'Note to the agent when you give back (optional)')}</span>
+                        <textarea
+                          maxlength={GIVE_BACK_NOTE_MAX_CHARS}
+                          rows={2}
+                          value={giveBackNote()}
+                          disabled={takeoverPending()}
+                          onInput={(event) => setGiveBackNote(event.currentTarget.value)}
+                        />
+                      </label>
+                    </Show>
+                  </>
+                )}
               </Show>
 
               <Show when={steps().length > 0}>

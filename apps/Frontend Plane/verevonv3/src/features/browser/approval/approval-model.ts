@@ -128,6 +128,32 @@ export function buildDecisionRequest(
   }
 }
 
+/**
+ * Build switch for the shared card (E3.2-b swap). Only `1` mounts it in
+ * BrowserChrome and the chat approval deck; anything else keeps the old cards.
+ */
+export function browserApprovalCardEnabled(): boolean {
+  return import.meta.env.VITE_BROWSER_APPROVAL_CARD === '1'
+}
+
+/**
+ * Redirect text on the card. Off until execution-core reads the redirect text
+ * of a rejected browser gate (Model Plane ask, E3.2-b swap): until then a
+ * reject with text would only abort the run, so the box is not offered.
+ */
+export const APPROVAL_REDIRECT_ENABLED = false
+
+/**
+ * Whether the chat deck may show a run approval on the shared card. The card
+ * has no password step-up and no standing scope, so an approval that needs
+ * either keeps the deck's own card. A decided approval is not shown at all.
+ */
+export function runApprovalFitsCard(approval: Approval): boolean {
+  if (approval.cause?.stepUpRequired) return false
+  if ((approval.cause?.scopeOptions ?? []).some((scope) => scope !== 'once')) return false
+  return runApprovalToCardModel(approval) !== null
+}
+
 /** Norwegian and English copy for a browser risk category. Null when unknown. */
 export const APPROVAL_RISK_COPY: Readonly<Record<string, { no: string; en: string }>> = {
   checkout: { no: 'Utsjekk/betaling', en: 'Checkout or payment' },

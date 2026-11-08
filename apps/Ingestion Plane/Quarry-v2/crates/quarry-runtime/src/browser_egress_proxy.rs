@@ -19,16 +19,22 @@ use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 
 use async_trait::async_trait;
-use quarry_browser::{BrowserEgressPolicy, BrowserEgressProxyProvider, PinnedEgressProxyEndpoint};
+use base64::Engine;
+use quarry_browser::{BrowserEgressPolicy, BrowserEgressProxyProvider, PinnedEgressProxyEndpoint, PublicBrowserAsset};
 use quarry_core::contracts::{BrowserEgressDecision, BrowserEgressReceipt};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
-use crate::dns_guard::{resolve_public_url, ResolvedTarget};
+use crate::dns_guard::{
+    resolve_public_url_via, HostLookup, PinnedDnsResolver, ResolvedTarget, SystemHostLookup,
+};
+use crate::fetch::{read_bounded_body, redirect_probe_target, validate_redirect_probe_url};
 
 const MAX_PROXY_HEADER_BYTES: usize = 32 * 1024;
 const RECEIPT_LIMIT: usize = 2_048;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const PROXY_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+const ASSET_TIMEOUT: Duration = Duration::from_secs(6);
+const MAX_ASSET_BYTES: usize = 4 * 1024 * 1024;
 
 /// Process-local egress authority for a Chromium instance. Its endpoint is
 /// intentionally loopback-only: it is a browser transport boundary, never a
@@ -41,6 +47,9 @@ pub struct PinnedBrowserEgressProxy {
 struct PinnedBrowserEgressProxyInner {
     sessions: Mutex<HashMap<String, PinnedBrowserEgressSession>>,
     shutdown: CancellationToken,
+    /// The DNS lookup every proxied request is vetted through (D2-059). The
+    /// system resolver in production; a scripted one in tests.
+    lookup: Arc<dyn HostLookup>,
 }
 
 struct PinnedBrowserEgressSession {
@@ -68,10 +77,18 @@ impl PinnedBrowserEgressProxy {
     /// browser lease, giving every session a separate local port and receipt
     /// stream without exposing a run identifier to any destination server.
     pub fn new() -> Self {
+        Self::with_host_lookup(Arc::new(SystemHostLookup))
+    }
+
+    /// The same authority over an explicit DNS lookup. Production uses `new`;
+    /// this exists so a test can prove a name that resolves to a private address
+    /// is refused under every policy mode without real DNS.
+    pub fn with_host_lookup(lookup: Arc<dyn HostLookup>) -> Self {
         Self {
             inner: Arc::new(PinnedBrowserEgressProxyInner {
                 sessions: Mutex::new(HashMap::new()),
                 shutdown: CancellationToken::new(),
+                lookup,
             }),
         }
     }
@@ -106,6 +123,7 @@ impl PinnedBrowserEgressProxy {
         let accept_receipts = receipts.clone();
         let accept_sequence = sequence.clone();
         let accept_policy = policy.clone();
+        let accept_lookup = self.inner.lookup.clone();
         let accept_task = tokio::spawn(async move {
             loop {
                 let accepted = tokio::select! {
@@ -123,11 +141,18 @@ impl PinnedBrowserEgressProxy {
                 let receipts = accept_receipts.clone();
                 let sequence = accept_sequence.clone();
                 let policy = accept_policy.clone();
+                let lookup = accept_lookup.clone();
                 let connection_shutdown = accept_shutdown.clone();
                 tokio::spawn(async move {
-                    if let Err(error) =
-                        serve_connection(stream, receipts, sequence, policy, connection_shutdown)
-                            .await
+                    if let Err(error) = serve_connection(
+                        stream,
+                        receipts,
+                        sequence,
+                        policy,
+                        lookup,
+                        connection_shutdown,
+                    )
+                    .await
                     {
                         tracing::debug!(error_class = error.code.wire_name(), "browser egress proxy request refused");
                     }
@@ -223,6 +248,28 @@ impl BrowserEgressProxyProvider for PinnedBrowserEgressProxy {
         Ok(())
     }
 
+    async fn fetch_public_asset(
+        &self,
+        session_key: &str,
+        url: &url::Url,
+    ) -> QuarryResult<PublicBrowserAsset> {
+        let (policy, shutdown) = self.inner.sessions.lock().await.get(session_key)
+            .map(|session| (session.policy.clone(), session.shutdown.clone()))
+            .ok_or_else(|| asset_error(ErrorCode::SecurityBlocked))?;
+        let permits = |policy: &BrowserEgressPolicy, url: &url::Url| {
+            policy.allows_url(url.as_str()) || policy.allows_public_asset(url.as_str())
+        };
+        if !permits(&*policy.lock().await, url) {
+            return Err(asset_error(ErrorCode::SecurityBlocked));
+        }
+        tokio::select! {
+            result = tokio::time::timeout(ASSET_TIMEOUT, fetch_public_asset(url, self.inner.lookup.as_ref())) => {
+                result.map_err(|_| asset_error(ErrorCode::Timeout))?
+            }
+            _ = shutdown.cancelled() => Err(asset_error(ErrorCode::SecurityBlocked)),
+        }
+    }
+
     async fn release_session(&self, session_key: &str) {
         if let Some(session) = self.inner.sessions.lock().await.remove(session_key) {
             session.shutdown.cancel();
@@ -231,15 +278,97 @@ impl BrowserEgressProxyProvider for PinnedBrowserEgressProxy {
     }
 }
 
+fn asset_error(code: ErrorCode) -> QuarryError {
+    QuarryError::new(code, "public browser asset could not be loaded")
+}
+
+/// A separate client sends no browser headers, cookies, credentials or body.
+/// A redirect is returned to Chromium so its next paused request is checked
+/// by the tab policy again, under Chromium's redirect limit.
+async fn fetch_public_asset(
+    url: &url::Url,
+    lookup: &dyn HostLookup,
+) -> QuarryResult<PublicBrowserAsset> {
+    validate_redirect_probe_url(url)?;
+    if url.scheme() != "https"
+        || !matches!(url.host(), Some(url::Host::Domain(_)))
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(asset_error(ErrorCode::SecurityBlocked));
+    }
+    let pinned = resolve_public_url_via(url, lookup)
+        .await
+        .map_err(|error| asset_error(error.code))?;
+    let resolver = Arc::new(PinnedDnsResolver::default());
+    resolver.pin(pinned).map_err(|error| asset_error(error.code))?;
+    let client = reqwest::Client::builder()
+        .timeout(ASSET_TIMEOUT)
+        .no_proxy()
+        .cookie_store(false)
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(resolver)
+        .build()
+        .map_err(|_| asset_error(ErrorCode::DriverFailed))?;
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|_| asset_error(ErrorCode::DriverFailed))?;
+    let status = response.status();
+    let mut headers = public_asset_headers(response.headers());
+    if let Some(target) = redirect_probe_target(url, status, response.headers())? {
+        // Chromium checks CORS on each cross-origin redirect as well as on
+        // the final asset. Keep the site's own allowed headers on both.
+        headers.push(("location".into(), target.to_string()));
+        return Ok(PublicBrowserAsset {
+            status: status.as_u16(),
+            headers,
+            body_base64: String::new(),
+        });
+    }
+    if !status.is_success() {
+        return Err(asset_error(ErrorCode::DriverFailed));
+    }
+    let body = read_bounded_body(response, MAX_ASSET_BYTES).await?;
+    Ok(PublicBrowserAsset {
+        status: status.as_u16(),
+        headers,
+        body_base64: base64::engine::general_purpose::STANDARD.encode(body),
+    })
+}
+
+fn public_asset_headers(upstream: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    let mut headers: Vec<_> = upstream
+        .iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "content-type"
+                    | "access-control-allow-origin"
+                    | "cross-origin-resource-policy"
+                    | "x-content-type-options"
+            )
+        })
+        .filter_map(|(name, value)| {
+            value.to_str().ok().filter(|text| text.len() <= 4096)
+                .map(|text| (name.to_string(), text.to_owned()))
+        })
+        .collect();
+    headers.push(("cache-control".into(), "no-store".into()));
+    headers
+}
+
 async fn serve_connection(
     client: TcpStream,
     receipts: Arc<Mutex<Vec<BrowserEgressReceipt>>>,
     sequence: Arc<Mutex<u64>>,
     policy: Arc<Mutex<BrowserEgressPolicy>>,
+    lookup: Arc<dyn HostLookup>,
     shutdown: CancellationToken,
 ) -> QuarryResult<()> {
     tokio::select! {
-        result = serve_connection_until_cancelled(client, receipts, sequence, policy) => result,
+        result = serve_connection_until_cancelled(client, receipts, sequence, policy, lookup) => result,
         _ = shutdown.cancelled() => Ok(()),
     }
 }
@@ -249,6 +378,7 @@ async fn serve_connection_until_cancelled(
     receipts: Arc<Mutex<Vec<BrowserEgressReceipt>>>,
     sequence: Arc<Mutex<u64>>,
     policy: Arc<Mutex<BrowserEgressPolicy>>,
+    lookup: Arc<dyn HostLookup>,
 ) -> QuarryResult<()> {
     // Chromium is the only intended peer, but this listener is still a
     // process-local network service. A partial request line must not retain a
@@ -279,7 +409,13 @@ async fn serve_connection_until_cancelled(
             "browser proxy request is outside the run domain policy",
         ));
     }
-    let target = match resolve_public_url(&request.url).await {
+    // D2-059: the policy above decides by name only. An open-web policy admits
+    // any public-looking name, so the resolved addresses are vetted here for
+    // every mode, with no allow_private_hosts bypass: a public name that
+    // resolves (or rebinds) to a private, loopback or metadata address is
+    // refused before any socket is opened, and the connect below dials only the
+    // addresses this resolution vetted.
+    let target = match resolve_public_url_via(&request.url, lookup.as_ref()).await {
         Ok(target) => target,
         Err(error) => {
             record_receipt(
@@ -561,6 +697,25 @@ mod tests {
     use super::*;
     use quarry_browser::BrowserEgressProxyProvider;
 
+    #[test]
+    fn public_asset_headers_preserve_site_cors_without_credentials() {
+        let mut upstream = reqwest::header::HeaderMap::new();
+        upstream.insert("access-control-allow-origin", "*".parse().unwrap());
+        upstream.insert("access-control-allow-credentials", "true".parse().unwrap());
+        upstream.insert("set-cookie", "site-token=secret".parse().unwrap());
+        upstream.insert("location", "https://cdn.example/next.css".parse().unwrap());
+        let headers = public_asset_headers(&upstream);
+        assert_eq!(
+            headers,
+            [
+                ("access-control-allow-origin".to_owned(), "*".to_owned()),
+                ("cache-control".to_owned(), "no-store".to_owned()),
+            ],
+        );
+        let no_cors = public_asset_headers(&reqwest::header::HeaderMap::new());
+        assert_eq!(no_cors, [("cache-control".to_owned(), "no-store".to_owned())]);
+    }
+
     async fn send_proxy_request(endpoint: &PinnedEgressProxyEndpoint, request: &str) -> String {
         let endpoint = url::Url::parse(endpoint.as_str()).expect("valid proxy endpoint");
         let address = SocketAddr::new(
@@ -654,6 +809,124 @@ mod tests {
         assert!(receipts
             .iter()
             .all(|receipt| receipt.decision == BrowserEgressDecision::Block));
+    }
+
+    /// Answers every name with the same fixed addresses (a name rebound to a
+    /// private target, as a rebinding DNS server serves it).
+    struct FixedLookup(Vec<IpAddr>);
+
+    #[async_trait]
+    impl HostLookup for FixedLookup {
+        async fn lookup(&self, _host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+            Ok(self.0.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn credentialless_asset_permission_cannot_open_a_tunnel_or_reach_private_dns() {
+        let proxy = PinnedBrowserEgressProxy::with_host_lookup(Arc::new(FixedLookup(vec![
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+        ])));
+        let session = "asset-rebind";
+        proxy
+            .configure_policy(
+                session,
+                BrowserEgressPolicy::from_allowed_domains(&["shop.example".to_owned()])
+                    .with_public_assets(),
+            )
+            .await
+            .expect("configure the asset-enabled session");
+        let endpoint = proxy.endpoint_for_session(session).await.expect("proxy endpoint");
+        let tunnel = send_proxy_request(
+            &endpoint,
+            "CONNECT cdn.example:443 HTTP/1.1\r\nHost: cdn.example:443\r\n\r\n",
+        )
+        .await;
+        assert!(tunnel.starts_with("HTTP/1.1 403"));
+
+        let url = url::Url::parse("https://cdn.example/site.css").expect("asset URL");
+        let error = proxy
+            .fetch_public_asset(session, &url)
+            .await
+            .err()
+            .expect("a public name resolving to metadata is refused");
+        assert_eq!(error.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn open_web_egress_refuses_a_public_name_that_resolves_private() {
+        // D2-059: the open-web policy admits the name (it is not local by name),
+        // so only the resolution can refuse it. It must, for HTTP and CONNECT.
+        let proxy = PinnedBrowserEgressProxy::with_host_lookup(Arc::new(FixedLookup(vec![
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+        ])));
+        let session = "open-web-private";
+        let policy = BrowserEgressPolicy::open_web(&[]);
+        assert!(policy.allows_url("https://rebind.example/"), "name check passes");
+        proxy
+            .configure_policy(session, policy)
+            .await
+            .expect("configure open-web policy");
+        let endpoint = proxy
+            .endpoint_for_session(session)
+            .await
+            .expect("session endpoint");
+
+        let http = send_proxy_request(
+            &endpoint,
+            "GET http://rebind.example/a HTTP/1.1\r\nHost: rebind.example\r\n\r\n",
+        )
+        .await;
+        let connect = send_proxy_request(
+            &endpoint,
+            "CONNECT rebind.example:443 HTTP/1.1\r\nHost: rebind.example:443\r\n\r\n",
+        )
+        .await;
+
+        assert!(http.starts_with("HTTP/1.1 403"));
+        assert!(connect.starts_with("HTTP/1.1 403"));
+        let receipts = proxy
+            .receipts_after(session, 0, 10)
+            .await
+            .expect("ordered receipts");
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts
+            .iter()
+            .all(|receipt| receipt.policy == "dns_or_ssrf_blocked"
+                && receipt.decision == BrowserEgressDecision::Block));
+    }
+
+    #[tokio::test]
+    async fn open_web_egress_refuses_a_mixed_or_metadata_answer() {
+        // One public address beside a metadata one must not pass: the whole
+        // answer is refused, never filtered down to the public half.
+        let proxy = PinnedBrowserEgressProxy::with_host_lookup(Arc::new(FixedLookup(vec![
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+        ])));
+        let session = "open-web-mixed";
+        proxy
+            .configure_policy(session, BrowserEgressPolicy::open_web(&[]))
+            .await
+            .expect("configure open-web policy");
+        let endpoint = proxy
+            .endpoint_for_session(session)
+            .await
+            .expect("session endpoint");
+
+        let response = send_proxy_request(
+            &endpoint,
+            "CONNECT mixed.example:443 HTTP/1.1\r\nHost: mixed.example:443\r\n\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 403"));
+        let receipts = proxy
+            .receipts_after(session, 0, 10)
+            .await
+            .expect("receipts");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].policy, "dns_or_ssrf_blocked");
     }
 
     #[tokio::test]

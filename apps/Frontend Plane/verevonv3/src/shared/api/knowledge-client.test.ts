@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  buildCrawlScopeOptions,
+  CRAWL_MAX_DEPTH,
+  CRAWL_PATTERN_MAX_COUNT,
+  CRAWL_PATTERN_MAX_LENGTH,
   getDocument,
   getWikiPageByPath,
   listDocuments,
   listWikiPages,
+  parseCrawlPatterns,
+  startCrawl,
   streamCrawlRunEvents,
   type CrawlWorkflowEvent,
 } from './knowledge-client'
@@ -154,5 +160,57 @@ describe('knowledge Data Plane response normalization', () => {
 
     expect(listed[0]).toMatchObject({ id: 'page-1', orgId: 'org-1', path: '/operations' })
     expect(loaded.excerpt).toBe('Current guidance')
+  })
+})
+
+// W2-U65-51: the crawl scope options the composer sends.
+describe('crawl scope options (W2-U65-51)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('splits patterns on lines and top-level commas, keeps brace commas, drops blanks and repeats', () => {
+    expect(parseCrawlPatterns('/docs/**, /blog/**\n\n  /docs/**  \r\nre:/tag/.*')).toEqual([
+      '/docs/**',
+      '/blog/**',
+      're:/tag/.*',
+    ])
+    expect(parseCrawlPatterns('/a/*.{html,htm}, /b/**')).toEqual(['/a/*.{html,htm}', '/b/**'])
+    expect(parseCrawlPatterns('   ')).toEqual([])
+  })
+
+  it('applies the edge caps: pattern length and pattern count', () => {
+    expect(parseCrawlPatterns('x'.repeat(CRAWL_PATTERN_MAX_LENGTH + 1))).toEqual([])
+    expect(parseCrawlPatterns('x'.repeat(CRAWL_PATTERN_MAX_LENGTH))).toHaveLength(1)
+    const many = Array.from({ length: CRAWL_PATTERN_MAX_COUNT + 20 }, (_, index) => `/p${index}/**`).join('\n')
+    expect(parseCrawlPatterns(many)).toHaveLength(CRAWL_PATTERN_MAX_COUNT)
+  })
+
+  it('builds only the options the user set', () => {
+    expect(buildCrawlScopeOptions({})).toEqual({})
+    expect(buildCrawlScopeOptions({ allowSubdomains: false, excludeText: ' ', includeText: '', maxDepth: undefined })).toEqual({})
+    expect(buildCrawlScopeOptions({ maxDepth: Number.NaN })).toEqual({})
+    expect(buildCrawlScopeOptions({ maxDepth: 0 })).toEqual({})
+    expect(buildCrawlScopeOptions({ maxDepth: 99 })).toEqual({ maxDepth: CRAWL_MAX_DEPTH })
+    expect(
+      buildCrawlScopeOptions({ allowSubdomains: true, excludeText: '/admin/**', includeText: '/docs/**', maxDepth: 2 }),
+    ).toEqual({ allowSubdomains: true, excludePaths: ['/admin/**'], includePaths: ['/docs/**'], maxDepth: 2 })
+  })
+
+  it('startCrawl sends the scope as typed and nothing else', async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify({ data: { id: 'run-1', status: 'running' } }), {
+          headers: { 'Content-Type': 'application/json' },
+          status: 200,
+        }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await startCrawl('org-1', {
+      url: 'https://example.com',
+      ...buildCrawlScopeOptions({ includeText: '/docs/**', maxDepth: 2 }),
+    })
+    const sent = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(sent).toEqual({ includePaths: ['/docs/**'], maxDepth: 2, url: 'https://example.com' })
   })
 })

@@ -154,21 +154,28 @@ impl DefaultEngine {
             return false;
         };
         let list = self.host_blocklist.read().await;
-        if list.contains(h) {
+        host_on_list(&list, h, self.match_subdomains)
+    }
+}
+
+/// Whether `host` is on `list`, exactly or (when `match_subdomains` is on)
+/// through a listed parent domain. One matcher for the scrape preflight and the
+/// browser reputation hook (E3.8.7), so the two paths can never disagree.
+fn host_on_list(list: &HashSet<String>, host: &str, match_subdomains: bool) -> bool {
+    if list.contains(host) {
+        return true;
+    }
+    if !match_subdomains {
+        return false;
+    }
+    let mut rest = host;
+    while let Some(idx) = rest.find('.') {
+        rest = &rest[idx + 1..];
+        if list.contains(rest) {
             return true;
         }
-        if !self.match_subdomains {
-            return false;
-        }
-        let mut rest = h;
-        while let Some(idx) = rest.find('.') {
-            rest = &rest[idx + 1..];
-            if list.contains(rest) {
-                return true;
-            }
-        }
-        false
     }
+    false
 }
 
 /// Entry counts of the two host lists.
@@ -176,6 +183,100 @@ impl DefaultEngine {
 pub struct ListCounts {
     pub blocklist: usize,
     pub allowlist: usize,
+}
+
+/// `QUARRY_EDGE__REPUTATION_MODE` (E3.8.7, D2-100): the deployment's browser URL
+/// reputation mode, `off` (the default), `warn` or `block`. It is a kill switch
+/// as well as a default: with it off no org setting turns the hook on.
+pub const REPUTATION_MODE_ENV: &str = "QUARRY_EDGE__REPUTATION_MODE";
+
+/// What the browser egress boundary does with a host the reputation lists name
+/// (E3.8.7). `Off` never consults the lists, so a policy built with it behaves
+/// exactly as one built before the hook existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReputationMode {
+    #[default]
+    Off,
+    /// Allow the request and record a `reputation_warned` receipt.
+    Warn,
+    /// Refuse the request and record a `reputation_blocked` receipt.
+    Block,
+}
+
+impl ReputationMode {
+    /// Parse a mode value. Anything but `warn` or `block` (case and surrounding
+    /// space ignored) is `Off`: an unreadable value never turns blocking on.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            Some("warn") => Self::Warn,
+            Some("block") => Self::Block,
+            _ => Self::Off,
+        }
+    }
+
+    /// The deployment mode from [`REPUTATION_MODE_ENV`].
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var(REPUTATION_MODE_ENV).ok().as_deref())
+    }
+
+    /// The wire name: `off`, `warn` or `block`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Warn => "warn",
+            Self::Block => "block",
+        }
+    }
+
+    /// The mode one org runs under. `self` is the deployment mode: when it is
+    /// `Off` the answer is `Off` whatever the org says (the flag is dark); when
+    /// it is on, the org's own setting wins, and an org without one gets the
+    /// deployment mode.
+    pub fn for_org(self, org: Option<ReputationMode>) -> Self {
+        if self == Self::Off {
+            return Self::Off;
+        }
+        org.unwrap_or(self)
+    }
+}
+
+/// What a reputation source knows about one host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostStanding {
+    /// Not on any list.
+    Unlisted,
+    /// On a block list.
+    Listed,
+    /// The source could not answer without waiting (for example a list swap in
+    /// progress). The browser boundary treats it as `Unlisted`.
+    Unknown,
+}
+
+/// A host reputation source the browser egress boundary consults for every
+/// http(s) request it decides: navigations, redirect hops, clicks that
+/// navigate, frames and sub-resources (E3.8.7). It is synchronous and must
+/// never block: the boundary calls it inside the CDP Fetch listener.
+pub trait HostReputation: Send + Sync {
+    /// The standing of `host`, lower-case with no trailing dot.
+    fn standing(&self, host: &str) -> HostStanding;
+
+    /// The stable name of this source, for logs and receipts. No host or URL.
+    fn source(&self) -> &'static str {
+        "security_snapshot"
+    }
+}
+
+impl HostReputation for DefaultEngine {
+    /// The same blocklist (and subdomain rule) the scrape preflight uses, read
+    /// without waiting. A reload holds the write lock only for the swap; a
+    /// lookup that lands inside it answers `Unknown`.
+    fn standing(&self, host: &str) -> HostStanding {
+        match self.host_blocklist.try_read() {
+            Ok(list) if host_on_list(&list, host, self.match_subdomains) => HostStanding::Listed,
+            Ok(_) => HostStanding::Unlisted,
+            Err(_) => HostStanding::Unknown,
+        }
+    }
 }
 
 /// Watch the snapshot at `path` by modification time and hot-reload the
@@ -325,5 +426,57 @@ mod tests {
         assert_eq!(v.decision, Decision::Block);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reputation_mode_parses_off_unless_warn_or_block() {
+        assert_eq!(ReputationMode::parse(None), ReputationMode::Off);
+        assert_eq!(ReputationMode::parse(Some("")), ReputationMode::Off);
+        assert_eq!(ReputationMode::parse(Some("off")), ReputationMode::Off);
+        assert_eq!(ReputationMode::parse(Some("yes")), ReputationMode::Off);
+        assert_eq!(ReputationMode::parse(Some(" Warn ")), ReputationMode::Warn);
+        assert_eq!(ReputationMode::parse(Some("BLOCK")), ReputationMode::Block);
+        assert_eq!(ReputationMode::default(), ReputationMode::Off);
+        for mode in [ReputationMode::Off, ReputationMode::Warn, ReputationMode::Block] {
+            assert_eq!(ReputationMode::parse(Some(mode.as_str())), mode);
+        }
+    }
+
+    #[test]
+    fn an_org_mode_applies_only_when_the_deployment_flag_is_on() {
+        let off = ReputationMode::Off;
+        assert_eq!(off.for_org(Some(ReputationMode::Block)), ReputationMode::Off);
+        assert_eq!(off.for_org(None), ReputationMode::Off);
+        let warn = ReputationMode::Warn;
+        assert_eq!(warn.for_org(None), ReputationMode::Warn);
+        assert_eq!(warn.for_org(Some(ReputationMode::Block)), ReputationMode::Block);
+        assert_eq!(warn.for_org(Some(ReputationMode::Off)), ReputationMode::Off);
+        let block = ReputationMode::Block;
+        assert_eq!(block.for_org(Some(ReputationMode::Warn)), ReputationMode::Warn);
+    }
+
+    #[tokio::test]
+    async fn the_engine_answers_host_standing_from_its_blocklist() {
+        let exact = DefaultEngine::new();
+        exact.block_host("evil.example").await;
+        assert_eq!(exact.standing("evil.example"), HostStanding::Listed);
+        assert_eq!(exact.standing("a.evil.example"), HostStanding::Unlisted);
+        assert_eq!(exact.standing("good.example"), HostStanding::Unlisted);
+        assert_eq!(HostReputation::source(&exact), "security_snapshot");
+
+        let suffix = DefaultEngine::new().with_subdomain_matching(true);
+        suffix.block_host("evil.example").await;
+        assert_eq!(suffix.standing("a.b.evil.example"), HostStanding::Listed);
+        assert_eq!(suffix.standing("notevil.example"), HostStanding::Unlisted);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_during_a_list_swap_answers_unknown_without_waiting() {
+        let engine = DefaultEngine::new();
+        engine.block_host("evil.example").await;
+        let held = engine.host_blocklist.write().await;
+        assert_eq!(engine.standing("evil.example"), HostStanding::Unknown);
+        drop(held);
+        assert_eq!(engine.standing("evil.example"), HostStanding::Listed);
     }
 }

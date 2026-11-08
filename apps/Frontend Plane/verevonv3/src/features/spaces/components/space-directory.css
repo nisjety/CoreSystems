@@ -1,0 +1,99 @@
+/* WS04-S8: the room directory page (/spaces/directory). */
+.verevon-space-directory {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.verevon-space-directory__header h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.verevon-space-directory__lead {
+  margin: 0 0 12px;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.verevon-space-directory__search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  padding: 6px 10px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-space-directory__search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.verevon-space-directory__status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+}
+
+.verevon-space-directory__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-space-directory__row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  padding: 10px 12px;
+}
+
+.verevon-space-directory__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.verevon-space-directory__name {
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.verevon-space-directory__topic {
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-space-directory__meta {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}

@@ -600,7 +600,7 @@ async fn child_frame_targets_fall_back_to_synthetic() {
         .await
         .expect("child frame accessibility tree");
     let child_tree = serde_json::to_value(&child_tree.result).expect("tree json");
-    let mut inner = raw_nodes_to_native_targets(&child_tree)
+    let mut inner = raw_nodes_to_native_targets(&child_tree, AX_PROJECTION_NODE_LIMIT)
         .into_iter()
         .find(|target| target.name.as_deref() == Some("Inner"))
         .expect("the iframe button is a target of its own frame");

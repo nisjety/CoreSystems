@@ -35,8 +35,9 @@ WORKDIR /app/rust
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/rust/target,sharing=locked \
-    cargo build --release --bin execution-core \
-    && cp target/release/execution-core /usr/local/bin/execution-core
+    cargo build --release --bin execution-core --bin mp-netbridge \
+    && cp target/release/execution-core /usr/local/bin/execution-core \
+    && cp target/release/mp-netbridge /usr/local/bin/mp-netbridge
 
 FROM debian:bookworm-slim AS runtime
 ARG SOURCE_REVISION=unverified
@@ -64,7 +65,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     export DEBIAN_FRONTEND=noninteractive DEBCONF_NOWARNINGS=yes; \
     apt-get update -qq; \
     if ! apt-get install -y -qq --no-install-recommends \
-        ca-certificates curl bubblewrap \
+        ca-certificates curl bubblewrap util-linux \
         python3 python3-pip \
         python3-numpy python3-pandas python3-matplotlib \
         python3-openpyxl python3-xlsxwriter \
@@ -75,6 +76,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         exit 1; \
     fi; \
     rm -f /tmp/apt-install.log
+# WS06-S8: per-spawn resource limits go through util-linux `prlimit`, which wraps
+# `bwrap` so every sandboxed child inherits them. The build fails if it is missing
+# or does not support the flags the wrapper uses, rather than shipping an image
+# whose limits would silently refuse every sandboxed spawn (fail closed at runtime).
+RUN set -e; \
+    prlimit --version; \
+    prlimit --cpu=5:7 --as=1073741824 --fsize=1048576 --nofile=64 --core=0 -- true
 # `--break-system-packages` is mandatory here: pip refuses to write into a
 # distro-managed site-packages under PEP 668, and this IS the image's system
 # Python. Same failure handling as apt — surface the log, then fail the build.
@@ -126,6 +134,8 @@ ENV MPLBACKEND=Agg
 COPY skills/office/ /opt/verevon/skills/office/
 RUN useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin modelplane
 COPY --from=builder /usr/local/bin/execution-core /usr/local/bin/execution-core
+# EP-9 E3: the sandbox's egress bridge (egress_proxy::NETBRIDGE_BIN); without it the host claims off.
+COPY --from=builder /usr/local/bin/mp-netbridge /usr/local/bin/mp-netbridge
 USER modelplane
 EXPOSE 8083 9093
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=5 \

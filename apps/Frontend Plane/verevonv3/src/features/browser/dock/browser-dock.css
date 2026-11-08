@@ -1,0 +1,78 @@
+/* Browser dock (WS9.G): the layout picker and the layouts the chat page takes when the dock is open
+   beside a live run. Colours come from the chat page tokens, with fallbacks, as in
+   browser-control-strip.css. Nothing here applies until the page carries a dock class.
+   Lane note: the target file is CRLF, like the other stylesheets in the dock folder. */
+
+.browser-dock-controls {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--verevon-d-border, rgb(0 0 0 / 12%));
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.browser-dock-controls__button {
+  min-height: 1.75rem;
+  padding: 0.25rem 0.5rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--verevon-e-muted, #5f5f5f);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.browser-dock-controls__button:hover {
+  color: var(--verevon-text, inherit);
+}
+
+.browser-dock-controls__button[aria-pressed='true'] {
+  background: var(--verevon-chat-fjord-soft, #eaf3fd);
+  color: var(--verevon-chat-fjord, #0071e3);
+}
+
+.browser-dock-controls__button:focus-visible {
+  outline: 2px solid var(--verevon-chat-fjord, #0071e3);
+  outline-offset: 1px;
+}
+
+/* Right: no rule. The live panel keeps its own rail width (`.verevon-chat-run-panel`, global.css).
+
+   Bottom: the transcript keeps the top and the browser takes `--browser-dock-size` of the page
+   height (the page sets it from the stored size; 40% when it does not). From 861px up only: at 860px
+   and below the split already stacks the panel under the transcript (global.css), and the dock
+   follows that stack. Canvas tabs (sources, artifacts, work) own the rail, so no dock layout applies
+   while one is open. */
+@media (min-width: 861px) {
+  .verevon-chat-page--dock-bottom:not(.verevon-chat-page--canvas) {
+    flex-direction: column;
+  }
+
+  .verevon-chat-page--dock-bottom:not(.verevon-chat-page--canvas) .verevon-chat-run-panel {
+    flex: 0 0 var(--browser-dock-size, 40%);
+    max-height: none;
+    border-left: 0;
+    box-shadow: 0 -12px 32px rgb(17 17 17 / 4%);
+  }
+
+  .verevon-chat-page--dock-bottom:not(.verevon-chat-page--canvas) .verevon-chat-run-panel--collapsed {
+    flex: 0 0 44px;
+  }
+}
+
+/* Maximised: the browser covers the chat page, as the Work sheet does on a phone (global.css). The
+   selector outranks the stacked phone panel, so a maximised dock is full height at every width. */
+.verevon-chat-page--dock-maximised:not(.verevon-chat-page--canvas) .verevon-chat-run-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  width: 100%;
+  flex: 1 1 auto;
+  max-height: none;
+  border-left: 0;
+}

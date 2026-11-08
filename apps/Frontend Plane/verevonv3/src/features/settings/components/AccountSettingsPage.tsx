@@ -1,8 +1,11 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { MailTaskAddressSection } from '@/features/settings/components/MailTaskAddressSection'
+import { NotificationChannelsSection } from '@/features/settings/components/NotificationChannelsSection'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
+import { SpaceNotificationPreferences } from '@/features/settings/components/SpaceNotificationPreferences'
+import { SpaceStatusMenu } from '@/features/spaces/components/SpaceStatusMenu'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
 import {
   SectionHeader,
@@ -23,6 +26,8 @@ import {
   type UserProfile,
 } from '@/shared/api/settings-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
+import { languageFromLocale, localeFromLanguage } from '@/shared/preferences/locale-map'
+import { receivePreferences } from '@/shared/preferences/preferences-store'
 import { getSession } from '@/shared/session/session-store'
 
 type FormState = {
@@ -35,10 +40,13 @@ type FormState = {
   officeLocation: string
   timezone: string
   language: string
+  /** 'auto' follows the language's own pattern. */
+  dateFormat: string
+  timeFormat: string
+  density: 'comfortable' | 'compact'
   theme: string
   status: string
   emailNotifications: boolean
-  pushNotifications: boolean
 }
 
 type LoadState =
@@ -58,10 +66,12 @@ const emptyForm: FormState = {
   officeLocation: '',
   timezone: 'Europe/Oslo',
   language: 'en-US',
+  dateFormat: 'auto',
+  timeFormat: 'auto',
+  density: 'comfortable',
   theme: 'system',
   status: 'online',
   emailNotifications: true,
-  pushNotifications: true,
 }
 
 function getProviderRows(i18n: ReturnType<typeof useI18n>) {
@@ -83,7 +93,7 @@ function splitDisplayName(name: string): { firstName: string; lastName: string }
   }
 }
 
-function formFrom(profile: UserProfile, preferences: UserPreferences): FormState {
+function formFrom(profile: UserProfile, preferences: UserPreferences, currentLanguage: string): FormState {
   const displayName = profile.displayName || profile.name || profile.email.split('@')[0] || ''
   const nameParts = splitDisplayName(displayName)
   return {
@@ -95,11 +105,17 @@ function formFrom(profile: UserProfile, preferences: UserPreferences): FormState
     phoneNumber: profile.phoneNumber,
     officeLocation: profile.officeLocation,
     timezone: preferences.timezone || profile.timezone || emptyForm.timezone,
-    language: preferences.language || emptyForm.language,
+    // An unset server language must not show (and then save) the compatibility default
+    // 'en-US' over a Norwegian UI: follow the language the person is using now.
+    language: preferences.explicit
+      ? (preferences.explicit.language && preferences.language ? preferences.language : currentLanguage)
+      : preferences.language || currentLanguage,
+    dateFormat: preferences.explicit?.dateFormat && preferences.dateFormat ? preferences.dateFormat : 'auto',
+    timeFormat: preferences.explicit?.timeFormat && preferences.timeFormat ? preferences.timeFormat : 'auto',
+    density: preferences.compactMode === true ? 'compact' : 'comfortable',
     theme: preferences.theme || emptyForm.theme,
     status: profile.status || emptyForm.status,
     emailNotifications: preferences.notifications?.email ?? emptyForm.emailNotifications,
-    pushNotifications: preferences.notifications?.push ?? emptyForm.pushNotifications,
   }
 }
 
@@ -121,7 +137,7 @@ export default function AccountSettingsPage() {
     try {
       const [profileData, preferencesData] = await Promise.all([getMe(), getPreferences()])
       setProfile(profileData)
-      setForm(formFrom(profileData, preferencesData))
+      setForm(formFrom(profileData, preferencesData, languageFromLocale(i18n.locale())))
       setLoadState({ type: 'ready' })
     } catch (error) {
       setLoadState({
@@ -148,7 +164,7 @@ export default function AccountSettingsPage() {
     const current = form()
     setLoadState({ type: 'saving' })
     try {
-      const [profileData] = await Promise.all([
+      const [profileData, savedPreferences] = await Promise.all([
         updateMe({
           name: current.displayName,
           displayName: current.displayName,
@@ -164,14 +180,20 @@ export default function AccountSettingsPage() {
         updatePreferences({
           language: current.language,
           timezone: current.timezone,
+          dateFormat: current.dateFormat as UserPreferences['dateFormat'],
+          timeFormat: current.timeFormat as UserPreferences['timeFormat'],
+          compactMode: current.density === 'compact',
           theme: current.theme,
           notifications: {
             email: current.emailNotifications,
-            push: current.pushNotifications,
           },
         }),
       ])
       setProfile(profileData)
+      // Feed the saved values to the shell (formats, density) and follow the saved language in the UI.
+      receivePreferences(savedPreferences)
+      const savedLocale = localeFromLanguage(current.language)
+      if (savedLocale) i18n.applyServerLocale(savedLocale)
       setLoadState({ type: 'saved' })
     } catch (error) {
       setLoadState({
@@ -188,7 +210,7 @@ export default function AccountSettingsPage() {
       return
     }
     void Promise.all([getPreferences()]).then(([preferences]) => {
-      setForm(formFrom(currentProfile, preferences))
+      setForm(formFrom(currentProfile, preferences, languageFromLocale(i18n.locale())))
       setLoadState({ type: 'ready' })
     })
   }
@@ -254,6 +276,9 @@ export default function AccountSettingsPage() {
       />
       <PreferencesSection form={form} onField={updateField} />
       <AvailabilitySection form={form} onField={updateField} />
+      <NotificationChannelsSection />
+      <SpaceStatusMenu />
+      <SpaceNotificationPreferences />
       <ConnectedAccountsSection profile={profile} />
       <ChatGptSubscriptionSection />
       <TwoFactorEnrollmentSection />
@@ -393,6 +418,30 @@ function ContactSection(props: {
   )
 }
 
+/** The four common zones, plus the stored one when it is something else. */
+function timezoneOptions(current: string) {
+  const options = [
+    { value: 'Europe/Oslo', label: 'Europe/Oslo' },
+    { value: 'UTC', label: 'UTC' },
+    { value: 'America/New_York', label: 'America/New York' },
+    { value: 'Europe/London', label: 'Europe/London' },
+  ]
+  if (current && !options.some((option) => option.value === current)) options.push({ value: current, label: current })
+  return options
+}
+
+/** English and Norwegian only; any other stored language stays visible as a disabled option. */
+function languageOptions(current: string, tr: (no: string, en: string) => string) {
+  const options = [
+    { value: 'en-US', label: tr('Engelsk', 'English'), disabled: false },
+    { value: 'nb-NO', label: tr('Norsk bokmål', 'Norwegian Bokmal'), disabled: false },
+  ]
+  if (current && !options.some((option) => option.value === current)) {
+    options.push({ value: current, label: current, disabled: true })
+  }
+  return options
+}
+
 function PreferencesSection(props: {
   form: () => FormState
   onField: <K extends keyof FormState>(key: K, value: FormState[K]) => void
@@ -410,23 +459,46 @@ function PreferencesSection(props: {
           label={i18n.tr('Språk', 'Language')}
           value={props.form().language}
           onChange={(event) => props.onField('language', event.currentTarget.value)}
-          options={[
-            { value: 'en-US', label: i18n.tr('Engelsk', 'English') },
-            { value: 'nb-NO', label: i18n.tr('Norsk bokmål', 'Norwegian Bokmal') },
-            { value: 'fr-FR', label: i18n.tr('Fransk', 'French') },
-            { value: 'de-DE', label: i18n.tr('Tysk', 'German') },
-          ]}
+          options={languageOptions(props.form().language, i18n.tr)}
         />
         <SettingsSelect
           id="timezone"
           label={i18n.tr('Tidssone', 'Time zone')}
           value={props.form().timezone}
           onChange={(event) => props.onField('timezone', event.currentTarget.value)}
+          options={timezoneOptions(props.form().timezone)}
+        />
+        <SettingsSelect
+          id="density"
+          label={i18n.tr('Tetthet', 'Density')}
+          value={props.form().density}
+          onChange={(event) => props.onField('density', event.currentTarget.value as FormState['density'])}
           options={[
-            { value: 'Europe/Oslo', label: 'Europe/Oslo' },
-            { value: 'UTC', label: 'UTC' },
-            { value: 'America/New_York', label: 'America/New York' },
-            { value: 'Europe/London', label: 'Europe/London' },
+            { value: 'comfortable', label: i18n.tr('Standard', 'Comfortable') },
+            { value: 'compact', label: i18n.tr('Kompakt', 'Compact') },
+          ]}
+        />
+        <SettingsSelect
+          id="date-format"
+          label={i18n.tr('Datoformat', 'Date format')}
+          value={props.form().dateFormat}
+          onChange={(event) => props.onField('dateFormat', event.currentTarget.value)}
+          options={[
+            { value: 'auto', label: i18n.tr('Følg språket', 'Follow language') },
+            { value: 'DD/MM/YYYY', label: 'DD/MM/YYYY' },
+            { value: 'MM/DD/YYYY', label: 'MM/DD/YYYY' },
+            { value: 'YYYY-MM-DD', label: 'YYYY-MM-DD' },
+          ]}
+        />
+        <SettingsSelect
+          id="time-format"
+          label={i18n.tr('Tidsformat', 'Time format')}
+          value={props.form().timeFormat}
+          onChange={(event) => props.onField('timeFormat', event.currentTarget.value)}
+          options={[
+            { value: 'auto', label: i18n.tr('Følg språket', 'Follow language') },
+            { value: '24h', label: i18n.tr('24 timer', '24-hour') },
+            { value: '12h', label: i18n.tr('12 timer', '12-hour') },
           ]}
         />
         <SettingsSelect
@@ -456,12 +528,6 @@ function AvailabilitySection(props: {
       description: i18n.tr('Send konto- og supportoppdateringer til den primære e-posten din.', 'Send account and support updates to your primary email.'),
       enabled: props.form().emailNotifications,
       onChange: (checked: boolean) => props.onField('emailNotifications', checked),
-    },
-    {
-      title: i18n.tr('Push-varsler', 'Push notifications'),
-      description: i18n.tr('Vis nettleservarsler for samtaler tildelt deg.', 'Show browser notifications for assigned conversations.'),
-      enabled: props.form().pushNotifications,
-      onChange: (checked: boolean) => props.onField('pushNotifications', checked),
     },
   ]
 

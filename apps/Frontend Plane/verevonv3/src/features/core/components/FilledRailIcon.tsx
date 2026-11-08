@@ -6,6 +6,7 @@ const paths: Record<string, string> = {
   spaces: 'M9 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM2 20v-3a6 6 0 0 1 12 0v3H2Zm14 0v-3a8 8 0 0 0-1-4h3a4 4 0 0 1 4 4v3h-6Z',
   inbox: 'M5 3h14l3 9v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-7l3-9Zm1.5 2L4 12h5v3h6v-3h5l-2.5-7h-11Z',
   marketing: 'M3 2h18v15h-8v3l4 2h-4l-1-1-1 1H7l4-2v-3H3V2Zm2 3v9h14V5H5Z',
+  engagement: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 3a7 7 0 1 1 0 14 7 7 0 0 1 0-14Zm0 2a5 5 0 1 0 0 10 5 5 0 0 0 0-10Zm0 2a3 3 0 1 1 0 6 3 3 0 0 1 0-6Zm0 1a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z',
   agents: 'M7 3h10l2 7H5l2-7ZM2 11h20v2H2v-2Zm4 4a4 4 0 1 0 3.87 5H14.13A4 4 0 1 0 14 18h-4a4 4 0 0 0-4-3Zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm12 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z',
   studio: 'M3 3h7v7H3V3Zm11 1h7v7h-7V4ZM4 14h7v7H4v-7Z',
   social: 'M5 2h2v3h10V2h2v3h1a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1V2Zm0 8v2h14v-2H5Zm1 5v2h2v-2H6Zm5 0v2h2v-2h-2Zm5 0v2h2v-2h-2Z',

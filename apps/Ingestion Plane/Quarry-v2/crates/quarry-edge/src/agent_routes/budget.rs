@@ -1,6 +1,6 @@
 use super::*;
 
-use quarry_runtime::action_cost::CostSource;
+use quarry_runtime::action_cost::{estimate_refused_action_cost, CostSource};
 
 pub(super) fn enforce_step_budget(entry: &RunEntry) -> Result<(), &'static str> {
     if entry.constraints.max_steps > 0 && entry.summary.step >= entry.constraints.max_steps {
@@ -77,6 +77,7 @@ pub(super) fn browser_action_name(action: &AgentAction) -> &'static str {
         AgentAction::FrameUploadRef { .. } => "frame_upload_ref",
         AgentAction::DownloadRef { .. } => "download_ref",
         AgentAction::FrameDownloadRef { .. } => "frame_download_ref",
+        AgentAction::FillOtpRef { .. } => "fill_otp_ref",
         AgentAction::Screenshot { .. } => "screenshot",
         AgentAction::Pdf => "pdf",
         AgentAction::Evaluate { .. } => "evaluate",
@@ -116,18 +117,86 @@ pub(super) fn receipt_cost_source(telemetry: &BrowserTelemetry) -> CostSource {
 /// The cost of a failed step and its source. `ran` is the telemetry of a browser action
 /// that ran and whose landed page the edge then refused (T4b-1): it is charged as a
 /// completed action is, since the action did run. An action that failed is charged the
-/// flat table (WS6.B).
+/// flat table (WS6.B). Two cases differ. A driver figure is kept whatever the action. A
+/// navigation whose landed page was refused and that the driver did not meter costs the
+/// refusal rate, not the flat navigate cost (W2-U21a): `ran` is `Some` only for a refused
+/// landing, so that case is always a refusal by policy.
 pub(super) fn failed_step_cost(
     ran: Option<&BrowserTelemetry>,
     action: &AgentAction,
 ) -> (f64, CostSource) {
     match ran {
+        Some(telemetry)
+            if receipt_cost_source(telemetry) == CostSource::FlatTable
+                && is_navigation(action) =>
+        {
+            refused_navigation_cost(action)
+        }
         Some(telemetry) => (
             receipt_cost_usd(telemetry, action),
             receipt_cost_source(telemetry),
         ),
         None => (estimated_action_cost_usd(action), CostSource::FlatTable),
     }
+}
+
+/// [`failed_step_cost`] for a failure whose error is known (W2-U21a). A navigation the driver
+/// refused before any page was used (`ran` is `None` and the error is `SECURITY_BLOCKED`: the
+/// run's domain grant, the egress guard or the target guard refused it) costs the refusal
+/// rate. A navigation that timed out or failed some other way is not a refusal and keeps the
+/// flat navigate cost. Call sites that hold the error should use this function.
+// No non-test caller yet: the failed-step call sites in step.rs and attach.rs switch to it
+// (see W23-W2-U21a-status.md). Remove this attribute when they do.
+#[allow(dead_code)]
+pub(super) fn failed_step_cost_for_error(
+    ran: Option<&BrowserTelemetry>,
+    action: &AgentAction,
+    error: &QuarryError,
+) -> (f64, CostSource) {
+    match ran {
+        None if is_navigation(action) && error.code == ErrorCode::SecurityBlocked => {
+            refused_navigation_cost(action)
+        }
+        _ => failed_step_cost(ran, action),
+    }
+}
+
+/// Whether the action is a navigation: the one action the refusal rate applies to.
+fn is_navigation(action: &AgentAction) -> bool {
+    matches!(action, AgentAction::Navigate { .. })
+}
+
+/// The refusal rate of a refused navigation, and its source. The flat navigate cost it
+/// replaces is counted beside it in the shadow counters.
+fn refused_navigation_cost(action: &AgentAction) -> (f64, CostSource) {
+    let (flat_micro, charged_micro) = refusal_micro_pair(action);
+    record_refused_navigation(flat_micro, charged_micro);
+    (
+        estimate_refused_action_cost(browser_action_name(action)).total_usd,
+        CostSource::FlatTable,
+    )
+}
+
+/// What a refused navigation costs on the flat table and at the refusal rate, in micro-USD.
+fn refusal_micro_pair(action: &AgentAction) -> (u64, u64) {
+    let flat = crate::budget::micro_usd(estimated_action_cost_usd(action));
+    let refused = crate::budget::micro_usd(
+        estimate_refused_action_cost(browser_action_name(action)).total_usd,
+    );
+    (flat, refused)
+}
+
+/// The shadow counters of refused navigations (W2-U21a): how many were charged, and both
+/// numbers under the enforcement mode they were charged in, so the X-12 shadow review can read
+/// the refusal rate against the flat navigate cost. Recorded in every mode: the charge is not
+/// gated by the mode.
+fn record_refused_navigation(flat_micro: u64, charged_micro: u64) {
+    let mode = crate::budget::current_mode().label();
+    metrics::counter!("quarry_agent_refused_navigation_total", "mode" => mode).increment(1);
+    metrics::counter!("quarry_agent_refused_navigation_flat_micro_usd_total", "mode" => mode)
+        .increment(flat_micro);
+    metrics::counter!("quarry_agent_refused_navigation_charged_micro_usd_total", "mode" => mode)
+        .increment(charged_micro);
 }
 
 pub(super) fn cost_source_label(source: CostSource) -> &'static str {
@@ -209,6 +278,8 @@ pub(super) fn estimated_action_cost_usd(action: &AgentAction) -> f64 {
         AgentAction::FrameUploadRef { .. } => "type",
         AgentAction::DownloadRef { .. } => "download_ref",
         AgentAction::FrameDownloadRef { .. } => "frame_download_ref",
+        // E3.1-a: one trusted-input fill, priced like the other typed inputs.
+        AgentAction::FillOtpRef { .. } => "type",
         AgentAction::Screenshot { .. } => "screenshot",
         AgentAction::Pdf => "pdf",
         AgentAction::Evaluate { .. } => "evaluate",
@@ -240,5 +311,165 @@ mod reload_label_tests {
             "reload"
         );
         assert!(estimated_action_cost_usd(&AgentAction::Reload { ignore_cache: false }) > 0.0);
+    }
+}
+
+#[cfg(test)]
+mod refusal_cost_tests {
+    use super::*;
+    use crate::budget::{BudgetLimits, BudgetMode, RunBudget, RunClass};
+    use quarry_runtime::action_cost::REFUSAL_RATE_USD;
+    use std::time::Instant;
+
+    fn navigate() -> AgentAction {
+        AgentAction::Navigate {
+            url: "http://fixture-b.crawl.test/ext".to_owned(),
+        }
+    }
+
+    /// The error the driver raises for a navigation the run's domain grant refuses
+    /// (`navigation_refused` in quarry-browser): `SECURITY_BLOCKED`, with no URL in it.
+    fn refused_by_grant() -> QuarryError {
+        QuarryError::new(
+            ErrorCode::SecurityBlocked,
+            "browser navigation is outside the run's allowed domains",
+        )
+        .with_details(serde_json::json!({ "reason": "domain_grant_blocked", "op": "navigate" }))
+    }
+
+    fn timed_out() -> QuarryError {
+        QuarryError::new(ErrorCode::Timeout, "navigation timed out")
+    }
+
+    /// The browser-time term switched off, so the ledger counts only the flat charges.
+    fn limits() -> BudgetLimits {
+        BudgetLimits {
+            browser_second_usd: 0.0,
+            ..BudgetLimits::default()
+        }
+    }
+
+    fn constraints(max_cost_usd: f64) -> AgentConstraints {
+        AgentConstraints {
+            max_steps: 10,
+            allowed_domains: vec![],
+            max_runtime_s: None,
+            max_cost_usd: Some(max_cost_usd),
+        }
+    }
+
+    fn agent_budget(max_cost_usd: f64) -> RunBudget {
+        RunBudget::start(
+            &limits(),
+            RunClass::Agent,
+            &constraints(max_cost_usd),
+            None,
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn a_navigation_the_driver_refuses_costs_the_refusal_rate() {
+        let (cost, source) = failed_step_cost_for_error(None, &navigate(), &refused_by_grant());
+        assert_eq!(cost, REFUSAL_RATE_USD);
+        assert_eq!(source, CostSource::FlatTable);
+        assert!(cost < estimated_action_cost_usd(&navigate()));
+    }
+
+    #[test]
+    fn a_navigation_that_times_out_is_not_a_refusal_and_keeps_the_flat_cost() {
+        assert_eq!(
+            failed_step_cost_for_error(None, &navigate(), &timed_out()),
+            (estimated_action_cost_usd(&navigate()), CostSource::FlatTable)
+        );
+    }
+
+    #[test]
+    fn a_refused_action_that_is_not_a_navigation_keeps_its_flat_cost() {
+        let click = AgentAction::Click {
+            selector: "#go".to_owned(),
+        };
+        assert_eq!(
+            failed_step_cost_for_error(None, &click, &refused_by_grant()),
+            (estimated_action_cost_usd(&click), CostSource::FlatTable)
+        );
+    }
+
+    #[test]
+    fn a_refused_landing_costs_the_refusal_rate_unless_the_driver_metered_it() {
+        // The action ran, its landed page was refused, and the driver gave no figure.
+        assert_eq!(
+            failed_step_cost(Some(&BrowserTelemetry::default()), &navigate()),
+            (REFUSAL_RATE_USD, CostSource::FlatTable)
+        );
+        // A driver figure is kept: the refusal rate replaces only the flat navigate cost.
+        let metered = BrowserTelemetry {
+            verified_action_cost_micro_usd: Some(12_345),
+            ..BrowserTelemetry::default()
+        };
+        let (cost, source) = failed_step_cost(Some(&metered), &navigate());
+        assert!((cost - 0.012_345).abs() < 1e-12);
+        assert_eq!(source, CostSource::ProviderBilled);
+    }
+
+    #[test]
+    fn the_shadow_pair_keeps_the_flat_navigate_cost_beside_the_refusal_rate() {
+        assert_eq!(refusal_micro_pair(&navigate()), (1_000, 100));
+    }
+
+    #[test]
+    fn refused_navigations_charge_the_refusal_rate_to_the_ledger() {
+        // A cap of 1500 micro-USD. The gate projects each navigate at the flat 1000 before it runs.
+        let mut budget = agent_budget(0.0015);
+        let now = Instant::now();
+        let mut refused = 0_u32;
+        while budget.gate(BudgetMode::On, 1_000, now).is_ok() {
+            let (cost, _) = failed_step_cost_for_error(None, &navigate(), &refused_by_grant());
+            budget.charge(false, crate::budget::micro_usd(cost));
+            refused += 1;
+            assert!(refused < 100, "the cap must be reached");
+        }
+        // 100 each: the gate passes 500 + 1000 (1500 is not over the cap) and refuses 600 + 1000.
+        assert_eq!(refused, 6);
+        assert_eq!(budget.ledger.spent_micro_usd, 600);
+        assert_eq!(budget.ledger.attempts, 6);
+        assert_eq!(budget.ledger.steps, 0, "a refused navigation is not a completed step");
+    }
+
+    #[test]
+    fn under_the_flat_navigate_charge_the_same_cap_refuses_the_second_navigation() {
+        let mut budget = agent_budget(0.0015);
+        let now = Instant::now();
+        budget
+            .gate(BudgetMode::On, 1_000, now)
+            .expect("the first navigation runs");
+        budget.charge(
+            false,
+            crate::budget::micro_usd(estimated_action_cost_usd(&navigate())),
+        );
+        assert!(
+            budget.gate(BudgetMode::On, 1_000, now).is_err(),
+            "1000 spent and 1000 more projected is over 1500"
+        );
+    }
+
+    #[test]
+    fn a_resumed_segment_keeps_the_refusal_charges_it_resumes() {
+        let now = Instant::now();
+        let mut first = agent_budget(0.0015);
+        for _ in 0..3 {
+            let (cost, _) = failed_step_cost_for_error(None, &navigate(), &refused_by_grant());
+            first.charge(false, crate::budget::micro_usd(cost));
+        }
+        let checkpoint = first.snapshot(now);
+        let resumed = RunBudget::start(
+            &limits(),
+            RunClass::Agent,
+            &constraints(0.0015),
+            Some(&checkpoint),
+            now,
+        );
+        assert_eq!(resumed.segment, 1);
+        assert_eq!(resumed.ledger.spent_micro_usd, 300, "a resume cannot refill the cap");
     }
 }

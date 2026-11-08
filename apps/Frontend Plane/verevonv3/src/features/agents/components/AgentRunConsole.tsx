@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  Target,
   Timer,
   Users,
   Wrench,
@@ -40,9 +41,12 @@ import {
   getPresetAgent,
   presetAgentChatActions,
   presetAgents,
+  resolvePresetAgent,
   type PresetAgent,
   type PresetAgentId,
+  type ResolvedPresetAgent,
 } from '@/shared/actions/preset-agents'
+import { listAuthored, type AuthoredBehaviour } from '@/shared/api/authored-kinds-client'
 import {
   streamChat,
   VEREVON_BALANCE_MODE_ID,
@@ -84,6 +88,8 @@ import {
   summarizeToolArgs,
   summarizeToolResult,
 } from '@/features/chat/components/chat-normalizers'
+import type { RunMeter } from '@/features/chat/components/chat-types'
+import { RunCostMeter, applyUsageProgress, applyUsageTotal } from '@/features/chat/components/RunCostMeter'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 import {
@@ -92,6 +98,8 @@ import {
   approvalKindLabel,
   approvalReason,
 } from '@/shared/approvals/approval-copy'
+import { isStoppedRunStatus, legacyStateFromRunStatus } from '@/shared/chat/thread-status'
+import { getThreadGoal, type ThreadGoal } from '@/shared/api/thread-goal-client'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -138,10 +146,8 @@ type Citation = {
   snippet: string
 }
 
-type RunUsage = {
-  inputTokens?: number
-  outputTokens?: number
-  costUsd?: number
+/** The run's usage: its running cost and tokens (`RunMeter`), with the latency and confidence the chat stream states. */
+type RunUsage = RunMeter & {
   latencyMs?: number
   confidence?: number
 }
@@ -243,6 +249,20 @@ export default function AgentRunConsole() {
     },
   )
 
+  // The person's authored presets (EP-11 S6), listed under the curated ones. Empty while the
+  // server's authored kinds are off and on any failure: the curated presets never depend on them.
+  const [authoredPresets] = createResource(async () => {
+    try {
+      const { items, kindsEnabled } = await listAuthored('preset')
+      return kindsEnabled ? items : []
+    } catch {
+      return [] as AuthoredBehaviour[]
+    }
+  })
+  const authoredPresetList = createMemo<AuthoredBehaviour[]>(() =>
+    authoredPresets.error != null ? [] : authoredPresets() ?? [],
+  )
+
   const [runs] = createResource(
     () => {
       const source = historySource()
@@ -260,6 +280,20 @@ export default function AgentRunConsole() {
       return page.runs
     },
   )
+
+  // The goal of the run's thread, read-only (EP-7 S5, decision D1): the goal is set and edited in the
+  // chat thread, so the console only shows it and links there. Re-read when a run settles, since a
+  // goal turn moves its counters and status. A failed read hides the panel: the goal is context here,
+  // not the run's result.
+  const [threadGoal] = createResource(
+    () => {
+      const threadId = state.threadId
+      if (!threadId) return null
+      return { threadId, tick: historyTick() }
+    },
+    (key) => getThreadGoal(key.threadId).catch(() => null),
+  )
+  const goalView = createMemo<ThreadGoal | null>(() => (threadGoal.error != null ? null : threadGoal() ?? null))
 
   // The run whose telemetry the side panel shows. Defaults to the live run; a
   // history-rail click overrides it until the user starts a new run.
@@ -634,6 +668,11 @@ export default function AgentRunConsole() {
   const runTask = () => {
     const content = goal().trim()
     if (!content || isActive()) return
+    // An unavailable preset sends nothing, so the check runs before the run state is reset. The
+    // empty Set stands in until an admitted-set client exists; with the switch off this is a no-op.
+    const preset = presetId() ? getPresetAgent(presetId()!) : undefined
+    const resolved: ResolvedPresetAgent | undefined = preset ? resolvePresetAgent(preset, new Set<string>()) : undefined
+    if (resolved && !resolved.available) return
 
     // A new run aborts the previous controller first — no leaked streams. Any
     // history replay is torn down and the telemetry panel re-pins to the live
@@ -747,11 +786,18 @@ export default function AgentRunConsole() {
       onUsage: (usage) => {
         setState((s) => {
           s.usage = {
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            costUsd: usage.costUsd,
+            ...applyUsageTotal(s.usage ?? undefined, usage),
             latencyMs: usage.latencyMs,
             confidence: usage.confidence,
+          }
+        })
+      },
+      onUsageProgress: (progress) => {
+        setState((s) => {
+          s.usage = {
+            ...applyUsageProgress(s.usage ?? undefined, progress),
+            latencyMs: s.usage?.latencyMs,
+            confidence: s.usage?.confidence,
           }
         })
       },
@@ -785,8 +831,7 @@ export default function AgentRunConsole() {
     // contracts (and their approval gating) instead of only the free-text goal.
     // `planMode: true` is never overridden by a preset — every action still runs
     // through the console's normal HITL/approval deck.
-    const preset = presetId() ? getPresetAgent(presetId()!) : undefined
-    const presetActions = preset ? presetAgentChatActions(preset) : undefined
+    const presetActions = resolved ? presetAgentChatActions(resolved) : undefined
 
     void streamChat(
       {
@@ -834,6 +879,19 @@ export default function AgentRunConsole() {
     setGoal(preset.goalTemplate)
     setModeId(preset.defaults.modeId)
     setBrowseWeb(preset.defaults.browseWeb)
+  }
+
+  // An authored preset fills the console's visible controls and nothing else: it carries no
+  // action subset (that stays with the curated presets, EP-6 S11), plan mode stays on, and the run
+  // starts only on the person's click. A control the preset does not name is left as it was, and a
+  // mode the console does not offer is ignored rather than sent.
+  const applyAuthoredPreset = (preset: AuthoredBehaviour) => {
+    if (isActive()) return
+    setPresetId(null)
+    if (preset.content.trim()) setGoal(preset.content)
+    const modeId = preset.settings.modeId
+    if (modeId && VEREVON_MODES.some((mode) => mode.id === modeId)) setModeId(modeId)
+    if (preset.settings.browseWeb !== undefined) setBrowseWeb(preset.settings.browseWeb)
   }
 
   const working = () => state.status === 'running'
@@ -885,6 +943,8 @@ export default function AgentRunConsole() {
               isActive={isActive()}
               modeId={modeId()}
               presetId={presetId()}
+              authoredPresets={authoredPresetList()}
+              onAuthoredPreset={applyAuthoredPreset}
               onBlueprint={setBlueprintId}
               onBrowseWeb={setBrowseWeb}
               onCancel={cancel}
@@ -946,7 +1006,11 @@ export default function AgentRunConsole() {
             />
 
             <Show when={hasTrust()}>
-              <TrustPanel citations={state.citations} usage={state.usage} />
+              <TrustPanel
+              citations={state.citations}
+              usage={state.usage}
+              quotaRefreshKey={`${state.runId ?? ''}:${state.status}`}
+            />
             </Show>
 
             <Show when={activeRunId()}>
@@ -955,6 +1019,10 @@ export default function AgentRunConsole() {
                 failed={proofView().failed}
                 loading={proofView().loading}
               />
+            </Show>
+
+            <Show when={goalView()}>
+              {(current) => <GoalPanel goal={current()} threadId={state.threadId ?? current().threadId} />}
             </Show>
 
             <PlanPanel
@@ -1065,6 +1133,8 @@ function Launcher(props: {
   isActive: boolean
   modeId: string
   presetId: PresetAgentId | null
+  authoredPresets: AuthoredBehaviour[]
+  onAuthoredPreset: (preset: AuthoredBehaviour) => void
   onBlueprint: (id: AgentBlueprint['id']) => void
   onBrowseWeb: (value: boolean) => void
   onCancel: () => void
@@ -1085,6 +1155,11 @@ function Launcher(props: {
         activeId={props.presetId}
         disabled={props.isActive}
         onSelect={props.onPreset}
+      />
+      <AuthoredPresetPicker
+        presets={props.authoredPresets}
+        disabled={props.isActive}
+        onSelect={props.onAuthoredPreset}
       />
 
       <div class="verevon-run-launcher__field">
@@ -1262,11 +1337,12 @@ function PresetPicker(props: {
         <For each={presetAgents}>
           {(preset) => {
             const active = () => props.activeId === preset.id
+            const available = () => resolvePresetAgent(preset, new Set<string>()).available
             return (
               <button
                 type="button"
                 aria-pressed={active() ? 'true' : 'false'}
-                disabled={props.disabled}
+                disabled={props.disabled || !available()}
                 onClick={() => props.onSelect(preset)}
                 class={cn(
                   'verevon-run-preset',
@@ -1276,12 +1352,52 @@ function PresetPicker(props: {
               >
                 <span class="verevon-run-preset__label">{preset.label}</span>
                 <span class="verevon-run-preset__desc">{preset.description}</span>
+                <Show when={!available()}>
+                  <span class="verevon-run-preset__desc">
+                    {i18n.tr('Ikke tilgjengelig i denne organisasjonen', 'Not available in this org')}
+                  </span>
+                </Show>
               </button>
             )
           }}
         </For>
       </div>
     </div>
+  )
+}
+
+// Authored presets (EP-11 S6): the person's own, listed under the curated ones. Picking one only
+// fills the console's controls; nothing runs until Run is pressed. Hidden when there are none.
+function AuthoredPresetPicker(props: {
+  presets: AuthoredBehaviour[]
+  disabled: boolean
+  onSelect: (preset: AuthoredBehaviour) => void
+}) {
+  const i18n = useI18n()
+  return (
+    <Show when={props.presets.length > 0}>
+      <div class="verevon-run-launcher__field">
+        <p class="verevon-run-launcher__label">{i18n.tr('Dine forhåndsinnstillinger', 'Your presets')}</p>
+        <div class="verevon-run-launcher__presets" role="group" aria-label={i18n.tr('Dine forhåndsinnstillinger', 'Your presets')}>
+          <For each={props.presets}>
+            {(preset) => (
+              <button
+                type="button"
+                disabled={props.disabled}
+                onClick={() => props.onSelect(preset)}
+                class={cn('verevon-run-preset', controlFocusClass)}
+                data-authored-preset={preset.id}
+              >
+                <span class="verevon-run-preset__label">{preset.name}</span>
+                <Show when={preset.description}>
+                  <span class="verevon-run-preset__desc">{preset.description}</span>
+                </Show>
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+    </Show>
   )
 }
 
@@ -1470,7 +1586,7 @@ function AnswerPanel(props: {
 
 // ── Trust panel ───────────────────────────────────────────────────────────────
 
-function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
+function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null; quotaRefreshKey: string }) {
   const i18n = useI18n()
   return (
     <div class="verevon-run-panel verevon-run-trust">
@@ -1481,18 +1597,11 @@ function TrustPanel(props: { citations: Citation[]; usage: RunUsage | null }) {
         {(usage) => (
           <>
             <p class="verevon-run-trust__subhead">{i18n.tr('Bruk', 'Usage')}</p>
+            {/* Tokens and cost live in the meter, which says "included in the subscription" or "price unavailable" rather than a bare zero. */}
+            <RunCostMeter meter={usage()} quotaRefreshKey={props.quotaRefreshKey} />
             <div class="verevon-run-trust__usage">
               <Show when={usage().confidence != null}>
                 <UsageStat label={i18n.tr('Konfidens', 'Confidence')} value={`${Math.round((usage().confidence ?? 0) * 100)}%`} />
-              </Show>
-              <Show when={usage().inputTokens != null || usage().outputTokens != null}>
-                <UsageStat
-                  label={i18n.tr('Tokens', 'Tokens')}
-                  value={i18n.tr(`${usage().inputTokens ?? 0} inn · ${usage().outputTokens ?? 0} ut`, `${usage().inputTokens ?? 0} in · ${usage().outputTokens ?? 0} out`)}
-                />
-              </Show>
-              <Show when={usage().costUsd != null}>
-                <UsageStat label={i18n.tr('Kostnad', 'Cost')} value={`$${(usage().costUsd ?? 0).toFixed(4)}`} />
               </Show>
               <Show when={usage().latencyMs != null}>
                 <UsageStat label={i18n.tr('Ventetid', 'Latency')} value={`${usage().latencyMs} ms`} />
@@ -1972,6 +2081,56 @@ export function PlanPanel(props: { plans: Plan[]; todos: Todo[]; loading: boolea
   )
 }
 
+/**
+ * The thread goal the run works toward, read-only (EP-7 S5). The console starts a new plan-mode
+ * thread for every launch, so a goal that spans turns lives in the chat thread (decision D1): this
+ * panel shows the objective, the usage line and the last verdict, and links to the chat for edits.
+ * There is no goal creation or editing here. Status and verdict tokens are shown as the server named
+ * them, like the plan states beside it.
+ */
+export function GoalPanel(props: { goal: ThreadGoal; threadId: string }) {
+  const i18n = useI18n()
+  const chatHref = () => `/chat?thread=${encodeURIComponent(props.threadId)}`
+  const usage = () => {
+    const parts: string[] = []
+    const goal = props.goal
+    if (goal.tokenBudget) {
+      parts.push(i18n.tr(`${goal.tokensUsed} av ${goal.tokenBudget} tokens`, `${goal.tokensUsed} of ${goal.tokenBudget} tokens`))
+    }
+    if (goal.maxTurns) {
+      parts.push(i18n.tr(`tur ${goal.turnsUsed} av ${goal.maxTurns}`, `turn ${goal.turnsUsed} of ${goal.maxTurns}`))
+    }
+    return parts.join(' - ')
+  }
+  return (
+    <div class="verevon-run-panel verevon-run-goal" aria-label={i18n.tr('Mål for tråden', 'Thread goal')}>
+      <div class="verevon-run-panel__head">
+        <span class="verevon-run-panel__eyebrow"><Target size={14} strokeWidth={2.1} /> {i18n.tr('Mål', 'Goal')}</span>
+        <span class="verevon-run-plan__state" data-goal-status={props.goal.status}>{props.goal.status}</span>
+      </div>
+      <p class="verevon-run-goal__objective">{props.goal.objective}</p>
+      <Show when={props.goal.successCriteria.length > 0}>
+        <ul class="verevon-run-plan__list">
+          <For each={props.goal.successCriteria}>
+            {(line) => <li class="verevon-run-plan__item"><span class="verevon-run-plan__summary">{line}</span></li>}
+          </For>
+        </ul>
+      </Show>
+      <Show when={usage()}>
+        <p class="verevon-run-goal__usage">{usage()}</p>
+      </Show>
+      <Show when={props.goal.lastVerdict}>
+        <p class="verevon-run-goal__verdict">
+          {i18n.tr('Siste vurdering', 'Last verdict')}: {props.goal.lastVerdict}
+        </p>
+      </Show>
+      <a href={chatHref()} link class={cn('verevon-run-goal__open', controlFocusClass)}>
+        {i18n.tr('Åpne i chat', 'Open in chat')}
+      </a>
+    </div>
+  )
+}
+
 function TimelinePanel(props: { entries: TimelineEntry[]; status: RunStatus }) {
   const i18n = useI18n()
   return (
@@ -2132,21 +2291,23 @@ function normalizeStatusTone(status?: string): 'ok' | 'warn' | 'error' | 'neutra
   return 'neutral'
 }
 
-/** Map a backend run status string onto the console's `RunStatus` union. */
+/**
+ * Map a backend run status string onto the console's `RunStatus` union. The
+ * attention vocabulary decides the state; a stop is checked first because that
+ * vocabulary reads a cancelled run as idle, and the console names it.
+ */
 function statusToRunStatus(status: string): RunStatus {
-  switch (status.toLowerCase()) {
-    case 'running':
-    case 'queued':
+  if (isStoppedRunStatus(status)) return 'cancelled'
+  switch (legacyStateFromRunStatus(status)) {
+    case 'working':
       return 'running'
-    case 'paused':
-    case 'awaiting_approval':
+    case 'needs_approval':
+    case 'needs_input':
       return 'paused'
     case 'completed':
       return 'done'
     case 'failed':
       return 'failed'
-    case 'cancelled':
-      return 'cancelled'
     default:
       return 'idle'
   }

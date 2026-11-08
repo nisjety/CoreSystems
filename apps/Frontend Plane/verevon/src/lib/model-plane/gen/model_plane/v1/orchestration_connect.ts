@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse } from "./orchestration_pbjs";
+import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AnswerRunQuestionRequest, AnswerRunQuestionResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, ClaimOnceApprovalRequest, ClaimOnceApprovalResponse, ClaimQuarantineReleaseRequest, ClaimQuarantineReleaseResponse, ConsumeApprovalRequest, ConsumeApprovalResponse, ConsumeRunQuestionRequest, ConsumeRunQuestionResponse, CreateApprovalRequest, CreateApprovalResponse, CreateRunQuestionRequest, CreateRunQuestionResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetQuarantinePreviewRequest, GetQuarantinePreviewResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, HoldQuarantinedOutputRequest, HoldQuarantinedOutputResponse, ListApprovalScopeGrantsRequest, ListApprovalScopeGrantsResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunQuestionsRequest, ListRunQuestionsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, ProposePlanRequest, ProposePlanResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, RerouteApprovalRequest, RerouteApprovalResponse, RevokeApprovalScopeGrantRequest, RevokeApprovalScopeGrantResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse, UseApprovalScopeGrantRequest, UseApprovalScopeGrantResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { GetRunProofBundleRequest, GetRunProofBundleResponse, GetVerificationMetricsRequest, GetVerificationMetricsResponse } from "./proof_bundle_pbjs";
 
@@ -49,6 +49,22 @@ export const OrchestrationCoreService = {
       name: "TransitionPlan",
       I: TransitionPlanRequest,
       O: TransitionPlanResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Create a plan directly in PROPOSED state with real steps, supplied by the
+     * model via the `plan.propose` control tool during a plan-mode run
+     * (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+     * session-core auto-creates at run start for the retrospective execution
+     * log (`create_plan`), this is the plan a user actually reviews and edits
+     * before granting an autonomy rung.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ProposePlan
+     */
+    proposePlan: {
+      name: "ProposePlan",
+      I: ProposePlanRequest,
+      O: ProposePlanResponse,
       kind: MethodKind.Unary,
     },
     /**
@@ -149,6 +165,85 @@ export const OrchestrationCoreService = {
       kind: MethodKind.Unary,
     },
     /**
+     * Move a pending approval to another addressee (build plan WS10 S6). Caller is a Space
+     * member holding a Control-signed `model.approval.reroute` decision; Control has already
+     * checked that the caller is the requester or a manager. Refused for a zero-retention caller
+     * and while SESSION_CORE_APPROVAL_MEMBER_DECIDE is off.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.RerouteApproval
+     */
+    rerouteApproval: {
+      name: "RerouteApproval",
+      I: RerouteApprovalRequest,
+      O: RerouteApprovalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+     * durable Do loop that paused for the approval calls this when it re-enters, so
+     * a granted approval is executed by the loop once and never also by the cold
+     * delivery worker. Caller-scoped (user bearer), not service-only.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ConsumeApproval
+     */
+    consumeApproval: {
+      name: "ConsumeApproval",
+      I: ConsumeApprovalRequest,
+      O: ConsumeApprovalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Claim the granted once-approval for one exact action, so the agent's retry of a
+     * non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
+     * caller is the run owner's session; the claim is one atomic update, so two
+     * concurrent claims have one winner. Refused for a zero-retention caller.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ClaimOnceApproval
+     */
+    claimOnceApproval: {
+      name: "ClaimOnceApproval",
+      I: ClaimOnceApprovalRequest,
+      O: ClaimOnceApprovalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Keep flagged tool output, encrypted, against an UNTRUSTED_CONTENT approval so the model
+     * is handed a placeholder instead (build plan WS10 S8). Caller is the run owner's session.
+     * Refused for a zero-retention caller and for a run that is not in a Space.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.HoldQuarantinedOutput
+     */
+    holdQuarantinedOutput: {
+      name: "HoldQuarantinedOutput",
+      I: HoldQuarantinedOutputRequest,
+      O: HoldQuarantinedOutputResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Hand the held content of a granted UNTRUSTED_CONTENT approval to the retry of the exact
+     * call, once (build plan WS10 S8). One atomic update, so two concurrent retries have one winner.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ClaimQuarantineRelease
+     */
+    claimQuarantineRelease: {
+      name: "ClaimQuarantineRelease",
+      I: ClaimQuarantineReleaseRequest,
+      O: ClaimQuarantineReleaseResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * A plain-text preview (at most 1 KiB) of held content, for the person deciding the
+     * approval and no one else (build plan WS10 S8).
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.GetQuarantinePreview
+     */
+    getQuarantinePreview: {
+      name: "GetQuarantinePreview",
+      I: GetQuarantinePreviewRequest,
+      O: GetQuarantinePreviewResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Claim due durable approval deliveries for an authenticated internal
      * worker. Claims are tenant-scoped, leased, and opaque; the caller identity
      * is derived from its verified service credential, never from this request.
@@ -210,6 +305,44 @@ export const OrchestrationCoreService = {
       name: "AcknowledgeApprovalDelivery",
       I: AcknowledgeApprovalDeliveryRequest,
       O: AcknowledgeApprovalDeliveryResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Ask the run's owner a question (build plan WS14 S3). A question is a pause
+     * kind with its own store, never an approval: an answer is information, not an
+     * authority grant, so it lives in `run_questions` and never reads as a grant.
+     * Refused for a zero-retention or waived run, and for a ZDR or waived caller.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.CreateRunQuestion
+     */
+    createRunQuestion: {
+      name: "CreateRunQuestion",
+      I: CreateRunQuestionRequest,
+      O: CreateRunQuestionResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List the caller's own questions for a run. Owner-only; an overdue
+     * question is reported EXPIRED.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.ListRunQuestions
+     */
+    listRunQuestions: {
+      name: "ListRunQuestions",
+      I: ListRunQuestionsRequest,
+      O: ListRunQuestionsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Answer (or skip) a requested question once. An identical retry is an
+     * idempotent replay; a different second answer is refused.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.AnswerRunQuestion
+     */
+    answerRunQuestion: {
+      name: "AnswerRunQuestion",
+      I: AnswerRunQuestionRequest,
+      O: AnswerRunQuestionResponse,
       kind: MethodKind.Unary,
     },
     /**
@@ -295,7 +428,7 @@ export const OrchestrationCoreService = {
  * OrchestratorWorkflowService — the production entry point into the durable
  * Temporal orchestration tier, served by orchestrator-core on the same gRPC
  * listener as its OrchestrationCoreService proxy.
- *
+ * 
  * It is a separate service, not another method on OrchestrationCoreService,
  * because that service's authority lives in session-core (Rust) which
  * implements every one of its methods; adding a Temporal-start method there
@@ -309,7 +442,7 @@ export const OrchestratorWorkflowService = {
   methods: {
     /**
      * Start one durable Temporal workflow on the orchestrator task queue.
-     *
+     * 
      * Before this RPC existed, every workflow the worker registers had zero
      * production callers. It is deliberately narrow:
      *   * `workflow_type` is matched against a server-side ALLOWLIST of the
@@ -328,6 +461,82 @@ export const OrchestratorWorkflowService = {
       name: "StartWorkflow",
       I: StartWorkflowRequest,
       O: StartWorkflowResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * Spend a `resume` question's answer once, for the continuation of the run that asked it (build
+ * plan WS14 S5). Its own service rather than a method of OrchestrationCoreService, as
+ * ApprovalScopeGrantService is, so the implementations and test doubles of that service need no
+ * change.
+ *
+ * @generated from service model_plane.v1.RunQuestionConsumeService
+ */
+export const RunQuestionConsumeService = {
+  typeName: "model_plane.v1.RunQuestionConsumeService",
+  methods: {
+    /**
+     * Claim an answered `resume` question for its run's continuation. The first claim spends the
+     * answer. The same claim token again is a safe replay that returns the answer; another claim is
+     * reported as already consumed, not as an error. Owner-only and org-scoped.
+     *
+     * @generated from rpc model_plane.v1.RunQuestionConsumeService.ConsumeRunQuestion
+     */
+    consumeRunQuestion: {
+      name: "ConsumeRunQuestion",
+      I: ConsumeRunQuestionRequest,
+      O: ConsumeRunQuestionResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * A standing release for one eligible call, given by a "this thread" or "this run" decision.
+ * Served by session-core. It is its own service rather than a method of
+ * OrchestrationCoreService, so the implementations of that service, and their test doubles,
+ * need no change.
+ *
+ * @generated from service model_plane.v1.ApprovalScopeGrantService
+ */
+export const ApprovalScopeGrantService = {
+  typeName: "model_plane.v1.ApprovalScopeGrantService",
+  methods: {
+    /**
+     * Atomically matches one live grant for a call and counts the use. The caller is an
+     * execution-core service principal acting for the run's owner. An empty grant_id means no
+     * grant matched, and the call pauses as it did before grants existed.
+     *
+     * @generated from rpc model_plane.v1.ApprovalScopeGrantService.UseApprovalScopeGrant
+     */
+    useApprovalScopeGrant: {
+      name: "UseApprovalScopeGrant",
+      I: UseApprovalScopeGrantRequest,
+      O: UseApprovalScopeGrantResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * The verified caller's own grants in one thread.
+     *
+     * @generated from rpc model_plane.v1.ApprovalScopeGrantService.ListApprovalScopeGrants
+     */
+    listApprovalScopeGrants: {
+      name: "ListApprovalScopeGrants",
+      I: ListApprovalScopeGrantsRequest,
+      O: ListApprovalScopeGrantsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Revokes one of the verified caller's live grants. Revocation takes effect at once.
+     *
+     * @generated from rpc model_plane.v1.ApprovalScopeGrantService.RevokeApprovalScopeGrant
+     */
+    revokeApprovalScopeGrant: {
+      name: "RevokeApprovalScopeGrant",
+      I: RevokeApprovalScopeGrantRequest,
+      O: RevokeApprovalScopeGrantResponse,
       kind: MethodKind.Unary,
     },
   }

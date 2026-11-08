@@ -9,12 +9,20 @@ use std::{future::Future, time::Duration};
 use tracing::{info, warn};
 
 mod approval_delivery;
+mod artifact_revisions;
+mod attention;
+mod attention_events;
+mod attention_grpc;
+mod attention_hub;
 mod audit_publisher;
 mod auth;
 mod compaction;
 mod continuation_crypto;
+mod decision_keys;
 mod dream_extractor;
 mod dreaming;
+mod eventlog_grpc;
+mod external_content;
 mod finetune_grpc;
 mod gdpr;
 mod gdpr_nats;
@@ -37,15 +45,33 @@ mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
 mod org_policy;
+mod request_snapshots;
 mod retention_receipt;
+mod retention_sweeper;
 mod routing_policy_grpc;
+mod room_run_attach;
+mod run_ledger_grpc;
+mod run_origin_stamp;
+mod run_phase;
 mod run_service_grpc;
 mod service_token;
+mod skill_versions;
+mod space;
+mod space_memory;
 mod space_deletion_reconciler;
 mod space_membership_nats;
+mod space_stream_grpc;
 mod store;
 mod terminalization;
+mod thread_export;
+mod thread_fork;
+mod thread_import;
+mod thread_reference;
+mod thread_shares;
+mod thread_goals;
 mod tool_ledger;
+mod trace_nats;
+mod user_profile;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -65,15 +91,42 @@ async fn main() -> Result<()> {
 
     let _otel_guard = mp_telemetry::init("session-core")?;
     info!("session-core starting");
+    // Per-thread run guard (WS09-S1): read once, never in a handler. ON unless
+    // SPACE_RUN_THREAD_GUARD is switched off.
+    let thread_run_guard = run_phase::guard_enabled_from_env();
+    run_phase::set_thread_run_guard(thread_run_guard);
+    info!(thread_run_guard, "space thread run guard configured");
 
     // Authentication configuration and JWKS are mandatory and loaded before
     // any listener/background worker starts. A missing issuer/audience or an
     // unavailable verification keyset therefore fails startup closed.
+    // Control Space decision keys (F11): log the configured ids with a public-key fingerprint,
+    // and fail start-up when a key set is configured but unparseable.
+    decision_keys::boot_check()?;
     let grpc_auth = auth::JwtVerifier::from_env().await?;
     let prom_handle = PrometheusBuilder::new().install_recorder()?;
 
     let pool = store::connect_postgres().await?;
     store::run_migrations(&pool).await?;
+    // Thread activity summary (WS15-S5): the trigger from migration 0078 keeps new messages current;
+    // this bounded task fills the threads that predate it. Readers refuse until it is done.
+    tokio::spawn(space::thread_activity::run_backfill(pool.clone()));
+    // Space event log (WS02-S1): the triggers from migration 0072 write rows only while
+    // this flag is on. Off by default; a failure to write the flag leaves the stored value
+    // as it was and never stops startup (the log is a realtime aid, not authority).
+    let space_event_emit = space::events::emit_enabled_from_env();
+    if let Err(error) = space::events::sync_flag(&pool, space_event_emit).await {
+        warn!(%error, "space event log flag could not be synced");
+    }
+    info!(space_event_emit, "space event log configured");
+    // Space attention outbox (WS11-S5): the trigger from migration 0080 enqueues one content-free
+    // event per persistent log row while this flag is on. Refused (stays off) while the log is off.
+    // Off by default; a failure here never stops startup.
+    let space_attention_emit = space::attention_outbox::emit_enabled_from_env();
+    if let Err(error) = space::attention_outbox::sync_flag(&pool, space_attention_emit).await {
+        warn!(%error, "space attention outbox flag could not be synced");
+    }
+    let space_wakes = space::events::SpaceWakes::new();
     // The adapter is optional only when no Letta endpoint is configured. Once
     // enabled, its dedicated Auth Core service-principal configuration is
     // mandatory so background dreaming/search never falls back to anonymous
@@ -91,6 +144,7 @@ async fn main() -> Result<()> {
         events_tx.clone(),
         letta_memory.clone(),
         grpc_auth,
+        space_wakes.clone(),
     ));
     let http_handle = tokio::spawn(http_health::serve(prom_handle));
     let nats_pool = pool.clone();
@@ -217,6 +271,99 @@ async fn main() -> Result<()> {
         },
     ));
 
+    let attention_events_pool = pool.clone();
+    let attention_events_handle = tokio::spawn(async move {
+        // Off by default: the task parks and makes no database read. Parking rather than
+        // returning keeps the select below from reading its end as a failure.
+        if !attention_events::enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core attention event sweep", move || {
+            let pool = attention_events_pool.clone();
+            async move { attention_events::run(pool).await }
+        })
+        .await
+    });
+    // Space event log: the NOTIFY listener only runs while emitting is on (it holds one pool
+    // connection); the retention sweeper always runs, because retention is owed for rows
+    // already written.
+    let space_listener_pool = pool.clone();
+    let space_listener_wakes = space_wakes.clone();
+    let space_listener_handle = tokio::spawn(async move {
+        if !space_event_emit {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core Space event listener", move || {
+            let pool = space_listener_pool.clone();
+            let wakes = space_listener_wakes.clone();
+            async move { space::events::run_listener(pool, wakes).await }
+        })
+        .await
+    });
+    let space_sweeper_pool = pool.clone();
+    let space_sweeper_handle = tokio::spawn(supervise_background(
+        "session-core Space event retention sweeper",
+        move || {
+            let pool = space_sweeper_pool.clone();
+            async move { space::events::run_retention_sweeper(pool).await }
+        },
+    ));
+
+    // WS10.S6: the run-trace consumer (durable `session-core-trace`) is off unless
+    // SESSION_CORE_TRACE_CONSUMER is 1/true/on, so a deployment that has not provisioned the
+    // stream is unaffected. The retention sweeper only deletes rows past their age.
+    let trace_pool = pool.clone();
+    let trace_nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let trace_handle = tokio::spawn(async move {
+        if !trace_nats::enabled() {
+            info!("SESSION_CORE_TRACE_CONSUMER is off; session-core trace consumer disabled");
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core trace consumer", move || {
+            let pool = trace_pool.clone();
+            let nats_url = trace_nats_url.clone();
+            async move { trace_nats::run(pool, nats_url).await }
+        })
+        .await
+    });
+    let trace_sweeper_pool = pool.clone();
+    let trace_sweeper_handle = tokio::spawn(supervise_background(
+        "session-core trace retention sweeper",
+        move || {
+            let pool = trace_sweeper_pool.clone();
+            async move { trace_nats::run_retention_sweeper(pool).await }
+        },
+    ));
+
+    // EP-14 S6: the request snapshot sweep is off unless SESSION_CORE_REQUEST_SNAPSHOTS_SWEEP_ENABLED is the
+    // literal `true`; off, the task parks and makes no database read.
+    let snapshot_sweep_pool = pool.clone();
+    let snapshot_sweep_handle = tokio::spawn(async move {
+        if !request_snapshots::sweep_enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core request snapshot sweep", move || {
+            let pool = snapshot_sweep_pool.clone();
+            async move { request_snapshots::run_sweeper(pool).await }
+        })
+        .await
+    });
+
+    // EP-9 C2: the retention sweeper is off unless SESSION_RETENTION_SWEEP names a mode; off, the task
+    // parks and makes no database read and no org-core call. It counts, it never deletes.
+    let retention_sweep_pool = pool.clone();
+    let retention_sweep_handle = tokio::spawn(async move {
+        let mode = retention_sweeper::mode();
+        if mode == retention_sweeper::Mode::Off {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core retention sweeper", move || {
+            let pool = retention_sweep_pool.clone();
+            async move { retention_sweeper::run(pool, mode).await }
+        })
+        .await
+    });
+
     let shutdown = shutdown_signal();
 
     tokio::select! {
@@ -232,6 +379,13 @@ async fn main() -> Result<()> {
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
+        result = attention_events_handle => result??,
+        result = space_listener_handle => result??,
+        result = space_sweeper_handle => result??,
+        result = trace_handle => result??,
+        result = trace_sweeper_handle => result??,
+        result = snapshot_sweep_handle => result??,
+        result = retention_sweep_handle => result??,
         () = shutdown => {},
     }
 

@@ -1,0 +1,14 @@
+.assistant-guide-layer { position: fixed; inset: 0; z-index: 9998; pointer-events: none; }
+.assistant-guide-cursor { position: absolute; pointer-events: auto; }
+.assistant-guide-cursor--moving { transition: left 650ms cubic-bezier(.2,.75,.25,1), top 650ms cubic-bezier(.2,.75,.25,1); }
+.assistant-guide-pointer { display: flex; align-items: flex-start; gap: 2px; min-width: 40px; min-height: 40px; border: 0; padding: 0; background: transparent; cursor: pointer; }
+.assistant-guide-pointer svg { width: 22px; height: 24px; fill: #ca6748; stroke: white; stroke-width: 1.8; filter: drop-shadow(0 2px 3px #0003); }
+.assistant-guide-pointer span { margin-top: 15px; padding: 4px 8px; border-radius: 8px; background: #a94d33; color: white; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.assistant-guide-pointer:focus-visible { outline: 2px solid #a94d33; outline-offset: 3px; }
+.assistant-guide-menu { min-width: 165px; display: grid; padding: 5px; margin: 3px 0 0 13px; border: 1px solid #e5e1dd; border-radius: 12px; background: #fff; box-shadow: 0 12px 35px #25201d24; }
+.assistant-guide-menu button { border: 0; background: none; padding: 8px 10px; text-align: left; border-radius: 7px; font-size: 12px; color: #272523; cursor: pointer; }
+.assistant-guide-menu button:hover, .assistant-guide-menu button:focus-visible { background: #f4f1ee; outline: none; }
+.dark .assistant-guide-menu { background: #252424; border-color: #55504d; }
+.dark .assistant-guide-menu button { color: #f5f1ee; }
+.dark .assistant-guide-menu button:hover, .dark .assistant-guide-menu button:focus-visible { background: #3b3735; }
+@media (prefers-reduced-motion: reduce) { .assistant-guide-cursor--moving { transition: none; } }

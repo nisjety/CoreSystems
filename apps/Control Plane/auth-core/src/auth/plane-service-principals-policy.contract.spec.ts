@@ -28,9 +28,11 @@ import { DataPlaneAuthorizationController } from './data-plane-authorization.con
 import { resetInteractiveRetentionCacheForTests } from './interactive-retention-policy';
 import { ModelPlaneTokenController } from './model-plane-token.controller';
 import {
+  authorizePlaneApiKeyExchange,
   authorizePlaneServicePrincipal,
   authorizePlaneServiceTokenExchange,
   loadPlaneServicePrincipalRegistry,
+  webPolicyPostureFor,
 } from './plane-service-principal';
 import { PlaneTokenController } from './plane-token.controller';
 
@@ -60,6 +62,8 @@ type PolicyEntry = {
   tokenExchange?: Record<string, string[]>;
   retentionByAudience?: Record<string, string>;
   scopesByAudience?: Record<string, string[]>;
+  webPolicyByAudience?: Record<string, string>;
+  apiKeyExchange?: string[];
 };
 const policy: Record<string, PolicyEntry> | null = existsSync(policyPath)
   ? (JSON.parse(readFileSync(policyPath, 'utf8')) as Record<
@@ -234,9 +238,20 @@ function mintRequest(
 describeIfPolicy('principal policy Quarry web-tool grant', () => {
   it('grants search:read and extract:read to execution-core on the quarry audience, beside its existing scopes', () => {
     const principal = policy?.['execution-core'];
+    // parse:write (INNH-11, POST /v1/parse) joined the list with R-13 PR 1; the
+    // block "principal bundle R-13 PR 1" below pins who holds it. jobs:control
+    // and jobs:read (E3.7.10) joined with the Model-facing job tools; the block
+    // "principal bundle E3.7.10" below pins them, and map:read and crawl:write
+    // (the execution-core knowledge.map and knowledge.crawl_site/batch tools)
+    // are pinned by "principal bundle E3.7.10 site tools".
     expect(principal?.scopesByAudience?.quarry).toEqual([
       'browser:execute',
+      'crawl:write',
       'extract:read',
+      'jobs:control',
+      'jobs:read',
+      'map:read',
+      'parse:write',
       'scrape:write',
       'search:read',
     ]);
@@ -630,11 +645,20 @@ describeIfPolicy('principal policy mail-to-task principals (dark)', () => {
 // (src/auth/fixtures, vendored into org-core) with service authentication
 // enforced.
 const retentionVocabulary = ['persistent', 'tenant', 'zdr'];
-// Plan W0-4 flips exactly these two lanes to `tenant`; any other lane doing so
-// is a retention decision nobody has made.
-const tenantLaneAllowList = [
+// Plan W0-4 flips the first two lanes to `tenant` (the Data Plane background
+// workers); WS16.S2 (R-13 PR 1) adds the two quarry-edge lanes of an org-bound
+// model call. Any other lane doing so is a retention decision nobody has made.
+const dataPlaneWorkerTenantLanes = [
   'embedding-engine|inference-core',
   'graph-index|inference-core',
+];
+const quarryExtractTenantLanes = [
+  'quarry-edge|inference-core',
+  'quarry-edge|model-gateway',
+];
+const tenantLaneAllowList = [
+  ...dataPlaneWorkerTenantLanes,
+  ...quarryExtractTenantLanes,
 ];
 // The golden is vendored inside this tree (src/auth/fixtures, sha256-pinned and
 // checked against org-core's copy by interactive-retention-policy.org-core-
@@ -1546,8 +1570,18 @@ describeIfPolicy('principal bundle P1: data:rerank for quarry-edge', () => {
       'org:data:read_all',
     ];
     expect(row?.scopesByAudience?.['data-plane']).toEqual(ceiling);
-    // The union of the lanes: P2 adds browser:read on browser-broker beside it.
-    expect(row?.scopes).toEqual(['browser:read', ...ceiling]);
+    // The union of the lanes: P2 adds browser:read on browser-broker beside it,
+    // WS16.S2 the two model scopes and ADR-2a the one-time-code read.
+    expect(row?.scopes).toEqual([
+      'browser:read',
+      'data:read',
+      'data:rerank',
+      'documents:write',
+      'inference:invoke',
+      'integration:otp:read',
+      'models:invoke',
+      'org:data:read_all',
+    ]);
     // The grant adds no retention authority, no tenancy and no delegation.
     expect(row?.audiences).toContain('data-plane');
     expect(row?.retentionByAudience?.['data-plane']).toBe('persistent');
@@ -1657,11 +1691,22 @@ describeIfPolicy('principal bundle P2: browser:read for quarry-edge', () => {
       'data:read',
       'data:rerank',
       'documents:write',
+      'inference:invoke',
+      'integration:otp:read',
+      'models:invoke',
       'org:data:read_all',
     ]);
-    expect(row?.audiences).toEqual(['browser-broker', 'data-plane']);
+    // R-13 PR 1 appended inference-core, ingestion and model-gateway; the first
+    // two lanes are exactly what P1 and P2 pinned.
+    expect(row?.audiences).toEqual([
+      'browser-broker',
+      'data-plane',
+      'inference-core',
+      'ingestion',
+      'model-gateway',
+    ]);
     // Validation carries no content, so the lane is ZDR; the data lane stays.
-    expect(row?.retentionByAudience).toEqual({
+    expect(row?.retentionByAudience).toMatchObject({
       'browser-broker': 'zdr',
       'data-plane': 'persistent',
     });
@@ -2042,13 +2087,13 @@ describeIfPolicy(
 );
 
 describeIfPolicy('principal bundle P1: tenant retention lanes', () => {
-  it('puts exactly embedding-engine and graph-index on inference-core on the tenant posture, and the switch adds no authority', () => {
+  it('puts exactly embedding-engine and graph-index on inference-core, and quarry-edge on its two model lanes, on the tenant posture, and the switch adds no authority', () => {
     const tenantLanes = retentionLanes(policy ?? {})
       .filter((lane) => lane.retention === 'tenant')
       .map((lane) => lane.key)
       .sort();
     expect(tenantLanes).toEqual([...tenantLaneAllowList].sort());
-    for (const lane of tenantLaneAllowList) {
+    for (const lane of dataPlaneWorkerTenantLanes) {
       const [principal, audience] = lane.split('|');
       const row = policy?.[principal];
       expect(row?.retentionByAudience).toEqual({ [audience]: 'tenant' });
@@ -2124,6 +2169,673 @@ describeIfPolicy('principal bundle P1: no wildcard, no stray scope', () => {
   });
 });
 
+// The Control Plane principal bundle "R-13 PR 1" (plan R-13; WS16.S2, ADR-2a,
+// INNH-10 CP-1, INNH-11, WS7.I): one registry change, inert until a caller
+// exists. It carries
+//
+//   models:invoke, inference:invoke   quarry-edge, on model-gateway (models:invoke)
+//                                     and inference-core (both), tenant retention:
+//                                     the two bearers of an org-bound model call.
+//   integration:otp:read              quarry-edge, on ingestion alone, ZDR: the
+//                                     executor-only one-time-code read.
+//   parse:write                       execution-core, on quarry alone: POST /v1/parse.
+//   webPolicyByAudience               execution-core and model-gateway, quarry only.
+//   apiKeyExchange                    the Verevon gateway, quarry and browser-broker.
+const modelScope = 'models:invoke';
+const inferenceScope = 'inference:invoke';
+const otpScope = 'integration:otp:read';
+const parseScope = 'parse:write';
+
+describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
+  it('gives quarry-edge exactly the two model audiences, tenant, with the scopes of the plan and no new credential', () => {
+    const row = policy?.['quarry-edge'];
+    expect(row?.scopesByAudience?.['model-gateway']).toEqual([modelScope]);
+    expect(row?.scopesByAudience?.['inference-core']).toEqual([
+      inferenceScope,
+      modelScope,
+    ]);
+    expect(row?.retentionByAudience?.['model-gateway']).toBe('tenant');
+    expect(row?.retentionByAudience?.['inference-core']).toBe('tenant');
+    expect(row?.consumerEnv).toBe('QUARRY_SERVICE_API_KEY');
+    expect(row?.tenancy).toBe('directory');
+    expect(row?.allowAnyOrg).toBeUndefined();
+    expect(row?.tokenExchange).toBeUndefined();
+    // Every audience has a scope entry and a retention entry, and nothing else.
+    expect(Object.keys(row?.scopesByAudience ?? {}).sort()).toEqual(
+      [...(row?.audiences ?? [])].sort(),
+    );
+    expect(Object.keys(row?.retentionByAudience ?? {}).sort()).toEqual(
+      [...(row?.audiences ?? [])].sort(),
+    );
+  });
+
+  it('holds models:invoke and inference:invoke on quarry-edge lanes the plan names, and models:invoke nowhere else', () => {
+    expect(holdersOfScope(modelScope)).toEqual(['quarry-edge']);
+    expect(lanesHoldingScope(modelScope)).toEqual([
+      'quarry-edge|inference-core',
+      'quarry-edge|model-gateway',
+    ]);
+    expectScopeConfinedTo(modelScope, [
+      'quarry-edge|inference-core',
+      'quarry-edge|model-gateway',
+    ]);
+    // inference:invoke is older and widely held; quarry-edge's hold is on its
+    // inference-core lane alone.
+    const quarryInference = lanesHoldingScope(inferenceScope).filter((lane) =>
+      lane.startsWith('quarry-edge|'),
+    );
+    expect(quarryInference).toEqual(['quarry-edge|inference-core']);
+  });
+
+  it('mints both bearers for quarry-edge as tenant tokens for a directory organization', () => {
+    const registry = registryWithTestCredentials();
+    expect(
+      authorizePlaneServicePrincipal(
+        registry,
+        mintRequest('quarry-edge', 'model-gateway', modelScope),
+      ),
+    ).toMatchObject({
+      serviceId: 'quarry-edge',
+      subject: 'service:quarry-edge',
+      orgId: 'org-a',
+      orgBinding: 'directory',
+      scopes: [modelScope],
+      retention: 'tenant',
+      zdr: true,
+    });
+    expect(
+      authorizePlaneServicePrincipal(registry, {
+        ...mintRequest('quarry-edge', 'inference-core', inferenceScope),
+        requestedScopes: [inferenceScope, modelScope],
+      }),
+    ).toMatchObject({
+      serviceId: 'quarry-edge',
+      orgBinding: 'directory',
+      scopes: [inferenceScope, modelScope],
+      retention: 'tenant',
+    });
+  });
+
+  it('refuses quarry-edge documents:write on inference-core, models:invoke mixed with data:read, and data:rerank on model-gateway', () => {
+    const registry = registryWithTestCredentials();
+    const refused: Array<[string, string[]]> = [
+      ['inference-core', ['documents:write']],
+      ['inference-core', ['data:read']],
+      ['inference-core', [modelScope, 'data:read']],
+      ['model-gateway', [modelScope, 'data:read']],
+      ['model-gateway', [rerankScope]],
+      ['model-gateway', [inferenceScope]],
+      ['model-gateway', ['browser:read']],
+      ['model-gateway', ['documents:write', 'org:data:read_all']],
+      ['data-plane', [modelScope]],
+      ['data-plane', [inferenceScope]],
+      ['browser-broker', [modelScope]],
+    ];
+    for (const [audience, scopes] of refused) {
+      expect({
+        audience,
+        scopes,
+        refused: (() => {
+          try {
+            authorizePlaneServicePrincipal(registry, {
+              ...mintRequest('quarry-edge', audience, scopes[0]),
+              requestedScopes: scopes,
+            });
+            return false;
+          } catch {
+            return true;
+          }
+        })(),
+      }).toEqual({ audience, scopes, refused: true });
+    }
+  });
+
+  it('mints a real inference-core token for quarry-edge that follows the org, with the tenant lifetime cap and no user', async () => {
+    await mintThroughRealController(
+      policy ?? {},
+      {
+        principal: 'quarry-edge',
+        audience: 'inference-core',
+        scopes: [inferenceScope, modelScope],
+      },
+      ({ claims, expiresInSeconds }) => {
+        expect(claims).toMatchObject({
+          aud: 'inference-core',
+          sub: 'service:quarry-edge',
+          principal_type: 'service',
+          service_id: 'service:quarry-edge',
+          org_id: 'org-a',
+          scopes: [inferenceScope, modelScope],
+          // org-a's own posture (the faked org-core says ZDR off), not the row's.
+          zdr: false,
+        });
+        expect(claims).not.toHaveProperty('user_id');
+        expect(expiresInSeconds).toBeLessThanOrEqual(60);
+      },
+    );
+  });
+
+  it('leaves every other principal as it was: the registry still names the same principals', () => {
+    expect(principalNames()).toEqual([
+      'browser-broker',
+      'capability-core',
+      'conversation-core',
+      'corpus-seeder',
+      'data-orchestrator',
+      'embedding-engine',
+      'execution-core',
+      'finspo-core',
+      'graph-index',
+      'imports-core',
+      'inference-core',
+      'model-execution',
+      'model-gateway',
+      'model-gateway-mail-task-bridge',
+      'orchestrator-core',
+      'quarry-edge',
+      'retrieval-engine',
+      'session-core',
+      'verevon-gateway',
+      'verevon-gateway-retention-decision',
+    ]);
+  });
+});
+
+describeIfPolicy(
+  'principal bundle R-13 PR 1: the ingestion audience (ADR-2a)',
+  () => {
+    it('gives quarry-edge integration:otp:read on ingestion alone, as a ZDR lane, and no other principal holds it', () => {
+      const row = policy?.['quarry-edge'];
+      expect(row?.scopesByAudience?.ingestion).toEqual([otpScope]);
+      expect(row?.retentionByAudience?.ingestion).toBe('zdr');
+      expect(holdersOfScope(otpScope)).toEqual(['quarry-edge']);
+      expect(lanesHoldingScope(otpScope)).toEqual(['quarry-edge|ingestion']);
+      expectScopeConfinedTo(otpScope, ['quarry-edge|ingestion']);
+    });
+
+    it('is a scope of its own: it grants neither integration:read nor integration:write, and they do not grant it', () => {
+      const registry = registryWithTestCredentials();
+      for (const other of ['integration:read', 'integration:write']) {
+        expect(() =>
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest('quarry-edge', 'ingestion', other),
+          ),
+        ).toThrow(/not authorized/i);
+        expect(() =>
+          authorizePlaneServicePrincipal(registry, {
+            ...mintRequest('quarry-edge', 'ingestion', otpScope),
+            requestedScopes: [otpScope, other],
+          }),
+        ).toThrow(/not authorized/i);
+      }
+      // The principals that do hold the integration scopes cannot read a code.
+      for (const holder of ['conversation-core', 'model-execution']) {
+        expect(() =>
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest(holder, 'ingestion', otpScope),
+          ),
+        ).toThrow(/not authorized/i);
+      }
+    });
+
+    it('mints the code-read scope for quarry-edge on ingestion as a ZDR token, and a real token carries zdr', async () => {
+      const registry = registryWithTestCredentials();
+      expect(
+        authorizePlaneServicePrincipal(
+          registry,
+          mintRequest('quarry-edge', 'ingestion', otpScope),
+        ),
+      ).toMatchObject({
+        serviceId: 'quarry-edge',
+        orgBinding: 'directory',
+        scopes: [otpScope],
+        retention: 'zdr',
+        zdr: true,
+      });
+      await mintThroughRealController(
+        policy ?? {},
+        { principal: 'quarry-edge', audience: 'ingestion', scopes: [otpScope] },
+        ({ claims }) => {
+          expect(claims).toMatchObject({
+            aud: 'ingestion',
+            sub: 'service:quarry-edge',
+            principal_type: 'service',
+            scopes: [otpScope],
+            zdr: true,
+          });
+        },
+      );
+    });
+  },
+);
+
+describeIfPolicy('principal bundle R-13 PR 1: parse:write (INNH-11)', () => {
+  it('is held by execution-core on the quarry audience alone, beside the scrape scopes it already held', () => {
+    expect(holdersOfScope(parseScope)).toEqual(['execution-core']);
+    expect(lanesHoldingScope(parseScope)).toEqual(['execution-core|quarry']);
+    expectScopeConfinedTo(parseScope, ['execution-core|quarry']);
+    expect(policy?.['execution-core']?.retentionByAudience?.quarry).toBe('zdr');
+  });
+
+  it('mints parse:write for execution-core on quarry as a ZDR token, and refuses it mixed with another authority', () => {
+    const registry = registryWithTestCredentials();
+    expect(
+      authorizePlaneServicePrincipal(
+        registry,
+        mintRequest('execution-core', 'quarry', parseScope),
+      ),
+    ).toMatchObject({
+      serviceId: 'execution-core',
+      scopes: [parseScope],
+      retention: 'zdr',
+      zdr: true,
+    });
+    expect(() =>
+      authorizePlaneServicePrincipal(registry, {
+        ...mintRequest('execution-core', 'quarry', parseScope),
+        requestedScopes: [parseScope, 'documents:write'],
+      }),
+    ).toThrow(/not authorized/i);
+  });
+});
+
+// The Control Plane rows of E3.7.10 (plan section 3.3, E3.7 R2): the agent
+// runtime's job tools (execution-core, Model Plane) read the status of a crawl
+// or batch job of the run's organization and pause or cancel it, on quarry-edge's
+// org-scoped job routes. Two named scopes, one principal, one audience:
+//
+//   jobs:read      GET /v1/jobs/:id (and the crawl and batch status views)
+//   jobs:control   pause and cancel (the toolset names no resume)
+//
+// Tenant-bound: a run mints with its own organization, which the directory
+// vouches for at every mint (orgBinding `directory`), and quarry-edge answers a
+// job id of another organization with 404. The rows are inert until both callers
+// exist: quarry-edge refuses every service principal on the job routes today
+// (`require_service_route_scope`, `authorize_control`), and the execution-core
+// tools are a Model Plane ask. The token stays zero-retention for Quarry, so the
+// grant adds no persistence authority.
+const jobReadScope = 'jobs:read';
+const jobControlScope = 'jobs:control';
+const jobScopes = [jobControlScope, jobReadScope];
+
+describeIfPolicy(
+  'principal bundle E3.7.10: Quarry job scopes for execution-core',
+  () => {
+    it('is held by execution-core on the quarry audience alone, for both scopes', () => {
+      for (const scope of jobScopes) {
+        expect({ scope, holders: holdersOfScope(scope) }).toEqual({
+          scope,
+          holders: ['execution-core'],
+        });
+        expect({ scope, lanes: lanesHoldingScope(scope) }).toEqual({
+          scope,
+          lanes: ['execution-core|quarry'],
+        });
+        expect(policy?.['execution-core']?.scopes).toContain(scope);
+        expectScopeConfinedTo(scope, ['execution-core|quarry']);
+      }
+    });
+
+    it('spells both as single named scopes, and keeps the quarry lane zero-retention with the tenant web policy', () => {
+      for (const scope of jobScopes) {
+        expect({
+          scope,
+          shape: /^[a-z][a-z-]*:[a-z][a-z-]*$/.test(scope),
+        }).toEqual({ scope, shape: true });
+      }
+      expect(policy?.['execution-core']?.retentionByAudience?.quarry).toBe(
+        'zdr',
+      );
+      expect(policy?.['execution-core']?.webPolicyByAudience?.quarry).toBe(
+        'tenant',
+      );
+    });
+
+    it('mints each job scope for a run organization through the directory, as a ZDR token', () => {
+      const registry = registryWithTestCredentials();
+      for (const scope of jobScopes) {
+        expect(
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest('execution-core', 'quarry', scope, 'org-run-1234'),
+          ),
+        ).toMatchObject({
+          serviceId: 'execution-core',
+          orgId: 'org-run-1234',
+          orgBinding: 'directory',
+          scopes: [scope],
+          retention: 'zdr',
+          zdr: true,
+        });
+      }
+      // Status and control together is one tool call's need (read, then pause).
+      expect(
+        authorizePlaneServicePrincipal(registry, {
+          ...mintRequest(
+            'execution-core',
+            'quarry',
+            jobReadScope,
+            'org-run-1234',
+          ),
+          requestedScopes: [jobReadScope, jobControlScope],
+        }),
+      ).toMatchObject({
+        orgBinding: 'directory',
+        // The authorizer keeps the requested order.
+        scopes: [jobReadScope, jobControlScope],
+      });
+    });
+
+    it('refuses a job scope mixed with an authority of another audience, and on any other audience', () => {
+      const registry = registryWithTestCredentials();
+      expect(() =>
+        authorizePlaneServicePrincipal(registry, {
+          ...mintRequest('execution-core', 'quarry', jobControlScope),
+          requestedScopes: [jobControlScope, 'sandbox:write'],
+        }),
+      ).toThrow(/not authorized/i);
+      for (const audience of [
+        'session-core',
+        'capability-core',
+        'sandbox-manager',
+      ]) {
+        for (const scope of jobScopes) {
+          expect(() =>
+            authorizePlaneServicePrincipal(
+              registry,
+              mintRequest('execution-core', audience, scope),
+            ),
+          ).toThrow(/not authorized/i);
+        }
+      }
+    });
+
+    it('gives model-gateway, the chat web-search principal on quarry, no job scope', () => {
+      const registry = registryWithTestCredentials();
+      for (const scope of jobScopes) {
+        expect(
+          policy?.['model-gateway']?.scopesByAudience?.quarry ?? [],
+        ).not.toContain(scope);
+        expect(() =>
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest('model-gateway', 'quarry', scope),
+          ),
+        ).toThrow(/not authorized/i);
+      }
+    });
+  },
+);
+
+// The other Control Plane rows of E3.7.10: execution-core's knowledge.map
+// (POST /v1/map, `map:read`) and knowledge.crawl_site / knowledge.batch
+// (POST /v1/crawl and /v1/batch, `crawl:write`), the Model Plane half that
+// landed with EXECUTION_CORE_WEB_CRAWL_TOOLS (default off). Same principal, same
+// zero-retention quarry lane and the same directory-bound run organization as
+// the job scopes above. `crawl:write` is inert until quarry-edge routes it for a
+// service principal (MP-ASKS E3.7.10, Quarry half); `/v1/map` already does.
+const siteToolScopes = ['crawl:write', 'map:read'];
+
+describeIfPolicy('principal bundle E3.7.10 site tools', () => {
+  it('is held by execution-core on the quarry audience alone', () => {
+    for (const scope of siteToolScopes) {
+      expect({ scope, holders: holdersOfScope(scope) }).toEqual({
+        scope,
+        holders: ['execution-core'],
+      });
+      expect({ scope, lanes: lanesHoldingScope(scope) }).toEqual({
+        scope,
+        lanes: ['execution-core|quarry'],
+      });
+      expect(policy?.['execution-core']?.scopes).toContain(scope);
+      expectScopeConfinedTo(scope, ['execution-core|quarry']);
+    }
+  });
+
+  it('mints each for a run organization through the directory, as a ZDR token', () => {
+    const registry = registryWithTestCredentials();
+    for (const scope of siteToolScopes) {
+      expect(
+        authorizePlaneServicePrincipal(
+          registry,
+          mintRequest('execution-core', 'quarry', scope, 'org-run-1234'),
+        ),
+      ).toMatchObject({
+        serviceId: 'execution-core',
+        orgId: 'org-run-1234',
+        orgBinding: 'directory',
+        scopes: [scope],
+        retention: 'zdr',
+        zdr: true,
+      });
+    }
+  });
+
+  it('gives model-gateway no site-tool scope', () => {
+    const registry = registryWithTestCredentials();
+    for (const scope of siteToolScopes) {
+      expect(
+        policy?.['model-gateway']?.scopesByAudience?.quarry ?? [],
+      ).not.toContain(scope);
+      expect(() =>
+        authorizePlaneServicePrincipal(
+          registry,
+          mintRequest('model-gateway', 'quarry', scope),
+        ),
+      ).toThrow(/not authorized/i);
+    }
+  });
+});
+
+describe('registry schema fields of R-13 PR 1: webPolicyByAudience and apiKeyExchange', () => {
+  const base = {
+    credential: 'test-only-credential-0123456789',
+    audiences: ['quarry', 'model-gateway'],
+    orgIds: ['org-a'],
+    scopes: ['search:read', 'scrape:read'],
+    scopesByAudience: {
+      quarry: ['search:read'],
+      'model-gateway': ['scrape:read'],
+    },
+  };
+  const registryOf = (extra: Record<string, unknown>) =>
+    JSON.stringify({ svc: { ...base, ...extra } });
+  const mint = (raw: string) =>
+    authorizePlaneServicePrincipal(raw, {
+      serviceId: 'svc',
+      credential: base.credential,
+      audience: 'quarry',
+      orgId: 'org-a',
+      requestedScopes: ['search:read'],
+      reason: 'schema field contract',
+    });
+
+  it('defaults both fields to absent: a row without them mints exactly as before and has no web policy and no exchange', () => {
+    const raw = registryOf({});
+    expect(mint(raw)).toMatchObject({
+      serviceId: 'svc',
+      scopes: ['search:read'],
+    });
+    expect(webPolicyPostureFor(raw, 'svc', 'quarry')).toBe('none');
+    expect(() =>
+      authorizePlaneApiKeyExchange(raw, {
+        serviceId: 'svc',
+        credential: base.credential,
+        audience: 'quarry',
+      }),
+    ).toThrow(/not authorized/i);
+  });
+
+  it('accepts webPolicyByAudience tenant on quarry and browser-broker only, for an audience the row names', () => {
+    const raw = registryOf({ webPolicyByAudience: { quarry: 'tenant' } });
+    expect(mint(raw)).toMatchObject({ serviceId: 'svc' });
+    expect(webPolicyPostureFor(raw, 'svc', 'quarry')).toBe('tenant');
+    expect(webPolicyPostureFor(raw, 'svc', 'model-gateway')).toBe('none');
+    expect(webPolicyPostureFor(raw, 'nobody', 'quarry')).toBe('none');
+    const broker = JSON.stringify({
+      svc: {
+        ...base,
+        audiences: ['browser-broker'],
+        scopes: ['browser:read'],
+        scopesByAudience: { 'browser-broker': ['browser:read'] },
+        webPolicyByAudience: { 'browser-broker': 'tenant' },
+      },
+    });
+    expect(webPolicyPostureFor(broker, 'svc', 'browser-broker')).toBe('tenant');
+  });
+
+  it('refuses the whole registry for a web policy on any other audience, a value other than tenant, an audience the row lacks, or the wrong shape', () => {
+    for (const webPolicyByAudience of [
+      { 'model-gateway': 'tenant' },
+      { 'session-core': 'tenant' },
+      { quarry: 'zdr' },
+      { quarry: 'persistent' },
+      { quarry: true },
+      { quarry: null },
+      { 'browser-broker': 'tenant' }, // a valid audience the row does not name
+      [],
+      'tenant',
+      null,
+    ]) {
+      expect(() => mint(registryOf({ webPolicyByAudience }))).toThrow(
+        /invalid principal policy/i,
+      );
+    }
+  });
+
+  it('keeps retention separate: a quarry web policy changes no retention, scope or binding', () => {
+    const without = registryOf({
+      retentionByAudience: { quarry: 'zdr', 'model-gateway': 'zdr' },
+    });
+    const withPolicy = registryOf({
+      retentionByAudience: { quarry: 'zdr', 'model-gateway': 'zdr' },
+      webPolicyByAudience: { quarry: 'tenant' },
+    });
+    expect(mint(withPolicy)).toEqual(mint(without));
+  });
+
+  it('authorizes an API-key exchange only for a principal that lists the audience and presents its credential', () => {
+    const raw = registryOf({ apiKeyExchange: ['browser-broker', 'quarry'] });
+    expect(
+      authorizePlaneApiKeyExchange(raw, {
+        serviceId: 'svc',
+        credential: base.credential,
+        audience: 'quarry',
+      }),
+    ).toEqual({ serviceId: 'svc', subject: 'service:svc', audience: 'quarry' });
+    for (const attempt of [
+      {
+        serviceId: 'svc',
+        credential: 'wrong-credential-0123456789',
+        audience: 'quarry',
+      },
+      { serviceId: 'svc', credential: '', audience: 'quarry' },
+      {
+        serviceId: 'svc',
+        credential: base.credential,
+        audience: 'model-gateway',
+      },
+      { serviceId: 'svc', credential: base.credential, audience: 'data-plane' },
+      { serviceId: 'other', credential: base.credential, audience: 'quarry' },
+    ]) {
+      expect(() => authorizePlaneApiKeyExchange(raw, attempt)).toThrow(
+        /not authorized/i,
+      );
+    }
+  });
+
+  it('does not let apiKeyExchange stand in for a service-token lane, or the reverse', () => {
+    // svc may exchange a key into browser-broker, but has no browser-broker lane.
+    const raw = registryOf({ apiKeyExchange: ['browser-broker'] });
+    expect(() =>
+      authorizePlaneServicePrincipal(raw, {
+        serviceId: 'svc',
+        credential: base.credential,
+        audience: 'browser-broker',
+        orgId: 'org-a',
+        requestedScopes: ['search:read'],
+        reason: 'schema field contract',
+      }),
+    ).toThrow(/not authorized/i);
+    // And a quarry service lane gives no right to exchange a key.
+    expect(() =>
+      authorizePlaneApiKeyExchange(registryOf({}), {
+        serviceId: 'svc',
+        credential: base.credential,
+        audience: 'quarry',
+      }),
+    ).toThrow(/not authorized/i);
+  });
+
+  it('refuses the whole registry for an apiKeyExchange that is not a duplicate-free list of exchange audiences', () => {
+    // The closed set is API_KEY_EXCHANGE_AUDIENCE_SCOPES (api-key-exchange.ts):
+    // model-gateway, session-core and inference-core (EP-12 S2) and quarry and
+    // browser-broker (INNH-10). Anything else, and any repeat, is refused.
+    for (const apiKeyExchange of [
+      [],
+      ['data-plane'],
+      ['quarry', 'quarry'],
+      ['quarry', ''],
+      ['*'],
+      'quarry',
+      null,
+    ]) {
+      expect(() => mint(registryOf({ apiKeyExchange }))).toThrow(
+        /invalid principal policy/i,
+      );
+    }
+  });
+
+  it('holds the committed registry to the plan: web policy on execution-core and model-gateway for quarry only, exchange on the gateway alone', () => {
+    const withPolicy = principalNames().filter(
+      (name) => policy?.[name]?.webPolicyByAudience !== undefined,
+    );
+    expect(withPolicy).toEqual(['execution-core', 'model-gateway']);
+    for (const name of withPolicy) {
+      expect(policy?.[name]?.webPolicyByAudience).toEqual({ quarry: 'tenant' });
+      // Not a retention change: the quarry lane of both stays zero-retention.
+      expect(policy?.[name]?.retentionByAudience?.quarry).toBe('zdr');
+    }
+    const exchangers = principalNames().filter(
+      (name) => policy?.[name]?.apiKeyExchange !== undefined,
+    );
+    expect(exchangers).toEqual(['verevon-gateway']);
+    // INNH-10 (browser agent) and EP-12 S2 (Agent API) audiences.
+    expect([...(policy?.['verevon-gateway']?.apiKeyExchange ?? [])].sort()).toEqual([
+      'browser-broker',
+      'inference-core',
+      'model-gateway',
+      'quarry',
+      'session-core',
+    ]);
+    // Holding the exchange adds no service-token lane to the gateway.
+    expect(policy?.['verevon-gateway']?.audiences).toEqual(['model-gateway']);
+    const registry = registryWithTestCredentials();
+    for (const audience of ['quarry', 'browser-broker']) {
+      expect(
+        authorizePlaneApiKeyExchange(registry, {
+          serviceId: 'verevon-gateway',
+          credential: 'test-only-verevon-gateway-key',
+          audience,
+        }),
+      ).toMatchObject({ serviceId: 'verevon-gateway', audience });
+      for (const other of principalNames().filter(
+        (name) => name !== 'verevon-gateway',
+      )) {
+        expect(() =>
+          authorizePlaneApiKeyExchange(registry, {
+            serviceId: other,
+            credential: `test-only-${other}-key`,
+            audience,
+          }),
+        ).toThrow(/not authorized/i);
+      }
+    }
+  });
+});
+
 // Quarry states, in one manifest, every service-token request quarry-edge makes
 // and whether Auth Core's registry grants it (`granted`). The manifest is Quarry's
 // (authored, not generated); a byte-for-byte copy is vendored here, pinned by the
@@ -2194,10 +2906,19 @@ describeIfPolicy(
       expect(new Set(names).size).toBe(names.length);
     });
 
-    it('is authorized by the real policy exactly where a row says granted, and refused exactly where it does not', () => {
+    // Since the WS16.S2 grant the registry authorizes (model-gateway, models:invoke)
+    // for the model-extract row, and Auth Core cannot tell model-invoke,
+    // model-stream or model-audio from it: same service, audience and scope. Those
+    // three stay `granted: false` as Quarry's own closed gate (model_plane_gate),
+    // and this list is the only place the registry may authorize a row marked not
+    // granted. A new `granted: false` row that the registry authorizes fails here.
+    const quarrySideGates = ['model-invoke', 'model-stream', 'model-audio'];
+
+    it('is authorized by the real policy exactly where a row says granted, and refused exactly where it does not (bar the Quarry-side gates)', () => {
       const registry = registryWithTestCredentials();
       let granted = 0;
       let refused = 0;
+      let gated = 0;
       for (const row of rows()) {
         const attempt = () =>
           authorizePlaneServicePrincipal(registry, {
@@ -2215,24 +2936,60 @@ describeIfPolicy(
           });
           granted += 1;
         } else {
-          expect({
-            row: row.name,
-            refused: (() => {
-              try {
-                attempt();
-                return false;
-              } catch {
-                return true;
-              }
-            })(),
-          }).toEqual({ row: row.name, refused: true });
-          refused += 1;
+          const refusedByRegistry = (() => {
+            try {
+              attempt();
+              return false;
+            } catch {
+              return true;
+            }
+          })();
+          if (quarrySideGates.includes(row.name)) {
+            // Authorized by the registry (it is the extract grant), closed by Quarry.
+            expect({ row: row.name, refused: refusedByRegistry }).toEqual({
+              row: row.name,
+              refused: false,
+            });
+            gated += 1;
+          } else {
+            expect({ row: row.name, refused: refusedByRegistry }).toEqual({
+              row: row.name,
+              refused: true,
+            });
+            refused += 1;
+          }
         }
       }
-      // Both halves ran: the manifest has granted rows and rows the registry does
-      // not grant, so neither loop above was empty.
-      expect(granted).toBeGreaterThanOrEqual(3);
-      expect(refused).toBeGreaterThanOrEqual(1);
+      // The halves that exist ran: granted rows and the Quarry-side gates. No row is
+      // refused by the registry today; the branch stays so that one added later is
+      // held to it.
+      expect(granted).toBeGreaterThanOrEqual(6);
+      expect(gated).toBe(quarrySideGates.length);
+      expect(refused).toBeGreaterThanOrEqual(0);
+    });
+
+    it("grants exactly the two WS16.S2 extract rows on the model audiences and keeps the other three model rows closed on Quarry's side", () => {
+      const modelRows = rows().filter(
+        (row) =>
+          row.audience === 'model-gateway' || row.audience === 'inference-core',
+      );
+      expect(
+        modelRows.filter((row) => row.granted).map((row) => row.name),
+      ).toEqual(['model-extract', 'model-extract-inference']);
+      expect(
+        modelRows.filter((row) => !row.granted).map((row) => row.name),
+      ).toEqual(quarrySideGates);
+      expect(rows().find((row) => row.name === 'model-extract')).toMatchObject({
+        audience: 'model-gateway',
+        scopes: ['models:invoke'],
+        reason: 'extract structured data from page text',
+      });
+      expect(
+        rows().find((row) => row.name === 'model-extract-inference'),
+      ).toMatchObject({
+        audience: 'inference-core',
+        scopes: ['inference:invoke', 'models:invoke'],
+      });
     });
 
     it('pins the web rerank row: data:rerank alone, on data-plane, never the Model Plane, and held by no other row', () => {

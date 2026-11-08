@@ -16,6 +16,8 @@ Run the browser checks on a dev server started from the files this change edits,
   Automated: `chat-locale-smoke.test.tsx` (the receipt's unavailable note is pinned, see Known gaps); `ChatLiveRunPanel.test.tsx` (interrupted state).
 - [ ] **ZDR refused.** The refusal names the feature or action and never says where the request went. A code this SPA does not know gets the generic text, never the server's English.
   Automated: `src/shared/api/zdr-refusals.test.ts` (every golden code in both languages, with its action); `src/features/chat/components/use-chat-controller.zdr-refusal.test.ts`; `src/features/chat/components/chat-normalizers.zdr-refusal.test.ts`.
+- [ ] **Retrying and trimmed.** A retried tool, a compacted turn or a trimmed context shows one short note per event in the reader's language, with one polite live-region sentence each. A plain turn shows nothing. Temporary and ZDR threads keep the notes for the session only.
+  Automated: `ChatMessages.lifecycle.test.tsx` (sentences in both languages; a plain turn is silent); `use-chat-controller.lifecycle.test.ts` (collected, replay dropped, cap of 20, session-only); `stream-activity.test.ts` (the retrying line); `tests/e2e/chat-lifecycle-cues.spec.ts` (browser, not yet run). Tick it only on browser evidence.
 - [ ] **Offline.** The reader sees that the connection is gone and what happens to an unsent message.
   Automated: none. By hand: take the browser offline in DevTools, send a message, and check the copy in both languages.
 - [ ] **Narrow viewport.** No horizontal page scroll at 320 px. The full-screen sheet takes over at 760 px and below.

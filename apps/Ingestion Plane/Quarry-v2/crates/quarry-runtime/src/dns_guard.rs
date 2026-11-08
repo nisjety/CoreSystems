@@ -21,6 +21,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_security::heur::resolve_guard;
@@ -102,16 +103,58 @@ impl Resolve for PinnedDnsResolver {
 /// - `Internal`        — DNS lookup failed (network or resolver error).
 /// - `SecurityBlocked` — At least one resolved address is private/loopback.
 pub async fn resolve_public_url(url: &Url) -> QuarryResult<ResolvedTarget> {
+    resolve_public_url_via(url, &SystemHostLookup).await
+}
+
+/// The DNS lookup the guard checks. `SystemHostLookup` is the only production
+/// implementation; the seam exists so a test can serve a second, different
+/// answer for the same name (DNS rebinding, D2-059) without real DNS.
+#[async_trait]
+pub trait HostLookup: Send + Sync {
+    /// Every socket address `host:port` maps to right now. `host` is the URL's
+    /// host string as given (an IPv6 literal keeps its brackets).
+    async fn lookup(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
+}
+
+/// The operating system resolver (`tokio::net::lookup_host`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemHostLookup;
+
+#[async_trait]
+impl HostLookup for SystemHostLookup {
+    async fn lookup(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        Ok(tokio::net::lookup_host(format!("{host}:{port}"))
+            .await?
+            .collect())
+    }
+}
+
+/// Whether a navigation must pass the DNS guard (D2-059). `allow_private_hosts`
+/// is a dev/test switch for allow-list runs that target a local fixture; it never
+/// widens an open-web grant, whose whole authority is "any PUBLIC host": a public
+/// name that resolves to a private address is refused there whatever the switch.
+pub fn dns_guard_required(allow_private_hosts: bool, open_web: bool) -> bool {
+    open_web || !allow_private_hosts
+}
+
+/// `resolve_public_url` through an explicit lookup. Each call resolves afresh
+/// and vets that answer: an earlier public answer for the same name grants
+/// nothing, so a name rebound to a private address is refused on the second
+/// resolution.
+pub async fn resolve_public_url_via(
+    url: &Url,
+    lookup: &dyn HostLookup,
+) -> QuarryResult<ResolvedTarget> {
     let host = url
         .host_str()
         .ok_or_else(|| QuarryError::new(ErrorCode::BadRequest, "missing host in URL"))?;
 
     let port = url.port_or_known_default().unwrap_or(80);
 
-    let addresses: Vec<SocketAddr> = tokio::net::lookup_host(format!("{host}:{port}"))
+    let addresses: Vec<SocketAddr> = lookup
+        .lookup(host, port)
         .await
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("dns lookup failed: {e}")))?
-        .collect();
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("dns lookup failed: {e}")))?;
     if addresses.is_empty() {
         return Err(QuarryError::new(
             ErrorCode::Internal,
@@ -185,15 +228,19 @@ mod tests {
             })
             .expect("public address can be pinned");
 
-        let name = "rebind.example".parse().expect("valid DNS name");
-        let addresses: Vec<_> = Resolve::resolve(&resolver, name)
-            .await
-            .expect("pinned hostname resolves")
-            .collect();
-        assert_eq!(addresses, vec![vetted]);
+        for host in ["rebind.example", "rebind.example."] {
+            let name = host.parse().expect("valid DNS name");
+            let addresses: Vec<_> = Resolve::resolve(&resolver, name)
+                .await
+                .expect("pinned hostname resolves")
+                .collect();
+            assert_eq!(addresses, vec![vetted]);
+        }
 
-        let missing = "unvetted.example".parse().expect("valid DNS name");
-        assert!(Resolve::resolve(&resolver, missing).await.is_err());
+        for host in ["unvetted.example", "unvetted.example."] {
+            let missing = host.parse().expect("valid DNS name");
+            assert!(Resolve::resolve(&resolver, missing).await.is_err());
+        }
     }
 
     #[test]
@@ -255,5 +302,131 @@ mod tests {
             .expect_err("loopback must be blocked on the resolve path too");
 
         assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    /// A lookup that serves its answers in order, one per call, the way a
+    /// rebinding DNS server does: a public address first, a private one next.
+    struct ScriptedLookup {
+        answers: std::sync::Mutex<std::collections::VecDeque<Vec<SocketAddr>>>,
+    }
+
+    impl ScriptedLookup {
+        fn new(answers: Vec<Vec<SocketAddr>>) -> Self {
+            Self {
+                answers: std::sync::Mutex::new(answers.into()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl HostLookup for ScriptedLookup {
+        async fn lookup(&self, _host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+            let next = self
+                .answers
+                .lock()
+                .expect("scripted lookup lock")
+                .pop_front()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no scripted answer"))?;
+            Ok(next
+                .into_iter()
+                .map(|address| SocketAddr::new(address.ip(), port))
+                .collect())
+        }
+    }
+
+    fn public_v4() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::new(93, 184, 216, 34), 0))
+    }
+
+    #[tokio::test]
+    async fn dns_guard_refuses_a_second_resolution_to_a_private_address() {
+        // D2-059: the name answered public once, then rebinds to RFC 1918 and to
+        // the cloud metadata address. Each resolution is vetted on its own: the
+        // first public answer grants the later ones nothing.
+        let lookup = ScriptedLookup::new(vec![
+            vec![public_v4()],
+            vec![SocketAddr::from((Ipv4Addr::new(10, 0, 0, 7), 0))],
+            vec![SocketAddr::from((Ipv4Addr::new(169, 254, 169, 254), 0))],
+        ]);
+        let target = url("https://rebind.example/login");
+
+        let first = resolve_public_url_via(&target, &lookup)
+            .await
+            .expect("the first, public answer preflights");
+        assert_eq!(first.host, "rebind.example");
+        assert_eq!(
+            first.addresses,
+            vec![SocketAddr::new(public_v4().ip(), 443)]
+        );
+
+        let second = resolve_public_url_via(&target, &lookup)
+            .await
+            .expect_err("the rebound private answer must be refused");
+        assert_eq!(second.code, ErrorCode::SecurityBlocked);
+
+        let third = resolve_public_url_via(&target, &lookup)
+            .await
+            .expect_err("the rebound metadata answer must be refused");
+        assert_eq!(third.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn dns_guard_refuses_a_mixed_answer_with_one_private_address() {
+        // A rebinding server can also answer with both: one public address to
+        // pass a naive "any public" check, one private for the connect to pick.
+        let lookup = ScriptedLookup::new(vec![vec![
+            public_v4(),
+            SocketAddr::from((Ipv4Addr::new(192, 168, 1, 1), 0)),
+        ]]);
+        let err = resolve_public_url_via(&url("http://mixed.example/"), &lookup)
+            .await
+            .expect_err("one private address taints the whole answer");
+        assert_eq!(err.code, ErrorCode::SecurityBlocked);
+    }
+
+    #[tokio::test]
+    async fn rebinding_cannot_replace_a_vetted_pin_with_a_private_address() {
+        // The pinned resolver is the transport half: after the rebound answer is
+        // refused, the connection still dials only the address vetted first.
+        let lookup = ScriptedLookup::new(vec![
+            vec![public_v4()],
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))],
+        ]);
+        let target = url("https://rebind.example/");
+        let resolver = PinnedDnsResolver::default();
+
+        let vetted = resolve_public_url_via(&target, &lookup)
+            .await
+            .expect("first answer is public");
+        resolver.pin(vetted.clone()).expect("public pin");
+
+        assert!(resolve_public_url_via(&target, &lookup).await.is_err());
+        let rebound = ResolvedTarget {
+            host: "rebind.example".to_owned(),
+            addresses: vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 443))],
+        };
+        assert_eq!(
+            resolver.pin(rebound).expect_err("private pin refused").code,
+            ErrorCode::SecurityBlocked
+        );
+
+        let name = "rebind.example".parse().expect("valid DNS name");
+        let addresses: Vec<_> = Resolve::resolve(&resolver, name)
+            .await
+            .expect("the vetted pin survives")
+            .collect();
+        assert_eq!(addresses, vetted.addresses);
+    }
+
+    #[test]
+    fn dns_guard_stays_on_for_open_web_under_allow_private_hosts() {
+        // allow_private_hosts only relaxes allow-list runs (local fixtures).
+        assert!(dns_guard_required(false, false));
+        assert!(!dns_guard_required(true, false));
+        assert!(dns_guard_required(false, true));
+        assert!(
+            dns_guard_required(true, true),
+            "an open-web grant is public-only whatever allow_private_hosts says"
+        );
     }
 }

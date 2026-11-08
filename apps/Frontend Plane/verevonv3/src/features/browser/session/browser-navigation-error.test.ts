@@ -36,6 +36,22 @@ describe('navigationFailureFromError (WS9.B)', () => {
     expect(blocked?.reason).toBe('blocked')
   })
 
+  it('classifies a navigation outside the run domains by its typed code, not its message', () => {
+    const refused = navigationFailureFromError(
+      { type: 'navigate', url: 'https://other.example/a' },
+      new ApiError('any wording at all', 403, 'browser_navigation_outside_scope'),
+      tr,
+    )
+    expect(refused?.reason).toBe('outside_scope')
+    expect(refused?.url).toBe('https://other.example/a')
+    const reworded = navigationFailureFromError(
+      { type: 'navigate', url: 'https://other.example/a' },
+      new ApiError('outside the run\'s allowed domains', 403, 'browser_session_failed'),
+      tr,
+    )
+    expect(reworded?.reason).toBe('failed')
+  })
+
   it('never shows the raw server message or an unknown code', () => {
     const failure = navigationFailureFromError(
       { type: 'navigate', url: 'https://example.com' },
@@ -45,6 +61,19 @@ describe('navigationFailureFromError (WS9.B)', () => {
     expect(failure?.sentence).not.toContain('internal stack detail')
     expect(failure?.sentence).not.toContain('unknown_code_xyz')
     expect(failure?.sentence.length).toBeGreaterThan(0)
+  })
+
+  it('keeps a typed security block distinct from a site response', () => {
+    const failure = navigationFailureFromError(
+      { type: 'navigate', url: 'https://example.com' },
+      new ApiError('Blocked', 502, 'DRIVER_FAILED', {
+        blockReason: 'waf_interstitial',
+        details: { reason: 'navigation_http_response', http_status: 403 },
+      }),
+      tr,
+    )
+    expect(failure?.reason).toBe('blocked')
+    expect(failure?.openOutsideUrl).toBeUndefined()
   })
 
   it('returns no retry URL when there is no failure', () => {

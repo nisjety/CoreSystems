@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  AUDIT_MAX_LIMIT,
   aggregateToolActions,
   aggregateWorkspaceActivity,
   listAuditEvents,
+  listAuditPage,
+  listOwnAuditEvents,
+  listToolActionEvents,
   zeroDataRetention,
   type AuditEvent,
 } from '@/shared/api/audit-client'
+import { ApiError } from '@/shared/api/http'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -98,5 +103,176 @@ describe('honesty invariant: no-source events never become a per-connection clai
     expect(perSource.has('hubspot')).toBe(true)
     const totalAttributed = [...perSource.values()].reduce((sum, s) => sum + s.count, 0)
     expect(totalAttributed).toBe(1)
+  })
+})
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json' },
+    status,
+  })
+}
+
+describe('role-gated audit reads (WS05-S1)', () => {
+  it('listAuditPage keeps meta.scope and ignores a scope it does not know', async () => {
+    for (const scope of ['org', 'self', 'org_redacted'] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+        data: [{ id: 1, event: 'tool_action' }],
+        meta: { count: 1, scope },
+        error: null,
+      })))
+      const page = await listAuditPage({ limit: 10 })
+      expect(page.scope).toBe(scope)
+      expect(page.events).toHaveLength(1)
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [], meta: { scope: 'galaxy' } })))
+    const unknown = await listAuditPage()
+    expect(unknown.scope).toBeUndefined()
+    expect('scope' in unknown).toBe(false)
+
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [] })))
+    expect((await listAuditPage()).scope).toBeUndefined()
+  })
+
+  it('listAuditPage throws the typed ApiError on a 403 audit_scope_denied', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      error: {
+        code: 'audit_scope_denied',
+        message: 'You can only read your own audit events.',
+        details: { scope: 'self' },
+      },
+    }, 403)))
+    const failure = await listAuditPage({ userId: 'someone-else' }).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    const apiError = failure as ApiError
+    expect(apiError.status).toBe(403)
+    expect(apiError.code).toBe('audit_scope_denied')
+    expect(apiError.message).toBe('You can only read your own audit events.')
+  })
+
+  it('listAuditPage sends the filters as query parameters with credentials', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ data: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listAuditPage({ event: 'tool_action', userId: 'u1', since: '2026-01-01T00:00:00Z', limit: 7 })
+    const [url, init] = fetchMock.mock.calls[0]!
+    const parsed = new URL(String(url), 'http://localhost')
+    expect(parsed.pathname).toBe('/api/v1/audit')
+    expect(parsed.searchParams.get('event')).toBe('tool_action')
+    expect(parsed.searchParams.get('user_id')).toBe('u1')
+    expect(parsed.searchParams.get('since')).toBe('2026-01-01T00:00:00Z')
+    expect(parsed.searchParams.get('limit')).toBe('7')
+    expect(parsed.searchParams.has('org_id')).toBe(false)
+    expect(init?.credentials).toBe('include')
+  })
+
+  it('listOwnAuditEvents sends the caller user_id and a default limit of 25', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({
+      data: [{ id: 3, event: 'login', user_id: 'user-a' }],
+      meta: { scope: 'self' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const page = await listOwnAuditEvents('user-a')
+    const parsed = new URL(String(fetchMock.mock.calls[0]![0]), 'http://localhost')
+    expect(parsed.searchParams.get('user_id')).toBe('user-a')
+    expect(parsed.searchParams.get('limit')).toBe('25')
+    expect(page.scope).toBe('self')
+    expect(page.events[0]?.userId).toBe('user-a')
+  })
+
+  it('listToolActionEvents defaults to the gateway page ceiling of 200', async () => {
+    expect(AUDIT_MAX_LIMIT).toBe(200)
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ data: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listToolActionEvents()
+    const parsed = new URL(String(fetchMock.mock.calls[0]![0]), 'http://localhost')
+    expect(parsed.searchParams.get('event')).toBe('tool_action')
+    expect(parsed.searchParams.get('limit')).toBe('200')
+    expect(parsed.searchParams.has('user_id')).toBe(false)
+  })
+
+  it('a redacted org-wide row (no user, subject or resource) still aggregates into the workspace rollup', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      data: [
+        { id: 1, occurred_at: '2026-10-01T00:00:00Z', plane: 'model', event: 'tool_action', outcome: 'ok', details: { tool: 'web_search', data_category: 'public', zdr: true, phase: 'complete' } },
+        { id: 2, occurred_at: '2026-10-01T00:01:00Z', plane: 'model', event: 'tool_action', outcome: 'ok', details: { tool: 'lookup', data_category: 'customer', zdr: false } },
+      ],
+      meta: { count: 2, scope: 'org_redacted' },
+    })))
+    const page = await listAuditPage({ event: 'tool_action', limit: 200 })
+    expect(page.scope).toBe('org_redacted')
+    for (const event of page.events) {
+      expect(event.userId).toBeUndefined()
+      expect(event.resource).toBeUndefined()
+    }
+    const activity = aggregateWorkspaceActivity(page.events)
+    expect(activity.totalEvents).toBe(2)
+    expect(activity.zdrEvents).toBe(1)
+    expect(activity.categories).toEqual(expect.arrayContaining([
+      { category: 'public', count: 1, zdrCount: 1 },
+      { category: 'customer', count: 1, zdrCount: 0 },
+    ]))
+    expect(activity.tools).toEqual(expect.arrayContaining(['web_search', 'lookup']))
+    // No source on a redacted row, so no per-connection bucket is invented.
+    expect(aggregateToolActions(page.events).size).toBe(0)
+  })
+})
+
+describe('audit list v2 (WS05-S4)', () => {
+  it('listAuditPage sends plane, outcome, subject, resource_id and cursor', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ data: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listAuditPage({
+      plane: 'model',
+      outcome: 'denied',
+      subject: 'agent:alpha',
+      resourceId: 'res-1',
+      cursor: 'abc-_DEF',
+      limit: 50,
+    })
+    const parsed = new URL(String(fetchMock.mock.calls[0]![0]), 'http://localhost')
+    expect(parsed.pathname).toBe('/api/v1/audit')
+    expect(parsed.searchParams.get('plane')).toBe('model')
+    expect(parsed.searchParams.get('outcome')).toBe('denied')
+    expect(parsed.searchParams.get('subject')).toBe('agent:alpha')
+    expect(parsed.searchParams.get('resource_id')).toBe('res-1')
+    expect(parsed.searchParams.get('cursor')).toBe('abc-_DEF')
+    expect(parsed.searchParams.get('limit')).toBe('50')
+    expect(parsed.searchParams.has('org_id')).toBe(false)
+  })
+
+  it('omits unset and empty v2 filters from the query string', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({ data: [] }))
+    vi.stubGlobal('fetch', fetchMock)
+    await listAuditPage({ plane: '', outcome: undefined, cursor: '' })
+    expect(String(fetchMock.mock.calls[0]![0])).toBe('/api/v1/audit')
+  })
+
+  it('returns nextCursor from meta.next_cursor and leaves it off when absent or blank', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      data: [{ id: 2, event: 'login' }],
+      meta: { count: 1, scope: 'org', next_cursor: 'cursor-2' },
+      error: null,
+    })))
+    const withCursor = await listAuditPage({ limit: 1 })
+    expect(withCursor.nextCursor).toBe('cursor-2')
+    expect(withCursor.scope).toBe('org')
+
+    for (const meta of [{ count: 1 }, { next_cursor: '' }, { next_cursor: 7 }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ data: [], meta })))
+      const page = await listAuditPage()
+      expect(page.nextCursor).toBeUndefined()
+      expect('nextCursor' in page).toBe(false)
+    }
+  })
+
+  it('throws the typed ApiError on a 400 invalid_cursor', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      error: { code: 'invalid_cursor', message: 'cursor is not a cursor this API issued', details: {} },
+    }, 400)))
+    const failure = await listAuditPage({ cursor: 'forged' }).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).status).toBe(400)
+    expect((failure as ApiError).code).toBe('invalid_cursor')
   })
 })

@@ -33,6 +33,8 @@ pub enum ApprovalKind {
     Destructive,
     /// Cost threshold crossed.
     Cost,
+    /// Tool output held for review as untrusted content (build plan WS10 S8).
+    UntrustedContent,
 }
 
 /// Lifecycle states for an approval.

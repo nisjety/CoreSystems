@@ -171,3 +171,20 @@ Test pins: edge `crawl_request` boundary tests (100/101, 512/513, 8192/8193); ga
 ### Model boundary (WS14.S6)
 
 The Model may propose `knowledge.crawl_site` with `url`, `maxPages`, `maxDepth`, `includePaths`, `excludePaths` and `allowSubdomains` only. The gateway builds that body with `Surface::Model`: `allow_external_links` is dropped, and no key containing `robot` is forwarded.
+
+## 13. Absent scope: what a crawl without a scope does (D2-073 default)
+
+A crawl job can reach the orchestrator with no `scope` object. That happens to a job row accepted before scope existed, and to a job from an edge older than the orchestrator during a rolling deploy. The default (W2-U64, D2-073) depends on the job's `scope_mode`:
+
+| The job carries | `scope_mode` | What the crawl does |
+|---|---|---|
+| no `scope` object | `observe`, empty or unknown | Runs as a legacy-unscoped crawl. Nothing is refused, and no `crawl` context is sent. `scopeFromParams` returns a legacy scope and `newCrawlScopeRun` returns nil. |
+| no `scope` object | `enforce` | Refused. `crawlInputFromJob` (`jobs/dispatcher.go`) returns an error, so the dispatcher does not start the workflow. |
+| a `scope`, but the edge did not report `scope_applied` | `observe` | Each such page counts as legacy-unscoped (version skew). Tolerated only on executions that carry the `crawl-scope-applied-tolerant-v1` marker. An older execution keeps the strict behaviour and ends the crawl. |
+| a `scope`, but the edge did not report `scope_applied` | `enforce` | The crawl ends with `edge_scope_unsupported`, and no child of that page is enqueued. |
+
+A crawl started while `QUARRY_EDGE__CRAWL_SCOPE_MODE` is `off` is stamped with `scope.legacy` set to true. It runs as a legacy crawl whatever `scope_mode` says.
+
+The edge keeps the same table as `scope_skew` (`crates/quarry-edge/src/crawl_request.rs`), and its unit tests pin the cases. Nothing calls `scope_skew` on the request path yet: the orchestrator makes the decision in production.
+
+Known gap, not changed by this section: a scheduled crawl (`startScheduledChild` in `services/quarry-orchestrator/internal/workflows/scheduled.go`) builds its child input with `CrawlInputFromParams`, which does not run the dispatcher's refusal. A scheduled crawl that names `scope_mode: enforce` and carries no scope therefore runs legacy-unscoped today. It is open as depth row W23-b-U64-1 (next round: move the check into `CrawlInputFromParams` in `workflows/inputs.go`).

@@ -1,8 +1,12 @@
 import { cleanup, render, screen } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const spacesClient = vi.hoisted(() => ({ getSpaceWork: vi.fn() }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})), getSpaceWork: vi.fn() }))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceWorkPanel } = await import('./SpaceWorkPanel')
 
@@ -72,6 +76,51 @@ describe('SpaceWorkPanel', () => {
     expect(await screen.findByRole('alert')).toBeTruthy()
     expect(screen.getByText(/kjører fortsatt/)).toBeTruthy()
     expect(screen.queryByText(/Ingenting kjører/)).toBeNull()
+  })
+
+  // WS03-S7: a typed denial says why; its words win over the section's code switch.
+  it('shows the denial copy when a gap carries a typed reason, over its code', async () => {
+    spacesClient.getSpaceWork.mockResolvedValue({
+      space, membership, runs: [], schedules: [],
+      unavailable: [{
+        section: 'runs',
+        code: 'runs_read_not_authorized',
+        reason: 'Reading this Space’s shared work is not authorized.',
+        details: { reason: 'space_role_below_floor', resolvable_by: 'space_manager' },
+      }],
+    })
+    render(() => <SpaceWorkPanel spaceRef="space_1" />)
+
+    expect(await screen.findByText(/Rollen din i dette rommet er ikke høy nok til dette\./)).toBeTruthy()
+    expect(screen.getByText(/Be en romleder om hjelp\./)).toBeTruthy()
+    expect(screen.queryByText(/andre medlemmer kjører/)).toBeNull()
+    expect(screen.queryByText(/not authorized/)).toBeNull()
+  })
+
+  it('never shows server text for a gap whose typed reason this build does not know', async () => {
+    spacesClient.getSpaceWork.mockResolvedValue({
+      space, membership, runs: [], schedules: [],
+      unavailable: [{
+        section: 'runs',
+        code: 'runs_read_not_authorized',
+        reason: 'Server internal wording',
+        details: { reason: 'space_future_reason' },
+      }],
+    })
+    render(() => <SpaceWorkPanel spaceRef="space_1" />)
+
+    expect(await screen.findByText(/Dette er ikke tillatt i rommet akkurat nå\./)).toBeTruthy()
+    expect(screen.queryByText(/Server internal wording/)).toBeNull()
+  })
+
+  it('keeps the code switch for a gap without details', async () => {
+    spacesClient.getSpaceWork.mockResolvedValue({
+      space, membership, runs: [], schedules: [],
+      unavailable: [{ section: 'runs', code: 'runs_read_not_authorized', reason: 'x' }],
+    })
+    render(() => <SpaceWorkPanel spaceRef="space_1" />)
+
+    expect(await screen.findByText(/andre medlemmer kjører/)).toBeTruthy()
   })
 
   // A build that does not know a code must still state the gap, in the

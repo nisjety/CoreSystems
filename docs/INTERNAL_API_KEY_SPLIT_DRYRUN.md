@@ -112,7 +112,7 @@ missing per-target key fails loud.
 | imports-core | integration-corev2 | `INTERNAL_API_KEY` | `X-Internal-Api-Key` | actions_gateway.py `:43` |
 | quarry-edge | documents-api | `DATA_PLANE_API_KEY`* (compose) | `authorization: Bearer` + `x-internal-api-key` | ingest_client.rs `:88-89` |
 | quarry-edge | retrieval-engine | `DATA_PLANE_API_KEY`* | `x-internal-key` | vector_index.rs `:137` |
-| quarry-control | notification-core | `NOTIFICATION_CORE_INTERNAL_KEY` | `x-internal-api-key` | notify/sink.go `:62` |
+| quarry-control | notification-core | `NOTIFICATION_QUARRY_CONTROL_SERVICE_TOKEN` (HMAC delegation, service id `quarry-control`) | `x-delegation-*` (delegation v2) | notify/sink.go |
 | conversation-core-go | integration-corev2 | `INTEGRATION_INTERNAL_API_KEY`* | `x-internal-api-key` | integration/client `:196` |
 | conversation-ingest-rs | conversation-core-go | `INTERNAL_API_KEY` | `x-internal-api-key` | lib.rs `:145` |
 | insight-core | social-core | `INTERNAL_API_KEY` | `x-internal-api-key` | socialmetrics/client `:73` |

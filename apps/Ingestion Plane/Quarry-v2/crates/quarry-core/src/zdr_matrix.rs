@@ -112,8 +112,10 @@ pub const ROWS: &[Row] = &[
         enforced_by: &[
             "scrape_max_age::zdr_never_reads_or_writes_the_url_cache_and_says_so",
             "scrape_cache::tests::zdr_wins_over_everything_else",
+            "scrape_cache::tests::a_zdr_response_carries_no_cache_freshness_fields",
+            "scrape_cache::tests::monitor_paths_never_reach_the_url_cache",
         ],
-        basis: "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass. The decision is made in scrape_cache::eligibility before any key exists",
+        basis: "same route as scrape: INNH-7 max_age reads and writes quarry:scrape:{org}:{hash} (the output and warnings, no inline text; the text is rebuilt from artifacts), dark behind QUARRY_EDGE__SCRAPE_MAX_AGE. Under ZDR (body flag or the token's floor) the cache is neither read nor written and no key is computed, not even a hashed URL (a hash of a known URL is a membership oracle); the scrape runs as a fresh fetch and the response carries the warning max_age_ignored_zdr with cache_state bypass, no cached_at and no cache_age_ms, and a fetched_at that is the time of that fetch. The decision is made in scrape_cache::eligibility before any key exists. A hit carries the original fetched_at, cached_at (the same instant) and cache_age_ms. An entry lives for cache.max_age_s (default 3600 s), so a max_age longer than that behaves as the TTL, and the response does not say so yet. Monitors never reach the cache: a change monitor fetches through /v1/internal/run_page and records through /v1/internal/change/record, and only scrape_with calls result_key, get_result or put_result",
         log: Log::Unverified,
     },
     Row {
@@ -255,6 +257,17 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[],
         basis: "audit_page::capture touches no cache, artifact store, index or event sink",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "browser_redirect_probe",
+        routes: &["/v1/browser/redirect-hop"],
+        treatment: Treatment::Inert {
+            reason: "checks one public HTTP response header for a redirect and stores nothing",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "browser_redirect::probe uses credentialless pinned transport and touches no cache, artifact store, index or event sink",
         log: Log::Unverified,
     },
     Row {
@@ -605,6 +618,17 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "agent_hit_test",
+        routes: &["/v1/agent/runs/{run_id}/hit-test"],
+        treatment: Treatment::Inert {
+            reason: "a read-only point lookup on the caller's own live run; it writes no receipt, timeline row, artifact or cache entry, and logs no page text",
+        },
+        status: Status::Enforced,
+        enforced_by: &["hit_test::hit_test_tests::the_wire_answer_carries_refs_and_no_browser_handles"],
+        basis: "agent_routes::hit_test::hit_test_point (E3.3-h, dark behind QUARRY_EDGE__HIT_TEST: 403 hit_test_disabled when off, and 501 unsupported when on until the driver trait gains its point method) reads DOM.getNodeForLocation and the partial accessibility tree, maps the hit to the person's lane's last observed @e ref, and answers the run's zdr flag with it. The AX name it returns is page text the same caller's observation already carries under ZDR; no backend node id or frame id is on the wire. Nothing is stored, so ZDR has nothing to suppress and the route is not refused",
+        log: Log::Unverified,
+    },
+    Row {
         id: "fleets",
         routes: &[
             "/v1/fleets",
@@ -684,6 +708,20 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[],
         basis: "internal_routes::purge_org_profiles checks the shared internal token, walks the org erasure families in AppState and reports row, tombstone and cache-key counts (WS17.E3); it is how a ZDR organization's erasure is carried out, so it is never refused",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "internal_user_receipt_purge",
+        routes: &["/v1/internal/orgs/{org}/users/{user}/receipts"],
+        treatment: Treatment::Inert {
+            reason: "erases one user's step receipts and browser timeline events in one organization and answers counts only; it stores nothing",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "internal_routes::tests::the_user_report_is_one_counts_only_family",
+            "step_receipts::user_erasure_tests::purge_for_actor_removes_only_that_user_in_that_org_and_is_idempotent",
+        ],
+        basis: "internal_routes::purge_user_receipts (W2-U49, X-19 condition c) checks the shared internal token and both path ids, deletes the rows whose org_id and actor_id match (Postgres over the queue pool when present, else the receipt store's purge_for_actor) and reports one counts-only step_receipts family. quarry-control calls it for a user or user_anonymize erasure event only when QUARRY_CONTROL_GDPR_USER_RECEIPTS is on (default off). A ZDR run writes no receipts, so there is nothing of it to find; like the org purge it is how erasure is carried out, so it is never refused",
         log: Log::Unverified,
     },
     Row {
@@ -977,5 +1015,30 @@ mod tests {
     fn normalize_makes_both_spellings_equal() {
         assert_eq!(normalize_route("/v1/agent/runs/:run_id/tabs/:tab_id"), normalize_route("/v1/agent/runs/{x}/tabs/{y}"));
         assert_eq!(normalize_route("/v1/:kind/jobs"), "/v1/{}/jobs");
+    }
+
+    /// The `scrape_max_age` row keeps the monitor bypass and the freshness fields in its
+    /// text: the row and its basis are what a support or security reader sees first.
+    #[test]
+    fn the_scrape_max_age_row_names_the_monitor_bypass_and_the_freshness_fields() {
+        let row = ROWS.iter().find(|row| row.id == "scrape_max_age").expect("a scrape_max_age row");
+        for needle in [
+            "/v1/internal/run_page",
+            "/v1/internal/change/record",
+            "only scrape_with",
+            "cached_at",
+            "cache_age_ms",
+            "fetched_at",
+            "bypass",
+            "max_age_ignored_zdr",
+        ] {
+            assert!(row.basis.contains(needle), "the scrape_max_age basis no longer says `{needle}`");
+        }
+        for test in [
+            "scrape_cache::tests::monitor_paths_never_reach_the_url_cache",
+            "scrape_cache::tests::a_zdr_response_carries_no_cache_freshness_fields",
+        ] {
+            assert!(row.enforced_by.contains(&test), "the scrape_max_age row does not cite {test}");
+        }
     }
 }

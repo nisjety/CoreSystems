@@ -7,10 +7,11 @@ use axum::{
 };
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
+    envelope::{error, error_with_details},
     upstream::{browser_origin, proxy_auth, proxy_auth_callback, proxy_auth_with_headers},
 };
 
@@ -165,7 +166,11 @@ pub(super) async fn sign_in(
     let url = format!("{}/api/auth/sign-in/email", state.auth_core_url);
     let cookie = cookie_header(&headers);
     let origin = browser_origin(&headers);
-    proxy_auth(
+    let submitted_email = body
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let response = proxy_auth(
         &state,
         Method::POST,
         &url,
@@ -173,7 +178,71 @@ pub(super) async fn sign_in(
         Some(&cookie),
         origin.as_deref(),
     )
-    .await
+    .await;
+    map_sso_sign_in_refusal(response, submitted_email.as_deref()).await
+}
+
+const SSO_REFUSAL_MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Maps auth-core's SSO enforcement refusals (WS05-S7) to the typed envelope:
+/// `SSO_REQUIRED` becomes 403 `sso_required` with `details.domain` (the SPA then
+/// offers `/api/v1/auth/sso/initiate`), and `SSO_POLICY_UNAVAILABLE` becomes 503
+/// `sso_policy_unavailable`. Every other response, cookies included, passes
+/// through untouched.
+async fn map_sso_sign_in_refusal(response: Response, submitted_email: Option<&str>) -> Response {
+    let status = response.status();
+    if status != StatusCode::FORBIDDEN && status != StatusCode::SERVICE_UNAVAILABLE {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let Ok(bytes) = to_bytes(body, SSO_REFUSAL_MAX_BODY_BYTES).await else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "upstream_unavailable",
+                "The upstream service is unavailable.",
+            )),
+        )
+            .into_response();
+    };
+    let parsed = serde_json::from_slice::<Value>(&bytes).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|value| value.get("code"))
+        .and_then(Value::as_str);
+    match (status, code) {
+        (StatusCode::FORBIDDEN, Some("SSO_REQUIRED")) => {
+            let domain = parsed
+                .as_ref()
+                .and_then(|value| value.get("domain"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    submitted_email
+                        .and_then(|email| email.rsplit_once('@'))
+                        .map(|(_, domain)| domain.trim().to_ascii_lowercase())
+                })
+                .unwrap_or_default();
+            (
+                StatusCode::FORBIDDEN,
+                Json(error_with_details(
+                    "sso_required",
+                    "Your organization requires single sign-on.",
+                    json!({ "domain": domain }),
+                )),
+            )
+                .into_response()
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, Some("SSO_POLICY_UNAVAILABLE")) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "sso_policy_unavailable",
+                "Sign-in policy could not be verified. Try again shortly.",
+            )),
+        )
+            .into_response(),
+        _ => Response::from_parts(parts, axum::body::Body::from(bytes)),
+    }
 }
 
 pub(super) async fn verify_two_factor(
@@ -747,5 +816,125 @@ mod canonical_sign_in_tests {
             )
             .is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod sso_refusal_tests {
+    //! WS05-S7: auth-core's SSO enforcement refusals become typed gateway envelopes; every other
+    //! response, cookies included, is passed through untouched.
+    use super::map_sso_sign_in_refusal;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, StatusCode},
+        response::Response,
+    };
+    use serde_json::{json, Value};
+
+    fn upstream(status: StatusCode, body: &str, cookie: Option<&str>) -> Response {
+        let mut builder = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-upstream-marker", "kept");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::SET_COOKIE, cookie);
+        }
+        builder.body(Body::from(body.to_owned())).unwrap()
+    }
+
+    async fn read(response: Response) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(body, usize::MAX).await.unwrap().to_vec();
+        (parts.status, parts.headers, bytes)
+    }
+
+    fn json_of(bytes: &[u8]) -> Value {
+        serde_json::from_slice(bytes).unwrap_or(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn sso_required_becomes_403_sso_required_with_the_domain_from_auth_core() {
+        let response = upstream(
+            StatusCode::FORBIDDEN,
+            r#"{"code":"SSO_REQUIRED","domain":"acme.example","message":"x"}"#,
+            None,
+        );
+        let (status, headers, bytes) = read(map_sso_sign_in_refusal(response, Some("user@other.example")).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let body = json_of(&bytes);
+        assert_eq!(body["error"]["code"], "sso_required");
+        assert_eq!(body["error"]["details"]["domain"], "acme.example");
+        assert!(body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+        // The upstream refusal is replaced, not forwarded: no upstream header or cookie survives.
+        assert!(headers.get("x-upstream-marker").is_none());
+        assert!(headers.get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn sso_required_falls_back_to_the_submitted_email_domain_lowercased() {
+        let response = upstream(StatusCode::FORBIDDEN, r#"{"code":"SSO_REQUIRED"}"#, None);
+        let (status, _, bytes) = read(map_sso_sign_in_refusal(response, Some("User@Acme.Example")).await).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(json_of(&bytes)["error"]["details"]["domain"], "acme.example");
+
+        // No usable email: an empty domain, still the typed code.
+        for email in [None, Some("no-at-sign")] {
+            let response = upstream(StatusCode::FORBIDDEN, r#"{"code":"SSO_REQUIRED"}"#, None);
+            let (_, _, bytes) = read(map_sso_sign_in_refusal(response, email).await).await;
+            let body = json_of(&bytes);
+            assert_eq!(body["error"]["code"], "sso_required");
+            assert_eq!(body["error"]["details"]["domain"], "");
+        }
+    }
+
+    #[tokio::test]
+    async fn sso_policy_unavailable_becomes_503_sso_policy_unavailable() {
+        let response = upstream(StatusCode::SERVICE_UNAVAILABLE, r#"{"code":"SSO_POLICY_UNAVAILABLE"}"#, None);
+        let (status, headers, bytes) = read(map_sso_sign_in_refusal(response, Some("a@b.example")).await).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_of(&bytes)["error"]["code"], "sso_policy_unavailable");
+        assert!(headers.get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn every_other_response_passes_through_with_body_headers_and_cookies() {
+        let cookie = "better-auth.session_token=abc; Path=/; HttpOnly";
+        let cases = [
+            (StatusCode::OK, r#"{"user":{"id":"u1"}}"#),
+            (StatusCode::UNAUTHORIZED, r#"{"code":"INVALID_EMAIL_OR_PASSWORD"}"#),
+            (StatusCode::FORBIDDEN, r#"{"code":"EMAIL_NOT_VERIFIED"}"#),
+            (StatusCode::FORBIDDEN, r#"{"message":"no code at all"}"#),
+            (StatusCode::FORBIDDEN, "plain text, not json"),
+            (StatusCode::FORBIDDEN, r#"{"code":"sso_required"}"#), // wrong case: not auth-core's code
+            (StatusCode::SERVICE_UNAVAILABLE, r#"{"code":"SOMETHING_ELSE"}"#),
+            (StatusCode::SERVICE_UNAVAILABLE, "upstream timeout"),
+            (StatusCode::BAD_GATEWAY, r#"{"code":"SSO_REQUIRED"}"#), // right code, wrong status
+        ];
+        for (status, body) in cases {
+            let response = upstream(status, body, Some(cookie));
+            let (got_status, headers, bytes) = read(map_sso_sign_in_refusal(response, Some("a@b.example")).await).await;
+            assert_eq!(got_status, status, "{body}");
+            assert_eq!(bytes, body.as_bytes(), "{body}");
+            assert_eq!(headers.get(header::SET_COOKIE).and_then(|v| v.to_str().ok()), Some(cookie), "{body}");
+            assert_eq!(headers.get("x-upstream-marker").and_then(|v| v.to_str().ok()), Some("kept"), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_success_with_a_session_cookie_is_returned_without_reading_the_body() {
+        let cookie = "better-auth.session_token=abc; Path=/; HttpOnly";
+        let response = upstream(StatusCode::OK, &json!({"token": "t"}).to_string(), Some(cookie));
+        let (status, headers, _) = read(map_sso_sign_in_refusal(response, None).await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers.get(header::SET_COOKIE).is_some());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_refusal_body_is_a_502_not_a_passthrough() {
+        let huge = format!(r#"{{"code":"SSO_REQUIRED","pad":"{}"}}"#, "x".repeat(70 * 1024));
+        let response = upstream(StatusCode::FORBIDDEN, &huge, None);
+        let (status, _, bytes) = read(map_sso_sign_in_refusal(response, Some("a@b.example")).await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(json_of(&bytes)["error"]["code"], "upstream_unavailable");
     }
 }

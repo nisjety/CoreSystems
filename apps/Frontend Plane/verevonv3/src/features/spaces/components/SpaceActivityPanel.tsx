@@ -1,5 +1,6 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
 
+import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denials'
 import { getSpaceActivity, type SpaceActivity } from '@/shared/api/spaces-client'
 import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -13,6 +14,9 @@ import {
   type ThreadLikeActivitySource,
 } from '../lib/activity-grammar'
 import { SpaceActivityFeed } from './SpaceActivityFeed'
+import { withLiveRunItems } from '../lib/room-run-grammar'
+import { spaceRunStore, trackLiveRuns } from '../lib/space-run-store'
+import { LIVE_RUN_STATUSES } from '../lib/space-thread-presentation'
 
 /**
  * What has happened in this room, on whose authority, and with what outcome.
@@ -51,6 +55,11 @@ export interface SpaceActivityPanelProps {
    */
   readonly threads: () => readonly ThreadLikeActivitySource[]
   readonly threadsLoading: () => boolean
+  /**
+   * `agent_work.live` from the thread listing (WS09-S5). On, a run this tab lists as queued or running
+   * is followed through the room's live view and shows its current step in place of the polled line.
+   */
+  readonly liveRuns?: boolean
 }
 
 type ActivityLens = 'all' | 'attention' | 'work' | 'conversation' | 'authority'
@@ -99,9 +108,14 @@ function sectionLabel(section: string, tr: (no: string, en: string) => string): 
  * the wrong language beats a gap not stated at all.
  */
 function gapReason(
-  gap: { readonly code?: string; readonly reason: string },
+  gap: { readonly code?: string; readonly reason: string; readonly details?: Readonly<Record<string, unknown>> },
   tr: (no: string, en: string) => string,
 ): string {
+  // A typed Space denial says why (policy off, role, ZDR ...): the presenter's
+  // words and next step win over the section's generic line.
+  if (isSpaceDenial({ details: gap.details })) {
+    return presentSpaceDenialText({ details: gap.details }, tr)
+  }
   switch (gap.code) {
     case 'runs_read_not_authorized':
       return tr(
@@ -148,15 +162,25 @@ export function SpaceActivityPanel(props: SpaceActivityPanelProps) {
   const [lens, setLens] = createSignal<ActivityLens>('all')
 
   const resolved = (): SpaceActivity | undefined => (activity.error ? undefined : activity())
+  const listedRuns = () => (resolved()?.runs ?? []) as readonly RunLikeActivitySource[]
+  const runIdOf = (run: RunLikeActivitySource) => (run.id ?? run.run_id ?? '').trim()
+  trackLiveRuns(
+    () => props.spaceRef,
+    () => listedRuns().filter((run) => LIVE_RUN_STATUSES.has((run.status ?? '').trim())).map(runIdOf).filter(Boolean),
+    () => props.liveRuns === true,
+  )
   const allItems = createMemo(() => {
     const current = resolved()
-    return buildSpaceRecord({
+    const record = buildSpaceRecord({
       threads: props.threads(),
       runs: (current?.runs ?? []) as readonly RunLikeActivitySource[],
       approvals: (current?.approvals ?? []) as readonly ApprovalLikeActivitySource[],
       operations: (current?.operations ?? []) as readonly OperationLikeActivitySource[],
       authority: (current?.authority ?? []) as readonly AuthorityLikeActivitySource[],
-    })
+    }, i18n.tr)
+    return props.liveRuns === true
+      ? withLiveRunItems(record, spaceRunStore.views(), new Set(listedRuns().map(runIdOf).filter(Boolean)), props.spaceRef, i18n.tr)
+      : record
   })
   const shown = createMemo(() => allItems().filter((item) => matchesLens(item, lens())))
   const hidden = () => allItems().length - shown().length

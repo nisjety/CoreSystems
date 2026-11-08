@@ -1,5 +1,5 @@
 import { removeClientValuesWithPrefix } from './client-storage'
-import { clearHomeDrafts } from './home-draft-storage'
+import { clearChatDrafts, clearHomeDrafts } from './home-draft-storage'
 
 // What Home keeps on this device from things a person typed or looked up, next
 // to the unsent draft (home-draft-storage): the Nett search snapshot and the
@@ -12,6 +12,9 @@ const SEARCH_SNAPSHOT_KEY_PREFIX = 'verevon.dashboard.search.session'
 const WEB_HISTORY_KEY_PREFIX = 'verevon.home-web-history.v1'
 // The browser omnibox's own visit history (features/browser/omnibox), kept apart from the Nett record.
 const OMNIBOX_HISTORY_KEY_PREFIX = 'verevon.browser-omnibox.v1'
+// User-bookmarked pages (features/browser/bookmarks). Presentation only, local
+// to the device, like the history records above.
+export const BOOKMARKS_KEY_PREFIX = 'verevon.browser-bookmarks.v1'
 
 function scopedKey(prefix: string, userId: string | undefined, orgId: string | undefined): string | null {
   const user = userId?.trim()
@@ -32,6 +35,11 @@ export function searchSnapshotStorageKey(userId: string | undefined, orgId: stri
 /** Where the browser omnibox's visit history of this user and workspace lives; null until both are known. */
 export function omniboxHistoryStorageKey(userId: string | undefined, orgId: string | undefined): string | null {
   return scopedKey(OMNIBOX_HISTORY_KEY_PREFIX, userId, orgId)
+}
+
+/** Where this user and workspace's bookmarks live; null until both are known. */
+export function bookmarksStorageKey(userId: string | undefined, orgId: string | undefined): string | null {
+  return scopedKey(BOOKMARKS_KEY_PREFIX, userId, orgId)
 }
 
 const snapshotClearListeners = new Set<() => void>()
@@ -73,13 +81,21 @@ export function clearOmniboxHistories(): void {
   removeClientValuesWithPrefix(`${OMNIBOX_HISTORY_KEY_PREFIX}:`)
 }
 
+/** Removes every account's bookmarks from this browser. */
+export function clearBookmarks(): void {
+  removeClientValuesWithPrefix(`${BOOKMARKS_KEY_PREFIX}:`)
+}
+
 /**
  * A workspace that is zero-data-retention allows no local copy of what a person
- * typed or searched for: drafts, saved searches and the Nett history all go.
+ * typed or searched for: drafts (Home's and the chat threads'), saved searches,
+ * the Nett history, omnibox history and bookmarks all go.
  */
 export function clearHomeLocalContent(): void {
   clearHomeDrafts()
+  clearChatDrafts()
   clearWebHistories()
   clearOmniboxHistories()
+  clearBookmarks()
   clearSearchSnapshots()
 }

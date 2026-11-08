@@ -25,7 +25,10 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json_with_session, session_token},
+    domains::chat::shared::{
+        delegated_auth_unavailable, model_token, proxy_model_json_with_session,
+        proxy_model_json_with_session_and_capability, required_capability_token, session_token,
+    },
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
 };
@@ -38,6 +41,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(decide_proposal),
         )
         .route("/api/v1/learning/ledger/{entry_id}/undo", post(undo_entry))
+        .route("/api/v1/learning/learn", post(learn_from_thread))
         // Ordered like memory.rs: `require_session` (written last, outer) runs first
         // and inserts `AuthenticatedUser`, so the rate limit keys by the verified user.
         .route_layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -175,9 +179,85 @@ pub(crate) async fn undo_entry(
     .await
 }
 
+/// The longest note a `/learn` carries, in characters, as model-gateway and capability-core bound it.
+const LEARN_NOTE_MAX_CHARS: usize = 500;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LearnBody {
+    #[serde(rename = "threadId")]
+    pub(crate) thread_id: String,
+    #[serde(default)]
+    pub(crate) note: Option<String>,
+}
+
+/// "Lær av denne samtalen": the owner asks Verevon to distil one of their threads into a
+/// skill proposal (EP-11 S7). Only the thread and the trimmed note cross; the owner is the
+/// session on the far side. The user's capability token rides with the model and session
+/// tokens, because model-gateway checks the thread on the session credential and capability-core
+/// runs the review on the capability one. The answer is relayed unchanged: 202 `queued`, 404
+/// while `LEARN_COMMAND_ENABLED` is off there, or the typed refusal (zero data retention
+/// included).
+pub(crate) async fn learn_from_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<LearnBody>,
+) -> impl IntoResponse {
+    let thread_id = body.thread_id.trim();
+    if thread_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_thread_id",
+                    "message": "threadId is required",
+                    "details": {},
+                }
+            })),
+        )
+            .into_response();
+    }
+    let note = body.note.as_deref().map_or("", str::trim);
+    if note.chars().count() > LEARN_NOTE_MAX_CHARS {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": {
+                    "code": "learn_note_too_long",
+                    "message": "the note is longer than 500 characters",
+                    "details": {},
+                }
+            })),
+        )
+            .into_response();
+    }
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/learning/learn", state.model_gateway_url);
+    proxy_model_json_with_session_and_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(json!({ "thread_id": thread_id, "note": note })),
+        token.as_deref(),
+        session_token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+    .into_response()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{decide_proposal, ledger, undo_entry, LearningDecisionBody, LedgerQuery};
+    use super::{
+        decide_proposal, learn_from_thread, ledger, undo_entry, LearnBody, LearningDecisionBody,
+        LedgerQuery,
+    };
     use axum::{
         extract::{Path, Query, State},
         http::{HeaderMap, StatusCode},
@@ -381,5 +461,108 @@ mod tests {
             .await
             .unwrap_or_default()
             .is_empty());
+    }
+
+    /// `upstreams` plus the capability-core audience, which `/learn` also mints.
+    async fn learn_upstreams(
+        status: u16,
+        reply: serde_json::Value,
+    ) -> (MockServer, MockServer, crate::config::AppState) {
+        let (auth_core, model_gateway, state) =
+            upstreams("POST", "/v1/learning/learn", status, reply).await;
+        Mock::given(method("GET"))
+            .and(path("/api/capability-core/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "capability-core-test-token",
+                "expiresInSeconds": 300,
+            })))
+            .mount(&auth_core)
+            .await;
+        (auth_core, model_gateway, state)
+    }
+
+    /// Only the thread and the trimmed note cross, with the user's capability token; the
+    /// gateway's 202 comes back unchanged.
+    #[tokio::test]
+    async fn learn_forwards_the_thread_and_note_with_the_capability_token() {
+        let (_auth, model_gateway, state) =
+            learn_upstreams(202, json!({ "data": { "state": "queued" } })).await;
+        let response = learn_from_thread(
+            State(state),
+            Extension(member()),
+            HeaderMap::new(),
+            Json(LearnBody {
+                thread_id: " thread-1 ".to_owned(),
+                note: Some("  keep the release steps  ".to_owned()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let requests: Vec<_> = model_gateway
+            .received_requests()
+            .await
+            .expect("model-gateway requests are recorded")
+            .into_iter()
+            .filter(|request| request.url.path() == "/v1/learning/learn")
+            .collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+            json!({ "thread_id": "thread-1", "note": "keep the release steps" })
+        );
+        assert!(requests[0].headers.get("x-capability-authorization").is_some());
+        assert!(requests[0].headers.get("x-session-authorization").is_some());
+    }
+
+    #[tokio::test]
+    async fn learn_relays_a_typed_zero_retention_refusal() {
+        let refusal = json!({ "error": {
+            "code": "zdr_feature_not_supported",
+            "message": "This is not supported with zero data retention yet: learning from this conversation.",
+            "retryable": false,
+            "action": "turn_off_feature",
+            "feature": "learn_command",
+        }});
+        let (_auth, _model_gateway, state) = learn_upstreams(412, refusal.clone()).await;
+        let response = learn_from_thread(
+            State(state),
+            Extension(member()),
+            HeaderMap::new(),
+            Json(LearnBody {
+                thread_id: "thread-1".to_owned(),
+                note: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn learn_refuses_a_blank_thread_or_a_long_note_without_a_hop() {
+        let (_auth, model_gateway, state) =
+            learn_upstreams(202, json!({ "data": { "state": "queued" } })).await;
+        for body in [
+            LearnBody {
+                thread_id: "  ".to_owned(),
+                note: None,
+            },
+            LearnBody {
+                thread_id: "thread-1".to_owned(),
+                note: Some("n".repeat(super::LEARN_NOTE_MAX_CHARS + 1)),
+            },
+        ] {
+            let response = learn_from_thread(
+                State(state.clone()),
+                Extension(member()),
+                HeaderMap::new(),
+                Json(body),
+            )
+            .await
+            .into_response();
+            assert!(response.status().is_client_error());
+        }
+        assert!(forwarded(&model_gateway, "/v1/learning/learn").await.is_empty());
     }
 }

@@ -41,6 +41,33 @@ service MemoryService {
   // and semantic copies, in one confirmed step. Org-owned memory is left alone.
   // Open to a ZDR caller too: erasure only removes, and pre-ZDR rows may exist.
   rpc ResetMemory(ResetMemoryRequest) returns (ResetMemoryResponse);
+
+  // The caller's standing profile (EP-8 S4): a short text built from their
+  // accepted personal memories, or as they last edited it. A ZDR caller gets
+  // an empty answer with skip_reason "zdr", never an error. Refused with
+  // failed_precondition "profile_not_enabled" while SESSION_USER_PROFILE_ENABLED
+  // is off.
+  // Response type is shared by the user profile RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc GetUserProfile(GetUserProfileRequest) returns (UserProfileResponse);
+
+  // Replace the profile text with the person's own edit. User callers only, for
+  // themselves; a stale expected_revision is refused (failed_precondition
+  // "profile_revision_stale"); a ZDR or waived credential is refused
+  // zdr_feature_not_supported (feature "user_profile").
+  // Response type is shared by the user profile RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc SetUserProfile(SetUserProfileRequest) returns (UserProfileResponse);
+
+  // Rebuild the profile from the person's accepted memories. Refused while
+  // memory is paused, off or disabled; an edited profile is kept unless force
+  // is set. Same caller and ZDR rules as SetUserProfile.
+  // Response type is shared by the user profile RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc RebuildUserProfile(RebuildUserProfileRequest) returns (UserProfileResponse);
 }
 
 message SearchMemoryRequest {
@@ -89,10 +116,18 @@ message SearchMemoryResponse {
 
   // Why the caller's own memory was not used for this search, one of the
   // closed MemoryControls.reason tokens: "user_paused", "user_off",
-  // "org_disabled", "policy_unavailable". Empty when it was used. A paused or
+  // "org_disabled", "policy_unavailable", or "space_scope" for a Space thread,
+  // which reads no personal or org rows. Empty when it was used. A paused or
   // off user still receives org-owned entries, so an empty `entries` with this
   // set means "memory is switched off", never "nothing to recall".
   string skip_reason = 4;
+
+  // Space memory rows of this thread's Space that were left out because they
+  // were learned in front of a different audience than the thread's current
+  // one (EP-8 S7, decision D5): a member added later does not see what the
+  // room said before they joined. A count only, never ids or content. Zero for
+  // every thread that is not a shared-room thread with Space memory on.
+  uint32 withheld = 5;
 }
 
 message MemoryEntry {
@@ -128,6 +163,30 @@ message MemoryEntry {
   // model's reading of a conversation; "unknown" is an older row written before
   // provenance was recorded, and must not be presented as either.
   MemoryProvenance provenance = 8;
+
+  // Space this row was learned in, set only when the row is withheld (see
+  // withheld_reason). Ids only, never content. Empty for every ordinary row.
+  string origin_space_ref = 9;
+
+  // Why this row is listed but never recalled. Closed vocabulary shared with
+  // the personal-chat hidden_reason: "room_origin_unverified" is a row learned
+  // in a shared room before containment existed. The owner may keep or delete
+  // it; no conversation recalls it. Empty for an ordinary row.
+  string withheld_reason = 10;
+
+  // The row's scope kind (agent_memory.scope): "user", "org", "thread", ...,
+  // "space" or "agent" (EP-8 S6). Empty when the reader does not report it;
+  // set by the Space memory readers (EP-8 S7).
+  string scope = 11;
+
+  // The scope instance: the Space id for "space", "<space_id>:<agent_id>" for
+  // "agent". Empty for every other kind. Ids only, never content.
+  string scope_id = 12;
+
+  // How a Space or agent row came to exist: "room_statement" (extracted from a
+  // room turn), "member_save" (an explicit save in a room), "agent_memory".
+  // Closed vocabulary; empty for every other row.
+  string source_label = 13;
 }
 
 // MemoryProvenance — who decided a memory was worth keeping.
@@ -208,6 +267,20 @@ message ListMemoryRequest {
 
   // Maximum results. Server clamps to a sane upper bound.
   uint32 limit = 3;
+
+  // Lists the memory of this Space instead of the user's own (EP-8 S7). Set,
+  // the call is answered only for a person who presents the Control Space
+  // memory decision below, which Control issues to the Space's owner or admin;
+  // `user_id` must still be the caller. Empty keeps the personal list.
+  string space_id = 4;
+
+  // The Control `model.space.memory.manage` decision reference, with
+  // `space_id`. Never logged.
+  string space_control_decision_ref = 5;
+
+  // The signed Control `model.space.memory.manage` decision token, with
+  // `space_id`. Never logged.
+  string space_control_decision_token = 6;
 }
 
 message ListMemoryResponse {
@@ -236,6 +309,19 @@ message DeleteMemoryRequest {
 
   // Identifier of the memory entry to delete.
   string memory_id = 3;
+
+  // Deletes a row of this Space's memory instead of the user's own (EP-8 S7),
+  // under the Control Space memory decision below, issued for this
+  // `memory_id`. Empty keeps the personal delete.
+  string space_id = 4;
+
+  // The Control `model.space.memory.manage` decision reference, with
+  // `space_id`. Never logged.
+  string space_control_decision_ref = 5;
+
+  // The signed Control `model.space.memory.manage` decision token, with
+  // `space_id`. Never logged.
+  string space_control_decision_token = 6;
 }
 
 message DeleteMemoryResponse {
@@ -253,6 +339,7 @@ message DeleteMemoryResponse {
 
 // MemoryState — the user's own choice about their memory (build plan WS07 S1).
 enum MemoryState {
+  // Unset state, the zero value. Setting it is refused.
   MEMORY_STATE_UNSPECIFIED = 0;
 
   // The default. Memory is used and learned from.
@@ -266,6 +353,7 @@ enum MemoryState {
   MEMORY_STATE_OFF = 3;
 }
 
+// Request to read one user's memory controls.
 message GetMemoryControlsRequest {
   // Tenant context.
   string org_id = 1;
@@ -274,6 +362,7 @@ message GetMemoryControlsRequest {
   string user_id = 2;
 }
 
+// Request to set one user's memory state.
 message SetMemoryControlsRequest {
   // Tenant context.
   string org_id = 1;
@@ -309,7 +398,9 @@ message MemoryControls {
   bool learning_allowed = 6;
 
   // Closed token for what decided the above: "on", "user_paused", "user_off",
-  // "org_disabled", "zdr", "policy_unavailable".
+  // "org_disabled", "zdr", "policy_unavailable". The thread-scoped tokens
+  // "space_scope" and "agent_run_scope" come from a thread's own recall or
+  // write (SearchMemory, IndexMemory), not from this message.
   string reason = 7;
 
   // How many of the user's rows the list hides under this decision (a count,
@@ -320,14 +411,19 @@ message MemoryControls {
   google.protobuf.Timestamp updated_at = 9;
 }
 
+// Response carrying one user's memory controls.
 message GetMemoryControlsResponse {
+  // The user's memory controls.
   MemoryControls controls = 1;
 }
 
+// Response to a set, carrying the user's memory controls.
 message SetMemoryControlsResponse {
+  // The user's memory controls.
   MemoryControls controls = 1;
 }
 
+// Request to erase one user's durable memory; confirm must be true.
 message ResetMemoryRequest {
   // Tenant context.
   string org_id = 1;
@@ -340,6 +436,7 @@ message ResetMemoryRequest {
   bool confirm = 3;
 }
 
+// Counts of rows erased by a memory reset, and whether any copy is unconfirmed.
 message ResetMemoryResponse {
   // How many durable rows were erased (current rows and retired ancestors).
   uint32 durable_deleted = 1;
@@ -353,4 +450,78 @@ message ResetMemoryResponse {
 
   // Stable machine-readable reason, empty when nothing is degraded.
   string degradation_reason = 4;
+}
+
+// UserProfile — the person's standing profile (EP-8 S4). Built only from their
+// own accepted, current scope "user" rows in session-core; never from org,
+// thread, Space or agent rows, and never from letta-bridge blocks.
+message UserProfile {
+  // The profile text, one line per remembered fact, at most 1400 characters.
+  string content = 1;
+
+  // The memory ids the built lines came from, in line order. Kept unchanged by
+  // an edit, so the deleted count below can be computed. Ids only.
+  repeated string source_memory_ids = 2;
+
+  // "built" (made by the builder) or "edited" (the person's own text, kept
+  // until they ask for a rebuild).
+  string origin = 3;
+
+  // Increases on every change; SetUserProfile must name the current one.
+  uint64 revision = 4;
+
+  // When the profile last changed.
+  google.protobuf.Timestamp updated_at = 5;
+
+  // For an edited profile: how many of its source memories were deleted since
+  // the edit. Zero for a built profile, whose deleted lines are already gone.
+  uint32 sources_deleted_since_edit = 6;
+}
+
+// Request to read one user's profile.
+message GetUserProfileRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The profile's owner. A user caller may only read their own.
+  string user_id = 2;
+}
+
+// Request to replace one user's profile text with an edit.
+message SetUserProfileRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The profile's owner. Must be the caller.
+  string user_id = 2;
+
+  // The new text, at most 1400 characters. Empty clears it.
+  string content = 3;
+
+  // The revision the edit was made against; 0 when no profile exists yet.
+  uint64 expected_revision = 4;
+}
+
+// Request to rebuild one user's profile from their accepted memories.
+message RebuildUserProfileRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The profile's owner. Must be the caller.
+  string user_id = 2;
+
+  // Replace an edited profile too. Without it an edited profile is kept.
+  bool force = 3;
+}
+
+// The user's profile, and why it is not used in conversations.
+message UserProfileResponse {
+  // The profile, unset when none exists or it is hidden (see skip_reason).
+  UserProfile profile = 1;
+
+  // Why the profile is not used in conversations, one of the closed
+  // MemoryControls.reason tokens ("user_paused", "user_off", "org_disabled",
+  // "zdr", "policy_unavailable"). A paused profile is still returned (listed
+  // and editable); off and org_disabled hide it. Empty when it is used.
+  string skip_reason = 2;
 }

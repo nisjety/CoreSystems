@@ -1217,3 +1217,429 @@ mod tests {
         assert_eq!(error.code, ErrorCode::DriverFailed);
     }
 }
+
+// ---------------------------------------------------------------------------
+// W3-E3.1-e: page reads denied after a delivered one-time code.
+// ---------------------------------------------------------------------------
+
+/// The rule id an observation's stamp counts when its page reads were withheld
+/// because a one-time code was delivered into the page (E3.1-e).
+pub const OTP_READ_DENIED_RULE: &str = "otp.credential_delivered";
+
+/// The note an observation (and so the receipt that stores it) carries when its
+/// page reads were withheld: the `[redacted:otp]` marker and the reason. Never a
+/// value, a length or a field name.
+pub const OTP_READ_DENIAL: &str =
+    "[redacted:otp] credential_delivered: page reads withheld until navigation";
+
+/// The `details.reason` of a pure read (screenshot, PDF, page content) refused
+/// before it ran, on a page a one-time code was delivered into.
+pub const OTP_READ_DENIED_REASON: &str = "otp_credential_delivered";
+
+/// How many delivered pages one run remembers. A run that fills more codes than
+/// this forgets its oldest page (the list is short: one per sign-in step).
+const MAX_DELIVERED_PAGES: usize = 16;
+
+/// The page a mark is kept for: the address without its fragment, so a
+/// same-document fragment change stays the same page.
+fn page_key(url: &str) -> &str {
+    url.split_once('#').map_or(url, |(page, _)| page)
+}
+
+/// Whether `action` loads a new document for the page it lands on (E3.1-e: the
+/// "navigation" that ends the denial). A navigation to the same page that only
+/// changes the fragment is a same-document move and is not one; back and forward
+/// may restore the page from the back-forward cache with the code still in the
+/// field, so they are not either.
+fn loads_fresh_document(action: &AgentAction, before_url: Option<&str>) -> bool {
+    match action {
+        AgentAction::Reload { .. } => true,
+        AgentAction::Navigate { url } => {
+            !(url.contains('#') && before_url.is_some_and(|b| page_key(b) == page_key(url)))
+        }
+        _ => false,
+    }
+}
+
+/// A pure read of the page: denied before it runs on a delivered page.
+#[must_use]
+pub fn is_pure_page_read(action: &AgentAction) -> bool {
+    matches!(
+        action,
+        AgentAction::Screenshot { .. } | AgentAction::Pdf | AgentAction::GetContent
+    )
+}
+
+/// E3.1-e: the pages of each run that a one-time code was delivered into.
+///
+/// After a `fill_otp_ref` step (succeeded or not: a failed insert may have left
+/// part of the code in the field, so it fails closed as `otp_source::deliver_otp`
+/// does) the page it ran on is marked. Every later observation of a marked page
+/// has its accessibility tree, DOM summary, screenshot, content-derived artifacts
+/// and extraction withheld ([`deny_reads_after_otp`]), and a pure read of it is
+/// refused before it runs, until a new document is loaded for that page (a
+/// navigation or reload to it) or the run is released. Landing on another page
+/// is not denied; coming back to the marked page by back/forward is.
+///
+/// The edge sees page addresses, not the browser's loader ids: the browser keeps
+/// its own per-loader mark (E3.1-c `current_loader_credential_delivered`), which
+/// is the precise signal once the driver trait exposes it.
+#[derive(Debug, Default)]
+pub struct CredentialDeliveredReads {
+    runs: std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl CredentialDeliveredReads {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn runs(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, Vec<String>>> {
+        // A poisoned lock still holds every mark: keep using it (fail closed).
+        self.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Mark `page_url` of `run` as holding a delivered code.
+    pub fn mark(&self, run: &str, page_url: &str) {
+        let key = page_key(page_url).to_owned();
+        let mut runs = self.runs();
+        let pages = runs.entry(run.to_owned()).or_default();
+        if !pages.contains(&key) {
+            if pages.len() >= MAX_DELIVERED_PAGES {
+                pages.remove(0);
+            }
+            pages.push(key);
+        }
+    }
+
+    /// Whether reads of `page_url` in `run` are denied.
+    #[must_use]
+    pub fn is_denied(&self, run: &str, page_url: &str) -> bool {
+        let key = page_key(page_url);
+        self.runs()
+            .get(run)
+            .is_some_and(|pages| pages.iter().any(|p| p == key))
+    }
+
+    /// A new document was loaded for `page_url`: its mark ends.
+    fn clear_page(&self, run: &str, page_url: &str) {
+        let key = page_key(page_url);
+        let mut runs = self.runs();
+        if let Some(pages) = runs.get_mut(run) {
+            pages.retain(|p| p != key);
+            if pages.is_empty() {
+                runs.remove(run);
+            }
+        }
+    }
+
+    /// Forget every mark of a released run.
+    pub fn release(&self, run: &str) {
+        self.runs().remove(run);
+    }
+
+    /// Before a step runs: a pure read of a delivered page is refused (403
+    /// `FORBIDDEN`, `details.reason` = [`OTP_READ_DENIED_REASON`]). `current_url`
+    /// is the page of the run's last observation.
+    ///
+    /// # Errors
+    /// The action is a pure read and the page holds a delivered code.
+    pub fn check_before(
+        &self,
+        run: &str,
+        action: &AgentAction,
+        current_url: Option<&str>,
+    ) -> quarry_core::QuarryResult<()> {
+        if is_pure_page_read(action) && current_url.is_some_and(|url| self.is_denied(run, url)) {
+            return Err(quarry_core::error::QuarryError::new(
+                quarry_core::error::ErrorCode::Forbidden,
+                "page reads are withheld after a one-time code was delivered; navigate to read again",
+            )
+            .with_details(serde_json::json!({ "reason": OTP_READ_DENIED_REASON })));
+        }
+        Ok(())
+    }
+
+    /// After a step ran: settle the marks and say whether the observation's page
+    /// reads must be withheld. `before_url` is the page of the run's last
+    /// observation, `landed_url` the page of this step's observation (`None` when
+    /// the step failed).
+    pub fn after_step(
+        &self,
+        run: &str,
+        action: &AgentAction,
+        before_url: Option<&str>,
+        landed_url: Option<&str>,
+    ) -> bool {
+        if matches!(action, AgentAction::FillOtpRef { .. }) {
+            // The page the code went into: where it landed, else where it started.
+            if let Some(page) = landed_url.or(before_url) {
+                self.mark(run, page);
+            }
+            return landed_url.is_some();
+        }
+        let Some(landed) = landed_url else {
+            return false;
+        };
+        if loads_fresh_document(action, before_url) {
+            self.clear_page(run, landed);
+        }
+        self.is_denied(run, landed)
+    }
+
+    /// [`Self::after_step`] over a step result: a step whose page is denied has
+    /// its reads withheld ([`deny_reads_after_otp`]); a failed `fill_otp_ref`
+    /// still marks its page.
+    pub fn settle(
+        &self,
+        run: &str,
+        action: &AgentAction,
+        before_url: Option<&str>,
+        result: quarry_core::QuarryResult<quarry_core::contracts::BrowserObservation>,
+    ) -> quarry_core::QuarryResult<quarry_core::contracts::BrowserObservation> {
+        match result {
+            Ok(mut obs) => {
+                if self.after_step(run, action, before_url, Some(&obs.url)) {
+                    deny_reads_after_otp(&mut obs);
+                }
+                Ok(obs)
+            }
+            Err(error) => {
+                self.after_step(run, action, before_url, None);
+                Err(error)
+            }
+        }
+    }
+}
+
+/// The process-wide marks (one per edge process, like the download ledger).
+#[must_use]
+pub fn credential_delivered_reads() -> &'static CredentialDeliveredReads {
+    static READS: std::sync::OnceLock<CredentialDeliveredReads> = std::sync::OnceLock::new();
+    READS.get_or_init(CredentialDeliveredReads::new)
+}
+
+/// E3.1-e: withhold every page read of an observation of a page a one-time code
+/// was delivered into. The accessibility nodes and executable targets, the DOM
+/// summary, the screenshot and the visual and evidence artifacts built from it,
+/// the content fingerprint (a short code is guessable from a hash), the
+/// observation delta, the extraction result, the console lines and the challenge
+/// evidence are dropped; the address, title, frames, dialogs, outcome and
+/// telemetry stay. The observation then carries [`OTP_READ_DENIAL`] in
+/// `policy_denials` and one [`OTP_READ_DENIED_RULE`] count in its stamp (a
+/// withheld screenshot is stamped `withheld`).
+pub fn deny_reads_after_otp(obs: &mut quarry_core::contracts::BrowserObservation) {
+    if let Some(snapshot) = obs.snapshot.as_mut() {
+        snapshot.targets.clear();
+        snapshot.accessibility = None;
+    }
+    obs.dom_summary = None;
+    let had_screenshot = obs.screenshot_artifact_id.is_some();
+    let withheld: Vec<_> = [
+        obs.screenshot_artifact_id.take(),
+        obs.visual_observation_artifact_id.take(),
+        obs.evidence_delta_artifact_id.take(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Some(proof) = obs.proof_bundle.as_mut() {
+        proof.artifact_ids.retain(|id| !withheld.contains(id));
+        proof.evidence_delta_artifact_id = None;
+        proof.content_fingerprint = None;
+        if let Some(challenge) = proof.challenge.as_mut() {
+            challenge.evidence.clear();
+        }
+    }
+    obs.observation_delta = None;
+    obs.extraction_result = None;
+    obs.console_summary.clear();
+    if let Some(challenge) = obs.challenge.as_mut() {
+        challenge.evidence.clear();
+    }
+    if !obs.policy_denials.iter().any(|d| d == OTP_READ_DENIAL) {
+        obs.policy_denials.push(OTP_READ_DENIAL.to_owned());
+    }
+    let stamp = obs.redaction.get_or_insert_with(RedactionStamp::default);
+    stamp.values_masked = stamp.values_masked.saturating_add(1);
+    let count = stamp
+        .by_rule
+        .entry(OTP_READ_DENIED_RULE.to_owned())
+        .or_insert(0);
+    *count = count.saturating_add(1);
+    if had_screenshot {
+        stamp.screenshot = ScreenshotState::Withheld;
+        stamp.rects = 0;
+        stamp.mask_ms = 0;
+    }
+}
+
+#[cfg(test)]
+mod otp_read_denial_tests {
+    use super::*;
+    use quarry_core::contracts::{
+        ActionOutcome, BrowserObservation, BrowserSnapshot, BrowserTelemetry, ConsoleLine,
+        DomSummary,
+    };
+    use quarry_core::error::ErrorCode;
+    use quarry_core::ids::Id;
+
+    const PAGE: &str = "https://login.example.com/verify?step=2";
+
+    fn fill() -> AgentAction {
+        AgentAction::FillOtpRef {
+            snapshot_id: "s1".into(),
+            generation: 1,
+            ref_id: "e1".into(),
+            approval_grant_id: "g1".into(),
+        }
+    }
+
+    fn click() -> AgentAction {
+        AgentAction::Click {
+            selector: "#next".into(),
+        }
+    }
+
+    fn observation(url: &str) -> BrowserObservation {
+        BrowserObservation {
+            run_id: Id::new(),
+            step: 1,
+            url: url.into(),
+            title: Some("Verify".into()),
+            snapshot: Some(BrowserSnapshot {
+                snapshot_id: "s2".into(),
+                generation: 2,
+                targets: vec![],
+                accessibility: None,
+                frames: vec![],
+            }),
+            dom_summary: Some(DomSummary {
+                node_count: 3,
+                interactive_elements: vec![],
+                text_snippet: Some("Your code 482913".into()),
+                click_map: None,
+            }),
+            screenshot_artifact_id: Some(Id::new()),
+            visual_observation_artifact_id: Some(Id::new()),
+            evidence_delta_artifact_id: None,
+            console_summary: vec![ConsoleLine {
+                level: "log".into(),
+                text: "otp=482913".into(),
+            }],
+            network_summary: vec![],
+            egress_receipts: vec![],
+            dialogs: vec![],
+            policy_denials: vec![],
+            action_outcome: ActionOutcome::default(),
+            observation_delta: None,
+            challenge: None,
+            extraction_profile: None,
+            extraction_result: None,
+            proof_bundle: None,
+            target_resolution: None,
+            telemetry: BrowserTelemetry::default(),
+            redaction: None,
+            observed_at: chrono::Utc::now(),
+        }
+    }
+
+    fn text_of(obs: &BrowserObservation) -> String {
+        serde_json::to_string(obs).unwrap()
+    }
+
+    #[test]
+    fn a_denied_observation_keeps_no_page_read_and_carries_the_marker() {
+        let mut obs = observation(PAGE);
+        deny_reads_after_otp(&mut obs);
+        let text = text_of(&obs);
+        assert!(!text.contains("482913"), "{text}");
+        assert!(obs.dom_summary.is_none());
+        assert!(obs.screenshot_artifact_id.is_none());
+        assert!(obs.visual_observation_artifact_id.is_none());
+        assert!(obs.console_summary.is_empty());
+        assert_eq!(obs.policy_denials, vec![OTP_READ_DENIAL.to_owned()]);
+        assert!(OTP_READ_DENIAL.starts_with(crate::otp_source::OTP_REDACTION));
+        let stamp = obs.redaction.as_ref().unwrap();
+        assert_eq!(stamp.by_rule.get(OTP_READ_DENIED_RULE), Some(&1));
+        assert_eq!(stamp.screenshot, ScreenshotState::Withheld);
+        // The address and title stay: the caller still knows where it is.
+        assert_eq!(obs.url, PAGE);
+        assert_eq!(obs.title.as_deref(), Some("Verify"));
+        // Twice is one marker.
+        deny_reads_after_otp(&mut obs);
+        assert_eq!(obs.policy_denials.len(), 1);
+    }
+
+    #[test]
+    fn a_fill_marks_its_page_and_denies_its_own_observation() {
+        let reads = CredentialDeliveredReads::new();
+        let out = reads
+            .settle("run", &fill(), Some(PAGE), Ok(observation(PAGE)))
+            .unwrap();
+        assert!(out.dom_summary.is_none());
+        assert!(reads.is_denied("run", PAGE));
+        // Another run is not affected.
+        assert!(!reads.is_denied("other", PAGE));
+    }
+
+    #[test]
+    fn a_failed_fill_still_marks_the_page_it_started_on() {
+        let reads = CredentialDeliveredReads::new();
+        let err = quarry_core::error::QuarryError::new(ErrorCode::DriverFailed, "insert failed");
+        assert!(reads.settle("run", &fill(), Some(PAGE), Err(err)).is_err());
+        assert!(reads.is_denied("run", PAGE));
+    }
+
+    #[test]
+    fn later_reads_of_the_page_stay_denied_until_a_new_document_loads() {
+        let reads = CredentialDeliveredReads::new();
+        reads.mark("run", PAGE);
+        // A click that stays on the page (or only moves its fragment) is still denied.
+        assert!(reads.after_step("run", &click(), Some(PAGE), Some(PAGE)));
+        let fragment = format!("{PAGE}#resend");
+        assert!(reads.after_step("run", &click(), Some(PAGE), Some(&fragment)));
+        let same_doc = AgentAction::Navigate { url: fragment.clone() };
+        assert!(reads.after_step("run", &same_doc, Some(PAGE), Some(&fragment)));
+        // A pure read is refused before it runs.
+        let shot = AgentAction::Screenshot { full_page: false };
+        let err = reads.check_before("run", &shot, Some(PAGE)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        assert!(reads.check_before("run", &click(), Some(PAGE)).is_ok());
+        // Landing elsewhere is not denied, but back to the page is (bfcache).
+        let home = "https://login.example.com/home";
+        assert!(!reads.after_step("run", &click(), Some(PAGE), Some(home)));
+        assert!(reads.after_step("run", &AgentAction::Back, Some(home), Some(PAGE)));
+        // A reload loads a new document: the mark ends.
+        let reload = AgentAction::Reload { ignore_cache: false };
+        assert!(!reads.after_step("run", &reload, Some(PAGE), Some(PAGE)));
+        assert!(!reads.is_denied("run", PAGE));
+        assert!(reads.check_before("run", &shot, Some(PAGE)).is_ok());
+    }
+
+    #[test]
+    fn a_navigation_to_the_page_ends_the_mark_and_release_forgets_the_run() {
+        let reads = CredentialDeliveredReads::new();
+        reads.mark("run", PAGE);
+        let nav = AgentAction::Navigate { url: PAGE.into() };
+        assert!(!reads.after_step("run", &nav, Some(PAGE), Some(PAGE)));
+        reads.mark("run", PAGE);
+        reads.release("run");
+        assert!(!reads.is_denied("run", PAGE));
+    }
+
+    #[test]
+    fn a_run_remembers_a_bounded_number_of_pages() {
+        let reads = CredentialDeliveredReads::new();
+        for i in 0..=MAX_DELIVERED_PAGES {
+            reads.mark("run", &format!("https://example.com/{i}"));
+        }
+        assert!(!reads.is_denied("run", "https://example.com/0"));
+        assert!(reads.is_denied("run", &format!("https://example.com/{MAX_DELIVERED_PAGES}")));
+    }
+}

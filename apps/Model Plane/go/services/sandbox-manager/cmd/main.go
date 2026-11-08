@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/objectstore"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
 	sbxserver "github.com/triodelab/model-plane/services/sandbox-manager/internal/server"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
@@ -107,6 +108,9 @@ func main() {
 	// Nil unless a durable database is configured; a Server without it refuses
 	// every thread-workspace RPC (WS22-S1).
 	var threadStore sbxserver.ThreadWorkspaceStore
+	// Nil unless a durable database is configured. Erasure and the retention
+	// sweeper are built from it (WS22-S5).
+	var threadEraser *threadworkspace.Eraser
 	if databaseURL != "" {
 		pool, err := pgxpool.New(ctx, databaseURL)
 		if err != nil {
@@ -155,6 +159,11 @@ func main() {
 			os.Exit(1)
 		}
 		threadStore = pgThreadStore
+		threadEraser, err = threadworkspace.NewEraser(pool)
+		if err != nil {
+			slog.Error("sandbox-manager thread workspace eraser unavailable", "error", err)
+			os.Exit(1)
+		}
 		if process.EnvSweeperEnabled() {
 			interval, staleAfter := process.TimingFromEnv(os.Getenv)
 			// The concrete store, not the Server's narrowed interface: the
@@ -188,8 +197,38 @@ func main() {
 		slog.Info("thread workspace enabled", "max_files", threadLimits.MaxFiles, "max_bytes", threadLimits.MaxBytes)
 	}
 
+	// WS22-S5: erasure and the retention sweeper reach a thread's blobs through the
+	// object store. With the switch on and a durable database, a missing object
+	// store stops startup, because the workspace would keep user files that no
+	// erasure path could reach.
+	var threadBlobs *objectstore.Client
+	var threadRetention = threadworkspace.DefaultRetention
+	if threadWorkspaceOn && threadEraser != nil {
+		blobConfig, blobsConfigured, blobConfigErr := objectstore.ConfigFromEnv(os.Getenv)
+		if blobConfigErr != nil || !blobsConfigured {
+			slog.Error("refusing to start sandbox-manager with the thread workspace enabled and no object store configured", "required", "MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY", "error", blobConfigErr)
+			os.Exit(1)
+		}
+		blobs, err := objectstore.New(blobConfig)
+		if err != nil {
+			slog.Error("sandbox-manager object store unavailable", "error", err)
+			os.Exit(1)
+		}
+		retention, err := threadworkspace.RetentionFromEnv(os.Getenv)
+		if err != nil {
+			slog.Error("sandbox-manager thread workspace retention is invalid", "error", err)
+			os.Exit(1)
+		}
+		threadBlobs, threadRetention = blobs, retention
+	}
+
 	server := sbxserver.NewServer(leaseStore, snapStore, workspaceStore).WithProcessStore(processStore).
 		WithThreadWorkspace(threadWorkspaceOn, threadStore, threadLimits)
+	if threadBlobs != nil {
+		server = server.WithThreadErasure(threadEraser, threadBlobs)
+		go threadworkspace.NewSweeper(threadEraser, threadBlobs, threadRetention).Start(ctx)
+		slog.Info("thread workspace retention sweeper started", "retention", threadRetention.String())
+	}
 	if capabilityVerifier != nil {
 		server = server.WithCapabilityVerifier(capabilityVerifier.Verify, backendID)
 		// The same Control key verifies both envelopes, so human read
@@ -198,7 +237,9 @@ func main() {
 		// other is not.
 		server = server.WithSpaceReadVerifier(capabilityVerifier.VerifySpaceRead)
 	}
-	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
+	// EP-9 E3 (D-E2): grant an egress-capable lease at off and record the tier instead of refusing it.
+	server = server.WithEgressTiers(egressTiersEnabled(os.Getenv("SANDBOX_MANAGER_EGRESS_TIERS")))
+	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authz.UnaryInterceptor(verifier), authz.ZDRGate()))
 	sbxserver.Register(grpcServer, server)
 	healthServerGRPC := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
@@ -225,5 +266,10 @@ func ephemeralDevelopmentEnabled(value string) bool {
 // strict rule as the ephemeral-development switch: only the literal "true"
 // enables it, so an empty, mistyped or capitalised value leaves it off.
 func threadWorkspaceEnabled(value string) bool {
+	return value == "true"
+}
+
+// egressTiersEnabled reads SANDBOX_MANAGER_EGRESS_TIERS strictly: only the literal "true" enables it.
+func egressTiersEnabled(value string) bool {
 	return value == "true"
 }

@@ -1,5 +1,149 @@
 use super::*;
 
+/// W3-E3.4-5: the flag that turns on the view-only live scope. Default off: while it is off
+/// the edge ignores the scope header and every live route behaves as before.
+const LIVE_VIEW_ONLY_FLAG: &str = "QUARRY_EDGE__LIVE_VIEW_ONLY";
+
+/// W3-E3.4-5: the header the gateway sets to say which live scope the caller holds. The
+/// gateway derives it from its own route, never from a bearer URL; a client cannot widen it,
+/// because the only value besides `full` takes authority away. The owner check
+/// (`caller_owns_live_run`) is unchanged and runs first: a view-only share is owner-only.
+pub const LIVE_SCOPE_HEADER: &str = "x-quarry-live-scope";
+
+/// Whether `QUARRY_EDGE__LIVE_VIEW_ONLY` is on in this process. Read per call, like
+/// `QUARRY_EDGE__DOWNLOADS`, so the flag needs no AppState plumbing.
+fn live_view_only_enabled() -> bool {
+    std::env::var(LIVE_VIEW_ONLY_FLAG)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// W3-E3.4-5: the authority a live connection holds over the run's browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveScope {
+    /// Watch and act (the behaviour before E3.4-5).
+    Full,
+    /// Watch only: frames, devtools and pings go out, no input frame is accepted, and no
+    /// interactive provider live-view URL is handed out.
+    ViewOnly,
+}
+
+impl LiveScope {
+    pub fn is_view_only(self) -> bool {
+        self == LiveScope::ViewOnly
+    }
+
+    /// Whether a client frame on the browser socket is accepted under this scope. A
+    /// view-only connection keeps its keep-alive (`ping`) and nothing that drives the
+    /// browser.
+    pub fn accepts_client_message(self, message: &BrowserWsClientMessage) -> bool {
+        match self {
+            LiveScope::Full => true,
+            LiveScope::ViewOnly => matches!(message, BrowserWsClientMessage::Ping),
+        }
+    }
+}
+
+/// The live scope a request carries, with the flag given explicitly (tests). Flag off: always
+/// `Full`, the header is not read. Flag on: no header (or `full`) is `Full`; `view_only`
+/// (also `view-only`, `view`) is `ViewOnly`; anything else is a 400.
+pub(super) fn live_scope_from(
+    headers: &axum::http::HeaderMap,
+    enabled: bool,
+) -> Result<LiveScope, &'static str> {
+    if !enabled {
+        return Ok(LiveScope::Full);
+    }
+    let Some(value) = headers.get(LIVE_SCOPE_HEADER) else {
+        return Ok(LiveScope::Full);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| "live scope must be full or view_only")?
+        .trim()
+        .to_ascii_lowercase();
+    match value.as_str() {
+        "" | "full" => Ok(LiveScope::Full),
+        "view_only" | "view-only" | "view" => Ok(LiveScope::ViewOnly),
+        _ => Err("live scope must be full or view_only"),
+    }
+}
+
+/// The live scope a request carries under the process flag.
+pub(super) fn live_scope(headers: &axum::http::HeaderMap) -> Result<LiveScope, &'static str> {
+    live_scope_from(headers, live_view_only_enabled())
+}
+
+/// W3-E3.4-5: a view-only share of a ZDR run is refused (403). A ZDR run's page is shown to
+/// its owner on the full-authority connection only; the watch-only surface this unit adds is
+/// a share, and ZDR does not take it.
+pub(super) fn view_only_zdr_refusal(scope: LiveScope, zdr: ZdrMode) -> Option<QuarryError> {
+    (scope.is_view_only() && zdr.is_active()).then(|| {
+        QuarryError::new(
+            ErrorCode::Forbidden,
+            "a view-only live share is not available for a zero-data-retention run",
+        )
+        .with_details(serde_json::json!({ "reason": "live_view_only_zdr" }))
+    })
+}
+
+/// W3-E3.4-5: the refusal a view-only socket sends for an input frame. The socket stays
+/// open; the frame is not executed.
+pub fn view_only_input_refusal() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Forbidden,
+        "this live connection is view-only and does not accept input",
+    )
+    .with_details(serde_json::json!({ "reason": "live_view_only" }))
+}
+
+/// W3-E3.4-5: the error frame the browser socket sends instead of running a client frame the
+/// scope does not accept, or `None` when the frame may run. `browser_ws_loop` (ws.rs) calls
+/// this before `execute_ws_action`; see the unit's status file for that wiring.
+pub fn view_only_ws_refusal(
+    scope: LiveScope,
+    message: &BrowserWsClientMessage,
+) -> Option<serde_json::Value> {
+    (!scope.accepts_client_message(message)).then(|| ws_error_frame(view_only_input_refusal()))
+}
+
+/// W3-E3.4-5: the provider live-view reference a scope may see. A view-only caller keeps the
+/// read-only kinds (an HLS video, the local frame stream) and loses an iframe or provider
+/// player, which can take input; an unknown kind counts as interactive. `None` makes the App
+/// Shell fall back to the frame stream.
+pub(super) fn scoped_live_view_ref(
+    scope: LiveScope,
+    live_view: Option<quarry_core::driver_meta::LiveViewRef>,
+) -> Option<quarry_core::driver_meta::LiveViewRef> {
+    use quarry_core::driver_meta::LiveViewKind;
+    match scope {
+        LiveScope::Full => live_view,
+        LiveScope::ViewOnly => live_view
+            .filter(|lv| matches!(lv.kind, Some(LiveViewKind::Hls) | Some(LiveViewKind::Frames))),
+    }
+}
+
+/// W3-E3.4-5: read the scope of an owner-checked live request and refuse a view-only share of
+/// a ZDR run. Called only after `caller_owns_live_run`, so a caller who does not own the run
+/// still gets the plain 404 and learns nothing about its scope or ZDR mode.
+pub(super) fn owner_live_scope(
+    headers: &axum::http::HeaderMap,
+    zdr: ZdrMode,
+    request_id: &str,
+) -> Result<LiveScope, ApiErr> {
+    let scope =
+        live_scope(headers).map_err(|msg| status_err(StatusCode::BAD_REQUEST, request_id, msg))?;
+    if let Some(err) = view_only_zdr_refusal(scope, zdr) {
+        return Err(driver_err(request_id, err));
+    }
+    Ok(scope)
+}
+
 /// Decide whether a typed event should reach the App Shell. The
 /// agent loop today emits only `agent.*` / `action.*` /
 /// `observation.ready` events; the explicit allow-list keeps
@@ -122,6 +266,25 @@ pub(super) fn stream_interval(query: &FrameStreamQuery) -> Duration {
     Duration::from_millis(query.interval_ms.unwrap_or(250).clamp(75, 2_000))
 }
 
+/// Pin only after the caller has passed the run-owner check. Never select the
+/// tab: observers must not change the active tab used by the human or agent.
+pub(super) async fn frame_session(
+    state: &AppState,
+    session: &BrowserSession,
+    tab_id: Option<&str>,
+    request_id: &str,
+) -> Result<BrowserSession, ApiErr> {
+    let Some(tab_id) = tab_id else { return Ok(session.clone()); };
+    if tab_id.is_empty() || tab_id.len() > 128 || !state.agent_driver.capabilities().tab_pinning {
+        return Err(status_err(StatusCode::BAD_REQUEST, request_id, "invalid or unsupported tab"));
+    }
+    let tabs = state.agent_driver.list_tabs(session).await.map_err(|e| driver_err(request_id, e))?;
+    if !tabs.iter().any(|tab| tab.tab_id == tab_id) {
+        return Err(status_err(StatusCode::NOT_FOUND, request_id, "tab not found"));
+    }
+    Ok(session.pinned_to(tab_id))
+}
+
 /// `GET /v1/agent/runs/{run_id}/frame` — return one transient live frame.
 ///
 /// This never writes an artifact. It is for live preview/human takeover only;
@@ -131,6 +294,7 @@ pub async fn live_frame(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
     Query(query): Query<FrameQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Envelope<LiveFrameData>>, ApiErr> {
     let request_id = crate::request_id::current();
     if !state.agent_driver.capabilities().full_visual_fidelity {
@@ -168,13 +332,17 @@ pub async fn live_frame(
         ));
     }
 
+    // W3-E3.4-5: after the owner check; a single frame is read-only in either scope.
+    owner_live_scope(&headers, entry.zdr, &request_id)?;
+
     let viewport = entry.lease.viewport.unwrap_or_else(default_stream_viewport);
     let options = live_frame_options(&query, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;
 
+    let session = frame_session(&state, &entry.session, query.tab_id.as_deref(), &request_id).await?;
     let frame = state
         .agent_driver
-        .live_frame(&entry.session, options)
+        .live_frame(&session, options)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
     Ok(Json(Envelope::ok(
@@ -202,6 +370,7 @@ pub async fn live_view(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Envelope<Option<quarry_core::driver_meta::LiveViewRef>>>, ApiErr> {
     let request_id = crate::request_id::current();
     let entry_arc = {
@@ -228,12 +397,14 @@ pub async fn live_view(
             "agent run not found",
         ));
     }
+    // W3-E3.4-5: a view-only caller gets no interactive provider URL.
+    let scope = owner_live_scope(&headers, entry.zdr, &request_id)?;
     let lv = state
         .agent_driver
         .live_view(&entry.session)
         .await
         .map_err(|e| driver_err(&request_id, e))?;
-    Ok(Json(Envelope::ok(request_id, lv)))
+    Ok(Json(Envelope::ok(request_id, scoped_live_view_ref(scope, lv))))
 }
 
 /// `GET /v1/agent/runs/{run_id}/events/stream` — typed agent-event SSE. Sends the
@@ -286,6 +457,9 @@ pub async fn agent_events_stream(
             "agent run not found",
         ));
     }
+    // W3-E3.4-5: the event stream is read-only in either scope; a view-only share of a ZDR
+    // run is still refused.
+    owner_live_scope(&headers, entry.zdr, &request_id)?;
     drop(entry);
 
     // The resume point: `?from_seq=` wins over the `Last-Event-ID` header.
@@ -448,6 +622,34 @@ fn replay_gap_event(gap: quarry_runtime::ReplayGap) -> Event {
     )
 }
 
+/// Only an owner watching the exact still-agent-held attached tab may see
+/// pointer data. The pointer was captured with this frame by the driver.
+fn scoped_frame_cursor(
+    live: &RunLive,
+    session_run_id: &str,
+    requested_tab: Option<&str>,
+    cursor: Option<quarry_browser::LiveAgentCursor>,
+) -> Option<LiveAgentCursorData> {
+    let cursor = cursor?;
+    if requested_tab != Some(cursor.tab_id.as_str()) { return None; }
+    let attached = {
+        let registry = live.attaches();
+        registry.live().is_some_and(|a| a.attach_id == cursor.attach_id && a.tab_id == cursor.tab_id)
+    };
+    if !attached { return None; }
+    let agent_holds_tab = {
+        let tabs = live.tabs();
+        tabs.get(&cursor.tab_id).is_some_and(|tab| tab.holder == BrowserTabHolder::Agent && tab.attach_id.as_deref() == Some(cursor.attach_id.as_str()))
+    };
+    if !agent_holds_tab || cursor.viewport_width == 0 || cursor.viewport_height == 0
+        || cursor.x >= cursor.viewport_width || cursor.y >= cursor.viewport_height { return None; }
+    Some(LiveAgentCursorData {
+        x: cursor.x, y: cursor.y,
+        viewport_width: cursor.viewport_width, viewport_height: cursor.viewport_height,
+        session_run_id: session_run_id.to_owned(), tab_id: cursor.tab_id, attach_id: cursor.attach_id,
+    })
+}
+
 /// `GET /v1/agent/runs/{run_id}/frames/stream` — stream transient live frames.
 ///
 /// Frame events are never persisted. This is the read-only visual channel
@@ -457,6 +659,7 @@ pub async fn live_frame_stream(
     Extension(claims): Extension<crate::auth::Claims>,
     Path(run_id): Path<String>,
     Query(query): Query<FrameStreamQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>, ApiErr> {
     let request_id = crate::request_id::current();
     if !state.agent_driver.capabilities().full_visual_fidelity {
@@ -492,6 +695,9 @@ pub async fn live_frame_stream(
             entry.zdr,
         )
     };
+    // W3-E3.4-5: after the owner check (inside the block above).
+    let scope = owner_live_scope(&headers, zdr, &request_id)?;
+    let session = frame_session(&state, &session, query.frame.tab_id.as_deref(), &request_id).await?;
     let options = live_frame_options(&query.frame, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;
     let interval = stream_interval(&query);
@@ -510,7 +716,13 @@ pub async fn live_frame_stream(
         // providers return a URL with an `expires_at`; the
         // App Shell triggers a `/v1/agent/runs/{id}/live-view`
         // refresh when that deadline elapses.
-        if let Ok(Some(ref lv)) = driver.live_view(&session).await {
+        //
+        // W3-E3.4-5: a view-only stream sends only a read-only kind (see
+        // `scoped_live_view_ref`).
+        if query.frame.tab_id.is_none() {
+        if let Some(ref lv) =
+            scoped_live_view_ref(scope, driver.live_view(&session).await.ok().flatten())
+        {
             match Event::default().event("live_view").json_data(lv) {
                 Ok(event) => yield Ok(event),
                 Err(_) => {
@@ -519,6 +731,7 @@ pub async fn live_frame_stream(
                     // just falls back to the screenshot frames.
                 }
             }
+        }
         }
         loop {
             if crate::drain::streams_are_closing() {
@@ -538,6 +751,7 @@ pub async fn live_frame_stream(
                         mime_type: frame.mime_type,
                         data_base64: frame.data_base64,
                         zdr: zdr_active,
+                        agent_cursor: scoped_frame_cursor(&handle.live, &run_id, query.frame.tab_id.as_deref(), frame.agent_cursor),
                     };
                     match Event::default()
                         .event("frame")
@@ -565,4 +779,120 @@ pub async fn live_frame_stream(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod live_scope_tests {
+    use super::*;
+    use quarry_core::driver_meta::{LiveViewKind, LiveViewRef};
+
+    fn headers(value: Option<&str>) -> axum::http::HeaderMap {
+        let mut map = axum::http::HeaderMap::new();
+        if let Some(value) = value {
+            map.insert(LIVE_SCOPE_HEADER, value.parse().expect("header value"));
+        }
+        map
+    }
+
+    fn client_message(json: &str) -> BrowserWsClientMessage {
+        serde_json::from_str(json).expect("client message")
+    }
+
+    fn live_view_ref(kind: Option<LiveViewKind>) -> Option<LiveViewRef> {
+        Some(LiveViewRef {
+            url: "https://live.example.test/session".to_owned(),
+            kind,
+            expires_at: None,
+        })
+    }
+
+    #[test]
+    fn cursor_requires_the_same_live_attached_agent_held_tab() {
+        let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0);
+        live.tabs().open_agent_tab("tab", "attach");
+        live.attaches().begin(AttachState {
+            borrowed: None,
+            attach_id: "attach".into(), grant_id: "grant".into(),
+            delegate_actor: "agent".into(), tab_id: "tab".into(),
+            allowed_domains: vec!["example.com".into()], policy_ask: None,
+            budget: AttachBudget::new(10, 60), lane: LaneRef::new(LaneState::default()),
+            phase: BrowserAttachState::Attached, started_ms: 0, last_activity_ms: 0,
+        }).unwrap();
+        let cursor = quarry_browser::LiveAgentCursor {
+            x: 25, y: 40, viewport_width: 800, viewport_height: 600,
+            tab_id: "tab".into(), attach_id: "attach".into(),
+        };
+        let shown = scoped_frame_cursor(&live, "run", Some("tab"), Some(cursor.clone())).unwrap();
+        let json = serde_json::to_value(shown).unwrap();
+        assert_eq!(json["sessionRunId"], "run");
+        assert_eq!(json["viewportWidth"], 800);
+        assert_eq!(json["attachId"], "attach");
+        assert!(scoped_frame_cursor(&live, "run", Some("other"), Some(cursor.clone())).is_none());
+        let mut wrong_attach = cursor.clone();
+        wrong_attach.attach_id = "other".into();
+        assert!(scoped_frame_cursor(&live, "run", Some("tab"), Some(wrong_attach)).is_none());
+        let mut out_of_bounds = cursor.clone(); out_of_bounds.x = 800;
+        assert!(scoped_frame_cursor(&live, "run", Some("tab"), Some(out_of_bounds)).is_none());
+        live.tabs().set_holder("tab", BrowserTabHolder::Human, None).unwrap();
+        assert!(scoped_frame_cursor(&live, "run", Some("tab"), Some(cursor)).is_none());
+    }
+
+    #[test]
+    fn flag_off_ignores_the_header() {
+        assert_eq!(live_scope_from(&headers(Some("view_only")), false), Ok(LiveScope::Full));
+        assert_eq!(live_scope_from(&headers(Some("nonsense")), false), Ok(LiveScope::Full));
+    }
+
+    #[test]
+    fn flag_on_reads_the_header() {
+        assert_eq!(live_scope_from(&headers(None), true), Ok(LiveScope::Full));
+        assert_eq!(live_scope_from(&headers(Some("full")), true), Ok(LiveScope::Full));
+        assert_eq!(live_scope_from(&headers(Some("view_only")), true), Ok(LiveScope::ViewOnly));
+        assert_eq!(live_scope_from(&headers(Some(" View-Only ")), true), Ok(LiveScope::ViewOnly));
+        assert!(live_scope_from(&headers(Some("admin")), true).is_err());
+    }
+
+    #[test]
+    fn view_only_accepts_ping_and_refuses_input() {
+        let ping = client_message(r#"{"type":"ping"}"#);
+        let action = client_message(
+            r#"{"type":"action","action":{"type":"navigate","url":"https://example.test/"}}"#,
+        );
+        assert!(LiveScope::ViewOnly.accepts_client_message(&ping));
+        assert!(!LiveScope::ViewOnly.accepts_client_message(&action));
+        assert!(LiveScope::Full.accepts_client_message(&action));
+
+        assert!(view_only_ws_refusal(LiveScope::ViewOnly, &ping).is_none());
+        assert!(view_only_ws_refusal(LiveScope::Full, &action).is_none());
+        let frame = view_only_ws_refusal(LiveScope::ViewOnly, &action).expect("refusal frame");
+        assert_eq!(frame["type"], "error");
+        assert_eq!(frame["code"], "FORBIDDEN");
+        assert_eq!(frame["details"]["reason"], "live_view_only");
+    }
+
+    #[test]
+    fn a_view_only_share_of_a_zdr_run_is_refused() {
+        let err = view_only_zdr_refusal(LiveScope::ViewOnly, ZdrMode::On).expect("refused");
+        assert_eq!(err.code, ErrorCode::Forbidden);
+        assert_eq!(err.code.http_status(), 403);
+        assert!(view_only_zdr_refusal(LiveScope::ViewOnly, ZdrMode::Off).is_none());
+        assert!(view_only_zdr_refusal(LiveScope::Full, ZdrMode::On).is_none());
+    }
+
+    #[test]
+    fn view_only_drops_interactive_live_view_kinds() {
+        let iframe = live_view_ref(Some(LiveViewKind::Iframe));
+        let provider = live_view_ref(Some(LiveViewKind::Provider));
+        let unknown = live_view_ref(None);
+        let hls = live_view_ref(Some(LiveViewKind::Hls));
+        let frames = live_view_ref(Some(LiveViewKind::Frames));
+
+        assert!(scoped_live_view_ref(LiveScope::ViewOnly, iframe.clone()).is_none());
+        assert!(scoped_live_view_ref(LiveScope::ViewOnly, provider).is_none());
+        assert!(scoped_live_view_ref(LiveScope::ViewOnly, unknown).is_none());
+        assert!(scoped_live_view_ref(LiveScope::ViewOnly, hls).is_some());
+        assert!(scoped_live_view_ref(LiveScope::ViewOnly, frames).is_some());
+        assert!(scoped_live_view_ref(LiveScope::Full, iframe).is_some());
+        assert!(scoped_live_view_ref(LiveScope::ViewOnly, None).is_none());
+    }
 }

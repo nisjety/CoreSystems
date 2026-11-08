@@ -329,6 +329,35 @@ fn schedule_target(kind: &str, config: &serde_json::Value) -> Result<String, (&'
     ))
 }
 
+/// The URLs a validated executable schedule fetches: all of a batch's `config.urls`, the one
+/// `target_ref` otherwise.
+fn schedule_urls(kind: &str, config: &serde_json::Value, target_ref: &str) -> Vec<String> {
+    if kind == "batch" {
+        if let Some(urls) = config.get("urls").and_then(|v| v.as_array()) {
+            return urls
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .map(|raw| raw.trim().to_owned())
+                .collect();
+        }
+    }
+    vec![target_ref.to_owned()]
+}
+
+/// Refuse a schedule create whose URL the org web policy denies. The schedule is a durable
+/// resource that fetches later, so a denied URL is stopped here instead of failing on every fire.
+fn gate_schedule_urls<'a>(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    zdr: bool,
+    urls: impl IntoIterator<Item = &'a str>,
+    request_id: &str,
+) -> Result<(), (StatusCode, Json<Envelope<()>>)> {
+    crate::web_policy_edge::decide(&state.policy, claims, zdr, None)
+        .and_then(|decision| crate::web_policy_edge::gate_urls(&decision, urls))
+        .map_err(|error| crate::web_policy_edge::envelope_error(request_id, error))
+}
+
 pub async fn create_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -383,6 +412,7 @@ pub async fn create_schedule(
                 "target_ref must be a valid url",
             ));
         }
+        gate_schedule_urls(&state, &claims, zdr, [target_ref.as_str()], &request_id)?;
         let body = ControlScheduleCreate {
             org_id: claims.org_id.clone(),
             created_by: claims.user_id.clone(),
@@ -446,6 +476,9 @@ pub async fn create_schedule(
     }
     let target_ref = schedule_target(&target_kind, &req.config)
         .map_err(|(reason, message)| bad_schedule(&request_id, reason, message))?;
+    // Every URL the schedule will fetch is gated now: a batch names up to 200, the others one.
+    let urls = schedule_urls(&target_kind, &req.config, &target_ref);
+    gate_schedule_urls(&state, &claims, zdr, urls.iter().map(String::as_str), &request_id)?;
     let body = ControlScheduleCreate {
         org_id: claims.org_id.clone(),
         created_by: claims.user_id.clone(),
@@ -491,6 +524,22 @@ pub async fn pause_schedule(
     .await
     .map_err(|e| err_response(&request_id, e))?;
     Ok(Json(Envelope::ok(request_id, summary)))
+}
+
+/// WS15.S4a: pause a schedule because its organization's fire-time posture is
+/// Zero Data Retention (`skipped_zdr`). Called by the schedule preflight under
+/// `QUARRY_EDGE__SCHEDULE_POSTURE=enforce`, with no user token: the org comes
+/// from the preflight's run-bound body, and the call is the same signed control
+/// forward `pause_schedule` makes. Unpause stays refused for a ZDR caller.
+pub(crate) async fn pause_for_posture(
+    state: &AppState,
+    schedule_id: &str,
+    org_id: &str,
+) -> Result<(), QuarryError> {
+    let path = format!("/v1/schedules/{schedule_id}/pause");
+    forward_json::<(), serde_json::Value>(state, reqwest::Method::POST, &path, org_id, None)
+        .await
+        .map(|_| ())
 }
 
 pub async fn unpause_schedule(

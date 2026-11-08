@@ -1,10 +1,12 @@
 import { getActionDescriptor, type ActionId } from '@/shared/actions/action-registry'
+import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { VEREVON_BALANCE_MODE_ID, type ChatAction } from '@/shared/api/chat-client'
 
 // ── Preset agents ─────────────────────────────────────────────────────────────
 // A small, curated set of ready-to-run tasks for the Agent Run Console. Each
-// preset pins a goal template plus a fixed Model-eligible action subset.
-// Browser registry actions are deliberately NOT treated as Model tools until a
+// preset pins a goal template plus the owner actions its goal needs; an action
+// is offered only when the org has admitted it (`resolvePresetAgent`). Browser
+// registry actions are deliberately NOT treated as Model tools until a
 // governed owner-operation adapter exists; the goal may request a proposal,
 // but cannot claim an effect happened. Presets never set `planMode: false`.
 
@@ -32,9 +34,24 @@ export type PresetAgent = {
   description: string
   /** Seeds the composer's goal field; the user can still edit it before running. */
   goalTemplate: string
-  /** Fixed Model-eligible action subset; empty until owner adapters are live. */
+  /**
+   * Owner actions the goal cannot do without. The org must admit every one for the
+   * preset to be available there (see `resolvePresetAgent`). Empty for a preset that
+   * runs as plain chat.
+   */
+  requiredActionIds: readonly ActionId[]
+  /**
+   * Model-eligible subset this run is sent with. The authored table leaves it empty;
+   * `resolvePresetAgent` fills it from the org's admissions.
+   */
   actionIds: readonly ActionId[]
   defaults: PresetAgentDefaults
+}
+
+/** A preset checked against one org's admissions. */
+export type ResolvedPresetAgent = PresetAgent & {
+  /** False when the org has not admitted every owner action the preset requires. */
+  available: boolean
 }
 
 const defaultLaunch = (browseWeb = false): PresetAgentDefaults => ({
@@ -52,6 +69,7 @@ export const presetAgents: readonly PresetAgent[] = [
     description: 'Answer the latest inbound conversation, grounded and cited from the knowledge base.',
     goalTemplate:
       "Draft a reply to the customer's most recent inbound message. Ground the answer in our knowledge base and cite the sources you used. If the conversation looks like it needs ongoing tracking, classify it as a ticket candidate — but do not send the reply or create anything without my approval.",
+    requiredActionIds: [],
     actionIds: [],
     defaults: defaultLaunch(),
   },
@@ -61,6 +79,7 @@ export const presetAgents: readonly PresetAgent[] = [
     description: 'Digest unread and unassigned conversations so nothing slips through.',
     goalTemplate:
       'Summarize all unread and unassigned inbox conversations from the last 24 hours. Group them by topic, flag anything urgent, and suggest who or which team each one should be assigned to.',
+    requiredActionIds: [],
     actionIds: [],
     defaults: defaultLaunch(),
   },
@@ -70,6 +89,7 @@ export const presetAgents: readonly PresetAgent[] = [
     description: "Propose a Quarry re-crawl of the organization's known website.",
     goalTemplate:
       "Propose a safe refresh plan for our knowledge base from the organization's known website. Do not start a crawl; explain the evidence, expected scope, and approval needed.",
+    requiredActionIds: [],
     actionIds: [],
     defaults: defaultLaunch(),
   },
@@ -79,6 +99,7 @@ export const presetAgents: readonly PresetAgent[] = [
     description: 'Classify open conversations and route the urgent ones to the right team.',
     goalTemplate:
       'Review open support conversations, classify which ones should become tickets, and assign the urgent ones to the right team. Escalate anything that needs a human to look at it right away.',
+    requiredActionIds: ['tickets.create'],
     actionIds: [],
     defaults: defaultLaunch(),
   },
@@ -89,9 +110,37 @@ export function getPresetAgent(id: PresetAgentId): PresetAgent | undefined {
 }
 
 /**
- * Turn a preset's fixed action-id subset into `ChatAction[]` for
- * `ChatInvokeRequest.actions`. Empty sets are intentional until their owner
- * actions are explicitly Model-eligible and enforceable at execution time.
+ * Whether presets carry owner actions at all. Off by default, so every preset stays
+ * tool-free and available exactly as before; only the literal "true" turns it on.
+ */
+export function presetAgentActionsEnabled(): boolean {
+  return import.meta.env.VITE_PRESET_AGENT_ACTIONS === 'true'
+}
+
+/**
+ * Check a preset against the owner actions one org has admitted. `admitted` is the
+ * org's enabled rows that execution-core also pins (WS24-S6). The server computes that
+ * set, so this module never reads the admission table itself.
+ *
+ * A required action is offered only when the org admits it and it is on the
+ * model-executable path here, and the preset is available only when it gets all of
+ * them. An unavailable preset sends no actions rather than a partial set. The check
+ * only narrows what a preset offers: it never adds an action, and the server still
+ * decides what the model is offered and every owner call.
+ */
+export function resolvePresetAgent(preset: PresetAgent, admitted: ReadonlySet<string>): ResolvedPresetAgent {
+  if (!presetAgentActionsEnabled()) return { ...preset, available: true }
+  const actionIds = preset.requiredActionIds.filter(
+    (id) => admitted.has(id) && isModelExecutableAction(id),
+  )
+  const available = actionIds.length === preset.requiredActionIds.length
+  return { ...preset, actionIds: available ? actionIds : [], available }
+}
+
+/**
+ * Turn a preset's admitted action-id subset into `ChatAction[]` for
+ * `ChatInvokeRequest.actions`. Empty sets are intentional: an authored preset has none
+ * until `resolvePresetAgent` admits its required actions for the org.
  */
 export function presetAgentChatActions(preset: PresetAgent): ChatAction[] {
   return preset.actionIds.map((id) => ({

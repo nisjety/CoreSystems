@@ -29,6 +29,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -88,9 +89,20 @@ type Lease struct {
 	// can apply the same ceiling Session Core applies to runs (migration
 	// 0004). Zero for a non-Space lease, and for leases predating 0004.
 	AudienceRevision int64
-	State            mpv1.SandboxLifecycleState
-	ExpiresAt          time.Time
-	CreatedAt          time.Time
+	// EgressTierPermitted is the egress tier this lease permits (migration 0008, EP-9 E3), decided once at
+	// AcquireLease. Set by Create; not read back by scanLease, so a lease read from the table carries "",
+	// which every reader treats as off.
+	EgressTierPermitted string
+	State               mpv1.SandboxLifecycleState
+	ExpiresAt           time.Time
+	CreatedAt           time.Time
+	// FailureCause is the cause the latest thread-workspace apply recorded (migration 0007), UNSPECIFIED
+	// when that apply was clean or none has run.
+	FailureCause mpv1.SandboxFailureCause
+	// LastActivityAt is when an acquire or a thread-workspace apply last used the lease (migration 0007).
+	LastActivityAt time.Time
+	// HeartbeatAt is the backend's last heartbeat for the lease. Nil until WS22-S8 writes one.
+	HeartbeatAt *time.Time
 }
 
 // IsExpired reports whether the lease has passed its TTL relative to now.
@@ -141,6 +153,8 @@ type SpaceGrant struct {
 	// the decision was signed. It becomes the ceiling every process this lease
 	// admits is read under (migration 0004).
 	RecipientAudienceRevision int64
+	// EgressTierPermitted is the tier the verified decision grants (EP-9 E3); empty is recorded as off.
+	EgressTierPermitted string
 }
 
 func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, grant SpaceGrant, ttl time.Duration) (*Lease, error) {
@@ -149,25 +163,31 @@ func (s *Store) Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, 
 		return nil, err
 	}
 	now := s.nowFn()
+	egressTier := grant.EgressTierPermitted
+	if egressTier == "" {
+		egressTier = "off"
+	}
 	l := &Lease{
-		ID:                 id,
-		ScopeID:            scopeID,
-		ScopeType:          scopeType,
-		OrgID:              orgID,
-		OwnerID:            ownerID,
-		Endpoint:           "sandbox://" + id,
-		SpaceID:            spaceID,
-		BackendID:          backendID,
-		ProcessesPermitted: grant.ProcessesPermitted,
-		AudienceRevision:   grant.RecipientAudienceRevision,
-		State:              mpv1.SandboxLifecycleState_SCRATCH,
-		ExpiresAt:          now.Add(ttl),
-		CreatedAt:          now,
+		ID:                  id,
+		ScopeID:             scopeID,
+		ScopeType:           scopeType,
+		OrgID:               orgID,
+		OwnerID:             ownerID,
+		Endpoint:            "sandbox://" + id,
+		SpaceID:             spaceID,
+		BackendID:           backendID,
+		ProcessesPermitted:  grant.ProcessesPermitted,
+		AudienceRevision:    grant.RecipientAudienceRevision,
+		EgressTierPermitted: egressTier,
+		State:               mpv1.SandboxLifecycleState_SCRATCH,
+		ExpiresAt:           now.Add(ttl),
+		CreatedAt:           now,
+		LastActivityAt:      now,
 	}
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	`, l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint, l.SpaceID, l.BackendID, l.ProcessesPermitted, l.AudienceRevision, int32(l.State), l.ExpiresAt, l.CreatedAt)
+		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, egress_tier_permitted)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	`, l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint, l.SpaceID, l.BackendID, l.ProcessesPermitted, l.AudienceRevision, int32(l.State), l.ExpiresAt, l.CreatedAt, l.EgressTierPermitted)
 	if err != nil {
 		return nil, fmt.Errorf("create lease: %w", err)
 	}
@@ -201,11 +221,11 @@ func (s *Store) AcquireThread(ctx context.Context, threadID, orgID, ownerID, bac
 	}
 	now := s.nowFn()
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at)
-		VALUES ($1, $2, 'thread', $3, $4, $5, '', $6, false, 0, $7, $8, $9)
+		INSERT INTO leases (id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, last_activity_at)
+		VALUES ($1, $2, 'thread', $3, $4, $5, '', $6, false, 0, $7, $8, $9, $9)
 		ON CONFLICT (org_id, owner_id, scope_id) WHERE scope_type = 'thread' AND state <> 4
-		DO UPDATE SET expires_at = GREATEST(leases.expires_at, EXCLUDED.expires_at)
-		RETURNING id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at
+		DO UPDATE SET expires_at = GREATEST(leases.expires_at, EXCLUDED.expires_at), last_activity_at = EXCLUDED.last_activity_at
+		RETURNING id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, failure_cause, last_activity_at, heartbeat_at
 	`, id, threadID, orgID, ownerID, "sandbox://"+id, backendID, int32(mpv1.SandboxLifecycleState_SCRATCH), now.Add(ttl), now)
 	l, err := scanLease(row)
 	if err != nil {
@@ -216,7 +236,7 @@ func (s *Store) AcquireThread(ctx context.Context, threadID, orgID, ownerID, bac
 
 func (s *Store) lookup(ctx context.Context, id, orgID, ownerID, backendID string) (*Lease, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at
+		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, failure_cause, last_activity_at, heartbeat_at
 		FROM leases
 		WHERE id = $1 AND org_id = $2 AND ($3 = '' OR owner_id = $3) AND state <> $4
 	`, id, orgID, ownerID, int32(mpv1.SandboxLifecycleState_DESTROYED))
@@ -317,7 +337,7 @@ func (s *Store) EndSnapshot(ctx context.Context, id string) {
 // after the lease itself has been released).
 func (s *Store) lookupIgnoringDestroyedState(ctx context.Context, id, orgID, ownerID string) (*Lease, error) {
 	row := s.pool.QueryRow(ctx, `
-		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at
+		SELECT id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, failure_cause, last_activity_at, heartbeat_at
 		FROM leases
 		WHERE id = $1 AND org_id = $2 AND ($3 = '' OR owner_id = $3)
 	`, id, orgID, ownerID)
@@ -368,14 +388,34 @@ func (s *Store) GetAny(ctx context.Context, id, orgID, ownerID, backendID string
 	return l, nil
 }
 
+// RecordActivity stamps when the lease was last used and records the failure cause the latest
+// thread-workspace apply produced, zero when that apply was clean. It writes on a lease the caller has
+// already resolved, so it names the organization and the owner again rather than trusting the id alone.
+func (s *Store) RecordActivity(ctx context.Context, id, orgID, ownerID string, cause mpv1.SandboxFailureCause, at time.Time) error {
+	if _, err := s.pool.Exec(ctx, `
+		UPDATE leases SET failure_cause = $4, last_activity_at = $5
+		WHERE id = $1 AND org_id = $2 AND owner_id = $3
+	`, id, orgID, ownerID, int32(cause), at); err != nil {
+		return fmt.Errorf("record lease activity: %w", err)
+	}
+	return nil
+}
+
 func scanLease(row pgx.Row) (*Lease, error) {
 	var l Lease
-	var state int32
+	var state, cause int32
+	var heartbeat pgtype.Timestamptz
 	if err := row.Scan(&l.ID, &l.ScopeID, &l.ScopeType, &l.OrgID, &l.OwnerID, &l.Endpoint,
-		&l.SpaceID, &l.BackendID, &l.ProcessesPermitted, &l.AudienceRevision, &state, &l.ExpiresAt, &l.CreatedAt); err != nil {
+		&l.SpaceID, &l.BackendID, &l.ProcessesPermitted, &l.AudienceRevision, &state, &l.ExpiresAt, &l.CreatedAt,
+		&cause, &l.LastActivityAt, &heartbeat); err != nil {
 		return nil, err
 	}
 	l.State = mpv1.SandboxLifecycleState(state)
+	l.FailureCause = mpv1.SandboxFailureCause(cause)
+	if heartbeat.Valid {
+		at := heartbeat.Time
+		l.HeartbeatAt = &at
+	}
 	return &l, nil
 }
 

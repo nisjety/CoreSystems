@@ -3,21 +3,26 @@
 //! Public routes: /healthz, /readyz, /version, /metrics
 //! Auth-gated routes: invoke endpoints, orchestration read endpoints, run-event SSE
 
-use std::{env, fmt::Write as _};
+use std::{convert::Infallible, env, fmt::Write as _};
 
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
-    response::{IntoResponse, Redirect, Response},
+    response::{
+        sse::{Event as SseEvent, Sse},
+        IntoResponse, Redirect, Response,
+    },
     routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use metrics_exporter_prometheus::PrometheusHandle;
+use mp_contracts::model_plane::v1::InferPurpose;
 use mp_contracts::model_plane::v1::{
+    AcquireLeaseRequest, DeleteThreadWorkspaceRequest, GetThreadWorkspaceRequest,
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
     Approval, ApprovalCause, ApprovalDecisionSource, ApprovalKind, ApprovalProof, ApprovalScope,
     ApprovalState, BatchTranslateTextRequest,
@@ -38,15 +43,15 @@ use mp_contracts::model_plane::v1::{
     TransitionPlanRequest, TransitionTodoRequest, TranslateTextRequest, TranslationInput,
     VerificationMetrics, VerificationStatus,
 };
-use mp_contracts::approval_cause::{CauseCode, SCOPE_ONCE};
+use mp_contracts::approval_cause::{self, CauseCode, SCOPE_ONCE, SCOPE_RUN, SCOPE_THREAD};
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 
 use crate::{
-    approvals,
     auth::{
         self, Claims, StepUpClaim, VerifiedCapabilityBearer, VerifiedCostBearer,
         VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
@@ -130,6 +135,39 @@ fn derived_stream_body_limit(explicit: usize, declared_total: Option<usize>) -> 
 }
 
 #[cfg(test)]
+mod attention_state_tests {
+    use super::{attention_reason_name, attention_state_name};
+
+    /// A replica with the attention switch off returns the unspecified state, and the wire omits
+    /// it, so a flag-off thread listing is unchanged. The named states are the closed set.
+    #[test]
+    fn unspecified_is_omitted_and_every_named_state_has_a_wire_name() {
+        assert_eq!(attention_state_name(0), None);
+        assert_eq!(attention_state_name(1), Some("needs_approval"));
+        assert_eq!(attention_state_name(2), Some("needs_input"));
+        assert_eq!(attention_state_name(3), Some("plan_ready"));
+        assert_eq!(attention_state_name(4), Some("working"));
+        assert_eq!(attention_state_name(5), Some("completed"));
+        assert_eq!(attention_state_name(6), Some("failed"));
+        assert_eq!(attention_state_name(7), Some("archived"));
+        assert_eq!(attention_state_name(8), Some("idle"));
+        // A number this build does not name reads as absent, never as a guessed state.
+        assert_eq!(attention_state_name(9), None);
+    }
+
+    /// A reason names the pending row behind a waiting state. Tag 4 belongs to WS03's parked loop
+    /// and reads as absent until that slice names it.
+    #[test]
+    fn reason_names_the_pending_row_and_leaves_the_rest_absent() {
+        assert_eq!(attention_reason_name(0), None);
+        assert_eq!(attention_reason_name(1), Some("approval"));
+        assert_eq!(attention_reason_name(2), Some("plan"));
+        assert_eq!(attention_reason_name(3), Some("input"));
+        assert_eq!(attention_reason_name(4), None);
+    }
+}
+
+#[cfg(test)]
 mod stream_body_limit_tests {
     use super::{derived_stream_body_limit, STREAM_BODY_HEADROOM_BYTES};
     use crate::attachment_policy::DEFAULT_STREAM_BODY_LIMIT_BYTES as DEFAULT;
@@ -155,6 +193,42 @@ mod stream_body_limit_tests {
             derived_stream_body_limit(explicit, Some(3_145_728)),
             explicit
         );
+    }
+}
+
+#[cfg(test)]
+mod run_question_origin_tests {
+    use super::run_question_value;
+    use mp_contracts::model_plane::v1::RunQuestion;
+
+    /// A model question reads as it always has: no origin keys, whether its origin is `model` or unset
+    /// (empty, as a session-core older than the column leaves it) (EP-4 S6).
+    #[test]
+    fn run_question_value_omits_model_origin() {
+        for origin in ["", "model"] {
+            let question = RunQuestion {
+                id: "q_model".into(),
+                origin: origin.into(),
+                ..Default::default()
+            };
+            let value = run_question_value(&question);
+            assert!(value.get("origin").is_none(), "origin {origin:?} must not reach the card");
+            assert!(value.get("origin_label").is_none());
+        }
+    }
+
+    /// A server's question names the server that asked, for the card's origin line and its notice.
+    #[test]
+    fn run_question_value_names_a_server_origin() {
+        let question = RunQuestion {
+            id: "q_server".into(),
+            origin: "mcp_elicitation".into(),
+            origin_label: "Fixture".into(),
+            ..Default::default()
+        };
+        let value = run_question_value(&question);
+        assert_eq!(value["origin"], "mcp_elicitation");
+        assert_eq!(value["origin_label"], "Fixture");
     }
 }
 
@@ -192,7 +266,32 @@ pub fn build_router_with_readiness(
     };
 
     // Auth-gated routes with rate limiting
-    let authed = Router::new()
+    let authed = authed_routes()
+        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn(auth::authorize_principal_route))
+        .layer(middleware::from_fn(auth::require_auth))
+        .layer(axum::Extension(rate_limiter));
+
+    Router::new()
+        .merge(public)
+        .merge(authed)
+        .layer(Extension(grpc_readiness))
+        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
+        .with_state(state)
+}
+
+/// Every auth-gated route, without its layers. `build_router_with_readiness` wraps it in
+/// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
+/// policy alone, to prove every route here answers to it (INNH-10 MP-3).
+fn authed_routes() -> Router<AppState> {
+    authed_routes_with(crate::agent_api_routes::enabled())
+}
+
+/// [`authed_routes`] with the Agent API switch passed in (EP-12 S5): its routes are merged only
+/// while it is on, and the route-fence test merges them to prove a key reaches none of them
+/// without the switch and its scope.
+fn authed_routes_with(agent_api: bool) -> Router<AppState> {
+    Router::new()
         .route("/v1/invoke", post(invoke))
         // Attachments ride the body as base64, so the 2 MiB default would refuse two
         // images the attachment policy admits (a 413 with no typed reason).
@@ -216,6 +315,14 @@ pub fn build_router_with_readiness(
             "/v1/threads/:thread_id/presentation",
             post(update_thread_presentation),
         )
+        // The attention state of the caller's threads (build plan WS16 S1). It is off by
+        // default, and the response says so rather than failing.
+        .route("/v1/attention", get(list_attention))
+        // The per-person live view of the same state (WS16 S5), relayed as server-sent events.
+        .route("/v1/attention/stream", get(stream_attention))
+        // Marks one thread read (WS16 S1). A zero-retention caller's read state stays on the
+        // client, so Session Core refuses that caller here.
+        .route("/v1/threads/:thread_id/seen", post(mark_thread_seen))
         .route("/v1/threads/:thread_id/archive", post(archive_thread))
         // Context inspector (plan item 3.5): what is actually in the model's
         // window for this thread, itemized. session-core has computed this all
@@ -225,6 +332,10 @@ pub fn build_router_with_readiness(
         // that?" was unreachable.
         .route("/v1/threads/:thread_id/context", get(get_thread_context))
         .route("/v1/threads/:thread_id", delete(delete_thread))
+        .route(
+            "/v1/threads/:thread_id/workspace",
+            get(get_thread_workspace).delete(delete_thread_workspace),
+        )
         // Control-authorized internal deletion adapter. This is deliberately
         // outside the browser/BFF API and is allowed only for the exact
         // deletion coordinator service by auth::authorize_principal_route.
@@ -244,6 +355,16 @@ pub fn build_router_with_readiness(
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Move a thread's active branch: a version switch or a rewind (build plan WS17 S8).
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
+        // Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6).
+        .route("/v1/threads/:thread_id/fork", post(fork_thread))
+        // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
+        .merge(crate::thread_goal_routes::router())
+        // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
+        .merge(crate::thread_export_routes::router())
+        // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
+        .merge(crate::thread_share_routes::router())
+        // The person's edit and restore of a thread artifact (Wave 3 EP-3 S4); 404 while editing is off.
+        .merge(crate::artifact_edit_routes::router())
         // Read-only replay of Session Core's canonical event log. The route
         // exposes envelope metadata only; Any payload bytes remain inside the
         // owning plane and cannot become an accidental browser data channel.
@@ -266,7 +387,19 @@ pub fn build_router_with_readiness(
             get(get_memory_controls).put(set_memory_controls),
         )
         .route("/v1/memories/reset", post(reset_memory))
+        // The standing profile (EP-8 S4): the user bearer only, org and user from
+        // the claims. session-core refuses all three while its switch is off.
+        .route(
+            "/v1/memories/profile",
+            get(get_user_profile).put(set_user_profile),
+        )
+        .route("/v1/memories/profile/rebuild", post(rebuild_user_profile))
         .route("/v1/memories/:memory_id", delete(delete_memory_entry))
+        // Space memory for the Space's owner or admin (EP-8 S7). POST so the Control
+        // `model.space.memory.manage` decision rides in the body, never a URL; Session Core
+        // verifies it and is the authority.
+        .route("/v1/spaces/:space_id/memory/list", post(list_space_memories))
+        .route("/v1/spaces/:space_id/memory/delete", post(delete_space_memory_entry))
         // Learning governance (WS07-S9): the owner's decisions on learned skills and
         // the ledger of what was learned. The user bearer only; the owner is the
         // verified caller on every hop, and session-core re-checks ownership.
@@ -307,17 +440,35 @@ pub fn build_router_with_readiness(
         // returns after reload. The live SSE route remains the sole tail
         // transport; this route only reads Session Core's canonical log.
         .route("/v1/runs/:run_id/events/replay", get(replay_run_events))
+        // WS10.S6: the run's durable trace (Session Core EventLog), owner only, paged by cursor.
+        .route("/v1/runs/:run_id/trace", get(get_run_trace))
+        // EP-14 S5: the run's durable, content-free timing and tool-call times, owner only.
+        .route("/v1/runs/:run_id/timing", get(get_run_timing))
+        // EP-14 S7: one model call's request snapshot, owner only, D3-filtered by Session Core.
+        .route("/v1/runs/:run_id/requests/:call_seq", get(get_run_request))
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
         // Quarry evidence; Quarry remains the only executor/capture layer.
         .route("/v1/browser/suggest-action", post(browser_suggest_action))
+        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts. Pure compute;
+        // 404 while WIDE_RESEARCH_ENTRY_ENABLED is off.
+        .route(
+            "/v1/research/wide/estimate",
+            post(wide_research_estimate_route),
+        )
         // Durable browser-agent run (Phase 2) — start/pause/resume/stop a
         // bounded multi-step browser-agent loop; progress streams over the
         // existing `/v1/runs/:run_id/events` route above.
         .merge(crate::browser_run::router())
+        // A durable navigation run for the Verevon assistant (behind its flag).
+        .merge(crate::assistant_navigation::router(
+            crate::assistant_navigation::enabled(),
+        ))
         // A signed-in user's browser grant (issue / release); the broker mints it.
         .merge(crate::browser_grants::router())
+        // Space room routes /v1/spaces/* (one file per feature under space_routes/).
+        .merge(crate::space_routes::router())
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)
@@ -348,17 +499,14 @@ pub fn build_router_with_readiness(
             "/v1/finetune/jobs/:job_id/deploy",
             post(crate::finetune_routes::deploy_job),
         )
-        .layer(middleware::from_fn(rate_limit::rate_limit_middleware))
-        .layer(middleware::from_fn(auth::authorize_principal_route))
-        .layer(middleware::from_fn(auth::require_auth))
-        .layer(axum::Extension(rate_limiter));
-
-    Router::new()
-        .merge(public)
-        .merge(authed)
-        .layer(Extension(grpc_readiness))
-        .layer(middleware::from_fn(gateway_metrics::metrics_middleware))
-        .with_state(state)
+        // Wave 3 EP-3 S3: artifact revision history and the composer's capability read.
+        .merge(crate::artifact_revision_routes::router())
+        // Wave 3 EP-11 S7: /learn, a person's request to distil one of their threads into a skill
+        // proposal. capability-core runs it and answers 404 while LEARN_COMMAND_ENABLED is off.
+        .route("/v1/learning/learn", post(learn_from_thread))
+        // Wave 3 EP-12 S5: the Agent API read and control routes, for API keys only; absent
+        // while MODEL_GATEWAY_AGENT_API is off.
+        .merge(crate::agent_api_routes::router(agent_api))
 }
 
 /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
@@ -393,6 +541,14 @@ fn orchestration_routes() -> Router<AppState> {
             get(get_approval),
         )
         .route(
+            "/v1/orchestration/approvals/:approval_id/quarantine-preview",
+            get(get_quarantine_preview),
+        )
+        .route(
+            "/v1/orchestration/approvals/:approval_id/preview",
+            get(get_approval_preview),
+        )
+        .route(
             "/v1/orchestration/threads/:thread_id/lineage",
             get(get_subagent_lineage),
         )
@@ -420,6 +576,9 @@ fn orchestration_routes() -> Router<AppState> {
             "/v1/orchestration/runs/:run_id/continue",
             post(crate::sse::continue_run),
         )
+        // The org's brand deck templates for the picker (Wave 3 EP-5 S7); 404 while
+        // SKILL_DECK_TEMPLATES_ENABLED is off.
+        .route("/v1/deck-templates", get(list_deck_templates))
 }
 
 /// App-Plane proxy routes (`/v1/capabilities`, `/v1/tasks`, `/v1/cron`,
@@ -463,6 +622,31 @@ fn proxy_routes() -> Router<AppState> {
             "/v1/tool-policies/:capability_id",
             put(set_tool_policy_proxy).delete(revoke_tool_policy_proxy),
         )
+        // The org agent policy and its durable hook rules (WS25-S10). capability-core owns both and
+        // decides who may write them from the signed principal; the org comes from the verified token,
+        // never from a body.
+        .route(
+            "/v1/org/agent-policy",
+            get(get_org_agent_policy_proxy).put(set_org_agent_policy_proxy),
+        )
+        .route(
+            "/v1/org/agent-policy/effective",
+            get(get_org_agent_policy_effective_proxy),
+        )
+        // The effective policy of one thread (Wave 3 EP-9 T2). Mounted always: the handler answers 404 while its switch
+        // is off, so the route fence below still reaches it.
+        .route(
+            "/v1/policy/effective",
+            get(crate::policy_effective::get_policy_effective),
+        )
+        .route(
+            "/v1/org/hooks",
+            get(list_org_hooks_proxy).post(create_org_hook_proxy),
+        )
+        .route(
+            "/v1/org/hooks/:hook_id",
+            put(update_org_hook_proxy).delete(delete_org_hook_proxy),
+        )
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -478,6 +662,7 @@ fn proxy_routes() -> Router<AppState> {
                 .delete(delete_cron_proxy),
         )
         .route("/v1/cron/:id/fires", get(list_cron_fires_proxy))
+        .route("/v1/cron/:id/run", post(run_cron_now_proxy))
         // Memory
         .route(
             "/v1/memory",
@@ -495,10 +680,21 @@ fn proxy_routes() -> Router<AppState> {
             get(list_skills_proxy).post(create_skill_proxy),
         )
         .route(
+            "/v1/skills/import",
+            post(import_skill_proxy).layer(DefaultBodyLimit::max(SKILL_IMPORT_BODY_LIMIT_BYTES)),
+        )
+        .route(
             "/v1/skills/:id",
             get(get_skill_proxy)
                 .patch(patch_skill_proxy)
                 .delete(delete_skill_proxy),
+        )
+        .route("/v1/skills/:id/versions", get(list_skill_versions_proxy))
+        .route("/v1/skills/:id/publish", post(publish_skill_proxy))
+        .route("/v1/skills/:id/draft", delete(discard_skill_draft_proxy))
+        .route(
+            "/v1/skills/:id/versions/:version/restore",
+            post(restore_skill_version_proxy),
         )
         // Plugins
         .route(
@@ -521,6 +717,348 @@ fn proxy_routes() -> Router<AppState> {
                 .post(create_run_watcher_proxy)
                 .delete(delete_run_watcher_proxy),
         )
+        // The HTML app an MCP tool declares, read with the viewer's authority and never stored
+        // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
+        .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
+        // A read tool an MCP App calls on its own server, as the run's owner, through execution-core's
+        // ExecuteStep (Wave 3 EP-4 S10); 404 while MCP_APP_TOOL_CALLS is off.
+        .route("/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-5 S7: `GET /v1/deck-templates` - the org's brand deck templates for the picker.
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/deck-templates` - see [`deck_templates_listing`].
+async fn list_deck_templates(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    deck_templates_listing(state, claims, bearer, crate::deck_templates::enabled()).await
+}
+
+/// The deck templates the caller may pick, `{data: {templates: [{skill_id, name, description, colors,
+/// fonts}]}}`, display fields only (`crate::deck_templates`). With the switch off the route is a 404 as if
+/// it did not exist, decided before the bearer is looked at. A zero-retention bearer is refused before
+/// anything is read, with feature `skills`: a ZDR turn never mounts or applies a template, so there is
+/// nothing to pick. capability-core takes the org from the caller's verified capability bearer; no org
+/// from a header, query or body is read here.
+async fn deck_templates_listing(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::deck_templates::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "capability_credential_required",
+            "listing deck templates needs a verified capability credential",
+        ));
+    };
+    let templates = crate::deck_templates::list_for_caller(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|status| grpc_status_to_http(&status))?;
+    Ok(Json(json!({ "data": { "templates": templates } })))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-4 S8: `GET /v1/mcp-apps/resource` - an MCP tool's `ui://` app document.
+// ---------------------------------------------------------------------------
+
+/// `?server_id=&tool=`. Both default to empty so a missing one is answered by the handler, after
+/// the switch, not by the extractor.
+#[derive(Debug, Default, Deserialize)]
+struct McpAppResourceQuery {
+    #[serde(default)]
+    server_id: String,
+    #[serde(default)]
+    tool: String,
+}
+
+/// `GET /v1/mcp-apps/resource` - see [`mcp_app_resource`].
+async fn get_mcp_app_resource(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: Query<McpAppResourceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    mcp_app_resource(state, claims, bearer, query, crate::mcp_apps::enabled()).await
+}
+
+/// The app document `tool` on `server_id` declares, `{data: {uri, html, needs_network}}`
+/// (`crate::mcp_apps`). With the switch off the route is a 404 as if it did not exist, decided
+/// before anything else. A zero-retention bearer is refused before any read, with feature
+/// `mcp_execution`: the read egresses to the MCP server as a tool call does. The org and the viewer
+/// come from the verified claims only; the registry is refreshed from capability-core with the
+/// caller's capability bearer, so a fresh replica answers from the system of record.
+async fn mcp_app_resource(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Query(query): Query<McpAppResourceQuery>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::mcp_apps::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let server_id = query.server_id.trim();
+    let tool = query.tool.trim();
+    if [server_id, tool]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > crate::mcp_apps::MAX_NAME_BYTES)
+    {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "server_id and tool are required",
+        ));
+    }
+    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "capability_credential_required",
+            "reading an MCP app needs a verified capability credential",
+        ));
+    };
+    if let Err(error) = crate::runtime_registries::hydrate_mcp_registry(
+        &state.mcp,
+        &state.ownership,
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        bearer.as_str(),
+    )
+    .await
+    {
+        warn!(org_id = %claims.org_id, %error, "MCP catalog hydration failed for an app read");
+        return Err(run_trace_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "registry_unavailable",
+            "capability registry is unavailable",
+        ));
+    }
+    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
+        &state.http_client,
+        &state.capability_core_base_url,
+        &state.mcp_oauth_service_token,
+        &claims.org_id,
+        server_id,
+    )
+    .await;
+    let resource = crate::mcp_apps::read_app_resource(
+        &state.mcp,
+        &state.ownership,
+        crate::mcp_apps::AppResourceCache::global(),
+        &claims.org_id,
+        &claims.user_id,
+        server_id,
+        tool,
+        oauth_token.as_deref(),
+    )
+    .await
+    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))?;
+    Ok(Json(json!({
+        "data": {
+            "uri": resource.uri,
+            "html": resource.html,
+            "needs_network": resource.needs_network,
+        }
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Wave 3 EP-4 S10: `POST /v1/mcp-apps/tool-call` - a read tool an MCP App calls on its own server.
+// ---------------------------------------------------------------------------
+
+/// The viewer's delegated bearers an app call needs, each optional so a missing one is answered by
+/// the handler, after the switch, with the typed envelope.
+struct McpAppCallBearers {
+    capability: Option<Extension<VerifiedCapabilityBearer>>,
+    session: Option<Extension<VerifiedModelBearer>>,
+    execution: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane: Option<Extension<VerifiedBearer>>,
+    inference: Option<Extension<VerifiedInferenceBearer>>,
+}
+
+/// `POST /v1/mcp-apps/tool-call` - see [`mcp_app_tool_call`].
+async fn post_mcp_app_tool_call(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    capability: Option<Extension<VerifiedCapabilityBearer>>,
+    session: Option<Extension<VerifiedModelBearer>>,
+    execution: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane: Option<Extension<VerifiedBearer>>,
+    inference: Option<Extension<VerifiedInferenceBearer>>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    let bearers = McpAppCallBearers {
+        capability,
+        session,
+        execution,
+        data_plane,
+        inference,
+    };
+    mcp_app_tool_call(
+        state,
+        claims,
+        bearers,
+        body,
+        crate::mcp_app_calls::enabled(),
+    )
+    .await
+}
+
+/// Call `tool` on the app's own `server_id` for the run `run_id`, `{data: {output, truncated}}`
+/// (`crate::mcp_app_calls`). With the switch off the route is a 404 as if it did not exist, decided
+/// before the body is read. A zero-retention or waived bearer is refused before anything else, with
+/// feature `mcp_execution`: the call carries the app's arguments to the MCP server. The org and the
+/// viewer come from the verified claims only; the body names the run, the server, the tool, its
+/// arguments and the frame nonce, and nothing that scopes the call.
+async fn mcp_app_tool_call(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearers: McpAppCallBearers,
+    body: Bytes,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr || claims.zdr_waiver.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    crate::mcp_app_calls::ZDR_FEATURE,
+                )
+                .json_body(),
+            ),
+        ));
+    }
+    let parsed: crate::mcp_app_calls::AppCallBody =
+        serde_json::from_slice(&body).map_err(|_| {
+            run_trace_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "the body must be a JSON object",
+            )
+        })?;
+    let call = crate::mcp_app_calls::validate(parsed).map_err(mcp_app_call_error)?;
+    let (Some(capability), Some(session), Some(execution), Some(data_plane), Some(inference)) = (
+        non_empty_bearer(
+            bearers
+                .capability
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .session
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .execution
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .data_plane
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+        non_empty_bearer(
+            bearers
+                .inference
+                .as_ref()
+                .map(|Extension(bearer)| bearer.as_str()),
+        ),
+    ) else {
+        return Err(run_trace_error(
+            StatusCode::UNAUTHORIZED,
+            "delegated_credential_required",
+            "an app tool call needs the viewer's verified capability, session, execution, data-plane and inference credentials",
+        ));
+    };
+    let output = crate::mcp_app_calls::call_app_tool(
+        &state,
+        &claims.org_id,
+        &claims.user_id,
+        &call,
+        &crate::mcp_app_calls::ViewerBearers {
+            capability,
+            session,
+            execution,
+            data_plane,
+            inference,
+        },
+    )
+    .await
+    .map_err(mcp_app_call_error)?;
+    Ok(Json(json!({
+        "data": {
+            "output": output.output,
+            "truncated": output.truncated,
+        }
+    })))
+}
+
+/// An app call's refusal in the typed envelope; the message is the module's own, never upstream text.
+fn mcp_app_call_error(error: crate::mcp_app_calls::AppCallError) -> HttpJsonError {
+    run_trace_error(error.status(), error.code(), error.message())
+}
+
+/// A bearer the auth layer verified and that is not blank.
+fn non_empty_bearer(bearer: Option<&str>) -> Option<&str> {
+    bearer.filter(|value| !value.trim().is_empty())
 }
 
 /// Request body cap for the two audio routes, `/v1/ai/dictate` and
@@ -958,7 +1496,7 @@ fn should_resume_granted_approval(
     ))
 }
 
-fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
+pub(crate) fn require_non_zdr_durable_mutation(claims: &Claims) -> Result<(), HttpJsonError> {
     let zdr = crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))?;
     if !zdr {
         return Ok(());
@@ -1111,6 +1649,7 @@ async fn list_approvals(
                 // Cross-org IDOR fix (Phase 6): scope to the caller's verified
                 // JWT org, never a client-suppliable value.
                 org_id: claims.org_id.clone(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -1264,8 +1803,8 @@ fn question_state_token(state: i32) -> &'static str {
 }
 
 /// The question as the browser reads it. The owner's own org and user ids stay off the wire.
-fn run_question_value(question: &RunQuestion) -> Value {
-    json!({
+pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
+    let mut value = json!({
         "id": question.id,
         "run_id": question.run_id,
         "thread_id": question.thread_id,
@@ -1292,7 +1831,15 @@ fn run_question_value(question: &RunQuestion) -> Value {
             "text": answer.text,
         })).collect::<Vec<_>>(),
         "answered_message_id": empty_to_null(&question.answered_message_id),
-    })
+    });
+    // A question the run's model asked keeps the shape the card has always read. Only a server's question
+    // names its origin, so the card can say who asked it (EP-4 S6).
+    let origin = question.origin.as_str();
+    if !origin.is_empty() && origin != mp_contracts::user_question::ORIGIN_MODEL {
+        value["origin"] = json!(origin);
+        value["origin_label"] = json!(question.origin_label);
+    }
+    value
 }
 
 /// The Verevon Proof Bundle for one run (roadmap P1.2). Read-only; the org is
@@ -1399,6 +1946,7 @@ async fn get_approval(
                 // Cross-org IDOR fix (Phase 6): scope to the caller's verified
                 // JWT org, never a client-suppliable value.
                 org_id: claims.org_id.clone(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -1410,6 +1958,155 @@ async fn get_approval(
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
     Ok(Json(json!({ "approval": approval_value(&approval) })))
+}
+
+/// `GET /v1/orchestration/approvals/{id}/quarantine-preview` — the inert preview (plain text, at
+/// most 1 KiB) of output held for review (build plan WS10 S8). Session Core answers only the run's
+/// owner while the approval is pending or granted-and-unspent; every other case is the same 404.
+/// The org is the verified JWT org, never a caller value. The text is never markup: show it as text.
+async fn get_quarantine_preview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(approval_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_quarantine_preview(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetQuarantinePreviewRequest {
+                org_id: claims.org_id.clone(),
+                approval_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    Ok(Json(json!({
+        "preview": {
+            "text": response.preview,
+            "truncated": response.truncated,
+            "tool_key": response.tool_key,
+            "trust_class": response.trust_class,
+            "format": "plain_text",
+        }
+    })))
+}
+
+/// The full-draft preview switch (EP-10-S1). Off: the route answers 404 `preview_unavailable` and
+/// nothing reaches Session Core. Only the literal `true` enables it.
+const APPROVAL_WRITE_PREVIEW_ENV: &str = "APPROVAL_WRITE_PREVIEW_ENABLED";
+
+fn approval_write_preview_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WRITE_PREVIEW_ENV).ok().as_deref())
+}
+
+/// `GET /v1/orchestration/approvals/{id}/preview` - see [`approval_preview`].
+async fn get_approval_preview(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    path: Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    approval_preview(state, claims, bearer, path, approval_write_preview_enabled()).await
+}
+
+/// The full draft a pending approval would release, `{data: {preview}}` (EP-10-S1, decision D4).
+/// Session Core decrypts the descriptor for the run's owner only and shapes it; the gateway adds
+/// nothing and logs nothing of it. A zero-retention bearer is refused before anything is read
+/// (`continuation_gate`, as for a decision), and Session Core refuses a waived one. The org is the
+/// verified JWT org. Every way of not seeing a draft reads as the same 404.
+async fn approval_preview(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(approval_id): Path<String>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "preview_unavailable",
+            "the approval preview is not available",
+        ));
+    }
+    crate::zdr_posture::continuation_gate(&claims)?;
+    let response = state
+        .orchestration_client
+        .clone()
+        .get_approval_preview(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetApprovalPreviewRequest {
+                approval_id,
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| approval_preview_status_to_http(&status))?
+        .into_inner();
+    let preview = response
+        .preview
+        .as_ref()
+        .ok_or_else(|| approval_preview_status_to_http(&tonic::Status::not_found("no preview")))?;
+    let mut value = approval_preview_value(preview);
+    value["can_edit"] = json!(preview_can_edit(preview, approval_edit_enabled()));
+    Ok(Json(json!({ "data": { "preview": value } })))
+}
+
+/// Whether the card may offer edit mode (EP-10-S6): the edit switch is on and the draft is a mail
+/// send that Session Core shaped with fields a person may change. A decision with an edit is
+/// refused while the switch is off, so the card never offers one then.
+fn preview_can_edit(
+    preview: &mp_contracts::model_plane::v1::ApprovalPreview,
+    edit_enabled: bool,
+) -> bool {
+    edit_enabled
+        && !preview.editable_fields.is_empty()
+        && !preview.raw_only
+        && preview.kind == "mail_send"
+}
+
+/// Session Core's answer to a preview read. A typed ZDR refusal keeps its catalogue body; another
+/// owner's approval, a decided or expired one and an older Session Core all read as one 404.
+fn approval_preview_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return grpc_status_to_http(status);
+    }
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
+            run_trace_error(
+                StatusCode::NOT_FOUND,
+                "approval_not_found",
+                "no such pending approval",
+            )
+        }
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_approval_preview",
+            "the approval id was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+fn approval_preview_value(preview: &mp_contracts::model_plane::v1::ApprovalPreview) -> Value {
+    json!({
+        "kind": preview.kind,
+        "provider": preview.provider,
+        "operation": preview.operation,
+        "connection_id": preview.connection_id,
+        "to": preview.to,
+        "subject": preview.subject,
+        "body_text": preview.body_text,
+        "has_html": preview.has_html,
+        "is_reply": preview.is_reply,
+        "raw_only": preview.raw_only,
+        "editable_fields": preview.editable_fields,
+        "action_fingerprint": preview.action_fingerprint,
+        "revision": preview.revision,
+        "format": "plain_text",
+    })
 }
 
 async fn get_subagent_lineage(
@@ -1664,6 +2361,436 @@ async fn replay_run_events(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// WS10.S6: `GET /v1/runs/:run_id/trace` â€” a run's durable trace from Session Core's EventLog.
+// ---------------------------------------------------------------------------
+
+/// Default and bounds of one trace page. Session Core clamps the same way (0 reads 100).
+const RUN_TRACE_DEFAULT_LIMIT: u32 = 100;
+const RUN_TRACE_MAX_LIMIT: u32 = 500;
+const RUN_TRACE_MAX_CURSOR_LEN: usize = 512;
+const RUN_TRACE_MAX_RUN_ID_LEN: usize = 64;
+const RUN_TRACE_MAX_TYPES: usize = 32;
+/// The `type_url` Session Core gives a trace row's payload; its `value` is the JSON object Quarry
+/// sent (`eventlog_grpc.rs` `TRACE_PAYLOAD_TYPE_URL`).
+const RUN_TRACE_PAYLOAD_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.BrowserTraceEvent";
+
+#[derive(Debug, Deserialize)]
+struct RunTraceQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<u32>,
+    /// Comma list of `EventType` names without the `EVENT_TYPE_` prefix.
+    #[serde(default)]
+    types: Option<String>,
+}
+
+fn run_trace_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// A run id as Session Core's trace store keeps it: one `[A-Za-z0-9_-]` token of at most 64.
+fn valid_trace_run_id(run_id: &str) -> bool {
+    (1..=RUN_TRACE_MAX_RUN_ID_LEN).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// `types=A,B` to EventType numbers. Blank items are skipped; an unknown name is a 400 (a typo
+/// must not read as "no events"); `UNSPECIFIED` is not a filter.
+fn parse_trace_types(raw: Option<&str>) -> Result<Vec<i32>, HttpJsonError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut types = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
+        let kind = EventType::from_str_name(&format!("EVENT_TYPE_{name}"))
+            .filter(|kind| *kind != EventType::Unspecified)
+            .ok_or_else(|| {
+                run_trace_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_trace_types",
+                    "types must be EventType names without the EVENT_TYPE_ prefix",
+                )
+            })?;
+        if !types.contains(&(kind as i32)) {
+            types.push(kind as i32);
+        }
+    }
+    if types.len() > RUN_TRACE_MAX_TYPES {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_types",
+            "too many event types",
+        ));
+    }
+    Ok(types)
+}
+
+/// One trace event in the shape of the run-trace envelope golden
+/// (`api/contracts/run-trace-envelope.golden.json`): names without their enum prefixes, the
+/// payload as the JSON object Quarry sent. A payload of any other type, or one that is not a JSON
+/// object, is reported by its type only: raw bytes never leave the gateway.
+fn trace_event_json(event: &Event) -> Value {
+    let event_type = EventType::try_from(event.event_type).map_or("UNSPECIFIED", |kind| {
+        kind.as_str_name().trim_start_matches("EVENT_TYPE_")
+    });
+    let origin = mp_contracts::model_plane::v1::RunOrigin::try_from(event.origin)
+        .ok()
+        .filter(|origin| *origin != mp_contracts::model_plane::v1::RunOrigin::Unspecified)
+        .map(|origin| origin.as_str_name().trim_start_matches("RUN_ORIGIN_").to_owned());
+    let ts = event.ts.as_ref().and_then(|ts| {
+        let nanos = u32::try_from(ts.nanos).ok()?;
+        chrono::DateTime::from_timestamp(ts.seconds, nanos)
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+    });
+    let payload = event.payload.as_ref().map(|any| {
+        let object = (any.type_url == RUN_TRACE_PAYLOAD_TYPE_URL)
+            .then(|| serde_json::from_slice::<Value>(&any.value).ok())
+            .flatten()
+            .filter(Value::is_object);
+        object.unwrap_or_else(|| json!({ "type_url": any.type_url }))
+    });
+    let agent = event.agent.as_ref().map(|agent| {
+        json!({ "id": agent.id, "role": agent.role, "parent_id": agent.parent_id })
+    });
+    json!({
+        "event_id": event.event_id,
+        "event_type": event_type,
+        "schema_version": event.schema_version,
+        "ts": ts,
+        "producer": event.producer,
+        "correlation_id": event.correlation_id,
+        "causation_id": event.causation_id,
+        "org_id": event.org_id,
+        "user_id": event.user_id,
+        "resource_ref": event.resource_ref,
+        "payload": payload,
+        "zdr": event.zdr,
+        "producer_seq": event.producer_seq,
+        "agent": agent,
+        "origin": origin,
+        "run_id": event.run_id,
+        "request_id": event.request_id,
+    })
+}
+
+/// Session Core's answer to a trace read. A non-owner and an unknown run look the same (404); a
+/// Session Core that does not serve the trace yet is a 501 the caller can tell from an outage.
+fn run_trace_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "trace_unavailable",
+            "the run trace is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_trace_query",
+            "the trace query was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/trace?cursor=&limit=&types=` â€” one page of the run's trace, oldest first.
+/// The org is the token's; Session Core checks that the caller owns the run (the user behind the
+/// session bearer), so this route adds no ownership rule of its own.
+async fn get_run_trace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+    Query(query): Query<RunTraceQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let limit = query
+        .limit
+        .unwrap_or(RUN_TRACE_DEFAULT_LIMIT)
+        .clamp(1, RUN_TRACE_MAX_LIMIT);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty());
+    if cursor.is_some_and(|cursor| cursor.len() > RUN_TRACE_MAX_CURSOR_LEN) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "the cursor is too long",
+        ));
+    }
+    let event_types = parse_trace_types(query.types.as_deref())?;
+    let request = mp_contracts::model_plane::v1::QueryEventsRequest {
+        filter: Some(mp_contracts::model_plane::v1::EventFilter {
+            org_id: claims.org_id.clone(),
+            run_id: run_id.to_owned(),
+            event_types,
+            ..Default::default()
+        }),
+        cursor: cursor.map(|value| mp_contracts::model_plane::v1::Cursor {
+            value: value.to_owned(),
+        }),
+        limit,
+        reverse: false,
+    };
+    let page = state
+        .event_log_client
+        .clone()
+        .query_events(authenticated_session_request(request, &bearer)?)
+        .await
+        .map_err(|status| run_trace_status_to_http(&status))?
+        .into_inner();
+    let events: Vec<Value> = page.events.iter().map(trace_event_json).collect();
+    let next_cursor = page
+        .next_cursor
+        .map(|cursor| cursor.value)
+        .filter(|value| !value.is_empty());
+    Ok(Json(json!({
+        "data": { "events": events },
+        "meta": { "next_cursor": next_cursor, "has_more": page.has_more },
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// EP-14 S5: `GET /v1/runs/:run_id/timing` - a run's durable, content-free timing.
+// ---------------------------------------------------------------------------
+
+/// A stored timestamp as RFC 3339 UTC to the millisecond, the shape the trace route uses.
+fn timing_rfc3339(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    let ts = ts?;
+    let nanos = u32::try_from(ts.nanos).ok()?;
+    chrono::DateTime::from_timestamp(ts.seconds, nanos)
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+/// One timing record as the SPA reads it: the report as the JSON object it was stored as. A report
+/// that does not parse is reported as absent, never as its raw text.
+fn run_timing_json(timing: &mp_contracts::model_plane::v1::RunTimingRecorded) -> Value {
+    let report = serde_json::from_str::<Value>(&timing.report_json)
+        .ok()
+        .filter(Value::is_object);
+    json!({
+        "run_id": timing.run_id,
+        "request_id": timing.request_id,
+        "schema": timing.schema,
+        "report": report,
+        "phases_dropped": timing.phases_dropped,
+        "recorded_at": timing_rfc3339(timing.recorded_at.as_ref()),
+    })
+}
+
+fn run_action_timing_json(action: &mp_contracts::model_plane::v1::RunActionTiming) -> Value {
+    json!({
+        "action_id": action.action_id,
+        "tool": action.tool,
+        "status": action.status,
+        "reserved_at": timing_rfc3339(action.reserved_at.as_ref()),
+        "finalized_at": timing_rfc3339(action.finalized_at.as_ref()),
+        "effect_class": (!action.effect_class.is_empty()).then_some(action.effect_class.as_str()),
+    })
+}
+
+/// Session Core's answer to a timing read. A non-owner, an unknown run and a Session Core with the read
+/// switched off all read as 404, so the route says nothing about a run the caller cannot see.
+fn run_timing_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        tonic::Code::Unimplemented => run_trace_error(
+            StatusCode::NOT_FOUND,
+            "run_timing_unavailable",
+            "run timing is not available",
+        ),
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "the run id was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/timing` - the run's timing records and its tool calls' reserve and finalize
+/// times, `{data: {timings, actions, truncated}}`. Session Core checks that the caller owns the run (the
+/// user behind the session bearer). A zero-retention bearer is refused before anything is read, with
+/// feature `run_inspection`: there is nothing of a ZDR run to inspect, and the refusal says so.
+async fn get_run_timing(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(run_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
+        ));
+    }
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let response = state
+        .run_ledger_client
+        .clone()
+        .get_run_timing(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunTimingRequest {
+                run_id: run_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| run_timing_status_to_http(&status))?
+        .into_inner();
+    let timings: Vec<Value> = response.timings.iter().map(run_timing_json).collect();
+    let actions: Vec<Value> = response.actions.iter().map(run_action_timing_json).collect();
+    Ok(Json(json!({
+        "data": { "timings": timings, "actions": actions, "truncated": response.truncated },
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// EP-14 S7: `GET /v1/runs/:run_id/requests/:call_seq` - the request inspector.
+// ---------------------------------------------------------------------------
+
+/// The inspector switch. Off: the route answers 404 as if it did not exist. Only the literal `true` enables it.
+const REQUEST_INSPECTOR_ENV: &str = "MODEL_GATEWAY_REQUEST_INSPECTOR";
+
+fn request_inspector_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(REQUEST_INSPECTOR_ENV).ok().as_deref())
+}
+
+/// A stored JSON text as the value it holds; text that does not parse is reported as absent, never raw.
+fn stored_json(raw: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(raw).ok()
+}
+
+/// Session Core's answer to an inspector read. Every way of not seeing a call (another user's run, an org
+/// admin, no such call, the read switched off) reads as 404, so the route confirms nothing.
+fn run_request_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied | tonic::Code::Unimplemented => {
+            run_trace_error(
+                StatusCode::NOT_FOUND,
+                "run_request_not_found",
+                "no such request",
+            )
+        }
+        tonic::Code::InvalidArgument => run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_request",
+            "the run id or call number was refused",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/requests/:call_seq` - see [`run_request_inspection`].
+async fn get_run_request(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    path: Path<(String, String)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    run_request_inspection(state, claims, bearer, path, request_inspector_enabled()).await
+}
+
+/// One model call as the inspector shows it: `{data: {call_seq, call_purpose, snapshot, system_sections,
+/// tools, tools_truncated, system_truncated, dropped}}`. Session Core checks that the caller is the user who
+/// owns the run and applies decision D3 (platform sections carry no text); the gateway adds nothing to it. With
+/// the switch off the route is a 404; a zero-retention bearer is refused before anything is read, with
+/// feature `run_inspection`.
+async fn run_request_inspection(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path((run_id, call_seq)): Path<(String, String)>,
+    enabled: bool,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    if claims.zdr {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
+        ));
+    }
+    let run_id = run_id.trim();
+    let call_seq = call_seq.trim().parse::<u32>().ok().filter(|seq| *seq > 0);
+    let (true, Some(call_seq)) = (valid_trace_run_id(run_id), call_seq) else {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_request",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-] and call_seq a number from 1",
+        ));
+    };
+    let response = state
+        .run_ledger_client
+        .clone()
+        .get_request_snapshot(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRequestSnapshotRequest {
+                run_id: run_id.to_owned(),
+                call_seq,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| run_request_status_to_http(&status))?
+        .into_inner();
+    let sections: Vec<Value> = response
+        .system_sections
+        .iter()
+        .map(|section| {
+            json!({
+                "label": section.label,
+                "source": section.source,
+                "digest": section.digest,
+                "chars": section.chars,
+                "text": (!section.text.is_empty()).then_some(section.text.as_str()),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "data": {
+            "run_id": run_id,
+            "call_seq": call_seq,
+            "call_purpose": response.call_purpose,
+            "snapshot": stored_json(&response.snapshot_json),
+            "system_sections": sections,
+            "tools": (!response.tools_json.is_empty()).then(|| stored_json(&response.tools_json)).flatten(),
+            "tools_truncated": response.tools_truncated,
+            "system_truncated": response.system_truncated,
+            "dropped": response.dropped,
+        },
+    })))
+}
+
 /// `type_url` of Session Core's `RUN_CANCELLED` row. Session Core has no enum
 /// value for that row, so it replays as `EVENT_TYPE_UNSPECIFIED` and only the
 /// payload discriminator identifies it (as in `durable_thread_event_type`).
@@ -1710,6 +2837,11 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
     let event_type = EventType::try_from(event.event_type)
         .map(|kind| kind.as_str_name().to_owned())
         .unwrap_or_else(|_| "EVENT_TYPE_UNSPECIFIED".to_owned());
+    if event_type == "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR" {
+        // Session accepts events from an owner; an unsigned audit record is
+        // not sufficient to authorize a live attachment projection.
+        return None;
+    }
     if let Some(status) = run_terminal_status(&event_type, &event) {
         if event.resource_ref != format!("run:{run_id}") && event.correlation_id != run_id {
             return None;
@@ -1751,6 +2883,8 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
             | "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
             | "EVENT_TYPE_BROWSER_RUN_PAUSED"
             | "EVENT_TYPE_BROWSER_RUN_RESUMED"
+            // WS8.G: ids only (run, plan, attach, session run, tab), never a URL or a title.
+            | "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR"
             | "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED"
             | "EVENT_TYPE_BROWSER_ACTION_DECIDED"
             | "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED"
@@ -1763,6 +2897,20 @@ fn project_run_replay_event(run_id: &str, event: Event) -> Option<DurableRunEven
         .and_then(|value| serde_json::from_slice::<Value>(&value.value).ok())?;
     if payload.get("run_id").and_then(Value::as_str) != Some(run_id) {
         return None;
+    }
+    if event_type == "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED"
+        && payload.get("action_id").and_then(Value::as_str) == Some(crate::browser_attach_compat::ACTION_ID)
+    {
+        let plan = payload.get("plan_id").and_then(Value::as_str)?;
+        let envelope = payload.get("status").and_then(Value::as_str)?;
+        let receipt = crate::browser_attach_compat::verify_configured(envelope, run_id, plan)?;
+        return Some(DurableRunEventProjection {
+            at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+            event_id: event.event_id,
+            event_type: "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR".to_owned(),
+            payload: json!({ "run_id": receipt.run_id, "plan_id": receipt.plan_id,
+                "session_run_id": receipt.session_run_id, "attach_id": receipt.attach_id, "tab_id": receipt.tab_id }),
+        });
     }
     Some(DurableRunEventProjection {
         at: event.ts.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
@@ -1888,22 +3036,278 @@ struct DecideApprovalBody {
     /// scopes need the grant store (S6), so any other value is refused until it exists.
     #[serde(default)]
     scope: String,
+    /// "Always" (build plan WS13 S7): only the literal `true` asks for a standing rule proposed
+    /// from this grant. Any other value is ignored, as an unknown key always was, so a body that
+    /// carries one reads exactly as it did before the switch existed.
+    #[serde(default)]
+    promote: Value,
+    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send, granted with
+    /// the approval in one act. Refused while APPROVAL_EDIT_ENABLED is off; absent, the decision is
+    /// exactly what it was before edits existed.
+    #[serde(default)]
+    edit: Option<DecideEditBody>,
 }
 
-/// The decide body's scope: absent or `once` is the one decision that exists today. Anything
-/// else, a well-formed `thread` or `run` included, is refused rather than silently narrowed
-/// to `once`, so a client never believes it granted more than it did.
-fn require_once_scope(scope: &str) -> Result<(), HttpJsonError> {
-    if scope.is_empty() || scope == SCOPE_ONCE {
-        return Ok(());
+/// The edit a decision may carry (EP-10-S4). `patch` holds only `to`, `subject` and `bodyText`;
+/// Session Core refuses any other key, so this gateway forwards it as the person wrote it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecideEditBody {
+    patch: Value,
+    base_fingerprint: String,
+}
+
+/// The approve-with-edits switch (EP-10-S4). Off: a decision carrying an edit is refused with 403
+/// `approval_edit_disabled` before anything reaches Session Core. Only the literal `true` enables
+/// it.
+const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
+
+fn approval_edit_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(env::var(APPROVAL_EDIT_ENV).ok().as_deref())
+}
+
+/// The largest patch an edit may carry: the 48 KiB body cap plus room for recipients and subject.
+const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
+
+fn edit_refusal(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// Check a decision's edit before any upstream call (EP-10-S4, decision D1): the switch, a grant,
+/// the `once` scope with no "Always", a JSON object patch and a 64-hex base fingerprint. `None`
+/// when the body carries no edit, whatever the switch says.
+fn checked_decision_edit(
+    edit: Option<&DecideEditBody>,
+    body_scope: &str,
+    promote: bool,
+    target: ApprovalState,
+    enabled: bool,
+) -> Result<Option<mp_contracts::model_plane::v1::ApprovalEdit>, HttpJsonError> {
+    let Some(edit) = edit else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(edit_refusal(
+            StatusCode::FORBIDDEN,
+            "approval_edit_disabled",
+            "Editing before approving is not enabled on this deployment.",
+        ));
     }
-    Err((
-        StatusCode::UNPROCESSABLE_ENTITY,
-        Json(json!({ "error": {
-            "code": "scope_not_enabled",
-            "message": "Only a decision for this one call is available.",
-        } })),
-    ))
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_requires_grant",
+            "An edit is sent with an approval only.",
+        ));
+    }
+    if !matches!(body_scope, "" | SCOPE_ONCE) || promote {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_requires_once",
+            "An edited action is approved for this one time only.",
+        ));
+    }
+    if !edit.patch.is_object() {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_patch",
+            "The edit is not in the expected shape.",
+        ));
+    }
+    let base = edit.base_fingerprint.trim();
+    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_base_fingerprint",
+            "The edit does not say which draft it changes.",
+        ));
+    }
+    let patch_json = edit.patch.to_string();
+    if patch_json.len() > MAX_EDIT_PATCH_BYTES {
+        return Err(edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "edit_too_large",
+            "The edited message is too long.",
+        ));
+    }
+    Ok(Some(mp_contracts::model_plane::v1::ApprovalEdit {
+        patch_json,
+        base_fingerprint: base.to_owned(),
+    }))
+}
+
+/// The HTTP form of a decision that carried an edit (EP-10-S4). Session Core sends the closed code
+/// as the status message: a changed approval is 409, a refused patch 422, a switch or owner refusal
+/// 403. A typed ZDR refusal and every other status keep the shared mapping.
+fn edit_decision_status_to_http(error: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(error).is_some() {
+        return grpc_status_to_http(error);
+    }
+    let code = error.message();
+    let contract_code = mp_contracts::approval_edit::EditError::ALL
+        .iter()
+        .any(|known| known.code() == code);
+    match (error.code(), code) {
+        (tonic::Code::Aborted, "approval_changed") => edit_refusal(
+            StatusCode::CONFLICT,
+            "approval_changed",
+            "This approval changed since you opened it. Review it again.",
+        ),
+        (tonic::Code::FailedPrecondition, "revision_limit") => edit_refusal(
+            StatusCode::CONFLICT,
+            "revision_limit",
+            "This action was edited too many times.",
+        ),
+        (tonic::Code::FailedPrecondition, "not_editable") => edit_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not_editable",
+            "This action cannot be edited; approve or reject it as drafted.",
+        ),
+        (tonic::Code::InvalidArgument, code)
+            if contract_code
+                || matches!(code, "invalid_patch" | "edit_requires_once" | "edit_requires_grant") =>
+        {
+            edit_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                code,
+                "The edit was not accepted.",
+            )
+        }
+        (tonic::Code::FailedPrecondition, "approval_edit_disabled")
+        | (tonic::Code::PermissionDenied, "edit_owner_only") => edit_refusal(
+            StatusCode::FORBIDDEN,
+            code,
+            "Editing this approval is not available.",
+        ),
+        _ => grpc_status_to_http(error),
+    }
+}
+
+/// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
+/// scope needs the switch, a granting decision, and an approval whose cause offers that scope: the
+/// server says what is offered, and a client never picks a scope it was not offered.
+fn checked_decision_scope(
+    requested: &str,
+    target: ApprovalState,
+    offered: &[String],
+) -> Result<&'static str, HttpJsonError> {
+    checked_decision_scope_with(
+        requested,
+        target,
+        offered,
+        approval_cause::scope_grants_enabled(),
+    )
+}
+
+fn checked_decision_scope_with(
+    requested: &str,
+    target: ApprovalState,
+    offered: &[String],
+    grants_enabled: bool,
+) -> Result<&'static str, HttpJsonError> {
+    let scope = match requested {
+        "" | SCOPE_ONCE => return Ok(SCOPE_ONCE),
+        SCOPE_THREAD => SCOPE_THREAD,
+        SCOPE_RUN => SCOPE_RUN,
+        _ => {
+            return Err(scope_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "scope_not_offered",
+                "That scope is not offered for this approval.",
+            ))
+        }
+    };
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_applicable",
+            "A scope applies to a grant only.",
+        ));
+    }
+    if !grants_enabled {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_enabled",
+            "Standing scopes are not enabled on this deployment.",
+        ));
+    }
+    if !offered.iter().any(|candidate| candidate == scope) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "scope_not_offered",
+            "That scope is not offered for this approval.",
+        ));
+    }
+    Ok(scope)
+}
+
+fn scope_refusal(status: StatusCode, code: &'static str, message: &'static str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// The proto scope a checked decision scope name stands for.
+fn approval_scope_code(scope: &str) -> i32 {
+    match scope {
+        SCOPE_THREAD => ApprovalScope::Thread as i32,
+        SCOPE_RUN => ApprovalScope::Run as i32,
+        _ => ApprovalScope::Once as i32,
+    }
+}
+
+/// The environment switch for "Always" as a reviewed rule (build plan WS13 S7). Default off; only
+/// the literal `true` enables it, read through the one strict parser the other switches share.
+const RULE_PROPOSALS_ENV: &str = "APPROVAL_RULE_PROPOSALS_ENABLED";
+
+fn rule_proposals_from(value: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(value)
+}
+
+fn rule_proposals_enabled() -> bool {
+    rule_proposals_from(env::var(RULE_PROPOSALS_ENV).ok().as_deref())
+}
+
+/// Whether a decision is "Always" (build plan WS13 S7): a standing rule proposed from this grant,
+/// for the person to confirm in settings. Returns `true` only for a valid ask under the switch; with
+/// the switch off `promote` is ignored. A rule is proposed from a grant of this thread on an MCP
+/// tool's approval and from nothing else, so every other ask is refused with its typed reason.
+fn checked_rule_proposal(
+    promote: bool,
+    scope: &str,
+    target: ApprovalState,
+    cause: Option<&ApprovalCause>,
+    enabled: bool,
+) -> Result<bool, HttpJsonError> {
+    if !enabled || !promote {
+        return Ok(false);
+    }
+    if !matches!(target, ApprovalState::Granted) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_not_applicable",
+            "A rule is proposed from a grant only.",
+        ));
+    }
+    if scope != SCOPE_THREAD {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_requires_thread_scope",
+            "Always applies to a decision for this thread.",
+        ));
+    }
+    if !cause.is_some_and(approval_cause::rule_offered) {
+        return Err(scope_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rule_not_offered",
+            "Always is offered only for an MCP tool that you may relax.",
+        ));
+    }
+    Ok(true)
 }
 
 /// The approval step-up switch (build plan WS13 S5). `off` changes nothing; `shadow` counts a grant
@@ -1980,15 +3384,17 @@ fn step_up_required_error() -> HttpJsonError {
     )
 }
 
-/// The durable decision this gateway records for a browser decision (build plan WS13 S3). The
-/// source is always USER: the body has no field for it, so a client-supplied value cannot
-/// reach the record. The scope is ONCE, the only scope the body can name today.
+/// The durable decision this gateway records for a decision (build plan WS13 S3). The source is
+/// always USER: the body has no field for it, so a client-supplied value cannot reach the record.
+/// `rule_proposed` is set only for an "Always" this gateway accepted (build plan WS13 S7).
 fn user_decision_request(
     approval_id: String,
     target_state: ApprovalState,
     user_id: &str,
     org_id: &str,
     reason: String,
+    scope: &str,
+    rule_proposed: bool,
 ) -> DecideApprovalRequest {
     DecideApprovalRequest {
         approval_id,
@@ -1999,7 +3405,9 @@ fn user_decision_request(
         // JWT org, never a client-suppliable value.
         org_id: org_id.to_owned(),
         decision_source: ApprovalDecisionSource::User as i32,
-        scope: ApprovalScope::Once as i32,
+        scope: approval_scope_code(scope),
+        rule_proposed,
+        ..Default::default()
     }
 }
 
@@ -2023,7 +3431,15 @@ async fn decide_approval(
             ))
         }
     };
-    require_once_scope(&body.scope)?;
+    // Approve with edits (EP-10-S4): refused before any upstream call unless it is a `once` grant
+    // under the switch. A body without `edit` takes exactly the path it always did.
+    let edit = checked_decision_edit(
+        body.edit.as_ref(),
+        &body.scope,
+        body.promote == Value::Bool(true),
+        target_state,
+        approval_edit_enabled(),
+    )?;
     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
         state
             .orchestration_client
@@ -2032,6 +3448,7 @@ async fn decide_approval(
                 GetApprovalRequest {
                     approval_id: approval_id.clone(),
                     org_id: claims.org_id.clone(),
+                    ..Default::default()
                 },
                 &session_bearer,
             )?)
@@ -2042,6 +3459,22 @@ async fn decide_approval(
     } else {
         None
     };
+    // The scope is checked against what this approval's cause offers, once the approval is known.
+    let offered = prior_approval
+        .as_ref()
+        .and_then(|approval| approval.cause.as_ref())
+        .map(|cause| cause.scope_options.clone())
+        .unwrap_or_default();
+    let scope = checked_decision_scope(&body.scope, target_state, &offered)?;
+    let asks_rule = checked_rule_proposal(
+        body.promote == Value::Bool(true),
+        scope,
+        target_state,
+        prior_approval
+            .as_ref()
+            .and_then(|approval| approval.cause.as_ref()),
+        rule_proposals_enabled(),
+    )?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
     if step_up_missing(
         target_state,
@@ -2065,56 +3498,45 @@ async fn decide_approval(
             }
         }
     }
+    let edited = edit.is_some();
+    let mut decision = user_decision_request(
+        approval_id,
+        target_state,
+        &claims.user_id,
+        &claims.org_id,
+        body.reason,
+        scope,
+        asks_rule,
+    );
+    decision.edit = edit;
     let resp = state
         .orchestration_client
         .clone()
-        .decide_approval(authenticated_session_request(
-            user_decision_request(
-                approval_id,
-                target_state,
-                &claims.user_id,
-                &claims.org_id,
-                body.reason,
-            ),
-            &session_bearer,
-        )?)
+        .decide_approval(authenticated_session_request(decision, &session_bearer)?)
         .await
-        .map_err(|e| grpc_status_to_http(&e))?
+        .map_err(|e| {
+            if edited {
+                edit_decision_status_to_http(&e)
+            } else {
+                grpc_status_to_http(&e)
+            }
+        })?
         .into_inner();
     let approval = resp
         .approval
         .ok_or_else(|| not_found("approval not found"))?;
-
     // A grant is durable authority, but not a restartable continuation: this
-    // path never invokes a generic `ResumeRun`, since the outbox is
-    // identifier-only and there is no descriptor-backed, service-only
-    // dispatcher yet to prove the paused work actually restarted.
-    //
-    // `quarantine_granted_approval_continuation` reports exactly that
-    // boundary and — for a granted approval — is DESIGNED to always return
-    // `unavailable`. That is a statement about continuation delivery, not a
-    // failure of the decision itself: `DecideApproval` above already durably
-    // recorded the grant (session-core's CAS write) before this ever runs.
-    // So its result becomes an informational field on the success response
-    // rather than clobbering it into a 502.
+    // path never invokes a generic `ResumeRun`. What happens next is read from
+    // the approval's derived `continuation` (Session Core joins the delivery
+    // outbox, start receipt and outcome), never assumed here: the old
+    // always-failing quarantine call answered "pending" for kinds the worker
+    // would refuse (build plan WS10 S1). The decision itself was already
+    // durably recorded above, so this is informational and never a 502.
     let mut continuation_delivery: Option<&'static str> = None;
     if matches!(target_state, ApprovalState::Granted)
         && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
     {
-        continuation_delivery = Some(if approval.continuation_mode.is_empty() {
-            match approvals::quarantine_granted_approval_continuation(
-                &approvals::gateway_approval_from_proto(&approval),
-            ) {
-                Ok(()) => "not_applicable",
-                Err(_) => "pending",
-            }
-        } else {
-            // A loop-owned approval (build plan WS03 S2) has no delivery row and
-            // is not the cold worker's: the durable Do loop consumes it when the
-            // user continues the run. Say so, rather than reporting a delivery
-            // that will never happen.
-            "awaiting_continue"
-        });
+        continuation_delivery = Some(continuation_delivery_word(&approval));
     }
 
     let mut body = json!({ "approval": approval_value(&approval) });
@@ -2122,6 +3544,81 @@ async fn decide_approval(
         body["continuation_delivery"] = json!(status);
     }
     Ok(Json(body))
+}
+
+/// The one-word `continuation_delivery` of a decided approval, kept for older clients next to the
+/// typed `approval.continuation`: `queued`, `running`, `completed`, `failed`, `not_resumable`
+/// (the approval only lets the agent retry the exact action once), `live` (a browser action
+/// polled by the running loop), `awaiting_continue` (a loop-owned approval) or `unknown` when
+/// Session Core could not derive the state.
+fn continuation_delivery_word(approval: &Approval) -> &'static str {
+    use mp_contracts::model_plane::v1::ContinuationState as State;
+    match continuation_state_name(approval) {
+        Some(State::Queued) => "queued",
+        Some(State::Running) => "running",
+        Some(State::Completed) => "completed",
+        Some(State::Failed) => "failed",
+        Some(State::NotResumable) => "not_resumable",
+        Some(State::Live) => "live",
+        Some(State::AwaitingContinue) => "awaiting_continue",
+        Some(State::Unspecified) | None => "unknown",
+    }
+}
+
+fn continuation_state_name(
+    approval: &Approval,
+) -> Option<mp_contracts::model_plane::v1::ContinuationState> {
+    approval
+        .continuation
+        .as_ref()
+        .and_then(|continuation| {
+            mp_contracts::model_plane::v1::ContinuationState::try_from(continuation.state).ok()
+        })
+}
+
+/// The resume class Session Core stored on the approval's card (`context.card.resume_class`),
+/// restricted to the closed vocabulary.
+fn card_resume_class(approval: &Approval) -> Option<String> {
+    use prost_types::value::Kind;
+    let context = approval.context.as_ref()?;
+    let Some(Kind::StructValue(card)) = context.fields.get("card")?.kind.as_ref() else {
+        return None;
+    };
+    let Some(Kind::StringValue(class)) = card.fields.get("resume_class")?.kind.as_ref() else {
+        return None;
+    };
+    matches!(class.as_str(), "action_continuation" | "live_poll" | "none").then(|| class.clone())
+}
+
+/// The typed continuation a browser may read; `null` until the approval is granted.
+fn continuation_value(approval: &Approval) -> Value {
+    use mp_contracts::model_plane::v1::{ContinuationState as State, VerificationStatus};
+    let Some(continuation) = approval.continuation.as_ref() else {
+        return Value::Null;
+    };
+    let state = match continuation_state_name(approval) {
+        Some(State::Queued) => "queued",
+        Some(State::Running) => "running",
+        Some(State::Completed) => "completed",
+        Some(State::Failed) => "failed",
+        Some(State::NotResumable) => "not_resumable",
+        Some(State::Live) => "live",
+        Some(State::AwaitingContinue) => "awaiting_continue",
+        Some(State::Unspecified) | None => return Value::Null,
+    };
+    let verification = match VerificationStatus::try_from(continuation.verification) {
+        Ok(VerificationStatus::VerifiedSuccess) => json!("verified_success"),
+        Ok(VerificationStatus::VerifiedFailure) => json!("verified_failure"),
+        Ok(VerificationStatus::PartiallyVerified) => json!("partially_verified"),
+        Ok(VerificationStatus::Unknown) => json!("unknown"),
+        _ => Value::Null,
+    };
+    json!({
+        "state": state,
+        "failure_code": empty_to_null(&continuation.failure_code),
+        "verification": verification,
+        "provider_receipt_id": empty_to_null(&continuation.provider_receipt_id),
+    })
 }
 
 /// Cancel a run through Session Core's authoritative `RunService`.
@@ -2236,6 +3733,7 @@ async fn cancel_run(
             // The guard above answered every ZDR posture with a refusal, so a
             // run-control event that reaches this line is persistent.
             zdr: false,
+            ..Default::default()
         };
         if let Err(error) = state
             .publisher
@@ -2285,6 +3783,7 @@ async fn resume_run(
                 checkpoint_id: String::new(),
                 org_id: claims.org_id.clone(),
                 approval_id: String::new(),
+                steer_text: String::new(),
             },
             &execution_bearer,
             &session_bearer,
@@ -2310,6 +3809,7 @@ async fn resume_run(
         // The guard above answered every ZDR posture with a refusal, so a
         // run-control event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -2379,6 +3879,19 @@ struct AiChatRequest {
     structured_output_schema: Option<String>,
     #[serde(default)]
     zdr: bool,
+    /// Sampling temperature, 0.0 to 1.0 (WS16.S1). Absent keeps the 0.7 every caller had before
+    /// this field existed. Read as a plain number and range-checked by hand so a value out of
+    /// range answers 400 with a reason, not a deserialiser 422.
+    #[serde(default)]
+    temperature: Option<f64>,
+    /// Output token ceiling, 1 to 8192. Absent keeps the 4096 every caller had before.
+    #[serde(default)]
+    max_tokens: Option<i64>,
+    /// Why a machine caller makes this call. A closed set (`quarry.extract`), and only the
+    /// `service:quarry-edge` principal may name it; it rides on the usage envelope so cost-core
+    /// can attribute the spend.
+    #[serde(default)]
+    purpose: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2417,6 +3930,8 @@ struct AiImagesRequest {
 #[derive(Debug, Default, Deserialize)]
 struct BrowserSuggestActionRequest {
     #[serde(default)]
+    mode: BrowserSuggestionMode,
+    #[serde(default)]
     goal: String,
     #[serde(default)]
     url: String,
@@ -2424,6 +3939,10 @@ struct BrowserSuggestActionRequest {
     title: String,
     #[serde(default)]
     observation: Value,
+    #[serde(default)]
+    history: Value,
+    #[serde(default)]
+    zdr: bool,
     #[serde(default)]
     visual_observation: Value,
     #[serde(default)]
@@ -2437,6 +3956,16 @@ struct BrowserSuggestActionRequest {
     #[serde(default)]
     provider: Option<String>,
 }
+
+#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum BrowserSuggestionMode {
+    #[default]
+    Quarry,
+    Desktop,
+}
+
+mod desktop_browser_planner;
 
 #[derive(Debug, Deserialize)]
 struct AiSpeechRequest {
@@ -2593,32 +4122,46 @@ async fn browser_suggest_action(
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<BrowserSuggestActionRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    use mp_contracts::model_plane::v1::{ChatMessage, InferRequest, ToolDefinition};
 
     let request_id = new_ulid();
+    let desktop = req.mode == BrowserSuggestionMode::Desktop;
     // A waived token names one connection, so it is refused here as a route mismatch (see `zdr_posture`).
-    crate::zdr_posture::zdr_or_refuse(
+    let effective_zdr = crate::zdr_posture::zdr_or_refuse(
         &claims,
-        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, false),
+        &crate::zdr_posture::Route::named(req.provider.as_deref(), None, desktop && req.zdr),
     )?;
-    let visual_summary =
-        browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
-    let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+    let (visual_summary, evidence, instructions, schema) = if desktop {
+        (
+            None,
+            desktop_browser_planner::evidence(&req)?,
+            desktop_browser_planner::instructions(),
+            desktop_browser_planner::ACTION_SCHEMA,
+        )
+    } else {
+        let visual_summary =
+            browser_visual_summary(&state, &claims, &req, &request_id, &inference_bearer).await?;
+        let evidence = browser_suggestion_prompt(&req, visual_summary.as_deref());
+        (visual_summary, evidence, browser_suggest_system_prompt(), BROWSER_ACTION_SCHEMA)
+    };
 
     let resp = state
         .inference_client
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::BrowserPlanner as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
-                model: req.model.clone().unwrap_or_default(),
+                model: req.model.clone().unwrap_or_else(|| {
+                    if desktop { "verevon-balance".to_owned() } else { String::new() }
+                }),
                 provider_hint: req.provider.clone().unwrap_or_default(),
                 messages: vec![
                     ChatMessage {
                         compaction_summary: String::new(),
                         role: "system".to_owned(),
-                        content: browser_suggest_system_prompt(),
+                        content: instructions,
                         name: String::new(),
                     },
                     ChatMessage {
@@ -2630,8 +4173,18 @@ async fn browser_suggest_action(
                 ],
                 temperature: 0.2,
                 max_tokens: 700,
-                structured_output_schema: BROWSER_ACTION_SCHEMA.to_owned(),
-                zdr: true,
+                structured_output_schema: if desktop { String::new() } else { schema.to_owned() },
+                tools: if desktop {
+                    vec![ToolDefinition {
+                        name: desktop_browser_planner::TOOL_NAME.to_owned(),
+                        description: "Propose one bounded desktop browser step from the current evidence.".to_owned(),
+                        parameters_json: schema.to_owned(),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                tool_choice: if desktop { desktop_browser_planner::TOOL_NAME.to_owned() } else { String::new() },
+                zdr: !desktop || effective_zdr,
                 ..Default::default()
             },
             &inference_bearer,
@@ -2640,15 +4193,23 @@ async fn browser_suggest_action(
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
 
-    let parsed: Value = serde_json::from_str(resp.content.trim()).map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "error": format!("browser planner returned invalid JSON: {e}")
-            })),
-        )
-    })?;
-    let suggestion = browser_suggestion_value(&parsed);
+    let parsed = if desktop {
+        desktop_browser_planner::parse_reply(&resp)?
+    } else {
+        serde_json::from_str(resp.content.trim()).map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": format!("browser planner returned invalid JSON: {e}")
+                })),
+            )
+        })?
+    };
+    let suggestion = if desktop {
+        desktop_browser_planner::suggestion(&parsed, &req.observation)?
+    } else {
+        browser_suggestion_value(&parsed)
+    };
 
     Ok(Json(json!({
         "id": request_id,
@@ -2750,12 +4311,23 @@ fn browser_suggestion_prompt(
         },
         1_200,
     );
-    let observation = compact_json_for_prompt(&req.observation, BROWSER_OBSERVATION_PROMPT_CHARS);
-    let visual_observation =
-        compact_json_for_prompt(&req.visual_observation, BROWSER_VISUAL_PROMPT_CHARS);
+    // WS12.S4: the page is untrusted and may hold a credential the user typed or the page
+    // echoed. Credential-shaped strings are masked HERE, on the way into the prompt, before
+    // any cut (`compact_json_for_prompt`, `truncate_for_prompt`) can split one into a
+    // fragment the pattern no longer matches. The request itself is not changed.
+    let observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.observation),
+        BROWSER_OBSERVATION_PROMPT_CHARS,
+    );
+    let visual_observation = compact_json_for_prompt(
+        &scrubbed_live_json(&req.visual_observation),
+        BROWSER_VISUAL_PROMPT_CHARS,
+    );
     let visual_summary = visual_summary.map_or_else(
         || "not provided".to_owned(),
-        |summary| truncate_for_prompt(summary, BROWSER_VISUAL_PROMPT_CHARS),
+        |summary| {
+            truncate_for_prompt(&mp_scrub::scrub_live(summary), BROWSER_VISUAL_PROMPT_CHARS)
+        },
     );
     let visual_artifact = req
         .visual_observation_artifact_id
@@ -2766,9 +4338,16 @@ fn browser_suggestion_prompt(
 
     format!(
         "Goal:\n{goal}\n\nCurrent URL: {}\nCurrent title: {}\n\nQuarry observation JSON:\n{observation}\n\nOpenCV visual observation artifact id: {visual_artifact}\nOpenCV visual observation JSON:\n{visual_observation}\n\nVLM screenshot summary:\n{visual_summary}\n\nReturn the single next browser action JSON only.",
-        truncate_for_prompt(&req.url, 1_000),
-        truncate_for_prompt(&req.title, 500),
+        truncate_for_prompt(&mp_scrub::scrub_url(&req.url), 1_000),
+        truncate_for_prompt(&mp_scrub::scrub_live(&req.title), 500),
     )
+}
+
+/// A copy of `value` with every credential-shaped string masked (`mp_scrub::scrub_live_json`).
+fn scrubbed_live_json(value: &Value) -> Value {
+    let mut copy = value.clone();
+    mp_scrub::scrub_live_json(&mut copy);
+    copy
 }
 
 fn browser_suggestion_value(parsed: &Value) -> Value {
@@ -2892,13 +4471,181 @@ fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
     out
 }
 
+/// `AiChatRequest::temperature` when the caller sends none.
+const AI_CHAT_DEFAULT_TEMPERATURE: f32 = 0.7;
+/// `AiChatRequest::max_tokens` when the caller sends none.
+const AI_CHAT_DEFAULT_MAX_TOKENS: i32 = 4096;
+/// The ceiling a caller may ask for.
+const AI_CHAT_MAX_TOKENS_CEILING: i64 = 8192;
+/// The one `purpose` value, and the one principal allowed to name it.
+const AI_CHAT_PURPOSE_QUARRY_EXTRACT: &str = "quarry.extract";
+const AI_CHAT_PURPOSE_CALLER: &str = "service:quarry-edge";
+
+/// `MODEL_GATEWAY_AI_CHAT_METERING`: whose `/v1/ai/chat` calls publish a `USAGE_ENVELOPE`.
+///
+/// The build plan's default is `service`; the owner rule is that new behaviour starts off, so the
+/// default here is `off` (assumed decision, recorded in the progress file). Rolling it out is
+/// `MODEL_GATEWAY_AI_CHAT_METERING=service`. `all` also meters user callers, which changes user
+/// accounting and is therefore not a default of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AiChatMetering {
+    #[default]
+    Off,
+    Service,
+    All,
+}
+
+impl AiChatMetering {
+    /// Anything other than the literal `service` or `all` is `off`.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(|value| value.trim().to_ascii_lowercase()).as_deref() {
+            Some("service") => Self::Service,
+            Some("all") => Self::All,
+            _ => Self::Off,
+        }
+    }
+
+    const fn meters(self, service_caller: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Service => service_caller,
+            Self::All => true,
+        }
+    }
+}
+
+/// The switch, read once per process.
+fn ai_chat_metering() -> AiChatMetering {
+    static MODE: std::sync::OnceLock<AiChatMetering> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        AiChatMetering::parse(env::var("MODEL_GATEWAY_AI_CHAT_METERING").ok().as_deref())
+    })
+}
+
+/// The validated sampling parameters of one `/v1/ai/chat` call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AiChatParams {
+    temperature: f32,
+    max_tokens: i32,
+    purpose: Option<&'static str>,
+}
+
+fn ai_chat_bad_request(error: &str) -> HttpJsonError {
+    (StatusCode::BAD_REQUEST, Json(json!({ "error": error })))
+}
+
+/// Validate the additive fields. Absent fields keep today's values exactly.
+fn ai_chat_params(req: &AiChatRequest, claims: &Claims) -> Result<AiChatParams, HttpJsonError> {
+    let temperature = match req.temperature {
+        None => AI_CHAT_DEFAULT_TEMPERATURE,
+        Some(value) if value.is_finite() && (0.0..=1.0).contains(&value) => {
+            // The range check above makes the narrowing safe for a sampling knob.
+            #[allow(clippy::cast_possible_truncation)]
+            let narrowed = value as f32;
+            narrowed
+        }
+        Some(_) => return Err(ai_chat_bad_request("temperature must be between 0.0 and 1.0")),
+    };
+    let max_tokens = match req.max_tokens {
+        None => AI_CHAT_DEFAULT_MAX_TOKENS,
+        Some(value) if (1..=AI_CHAT_MAX_TOKENS_CEILING).contains(&value) => {
+            i32::try_from(value).unwrap_or(AI_CHAT_DEFAULT_MAX_TOKENS)
+        }
+        Some(_) => return Err(ai_chat_bad_request("max_tokens must be between 1 and 8192")),
+    };
+    let purpose = match req.purpose.as_deref() {
+        None => None,
+        Some(purpose) => {
+            // Service callers only, and only the one named service. A user token that sends a
+            // purpose is refused rather than ignored, so the field can never read as accepted.
+            if claims.service_principal_id().is_none() || claims.sub != AI_CHAT_PURPOSE_CALLER {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    Json(json!({ "error": "purpose is not permitted for this caller" })),
+                ));
+            }
+            if purpose != AI_CHAT_PURPOSE_QUARRY_EXTRACT {
+                return Err(ai_chat_bad_request("unknown purpose"));
+            }
+            Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT)
+        }
+    };
+    Ok(AiChatParams {
+        temperature,
+        max_tokens,
+        purpose,
+    })
+}
+
+/// The `USAGE_ENVELOPE` of one metered `/v1/ai/chat` call: the shape `grpc.rs` and `invoke`
+/// publish, plus `route` and `purpose` so cost-core can tell this lane from chat.
+fn ai_chat_usage_envelope(
+    request_id: &str,
+    claims: &Claims,
+    infer: &mp_contracts::model_plane::v1::InferResponse,
+    latency_ms: u64,
+    purpose: Option<&str>,
+    cost_basis: crate::pricing::CostBasis,
+) -> Envelope {
+    // A service is attributed by its subject, a user by their id.
+    let user_id = if claims.service_principal_id().is_some() {
+        claims.sub.clone()
+    } else {
+        claims.user_id.clone()
+    };
+    Envelope {
+        event_id: new_ulid(),
+        event_type: "USAGE_ENVELOPE".to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-USAGE_ENVELOPE"),
+        org_id: claims.org_id.clone(),
+        user_id: user_id.clone(),
+        resource_ref: format!("request/{request_id}"),
+        payload: json!({
+            "request_id": request_id,
+            "org_id": claims.org_id,
+            "user_id": user_id,
+            "model": infer.model_used,
+            "input_tokens": infer.input_tokens,
+            "output_tokens": infer.output_tokens,
+            "latency_ms": latency_ms,
+            "transport": "http",
+            "route": "ai_chat",
+            "purpose": purpose,
+            "provider_used": infer.provider_used,
+            "residency": infer.residency,
+            "cache_read_input_tokens": infer.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer.cache_creation_input_tokens,
+            "cost_basis": cost_basis.as_str(),
+        }),
+        zdr: false,
+        ..Default::default()
+    }
+}
+
 async fn ai_chat(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     inference_bearer: VerifiedInferenceBearer,
     Json(req): Json<AiChatRequest>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    ai_chat_with(state, claims, inference_bearer, req, ai_chat_metering()).await
+}
+
+async fn ai_chat_with(
+    state: AppState,
+    claims: Claims,
+    inference_bearer: VerifiedInferenceBearer,
+    req: AiChatRequest,
+    metering: AiChatMetering,
+) -> Result<Json<Value>, HttpJsonError> {
     use mp_contracts::model_plane::v1::{ChatMessage, InferRequest};
+    // Bad sampling fields and a purpose the caller may not name are refused before anything else.
+    let params = ai_chat_params(&req, &claims)?;
     // The posture of this turn, through the resolver: a ZDR turn that names the caller's own
     // connection is refused here, typed, before any model call, and a waiver is honoured only on
     // the connection it names (see `zdr_posture`). Without this, a connection id with no provider
@@ -2921,19 +4668,23 @@ async fn ai_chat(
         })
         .collect();
     let request_id = new_ulid();
+    let (provider_hint, connection_id) =
+        (req.provider.clone(), req.subscription_connection_id.clone());
+    let started = std::time::Instant::now();
     let resp = state
         .inference_client
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::Answer as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: req.model,
                 provider_hint: req.provider,
                 subscription_connection_id: req.subscription_connection_id,
                 messages,
-                temperature: 0.7,
-                max_tokens: 4096,
+                temperature: params.temperature,
+                max_tokens: params.max_tokens,
                 structured_output_schema: req.structured_output_schema.unwrap_or_default(),
                 zdr,
                 ..Default::default()
@@ -2943,11 +4694,54 @@ async fn ai_chat(
         .await
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A subscription call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_route(&provider_hint, &connection_id)
+        .served_by(&resp.provider_used);
+    // Under ZDR nothing about the call is priced, metered or ledgered: the cost is null.
+    let cost_usd = if zdr {
+        None
+    } else {
+        state
+            .pricing
+            .cost_usd_for(
+                cost_basis,
+                &resp.model_used,
+                i64::from(resp.input_tokens.max(0)),
+                i64::from(resp.output_tokens.max(0)),
+                i64::from(resp.cache_read_input_tokens.max(0)),
+                i64::from(resp.cache_creation_input_tokens.max(0)),
+            )
+            .await
+    };
+    if !zdr && metering.meters(claims.service_principal_id().is_some()) {
+        let envelope = ai_chat_usage_envelope(
+            &request_id,
+            &claims,
+            &resp,
+            latency_ms,
+            params.purpose,
+            cost_basis,
+        );
+        if let Err(error) = state
+            .publisher
+            .publish(&subjects::usage_subject(&claims.org_id), &envelope)
+            .await
+        {
+            warn!(%error, "failed to publish ai_chat USAGE_ENVELOPE");
+        }
+    }
     Ok(Json(json!({
         "id": request_id,
         "content": resp.content,
         "model_used": resp.model_used,
-        "usage": { "input_tokens": resp.input_tokens, "output_tokens": resp.output_tokens },
+        "provider_used": resp.provider_used,
+        "usage": {
+            "input_tokens": resp.input_tokens,
+            "output_tokens": resp.output_tokens,
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+        },
     })))
 }
 
@@ -3110,6 +4904,7 @@ async fn recommend_plan(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::Answer as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: String::new(),
@@ -4646,6 +6441,7 @@ async fn ai_dictate(
         .clone()
         .infer(authenticated_inference_request(
             InferRequest {
+                purpose: InferPurpose::DictationCleanup as i32,
                 request_id: request_id.clone(),
                 org_id: claims.org_id.clone(),
                 model: cleanup_model,
@@ -5844,6 +7640,25 @@ async fn proxy_to_capability_core(
     method: &str,
     body: Option<&Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // Refuse before delegating: the durable-mutation inventory checks this entry point on its own.
+    if method != "GET" {
+        require_non_zdr_durable_mutation(claims)?;
+    }
+    proxy_to_capability_core_with_precondition(state, claims, bearer, path, method, body, None)
+        .await
+}
+
+/// [`proxy_to_capability_core`] with an optional `If-Match` revision on the forwarded request: a write
+/// capability-core applies only at the revision its author read.
+async fn proxy_to_capability_core_with_precondition(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+    path: &str,
+    method: &str,
+    body: Option<&Value>,
+    if_match: Option<&str>,
+) -> Result<Json<Value>, HttpJsonError> {
     // Capability Core remains authoritative, but stop an obvious issuer-ZDR
     // mutation at the public boundary before forwarding any body or credential.
     if method != "GET" {
@@ -5875,6 +7690,10 @@ async fn proxy_to_capability_core(
         }
     }
     .bearer_auth(bearer.as_str());
+    let builder = match if_match {
+        Some(revision) => builder.header(reqwest::header::IF_MATCH, revision),
+        None => builder,
+    };
     let resp = builder.send().await.map_err(|e| {
         (
             StatusCode::BAD_GATEWAY,
@@ -6096,6 +7915,116 @@ async fn revoke_tool_policy_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
 }
 
+/// Takes the revision a policy write was made against out of its body. capability-core reads it from
+/// `If-Match`, and this proxy forwards only the session's headers, so the SPA names it in the body. A body
+/// without one forwards with no precondition, which capability-core refuses with 428.
+fn take_policy_revision(body: &mut Value) -> Result<Option<String>, HttpJsonError> {
+    let Some(raw) = body
+        .as_object_mut()
+        .and_then(|object| object.remove("revision"))
+    else {
+        return Ok(None);
+    };
+    match raw.as_u64() {
+        Some(revision) if i64::try_from(revision).is_ok() => Ok(Some(revision.to_string())),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "revision must be a non-negative integer"})),
+        )),
+    }
+}
+
+/// `GET /v1/org/agent-policy` — the org's agent policy in force. Any member of the org reads it.
+async fn get_org_agent_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-agent-policy", "GET", None).await
+}
+
+/// `PUT /v1/org/agent-policy` — an org admin replaces the policy at the revision the body names. The rest
+/// of the body is forwarded as sent: capability-core decodes it strictly and decides the admin claim, the
+/// write scope and the ZDR posture from the signed principal.
+async fn set_org_agent_policy_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(mut body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    let revision = take_policy_revision(&mut body)?;
+    proxy_to_capability_core_with_precondition(
+        &s,
+        &c,
+        &bearer,
+        "org-agent-policy",
+        "PUT",
+        Some(&body),
+        revision.as_deref(),
+    )
+    .await
+}
+
+/// `GET /v1/org/agent-policy/effective` — each setting with the value in force for the caller's org. Only
+/// the org layer exists yet, and capability-core accepts only `user=me`, so the read always asks for that.
+async fn get_org_agent_policy_effective_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = capability_query_path("org-agent-policy/effective", &[("user", "me")]);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// `GET /v1/org/hooks` — the org's active hook rules and the policy revision they are at.
+async fn list_org_hooks_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-hooks", "GET", None).await
+}
+
+/// `POST /v1/org/hooks` — an org admin adds a rule. The body is forwarded as sent, so a field that
+/// capability-core does not know, the org id included, is refused rather than dropped.
+async fn create_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    proxy_to_capability_core(&s, &c, &bearer, "org-hooks", "POST", Some(&body)).await
+}
+
+/// `PUT /v1/org/hooks/:hook_id` — an org admin replaces the content of an active rule.
+async fn update_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(hook_id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&hook_id, "hook_id")?;
+    let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "PUT", Some(&body)).await
+}
+
+/// `DELETE /v1/org/hooks/:hook_id` — an org admin retires an active rule; the row stays as history.
+async fn delete_org_hook_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(hook_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&hook_id, "hook_id")?;
+    let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+
 /// Optional `space_ref` narrows the org's schedules to one room's.
 ///
 /// Forwarded verbatim; capability-core applies it as a filter over rows that
@@ -6104,6 +8033,9 @@ async fn revoke_tool_policy_proxy(
 #[derive(Debug, Default, Deserialize)]
 struct CronListQuery {
     space_ref: Option<String>,
+    /// `self` narrows the list to the caller's own schedules (EP-6-S2). Any
+    /// other value is dropped, never forwarded.
+    creator: Option<String>,
 }
 
 /// Query for both process routes. `space_ref` and the two decision fields
@@ -6213,6 +8145,153 @@ async fn read_process_output(
     })))
 }
 
+/// Lifetime of the thread lease a workspace read acquires. Execution-core's own
+/// thread lease uses the same hour, and every acquire slides it, so a read never
+/// shortens a lease a live run holds.
+const THREAD_WORKSPACE_LEASE_TTL_SECS: i64 = 3_600;
+
+/// `GET /v1/threads/{thread_id}/workspace`: the files one thread keeps across runs
+/// (WS22-S5, DEC-23), each with its content hash and size, never its content.
+///
+/// The workspace is read through a lease, so this acquires the caller's thread
+/// lease first. Acquire is idempotent for the same user and thread, and it carries
+/// the caller's ZDR posture, so a ZDR caller is refused before any lease row is
+/// written. The bearer is the user-bound `aud=sandbox-manager` credential the BFF
+/// attaches per request, and sandbox-manager binds every row to that user.
+async fn get_thread_workspace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = require_url_safe_thread_id(&thread_id)?;
+    let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))?;
+    let mut sandbox = state.sandbox_client.clone();
+    let lease = sandbox
+        .acquire_lease(authenticated_sandbox_request(
+            AcquireLeaseRequest {
+                org_id: claims.org_id.clone(),
+                scope_type: "thread".to_owned(),
+                scope_id: thread_id.clone(),
+                ttl: Some(prost_types::Duration {
+                    seconds: THREAD_WORKSPACE_LEASE_TTL_SECS,
+                    nanos: 0,
+                }),
+                zdr,
+                ..Default::default()
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+    let response = sandbox
+        .get_thread_workspace(authenticated_sandbox_request(
+            GetThreadWorkspaceRequest {
+                lease_id: lease.lease_id,
+                backend_id: lease.backend_id,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "revision": response.revision,
+        "files": response.entries.iter().map(|entry| json!({
+            "path": entry.path,
+            "content_hash": entry.content_hash,
+            "size_bytes": entry.size_bytes,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// `DELETE /v1/threads/{thread_id}/workspace`: the user's reset of one thread's
+/// files (WS22-S5). Sandbox-manager removes the thread's rows and then its blobs,
+/// and only the caller's own thread. A thread that holds nothing is a successful
+/// no-op, so a retry finishes an erase whose blob removal failed the first time.
+/// Erasure is not refused under ZDR, because a ZDR thread holds nothing to erase.
+async fn delete_thread_workspace(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSandboxBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let thread_id = require_url_safe_thread_id(&thread_id)?;
+    let response = state
+        .sandbox_client
+        .clone()
+        .delete_thread_workspace(authenticated_sandbox_request(
+            DeleteThreadWorkspaceRequest {
+                thread_id: thread_id.clone(),
+                org_id: claims.org_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| grpc_status_to_http(&e))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "thread_id": thread_id,
+        "files_deleted": response.files_deleted,
+        "object_prefix": response.object_prefix,
+    })))
+}
+
+/// A thread id the workspace path accepts: the plain key segment the object store
+/// keys blobs by (letters, digits, `_` and `-`, at most 128 bytes). It is refused
+/// here, before any RPC, so a crafted id never reaches a blob prefix.
+fn require_url_safe_thread_id(raw: &str) -> Result<String, HttpJsonError> {
+    let thread_id = raw.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id is required" })),
+        ));
+    }
+    if thread_id.len() > 128
+        || !thread_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "thread_id must be a plain key segment" })),
+        ));
+    }
+    Ok(thread_id.to_owned())
+}
+
+#[cfg(test)]
+mod thread_workspace_route_tests {
+    use super::*;
+
+    #[test]
+    fn a_thread_id_is_a_plain_key_segment_or_it_is_refused_before_any_rpc() {
+        assert_eq!(
+            require_url_safe_thread_id(" thr_01J9-abc ").unwrap(),
+            "thr_01J9-abc"
+        );
+        let long = "a".repeat(129);
+        for bad in [
+            "",
+            "   ",
+            "thread/1",
+            "../thr",
+            "thr.1",
+            "thr 1",
+            "thr%2F1",
+            long.as_str(),
+        ] {
+            let (status, _) = require_url_safe_thread_id(bad).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+    }
+}
+
 /// The same URL-safety rule `/v1/cron` applies, and for the same reason: this
 /// crate has no URL-encoder, and half of one is worse than none — a
 /// `space_ref` carrying `&` or `=` would silently become different parameters.
@@ -6320,12 +8399,22 @@ async fn list_cron_proxy(
             Json(json!({ "error": "space_ref must be URL-safe" })),
         ));
     }
-    let path = if space_ref.is_empty() {
-        format!("cron?org_id={}", c.org_id)
-    } else {
-        format!("cron?org_id={}&space_ref={space_ref}", c.org_id)
-    };
+    let path = cron_list_path(&c.org_id, space_ref, query.creator.as_deref());
     proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// The upstream list path. Only the literal `creator=self` is forwarded:
+/// capability-core compares it to the verified actor, so it can only narrow.
+fn cron_list_path(org_id: &str, space_ref: &str, creator: Option<&str>) -> String {
+    let mut path = if space_ref.is_empty() {
+        format!("cron?org_id={org_id}")
+    } else {
+        format!("cron?org_id={org_id}&space_ref={space_ref}")
+    };
+    if creator == Some("self") {
+        path.push_str("&creator=self");
+    }
+    path
 }
 async fn create_cron_proxy(
     State(s): State<AppState>,
@@ -6333,6 +8422,11 @@ async fn create_cron_proxy(
     bearer: VerifiedCapabilityBearer,
     Json(mut b): Json<Value>,
 ) -> Result<Json<Value>, HttpJsonError> {
+    // A template naming a thread goal is a goal-bound schedule (EP-7 S6): admitted first, since
+    // session-core binds it to the goal at insert.
+    if crate::goal_unattended::names_goal(&b) {
+        crate::goal_unattended::admit(&c, &b)?;
+    }
     b["org_id"] = json!(c.org_id);
     proxy_to_capability_core(&s, &c, &bearer, "cron", "POST", Some(&b)).await
 }
@@ -6408,6 +8502,76 @@ mod cron_fires_path_tests {
     }
 }
 
+/// Run now (EP-6-S2): one manual fire of a schedule. Only the caller's
+/// `request_id` is forwarded; capability-core checks the creator, asks Control
+/// for a fresh fire decision and answers 404 while `CRON_RUN_NOW_ENABLED` is off.
+async fn run_cron_now_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = cron_run_path(&id)?;
+    let body = json!({ "request_id": b.get("request_id").cloned().unwrap_or(Value::Null) });
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", Some(&body)).await
+}
+
+/// The upstream run path. The id is decoded from the request path, so an
+/// encoded `/` or `?` would otherwise address a different upstream route.
+fn cron_run_path(id: &str) -> Result<String, HttpJsonError> {
+    let url_safe = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'));
+    if !url_safe {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {
+                "code": "invalid_cron_id",
+                "message": "cron id must be URL-safe",
+                "details": {}
+            }})),
+        ));
+    }
+    Ok(format!("cron/{id}/run"))
+}
+
+#[cfg(test)]
+mod cron_run_now_path_tests {
+    use super::{cron_list_path, cron_run_path};
+
+    #[test]
+    fn cron_run_path_forwards_only_the_id() {
+        assert_eq!(cron_run_path("cron_1").unwrap(), "cron/cron_1/run");
+        for bad in ["", ".", "..", "cron_1/fires", "cron_1?creator=x", "cron 1", "cron_1#x"] {
+            let (status, _) = cron_run_path(bad).unwrap_err();
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn cron_list_forwards_only_creator_self() {
+        assert_eq!(cron_list_path("org-1", "", None), "cron?org_id=org-1");
+        assert_eq!(
+            cron_list_path("org-1", "", Some("self")),
+            "cron?org_id=org-1&creator=self"
+        );
+        assert_eq!(
+            cron_list_path("org-1", "space-1", Some("self")),
+            "cron?org_id=org-1&space_ref=space-1&creator=self"
+        );
+        for other in ["someone-else", "SELF", "self&org_id=org-2", ""] {
+            assert_eq!(
+                cron_list_path("org-1", "space-1", Some(other)),
+                "cron?org_id=org-1&space_ref=space-1"
+            );
+        }
+    }
+}
+
 async fn list_memory_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
@@ -6453,16 +8617,26 @@ async fn delete_memory_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("memory/{id}"), "DELETE", None).await
 }
 
+/// EP-11 S6: the `&kind=` suffix for a skills read, forwarded only when it is exactly one of the
+/// authored kinds so nothing else from the caller's query string reaches capability-core.
+fn authored_kind_suffix(q: &std::collections::HashMap<String, String>) -> String {
+    match q.get("kind").map(String::as_str) {
+        Some(kind @ ("skill" | "template" | "preset")) => format!("&kind={kind}"),
+        _ => String::new(),
+    }
+}
+
 async fn list_skills_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(
         &s,
         &c,
         &bearer,
-        &format!("skills?org_id={}", c.org_id),
+        &format!("skills?org_id={}{}", c.org_id, authored_kind_suffix(&q)),
         "GET",
         None,
     )
@@ -6477,13 +8651,27 @@ async fn create_skill_proxy(
     b["org_id"] = json!(c.org_id);
     proxy_to_capability_core(&s, &c, &bearer, "skills", "POST", Some(&b)).await
 }
+/// EP-11 S8: a skill imported from a SKILL.md or a zip, sent as base64 inside JSON; capability-core
+/// answers 404 while SKILL_IMPORT_ENABLED is off. 12 MiB carries the largest bundle in base64.
+const SKILL_IMPORT_BODY_LIMIT_BYTES: usize = 12 * 1024 * 1024;
+async fn import_skill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "skills/import", "POST", Some(&b)).await
+}
 async fn get_skill_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "GET", None).await
+    // The single-row read takes the kind as its only query parameter, so the suffix's `&` becomes `?`.
+    let kind = authored_kind_suffix(&q).replacen('&', "?", 1);
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}{kind}"), "GET", None).await
 }
 async fn patch_skill_proxy(
     State(s): State<AppState>,
@@ -6501,6 +8689,77 @@ async fn delete_skill_proxy(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}"), "DELETE", None).await
+}
+/// EP-11 S5: publish a skill's pending draft as its next version
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn publish_skill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, &format!("skills/{id}/publish"), "POST", None).await
+}
+/// EP-11 S5: discard a skill's pending draft
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn discard_skill_draft_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("skills/{id}/draft"),
+        "DELETE",
+        None,
+    )
+    .await
+}
+/// EP-11 S5: restore an earlier version as the skill's draft
+/// (capability-core answers 404 while SKILL_DRAFT_PUBLISH is off).
+async fn restore_skill_version_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((id, version)): Path<(String, u32)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("skills/{id}/versions/{version}/restore"),
+        "POST",
+        None,
+    )
+    .await
+}
+/// EP-11 S2: a skill's immutable versions (capability-core
+/// `GET /api/v1/skills/{id}/versions`, 404 while SKILL_VERSIONS_API is off).
+/// Only the paging parameters pass, and only as plain digits.
+async fn list_skill_versions_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let mut path = format!("skills/{id}/versions");
+    let paging: Vec<String> = ["limit", "before_version"]
+        .iter()
+        .filter_map(|key| {
+            q.get(*key)
+                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                .map(|v| format!("{key}={v}"))
+        })
+        .collect();
+    if !paging.is_empty() {
+        path.push('?');
+        path.push_str(&paging.join("&"));
+    }
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
 }
 
 /// `GET /v1/runs/:run_id/watchers` — the caller's own watch status on this
@@ -6724,6 +8983,35 @@ fn not_found(message: &str) -> HttpJsonError {
 /// semantics. Every other code — including transport failures (`Unavailable`,
 /// `Internal`, …) — stays `502`, preserving the prior "upstream is unhappy"
 /// default for these routes.
+/// EP-9 C4: an erase refused by a legal hold, or by a hold check that could not be made, keeps
+/// its typed code from the `x-mp-error-code` trailer; without it `FailedPrecondition` would read
+/// as `thread_persistence_not_permitted` and the SPA would never see the hold.
+fn thread_erase_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    match error.metadata().get("x-mp-error-code").and_then(|value| value.to_str().ok()) {
+        Some("erasure_blocked_legal_hold") => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": {
+                    "code": "erasure_blocked_legal_hold",
+                    "message": error.message(),
+                    "details": {"retryable": false},
+                }
+            })),
+        ),
+        Some("erasure_hold_check_unavailable") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": {
+                    "code": "erasure_hold_check_unavailable",
+                    "message": "Legal holds could not be checked, so nothing was deleted.",
+                    "details": {"retryable": true},
+                }
+            })),
+        ),
+        _ => session_thread_error(context, error),
+    }
+}
+
 pub(crate) fn session_thread_error(context: &str, error: &tonic::Status) -> HttpJsonError {
     match error.code() {
         tonic::Code::InvalidArgument => (
@@ -6913,8 +9201,14 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
 /// the rest of the orchestration surface; the SPA client normalizes to
 /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
 /// the arbitrary `metadata` Struct is flattened to plain JSON.
-fn run_detail_value(run: &RunDetail) -> Value {
-    json!({
+pub(crate) fn run_detail_value(run: &RunDetail) -> Value {
+    run_detail_value_with(run, run_origin_field_enabled())
+}
+
+/// `run_detail_value` with the origin switch passed in, so a test can name either
+/// setting without touching the process environment.
+fn run_detail_value_with(run: &RunDetail, origin_field: bool) -> Value {
+    let mut value = json!({
         "run_id": run.run_id,
         "thread_id": run.thread_id,
         "parent_run_id": empty_to_null(&run.parent_run_id),
@@ -6931,7 +9225,28 @@ fn run_detail_value(run: &RunDetail) -> Value {
         "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "updated_at": run.updated_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         "metadata": run.metadata.as_ref().map_or(Value::Null, prost_struct_to_json),
-    })
+    });
+    // Set by Session Core only when the run was read through a Space read decision (WS09-S4);
+    // absent otherwise, so an owner-path projection is byte-for-byte what it was.
+    if !run.owner_subject_id.is_empty() {
+        value["owner_subject_id"] = json!(run.owner_subject_id);
+    }
+    // EP-12 S1: the origin the run was stamped with, at the top level, so the Agent
+    // API and the trigger chip read one field. It is read from the metadata projected
+    // above, and a stamp outside the closed token set projects as null, not a guess.
+    if origin_field {
+        value["origin"] = mp_contracts::run_origin::RunOrigin::from_metadata(&value["metadata"])
+            .map_or(Value::Null, |origin| json!(origin.as_str()));
+    }
+    value
+}
+
+/// The switch that adds the top-level `origin` to a run projection (EP-12 S1). Default
+/// off; the strict parser the other gateway switches share reads it.
+const RUN_ORIGIN_FIELD_ENV: &str = "MODEL_GATEWAY_RUN_ORIGIN_FIELD";
+
+fn run_origin_field_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(RUN_ORIGIN_FIELD_ENV).ok().as_deref())
 }
 
 #[cfg(test)]
@@ -6965,6 +9280,64 @@ mod run_detail_value_tests {
         assert_eq!(value["run_id"], "run-1");
         assert_eq!(value["status"], "awaiting_approval");
     }
+
+    /// A run whose stored metadata carries `stamp` as its origin, the shape Session Core returns.
+    fn run_stamped(stamp: &str) -> RunDetail {
+        RunDetail {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            metadata: Some(prost_types::Struct {
+                fields: [(
+                    "origin".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StringValue(stamp.to_owned())),
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// With the switch on, the top-level `origin` names the run's stamp, and a run
+    /// with no stamp reads as chat.
+    #[test]
+    fn run_detail_value_names_origin_when_switch_on() {
+        for (stamp, origin) in [("api", "api"), ("schedule", "schedule"), ("chat", "chat")] {
+            let value = run_detail_value_with(&run_stamped(stamp), true);
+            assert_eq!(value["origin"], origin, "{stamp}");
+        }
+        let unstamped = RunDetail {
+            run_id: "run-2".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(run_detail_value_with(&unstamped, true)["origin"], "chat");
+    }
+
+    /// With the switch off the projection is what it was: no `origin` key, and the
+    /// metadata unchanged.
+    #[test]
+    fn run_detail_value_unchanged_when_switch_off() {
+        let run = run_stamped("api");
+        let off = run_detail_value_with(&run, false);
+        let object = off.as_object().expect("a run is a JSON object");
+        assert!(!object.contains_key("origin"), "{off}");
+        assert_eq!(off["metadata"]["origin"], "api");
+        // Switching the field on adds exactly one key and changes nothing else.
+        let mut expected = off.clone();
+        expected["origin"] = json!("api");
+        assert_eq!(run_detail_value_with(&run, true), expected);
+    }
+
+    /// A stamp outside the closed token set projects as null, and the metadata still
+    /// shows what was stored.
+    #[test]
+    fn unknown_origin_stamp_projects_null() {
+        let value = run_detail_value_with(&run_stamped("sheduled"), true);
+        assert!(value["origin"].is_null(), "{value}");
+        assert_eq!(value["metadata"]["origin"], "sheduled");
+    }
 }
 
 /// Convert a prost `Timestamp` to an RFC3339 JSON string. An out-of-range value
@@ -6974,6 +9347,15 @@ fn prost_ts_to_rfc3339(ts: &prost_types::Timestamp) -> Value {
     match chrono::DateTime::from_timestamp(ts.seconds, nanos) {
         Some(dt) => Value::String(dt.to_rfc3339()),
         None => Value::Null,
+    }
+}
+
+/// The RFC3339 time of a transcript turn, or `None` when session-core sent none (or one that
+/// cannot be represented), so the field is left off rather than invented.
+fn message_created_at(ts: Option<&prost_types::Timestamp>) -> Option<String> {
+    match prost_ts_to_rfc3339(ts?) {
+        Value::String(rfc3339) => Some(rfc3339),
+        _ => None,
     }
 }
 
@@ -7043,8 +9425,8 @@ fn todo_value(todo: &Todo) -> Value {
     })
 }
 
-fn approval_value(approval: &Approval) -> Value {
-    json!({
+pub(crate) fn approval_value(approval: &Approval) -> Value {
+    let mut value = json!({
         "id": approval.id,
         "run_id": approval.run_id,
         "step_id": empty_to_null(&approval.step_id),
@@ -7055,7 +9437,42 @@ fn approval_value(approval: &Approval) -> Value {
         "decision_reason": empty_to_null(&approval.decision_reason),
         // Why the pause was raised (build plan WS13 S2); null when the creator stated none.
         "cause": approval.cause.as_ref().map_or(Value::Null, approval_cause_value),
-    })
+        // What the card says it is for (build plan WS10 S1): allowlisted by the creator and
+        // re-validated by Session Core, never raw arguments.
+        "tool_key": empty_to_null(&approval.tool_key),
+        "action_label": empty_to_null(&approval.action_label),
+        // What approving does with the paused work, stated by Session Core from its own rows:
+        // `action_continuation`, `live_poll` or `none`. Null on an approval created before the
+        // card context existed, so a surface says nothing rather than guessing.
+        "resume_class": card_resume_class(approval).map_or(Value::Null, Value::String),
+        // Where the approved action stands, derived from the delivery rows; null until granted.
+        "continuation": continuation_value(approval),
+        // Who is asked to decide it and who raised it (build plan WS10 S6): identifiers and kinds
+        // only. The requester is the subject the approved action runs as.
+        "requester_subject_id": empty_to_null(&approval.requester_subject_id),
+        "addressee": approval.addressee.as_ref().map(|a| json!({
+            "kind": match a.kind {2 => "named", 3 => "any_editor", 4 => "any_manager", _ => "requester"},
+            "subject_id": empty_to_null(&a.subject_id),
+        })),
+        "grant_ref": empty_to_null(&approval.grant_ref),
+        "turn_origin": empty_to_null(&approval.turn_origin),
+    });
+    // EP-10-S4: present only for an approval the person edited before granting, so every other
+    // approval projects exactly as before.
+    if approval.revision > 0 {
+        value["revision"] = json!(approval.revision);
+    }
+    value
+}
+
+/// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
+/// are off, so a card never offers a scope the decide route would refuse.
+fn offered_scope_options(cause: &ApprovalCause) -> Vec<String> {
+    if approval_cause::scope_grants_enabled() {
+        cause.scope_options.clone()
+    } else {
+        vec![SCOPE_ONCE.to_owned()]
+    }
 }
 
 /// The part of an approval's cause a browser may read. An allowlist: the stored cause also
@@ -7070,7 +9487,10 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "effect_class": empty_to_null(&cause.effect_class),
         "risk_category": empty_to_null(&cause.risk_category),
         "rule_id": empty_to_null(&cause.rule_id),
-        "scope_options": cause.scope_options,
+        "assist_kind": empty_to_null(&cause.assist_kind),
+        "assist_origin": empty_to_null(&cause.assist_origin),
+        "host": empty_to_null(&cause.host),
+        "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
     })
 }
@@ -7243,6 +9663,9 @@ mod approval_step_up_tests {
             "model-gateway/src/grpc.rs",
             // The HTTP decide route, where the step-up gate sits.
             "model-gateway/src/http_routes.rs",
+            // Main's Space member decide route (WS10 S6), merged 2026-11-02. It carries a Control
+            // decision, not the step-up gate; whether a member grant needs step-up is a depth item.
+            "model-gateway/src/space_routes/approvals.rs",
         ]
         .into_iter()
         .collect();
@@ -7275,6 +9698,327 @@ mod approval_step_up_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_rule_tests {
+    use super::*;
+
+    /// The digest the fixture tool's definition is pinned to.
+    const PINNED_DIGEST: &str = "2b6a1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a";
+
+    /// An MCP tool's approval as the server states it once the tool is pinned: the given code, the
+    /// declared class, the pinned digest, and the scopes the server computes from them.
+    fn mcp_cause(code: &str, effect_class: &str) -> ApprovalCause {
+        approval_cause::normalized(ApprovalCause {
+            code: code.to_owned(),
+            tool: "mcp__fixture__create_note".to_owned(),
+            effect_class: effect_class.to_owned(),
+            action_key: "mcp__fixture__create_note".to_owned(),
+            call_digest: "digest-of-the-exact-call".to_owned(),
+            tool_digest: PINNED_DIGEST.to_owned(),
+            ..ApprovalCause::default()
+        })
+        .0
+    }
+
+    fn ask(
+        cause: Option<&ApprovalCause>,
+        scope: &str,
+        target: ApprovalState,
+    ) -> Result<bool, HttpJsonError> {
+        checked_rule_proposal(true, scope, target, cause, true)
+    }
+
+    fn refusal_code(result: Result<bool, HttpJsonError>) -> String {
+        let (status, Json(body)) = result.expect_err("the ask is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        body["error"]["code"]
+            .as_str()
+            .expect("a typed refusal code")
+            .to_owned()
+    }
+
+    #[test]
+    fn an_always_choice_before_confirmation_is_a_thread_grant() {
+        let cause = mcp_cause("risky_effect_under_ask", "external_write");
+        let scope = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Granted,
+            &cause.scope_options,
+            true,
+        )
+        .expect("the thread scope is offered");
+        assert_eq!(scope, SCOPE_THREAD);
+        assert!(ask(Some(&cause), scope, ApprovalState::Granted).expect("an MCP grant may ask"));
+        // The grant is the decision's own: it does not wait for the rule to be confirmed. The rule
+        // is proposed beside it and is in force only once the person confirms it.
+        let request = user_decision_request(
+            "appr-1".to_owned(),
+            ApprovalState::Granted,
+            "user-1",
+            "org-1",
+            String::new(),
+            scope,
+            true,
+        );
+        assert_eq!(request.scope, ApprovalScope::Thread as i32);
+        assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
+        assert!(
+            request.rule_proposed,
+            "the proposal travels with the decision"
+        );
+    }
+
+    #[test]
+    fn a_rule_is_proposed_only_from_an_mcp_grant_the_person_may_relax() {
+        let grant = mcp_cause("risky_effect_under_ask", "external_write");
+        let mut built_in = grant.clone();
+        built_in.tool = "write_file".to_owned();
+        assert_eq!(
+            refusal_code(ask(Some(&built_in), SCOPE_THREAD, ApprovalState::Granted)),
+            "rule_not_offered"
+        );
+        for (code, class) in [
+            ("risky_effect_under_ask", "destructive"),
+            ("risky_effect_under_ask", "owner_effect"),
+            ("risky_effect_under_ask", ""),
+            ("hook_ask", "external_write"),
+            ("capability_policy_ask", "external_write"),
+        ] {
+            let cause = mcp_cause(code, class);
+            assert_eq!(
+                refusal_code(ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted)),
+                "rule_not_offered",
+                "{code} with class {class:?}"
+            );
+        }
+        assert_eq!(
+            refusal_code(ask(None, SCOPE_THREAD, ApprovalState::Granted)),
+            "rule_not_offered"
+        );
+        let mut unpinned = grant.clone();
+        unpinned.tool_digest.clear();
+        assert_eq!(
+            refusal_code(ask(
+                Some(&approval_cause::normalized(unpinned).0),
+                SCOPE_THREAD,
+                ApprovalState::Granted
+            )),
+            "rule_not_offered",
+            "an MCP tool whose definition is not pinned has no rule"
+        );
+        assert_eq!(
+            refusal_code(ask(Some(&grant), SCOPE_ONCE, ApprovalState::Granted)),
+            "rule_requires_thread_scope"
+        );
+        assert_eq!(
+            refusal_code(ask(Some(&grant), SCOPE_THREAD, ApprovalState::Denied)),
+            "rule_not_applicable"
+        );
+        for class in ["read", "sandbox_compute", "context_write", "external_write"] {
+            let cause = mcp_cause("consent_to_disclose", class);
+            assert!(
+                ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted).expect(class),
+                "{class} may be relaxed"
+            );
+        }
+        // With the switch off nothing is asked, however invalid the ask, and nothing is refused.
+        assert!(!checked_rule_proposal(
+            true,
+            SCOPE_ONCE,
+            ApprovalState::Denied,
+            Some(&built_in),
+            false,
+        )
+        .expect("ignored while the switch is off"));
+        assert!(!checked_rule_proposal(
+            false,
+            SCOPE_THREAD,
+            ApprovalState::Granted,
+            Some(&grant),
+            true,
+        )
+        .expect("an absent ask is not an ask"));
+    }
+
+    #[test]
+    fn promote_is_ignored_while_the_switch_is_off_and_only_the_literal_true_asks() {
+        assert!(!rule_proposals_from(None));
+        assert!(!rule_proposals_from(Some("1")));
+        assert!(!rule_proposals_from(Some("yes")));
+        assert!(rule_proposals_from(Some(" TRUE ")));
+        let literal: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "promote": true,
+        }))
+        .expect("a boolean promote parses");
+        assert_eq!(literal.promote, Value::Bool(true));
+        for other in [json!("yes"), json!(1), json!(null)] {
+            let body: DecideApprovalBody = serde_json::from_value(json!({
+                "decision": "approve",
+                "promote": other,
+            }))
+            .expect("any promote value parses, as an unknown key always did");
+            assert_ne!(body.promote, Value::Bool(true));
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_edit_route_tests {
+    //! EP-10-S4: the gateway half of approve-with-edits. Every check runs before an upstream call;
+    //! the switch is off by default and a body without `edit` is untouched by it.
+    use super::*;
+
+    const BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn edit_body() -> DecideEditBody {
+        DecideEditBody {
+            patch: json!({ "subject": "New subject" }),
+            base_fingerprint: BASE.to_owned(),
+        }
+    }
+
+    fn code_of(error: &HttpJsonError) -> (StatusCode, String) {
+        (error.0, error.1 .0["error"]["code"].as_str().unwrap_or_default().to_owned())
+    }
+
+    #[test]
+    fn approval_edit_switch_is_off_by_default_and_strict() {
+        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
+        for value in [None, Some("1"), Some("yes"), Some("on"), Some("")] {
+            assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn edit_off_by_default_is_forbidden() {
+        let refused =
+            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Granted, false)
+                .expect_err("off");
+        assert_eq!(code_of(&refused), (StatusCode::FORBIDDEN, "approval_edit_disabled".to_owned()));
+        assert!(refused.1 .0["error"]["details"].is_object(), "details is an object");
+    }
+
+    #[test]
+    fn a_decision_without_an_edit_is_unchanged_by_the_switch() {
+        for enabled in [false, true] {
+            assert!(checked_decision_edit(None, "thread", true, ApprovalState::Denied, enabled)
+                .expect("no edit")
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn edit_with_scope_thread_is_refused() {
+        for (scope, promote) in [("thread", false), ("run", false), ("", true)] {
+            let refused =
+                checked_decision_edit(Some(&edit_body()), scope, promote, ApprovalState::Granted, true)
+                    .expect_err("wide scope");
+            assert_eq!(
+                code_of(&refused),
+                (StatusCode::UNPROCESSABLE_ENTITY, "edit_requires_once".to_owned()),
+                "{scope} {promote}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejection_with_an_edit_is_refused() {
+        let refused =
+            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Denied, true)
+                .expect_err("rejection");
+        assert_eq!(code_of(&refused).1, "edit_requires_grant");
+    }
+
+    #[test]
+    fn an_edit_is_forwarded_as_its_patch_and_base() {
+        let edit = checked_decision_edit(Some(&edit_body()), "once", false, ApprovalState::Granted, true)
+            .expect("accepted")
+            .expect("an edit");
+        assert_eq!(edit.base_fingerprint, BASE);
+        let patch: Value = serde_json::from_str(&edit.patch_json).expect("json");
+        assert_eq!(patch, json!({ "subject": "New subject" }));
+    }
+
+    #[test]
+    fn a_malformed_edit_is_refused_before_the_upstream() {
+        let mut not_object = edit_body();
+        not_object.patch = json!(["subject"]);
+        let refused = checked_decision_edit(Some(&not_object), "", false, ApprovalState::Granted, true)
+            .expect_err("array patch");
+        assert_eq!(code_of(&refused).1, "invalid_patch");
+
+        let mut short = edit_body();
+        short.base_fingerprint = "abc".to_owned();
+        let refused = checked_decision_edit(Some(&short), "", false, ApprovalState::Granted, true)
+            .expect_err("short base");
+        assert_eq!(code_of(&refused).1, "invalid_base_fingerprint");
+
+        let mut large = edit_body();
+        large.patch = json!({ "bodyText": "x".repeat(MAX_EDIT_PATCH_BYTES) });
+        let refused = checked_decision_edit(Some(&large), "", false, ApprovalState::Granted, true)
+            .expect_err("large");
+        assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, "edit_too_large".to_owned()));
+    }
+
+    #[test]
+    fn decide_body_parses_an_edit_and_refuses_unknown_edit_keys() {
+        let body: DecideApprovalBody = serde_json::from_value(json!({
+            "decision": "approve",
+            "edit": { "patch": { "to": ["a@example.com"] }, "base_fingerprint": BASE },
+        }))
+        .expect("an edit parses");
+        assert!(body.edit.is_some());
+        let plain: DecideApprovalBody =
+            serde_json::from_value(json!({ "decision": "approve" })).expect("no edit");
+        assert!(plain.edit.is_none());
+        assert!(serde_json::from_value::<DecideApprovalBody>(json!({
+            "decision": "approve",
+            "edit": { "patch": {}, "base_fingerprint": BASE, "connection_id": "conn-2" },
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn approval_changed_is_409() {
+        let refused = edit_decision_status_to_http(&tonic::Status::aborted("approval_changed"));
+        assert_eq!(code_of(&refused), (StatusCode::CONFLICT, "approval_changed".to_owned()));
+        assert!(refused.1 .0["error"]["details"].is_object());
+    }
+
+    #[test]
+    fn edit_refusals_map_to_typed_statuses() {
+        for error in mp_contracts::approval_edit::EditError::ALL {
+            let refused =
+                edit_decision_status_to_http(&tonic::Status::invalid_argument(error.code()));
+            assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, error.code().to_owned()));
+        }
+        let cases = [
+            (tonic::Status::failed_precondition("not_editable"), StatusCode::UNPROCESSABLE_ENTITY),
+            (tonic::Status::failed_precondition("revision_limit"), StatusCode::CONFLICT),
+            (tonic::Status::failed_precondition("approval_edit_disabled"), StatusCode::FORBIDDEN),
+            (tonic::Status::permission_denied("edit_owner_only"), StatusCode::FORBIDDEN),
+        ];
+        for (status, http) in cases {
+            let refused = edit_decision_status_to_http(&status);
+            assert_eq!(code_of(&refused), (http, status.message().to_owned()));
+        }
+        let other = edit_decision_status_to_http(&tonic::Status::not_found("approval not found"));
+        assert_eq!(other.0, StatusCode::NOT_FOUND, "everything else keeps the shared mapping");
+    }
+
+    #[test]
+    fn an_edited_approval_projects_its_revision_and_an_unedited_one_does_not() {
+        let mut approval = Approval {
+            id: "appr_1".to_owned(),
+            ..Approval::default()
+        };
+        assert!(approval_value(&approval).get("revision").is_none());
+        approval.revision = 1;
+        assert_eq!(approval_value(&approval)["revision"], 1);
     }
 }
 
@@ -7347,6 +10091,8 @@ mod approval_value_tests {
             "user-1",
             "org-1",
             body.reason,
+            "once",
+            false,
         );
         assert_eq!(request.decision_source, ApprovalDecisionSource::User as i32);
         assert_eq!(request.scope, ApprovalScope::Once as i32);
@@ -7372,15 +10118,69 @@ mod approval_value_tests {
     }
 
     #[test]
-    fn a_decision_scope_other_than_once_is_refused_until_grants_exist() {
-        assert!(require_once_scope("").is_ok());
-        assert!(require_once_scope("once").is_ok());
-        for scope in ["thread", "run", "Once", " once", "forever"] {
-            let (status, Json(body)) =
-                require_once_scope(scope).expect_err("a standing scope must be refused");
+    fn a_decision_scope_other_than_once_is_refused_while_grants_are_off() {
+        let offered = vec![SCOPE_ONCE.to_owned(), SCOPE_THREAD.to_owned()];
+        assert_eq!(
+            checked_decision_scope_with("", ApprovalState::Granted, &offered, false).expect("once"),
+            SCOPE_ONCE
+        );
+        for scope in ["thread", "run"] {
+            let (status, Json(body)) = checked_decision_scope_with(
+                scope,
+                ApprovalState::Granted,
+                &offered,
+                false,
+            )
+            .expect_err("a standing scope is refused while grants are off");
             assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{scope}");
             assert_eq!(body["error"]["code"], "scope_not_enabled", "{scope}");
         }
+    }
+
+    #[test]
+    fn decide_refuses_a_scope_the_server_did_not_offer() {
+        let once_only = vec![SCOPE_ONCE.to_owned()];
+        let (status, Json(body)) = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Granted,
+            &once_only,
+            true,
+        )
+        .expect_err("a scope the cause does not offer is refused");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "scope_not_offered");
+
+        let offered = vec![
+            SCOPE_ONCE.to_owned(),
+            SCOPE_THREAD.to_owned(),
+            SCOPE_RUN.to_owned(),
+        ];
+        assert_eq!(
+            checked_decision_scope_with("thread", ApprovalState::Granted, &offered, true)
+                .expect("offered"),
+            SCOPE_THREAD
+        );
+        assert_eq!(
+            checked_decision_scope_with("run", ApprovalState::Granted, &offered, true)
+                .expect("offered"),
+            SCOPE_RUN
+        );
+        let (_, Json(body)) = checked_decision_scope_with(
+            "forever",
+            ApprovalState::Granted,
+            &offered,
+            true,
+        )
+        .expect_err("an unknown scope is refused");
+        assert_eq!(body["error"]["code"], "scope_not_offered");
+        let (_, Json(body)) = checked_decision_scope_with(
+            "thread",
+            ApprovalState::Denied,
+            &offered,
+            true,
+        )
+        .expect_err("a denial carries no scope");
+        assert_eq!(body["error"]["code"], "scope_not_applicable");
     }
 
     #[test]
@@ -7543,14 +10343,31 @@ fn lineage_value(lineage: &SubagentLineage) -> Value {
     json!({
         "thread_id": lineage.thread_id,
         "max_depth": lineage.max_depth,
-        "edges": lineage.edges.iter().map(|edge| {
-            json!({
-                "parent_run_id": edge.parent_run_id,
-                "child_run_id": edge.child_run_id,
-                "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
-            })
-        }).collect::<Vec<_>>(),
+        "edges": lineage.edges.iter().map(lineage_edge_value).collect::<Vec<_>>(),
     })
+}
+
+/// One lineage edge. The goal, batch and edge status (Wave 3 EP-2 S9) are added only when
+/// session-core returned them, so an edge without them serialises exactly as it did before: a
+/// reloaded wide-research panel groups its cards by `batch_id` and titles them by `goal_summary`.
+fn lineage_edge_value(edge: &mp_contracts::model_plane::v1::LineageEdge) -> Value {
+    let mut value = json!({
+        "parent_run_id": edge.parent_run_id,
+        "child_run_id": edge.child_run_id,
+        "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
+    });
+    if let Some(object) = value.as_object_mut() {
+        for (key, field) in [
+            ("goal_summary", &edge.goal_summary),
+            ("batch_id", &edge.batch_id),
+            ("status", &edge.status),
+        ] {
+            if !field.is_empty() {
+                object.insert(key.to_owned(), Value::String(field.clone()));
+            }
+        }
+    }
+    value
 }
 
 fn empty_to_null(value: &str) -> Value {
@@ -7902,6 +10719,7 @@ async fn ingest_feedback(
         // The guard at the top of this handler answered every ZDR posture with a refusal,
         // so the feedback event that reaches this line is persistent.
         zdr: false,
+        ..Default::default()
     };
     state
         .publisher
@@ -7944,6 +10762,11 @@ pub struct InvokeRequest {
     /// authority and Session Core independently verifies this bearer.
     #[serde(default)]
     pub space_context: Option<crate::session_flow::ThreadSpaceContext>,
+    /// Server-injected Control `model.run.wake` decision and the stored post and agent it binds
+    /// (WS08-S3). With it the stream starts one run from that post and appends no user turn. The
+    /// BFF strips any browser value and injects this after Control signs; Session Core verifies it.
+    #[serde(default)]
+    pub wake_context: Option<crate::session_flow::WakeContext>,
     #[serde(default)]
     pub structured_output_schema: Option<String>,
     #[serde(default)]
@@ -7981,6 +10804,18 @@ pub struct InvokeRequest {
     /// its tool set, whether or not the Search toggle is also on.
     #[serde(default, alias = "deepResearch")]
     pub deep_research: bool,
+    /// Wave 3 EP-2 S5 — which turn of a two-turn deep research this is: `"plan"` ends with an
+    /// editable plan and searches nothing, `"run"` runs the plan in `research_plan`. Absent is
+    /// today's one-shot. Kept as raw JSON and read only on a deep-research turn while
+    /// `DEEP_RESEARCH_PLAN_TURN` is on (`deep_research::research_phase`), so a body carrying it is
+    /// parsed exactly as before with the switch off.
+    #[serde(default, alias = "researchPhase")]
+    pub research_phase: Option<serde_json::Value>,
+    /// Wave 3 EP-2 S5 — the edited plan a run turn carries:
+    /// `{sub_queries: [string], answers: [{question, answer}]}`. Untrusted: the gateway re-clamps
+    /// every sub-query and bounds the answers before anything is searched.
+    #[serde(default, alias = "researchPlan")]
+    pub research_plan: Option<serde_json::Value>,
     /// Per-turn retrieval-source filter (Perplexity-Focus style). Absent/unknown
     /// → "auto" (today's behavior, byte-identical). Meaningless and ignored
     /// when `conversation_only` is in effect — that mode already excludes both
@@ -8044,6 +10879,12 @@ pub struct InvokeRequest {
     /// posture (`HARNESS_PHASE1` §1). Absent → "chat" (auto, non-gating).
     #[serde(default)]
     pub profile: Option<String>,
+    /// The agent mode the person chose for this turn (WS25-S6): `lockdown`, `read_only`, `ask_first`
+    /// or `auto`. Read only while `AGENT_MODES` is on, and then it can only tighten the posture the
+    /// platform already sets; an id this build does not know is refused typed (`agent_mode_unknown`).
+    /// Absent or blank is no choice, and the turn is the one it was before the field existed.
+    #[serde(default, alias = "agentMode")]
+    pub agent_mode: Option<String>,
     /// Response-style / verbosity profile (token-efficiency layer):
     /// `concise` | `detailed` | `minimal` | `normal`. `normal`/unset/unknown
     /// injects no directive. See `crate::verbosity`.
@@ -8095,6 +10936,13 @@ pub struct InvokeRequest {
     /// client is never read. A ZDR token is refused through the `agentic` row.
     #[serde(default, alias = "executeGranted")]
     pub execute_granted: bool,
+    /// The plan an approve-then-execute turn runs (WS14 S2): the plan a plan approval answered
+    /// `continuation: execute_now` for. It is read only while `MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE`
+    /// is on, and only together with `execute_granted`. The turn is refused typed
+    /// (`plan_grant_unavailable`) unless the thread's grant names this plan, and the run then binds
+    /// that grant itself (`sse::approve_then_execute_grant`). It carries no rung.
+    #[serde(default, alias = "approvedPlanId")]
+    pub approved_plan_id: Option<String>,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -8148,6 +10996,686 @@ pub struct InvokeRequest {
     /// not carried here — this field is the text alone.
     #[serde(default)]
     pub persona_instructions: Option<String>,
+    /// The reply tone the person picked (EP-8-S3), resolved server-side from user-core's AI settings
+    /// by the BFF gateway and never client-suppliable, like `persona_instructions`. Only the closed
+    /// names `professional`, `friendly`, `direct`, `warm` and `neutral` mean anything: `default` and any
+    /// other value add nothing. Read only while `MODEL_GATEWAY_TONE_PRESETS` is on.
+    #[serde(default)]
+    pub persona_tone: Option<String>,
+    /// WS16-S6 — the viewer's interface language, stamped by the BFF gateway from a closed set
+    /// (`nb-NO` or `en-US`; flag `CHAT_LOCALE_HINT`). A framing hint for the reply language,
+    /// request-scoped: never stored, grants nothing, and `Honored` under ZDR. See
+    /// [`crate::locale_hint`]. Absent on agent wake-ups.
+    #[serde(default)]
+    pub locale: Option<String>,
+    /// The browser's IANA zone name (`Europe/Oslo`), sent on every turn (EP-8-S1). The BFF gateway
+    /// keeps it only in that closed form; it is checked again here, because it is printed into the
+    /// prompt. Read only while `MODEL_GATEWAY_USER_LOCALE_CONTEXT` is on; never stored.
+    #[serde(default)]
+    pub client_timezone: Option<String>,
+    /// The browser's UTC offset in minutes, east positive (EP-8-S1). Dates and times are computed from
+    /// it, so a value outside the range a browser can report gives no local clock at all.
+    #[serde(default)]
+    pub client_utc_offset_minutes: Option<i32>,
+    /// The app language the browser shows, `no` or `en` (EP-8-S1). Distinct from `locale` above, which
+    /// is the WS16-S6 hint with its own switch and vocabulary (`nb-NO` / `en-US`).
+    #[serde(default)]
+    pub ui_locale: Option<String>,
+    /// EP-6 S10 — the published agent definitions this turn's `subagent.task` may name as a
+    /// role, resolved server-side by the BFF gateway (the Space's bound agents, each at its
+    /// pinned or published version) and never client-suppliable, like `agent_system_prompt`.
+    /// Kept as raw JSON: it is read, bounded and typed only while
+    /// `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` is on (`sse::compose_agent_roles`), so a body
+    /// carrying it is parsed exactly as before with the switch off. Grants nothing: a role
+    /// only narrows a delegated child's tools.
+    #[serde(default)]
+    pub agent_roles: Option<serde_json::Value>,
+    /// EP-6 S9 — the mentioned agent's definition id (Convex), stamped by the BFF gateway with
+    /// `AGENT_VERSION_PINNING` on, from the binding it re-resolved; any client copy is stripped
+    /// there first. The five `agent_*` pin fields below are kept as raw JSON for the same reason
+    /// as `agent_roles`: they are read and typed only while `MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST`
+    /// is on (`sse::agent_pin`), so a body carrying them parses exactly as before with it off.
+    #[serde(default)]
+    pub agent_ref: Option<serde_json::Value>,
+    /// EP-6 S9 — the definition version this turn runs (the binding's pin, else the published
+    /// one), from 1.
+    #[serde(default)]
+    pub agent_version: Option<serde_json::Value>,
+    /// EP-6 S9 — `sha256:` digest of that version's canonical body, so a log line names exactly
+    /// what answered.
+    #[serde(default)]
+    pub agent_digest: Option<serde_json::Value>,
+    /// EP-6 S9 — the version's tool allowlist (WS05 capability ids). Only ever narrows the turn's
+    /// tools; absent means the definition states none.
+    #[serde(default)]
+    pub agent_tool_capability_ids: Option<serde_json::Value>,
+    /// EP-6 S9 — the version's autonomy cap (`read_only`, `ask_first` or `auto`), one more input
+    /// to the WS25-S6 strictest-wins mode resolve, so it can only lower the result.
+    #[serde(default)]
+    pub agent_autonomy_cap: Option<serde_json::Value>,
+    /// Wave 3 EP-2 S8 — a wide-research run from the composer's "Bred forskning" entry:
+    /// `{item_cap, items}`, or a one-item retry `{retry_of_child_run_id, batch_id}` (EP-2 S9).
+    /// Kept as raw JSON and read only on an agentic turn while
+    /// `WIDE_RESEARCH_ENTRY_ENABLED` is on ([`wide_research_request`]), so a body carrying it is
+    /// parsed exactly as before with the switch off. It only narrows a run: the gateway clamps
+    /// `item_cap` to the org's `research.max_fan_out_items`.
+    #[serde(default, alias = "wideResearch")]
+    pub wide_research: Option<serde_json::Value>,
+    /// Wave 3 EP-3 S5 — the typed context references the composer attached: `[{kind, id, label,
+    /// selection?}]`, selectors only, never content. Kept as raw JSON and read only while
+    /// `MODEL_GATEWAY_CONTEXT_REFS_ENABLED` is on ([`crate::context_refs::resolve`]), so a body
+    /// carrying it parses exactly as before with the switch off. A ZDR turn carrying any is refused
+    /// with the `context_references` feature whatever the switch says.
+    #[serde(default, alias = "contextRefs")]
+    pub context_refs: Option<serde_json::Value>,
+    /// Wave 3 EP-5 S7 — the brand deck template the person picked: a skill id, never a name the
+    /// model chose (decision D5). Kept as raw JSON and read only while `SKILL_DECK_TEMPLATES_ENABLED`
+    /// is on ([`crate::deck_templates::requested`]), so a body carrying it parses exactly as before
+    /// with the switch off. The turn checks it with [`crate::deck_templates::resolve`] before use; a
+    /// ZDR turn carrying one is refused with the `skills` feature.
+    #[serde(default, alias = "deckTemplate")]
+    pub deck_template: Option<serde_json::Value>,
+    /// Wave 3 EP-7 S1 — the thread goal a Continue turn works toward (`goal_...`). Read only on a
+    /// Do turn while `MODEL_GATEWAY_THREAD_GOALS_ENABLED` is on
+    /// ([`crate::thread_goal_routes::turn_goal_recitation`]): a goal that is not the thread's
+    /// active goal is refused `thread_goal_mismatch` before any run exists. A ZDR turn carrying one
+    /// is refused with the `thread_goal` feature whatever the switch says.
+    #[serde(default, alias = "goalId")]
+    pub goal_id: Option<String>,
+    /// Wave 3 EP-7 S4 — the turn was sent by the goal bar's "Keep going" pump after its countdown,
+    /// not typed. It grants nothing: it marks the run for audit (`runs.metadata.goal_auto`, through
+    /// [`crate::goal_auto::mark`]) and is refused `goal_auto_disabled` before any run exists unless
+    /// `MODEL_GATEWAY_GOAL_AUTO_CONTINUE` is on ([`crate::goal_auto::refusal`]). Every goal turn is
+    /// still claimed by session-core, which refuses while a decision waits on the owner.
+    #[serde(default, alias = "goalAuto")]
+    pub goal_auto: bool,
+}
+
+/// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
+/// it. Off, `POST /v1/research/wide/estimate` answers 404 and `InvokeRequest.wide_research` is never
+/// read, so a run is exactly what it was before the switch existed.
+pub const WIDE_RESEARCH_ENTRY_ENV: &str = "WIDE_RESEARCH_ENTRY_ENABLED";
+
+/// Whether the wide-research entry is on in this process.
+#[must_use]
+pub fn wide_research_entry_enabled() -> bool {
+    wide_research_entry_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn wide_research_entry_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(WIDE_RESEARCH_ENTRY_ENV).is_some_and(|value| value.trim() == "true")
+}
+
+/// The most items one wide-research run fans out: the hard maximum of the org policy key and of
+/// execution-core's `subagent::MAX_WIDE_RESEARCH_ITEMS`.
+pub const MAX_WIDE_RESEARCH_ITEMS: u32 = mp_contracts::org_agent_policy::MAX_FAN_OUT_ITEMS;
+
+/// Most items a wide-research request may carry, kept and dropped together (execution-core reads
+/// no more than this many either).
+const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
+
+/// Longest item forwarded; execution-core cuts at the same length.
+const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+
+/// Longest child run id a retry may name (EP-2 S9); run ids are ULID-based and far shorter.
+const MAX_WIDE_RESEARCH_RUN_ID_CHARS: usize = 128;
+
+/// Longest batch id a retry may name (EP-2 S9): a batch id is the fan-out call's step id.
+const MAX_WIDE_RESEARCH_BATCH_ID_CHARS: usize = 256;
+
+/// Whether a retry's run or batch id is one execution-core may look up: non-empty, at most `max`
+/// characters, printable ASCII with no whitespace. Anything else is not an id this platform minted.
+fn wide_research_retry_id_ok(id: &str, max: usize) -> bool {
+    !id.is_empty() && id.len() <= max && id.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// Items in flight at once in one fan-out: execution-core's `WIDE_RESEARCH_FAN_OUT_CONCURRENCY`
+/// default. The gateway cannot read that executor's environment, so the estimate states this.
+const WIDE_RESEARCH_CONCURRENCY: u32 = 4;
+
+/// The org's wide-research item cap and where it came from: the org's own policy, or the key's
+/// platform default when the policy switch does not enforce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideResearchCap {
+    pub items: u32,
+    pub source: &'static str,
+}
+
+impl WideResearchCap {
+    /// The cap a run is held to: the org's value when the policy is enforced (`Some`), else the
+    /// key's default, never above [`MAX_WIDE_RESEARCH_ITEMS`].
+    #[must_use]
+    pub fn of(org_cap: Option<u32>) -> Self {
+        match org_cap {
+            Some(items) => Self {
+                items: items.min(MAX_WIDE_RESEARCH_ITEMS),
+                source: "org_policy",
+            },
+            None => Self {
+                items: mp_contracts::org_agent_policy::DEFAULT_MAX_FAN_OUT_ITEMS,
+                source: "platform_default",
+            },
+        }
+    }
+}
+
+/// The wide-research request a Do run carries (Wave 3 EP-2 S8), from the turn's raw JSON.
+///
+/// `None` with the switch off, for a ZDR or waived turn, and for a body that is not
+/// `{item_cap?, items?}` or a retry `{retry_of_child_run_id, batch_id?}` (EP-2 S9). Items are trimmed, blank ones skipped, each cut to 500 characters and at
+/// most 64 kept; `item_cap` is the person's ask (the item count when absent) clamped to the org
+/// cap, so a request can only narrow. An org cap of 0 is sent as 0, and execution-core refuses the
+/// run: wide research is off for that org.
+#[must_use]
+pub fn wide_research_request(
+    enabled: bool,
+    raw: Option<&Value>,
+    zdr_or_waived: bool,
+    cap: WideResearchCap,
+) -> Option<mp_contracts::model_plane::v1::WideResearchRequest> {
+    #[derive(Deserialize)]
+    struct Input {
+        #[serde(default)]
+        item_cap: Option<u32>,
+        #[serde(default)]
+        items: Vec<String>,
+        #[serde(default)]
+        retry_of_child_run_id: Option<String>,
+        #[serde(default)]
+        batch_id: Option<String>,
+    }
+
+    if !enabled || zdr_or_waived {
+        return None;
+    }
+    let input = raw
+        .filter(|raw| raw.is_object())
+        .and_then(|raw| serde_json::from_value::<Input>(raw.clone()).ok())?;
+    // A one-item retry (EP-2 S9): execution-core reads the item back from the child run, owner
+    // checked, so the body's items are not forwarded; the cap is one item, and an org with wide
+    // research off is still sent 0. A malformed id is no request at all, never a fresh fan-out.
+    if let Some(child_run_id) = input.retry_of_child_run_id.as_deref() {
+        let batch_id = input.batch_id.as_deref().unwrap_or_default();
+        if !wide_research_retry_id_ok(child_run_id, MAX_WIDE_RESEARCH_RUN_ID_CHARS)
+            || !(batch_id.is_empty()
+                || wide_research_retry_id_ok(batch_id, MAX_WIDE_RESEARCH_BATCH_ID_CHARS))
+        {
+            return None;
+        }
+        return Some(mp_contracts::model_plane::v1::WideResearchRequest {
+            item_cap: cap.items.min(1),
+            items: Vec::new(),
+            batch_id: batch_id.to_owned(),
+            retry_of_child_run_id: child_run_id.to_owned(),
+        });
+    }
+    let items: Vec<String> = input
+        .items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
+        .map(|item| item.chars().take(MAX_WIDE_RESEARCH_ITEM_CHARS).collect())
+        .collect();
+    let asked = input
+        .item_cap
+        .filter(|&count| count > 0)
+        .or_else(|| u32::try_from(items.len()).ok().filter(|&count| count > 0))
+        .unwrap_or(cap.items);
+    Some(mp_contracts::model_plane::v1::WideResearchRequest {
+        item_cap: asked.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS),
+        items,
+        ..Default::default()
+    })
+}
+
+/// `POST /v1/research/wide/estimate` body: how many items the person means to research, and on
+/// which model and route.
+#[derive(Debug, Deserialize)]
+pub struct WideResearchEstimateRequest {
+    pub item_count: u32,
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The route the run would be pinned to, as the composer sends it on the turn; a subscription
+    /// route has no per-token price.
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub subscription_connection_id: Option<String>,
+}
+
+/// What one research round is assumed to read and write, for the USD range only: a researcher's
+/// round reads a page or a result list and writes a short note. A range, never a promise.
+const ESTIMATE_INPUT_TOKENS_PER_ROUND: (u32, u32) = (6_000, 18_000);
+const ESTIMATE_OUTPUT_TOKENS_PER_ROUND: (u32, u32) = (500, 1_500);
+
+/// Seconds one item round is assumed to take, low and high, for the wall-clock range.
+const ESTIMATE_SECONDS_PER_ROUND: (u64, u64) = (30, 90);
+
+/// What a wide-research run of some items would look like before it starts (Wave 3 EP-2 S8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WideResearchEstimate {
+    pub items_requested: u32,
+    pub items_after_cap: u32,
+    pub concurrency: u32,
+    pub rounds_per_item: u32,
+    pub minutes_low: u64,
+    pub minutes_high: u64,
+    pub cap: WideResearchCap,
+}
+
+impl WideResearchEstimate {
+    /// The pure part of the estimate. `max_rounds` is the run's round budget and `deadline_secs`
+    /// its wall clock, resolved server-side exactly as a real run's are.
+    #[must_use]
+    pub fn compute(
+        item_count: u32,
+        cap: WideResearchCap,
+        max_rounds: u32,
+        deadline_secs: u64,
+    ) -> Self {
+        let items = item_count.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS);
+        let concurrency = WIDE_RESEARCH_CONCURRENCY.min(items.max(1));
+        // The parent spends its first round calling the fan-out and keeps one to answer with
+        // (execution-core's `PARENT_SYNTHESIS_RESERVE`); the rest is divided between the items.
+        let rounds_per_item = if items == 0 {
+            0
+        } else {
+            max_rounds.saturating_sub(2) / items
+        };
+        let waves = u64::from(items.div_ceil(concurrency));
+        let rounds = u64::from(rounds_per_item.max(1));
+        let deadline_minutes = deadline_secs.div_ceil(60);
+        Self {
+            items_requested: item_count,
+            items_after_cap: items,
+            concurrency,
+            rounds_per_item,
+            minutes_low: (waves * ESTIMATE_SECONDS_PER_ROUND.0)
+                .div_ceil(60)
+                .min(deadline_minutes),
+            minutes_high: (waves * rounds * ESTIMATE_SECONDS_PER_ROUND.1)
+                .div_ceil(60)
+                .min(deadline_minutes),
+            cap,
+        }
+    }
+
+    /// The USD range on a metered, priced route; `None` (null on the wire) on a subscription
+    /// route or for a model the catalogue does not name, never a borrowed figure.
+    #[must_use]
+    pub fn usd(&self, list: Option<&crate::pricing::ListPrice>) -> Option<(f64, f64)> {
+        let list = list?;
+        let rounds = f64::from(self.items_after_cap) * f64::from(self.rounds_per_item.max(1));
+        let cost = |input: u32, output: u32| {
+            rounds
+                * (f64::from(input) * list.input_per_million
+                    + f64::from(output) * list.output_per_million)
+                / 1_000_000.0
+        };
+        Some((
+            cost(
+                ESTIMATE_INPUT_TOKENS_PER_ROUND.0,
+                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.0,
+            ),
+            cost(
+                ESTIMATE_INPUT_TOKENS_PER_ROUND.1,
+                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.1,
+            ),
+        ))
+    }
+
+    /// The `data` of the estimate answer.
+    #[must_use]
+    pub fn json(&self, usd: Option<(f64, f64)>, basis: crate::pricing::CostBasis) -> Value {
+        json!({
+            "items_requested": self.items_requested,
+            "items_after_cap": self.items_after_cap,
+            "concurrency": self.concurrency,
+            "rounds_per_item": self.rounds_per_item,
+            "minutes_low": self.minutes_low,
+            "minutes_high": self.minutes_high,
+            "usd_low": usd.map(|(low, _)| low),
+            "usd_high": usd.map(|(_, high)| high),
+            "cost_basis": basis.as_str(),
+            "cap": self.cap.items,
+            "cap_source": self.cap.source,
+        })
+    }
+}
+
+/// A typed error of the estimate route; `details` is always an object.
+fn wide_research_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// `POST /v1/research/wide/estimate` (Wave 3 EP-2 S8): what a wide-research run of `item_count`
+/// items would look like, before it is started. Pure compute: nothing is stored and nothing is
+/// started. 404 while `WIDE_RESEARCH_ENTRY_ENABLED` is off. A zero-retention caller is refused with
+/// the typed `agentic` refusal, because the run it estimates is refused under ZDR. The org's cap is
+/// read as a Do run's is; a policy that is enforced and cannot be read answers
+/// `org_policy_unavailable`. USD is null unless the route is metered and the model priced.
+async fn wide_research_estimate_route(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Json(req): Json<WideResearchEstimateRequest>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !wide_research_entry_enabled() {
+        return Err(wide_research_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "not found",
+        ));
+    }
+    wide_research_estimate_posture(&claims)?;
+    let org_cap = wide_research_org_cap(&state, &claims.org_id, capability_bearer.as_deref())
+        .await
+        .map_err(|code| {
+            wide_research_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                code,
+                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
+            )
+        })?;
+    let basis = crate::pricing::CostBasis::of_route(
+        req.provider.as_deref().unwrap_or_default(),
+        req.subscription_connection_id.as_deref().unwrap_or_default(),
+    );
+    let pinned = basis == crate::pricing::CostBasis::Subscription;
+    let estimate = WideResearchEstimate::compute(
+        req.item_count,
+        WideResearchCap::of(org_cap),
+        crate::run_budget::run_budget_from_env(pinned).max_rounds,
+        crate::sse::agentic_run_deadline_secs(pinned),
+    );
+    let model = req.model.as_deref().map(str::trim).unwrap_or_default();
+    let list = if model.is_empty() {
+        None
+    } else {
+        state.pricing.snapshot().await.list_price(basis, model)
+    };
+    Ok(Json(json!({
+        "data": estimate.json(estimate.usd(list.as_ref()), basis)
+    })))
+}
+
+/// The estimate's ZDR gate: a zero-retention caller is refused with the `agentic` feature (the run
+/// it estimates is refused the same way); a waiver, which names one chat connection, is answered as
+/// a Do run of its org would be, since the estimate names no connection and stores nothing.
+///
+/// # Errors
+///
+/// The typed refusal as an HTTP answer.
+fn wide_research_estimate_posture(claims: &Claims) -> Result<(), HttpJsonError> {
+    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(posture) if posture.zdr() => Err(crate::zdr_posture::http(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic"),
+        )),
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.code() == mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH => {
+            Ok(())
+        }
+        Err(refusal) => Err(crate::zdr_posture::http(&refusal)),
+    }
+}
+
+/// The org's `research.max_fan_out_items` as the policy switch reads it: `None` when the switch
+/// does not enforce (the platform default applies), the org's value when it does.
+///
+/// # Errors
+///
+/// [`crate::org_agent_policy::POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be
+/// read inside its bound, as a Do run would be refused.
+pub(crate) async fn wide_research_org_cap(
+    state: &AppState,
+    org_id: &str,
+    capability_bearer: Option<&VerifiedCapabilityBearer>,
+) -> Result<Option<u32>, &'static str> {
+    use crate::org_agent_policy::{policy_mode, shared_cache, PolicyMode};
+
+    if policy_mode() != PolicyMode::Enforce {
+        return Ok(None);
+    }
+    crate::org_agent_policy::ensure(
+        shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        org_id,
+        capability_bearer.map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map(|policy| Some(policy.max_fan_out_items))
+    .map_err(|error| {
+        tracing::warn!(%org_id, %error, "org agent policy cannot be read for a wide-research estimate");
+        crate::org_agent_policy::POLICY_UNAVAILABLE_CODE
+    })
+}
+
+#[cfg(test)]
+mod wide_research_tests {
+    use super::*;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": zdr,
+            "org_zdr": zdr,
+        }))
+        .expect("a minted token's payload is valid Claims")
+    }
+
+    fn org(items: u32) -> WideResearchCap {
+        WideResearchCap::of(Some(items))
+    }
+
+    #[test]
+    fn wide_research_entry_switch_is_only_the_literal_true() {
+        for (value, on) in [
+            (None, false),
+            (Some("false"), false),
+            (Some("1"), false),
+            (Some("TRUE"), false),
+            (Some("true"), true),
+        ] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert_eq!(wide_research_entry_enabled_with(&get), on, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn wide_research_request_is_absent_with_the_switch_off_and_under_zdr() {
+        let body = json!({"item_cap": 5, "items": ["a"]});
+        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
+        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
+        assert_eq!(wide_research_request(true, None, false, org(8)), None);
+        assert_eq!(
+            wide_research_request(true, Some(&json!(["a"])), false, org(8)),
+            None
+        );
+    }
+
+    #[test]
+    fn wide_research_request_clamps_the_ask_to_the_org_cap() {
+        // Org cap 5, ten items asked: the run is held to 5 and carries all ten items, so
+        // execution-core can name the five it drops.
+        let items: Vec<String> = (0..10).map(|n| format!("item {n}")).collect();
+        let request = wide_research_request(true, Some(&json!({"items": items})), false, org(5))
+            .expect("the switch is on");
+        assert_eq!(request.item_cap, 5);
+        assert_eq!(request.items.len(), 10);
+        // A count preset with no list asks for that many, never more than the org allows.
+        let preset = wide_research_request(true, Some(&json!({"item_cap": 16})), false, org(8))
+            .expect("the switch is on");
+        assert_eq!(preset.item_cap, 8);
+        assert!(preset.items.is_empty());
+        // A narrower ask stays narrower.
+        let narrow =
+            wide_research_request(true, Some(&json!({"item_cap": 3})), false, org(8)).expect("on");
+        assert_eq!(narrow.item_cap, 3);
+        // An org with wide research off is sent 0, and execution-core refuses the run.
+        let off = wide_research_request(true, Some(&json!({"items": ["a"]})), false, org(0))
+            .expect("on");
+        assert_eq!(off.item_cap, 0);
+    }
+
+    #[test]
+    fn wide_research_request_bounds_and_cleans_items() {
+        let long = "y".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 10);
+        let many: Vec<String> = (0..80).map(|n| format!("q{n}")).collect();
+        let request = wide_research_request(
+            true,
+            Some(&json!({"items": ["  a  ", "", "   ", long]})),
+            false,
+            org(16),
+        )
+        .expect("on");
+        assert_eq!(request.items[0], "a");
+        assert_eq!(request.items.len(), 2);
+        assert_eq!(request.items[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
+        let flood = wide_research_request(true, Some(&json!({"items": many})), false, org(16))
+            .expect("on");
+        assert_eq!(flood.items.len(), MAX_WIDE_RESEARCH_REQUEST_ITEMS);
+    }
+
+    #[test]
+    fn a_wide_research_retry_is_one_item_named_by_its_child_run() {
+        let body = json!({
+            "retry_of_child_run_id": "run-01jchild",
+            "batch_id": "run-1:tool_1_fan-1",
+            "items": ["ignored"],
+            "item_cap": 9,
+        });
+        let retry = wide_research_request(true, Some(&body), false, org(8)).expect("on");
+        assert_eq!(retry.item_cap, 1);
+        assert!(retry.items.is_empty(), "execution-core reads the item back itself");
+        assert_eq!(retry.retry_of_child_run_id, "run-01jchild");
+        assert_eq!(retry.batch_id, "run-1:tool_1_fan-1");
+        // An org with wide research off is still refused by execution-core.
+        let off = wide_research_request(true, Some(&body), false, org(0)).expect("on");
+        assert_eq!(off.item_cap, 0);
+        // A retry is a non-ZDR, switched-on request like any other.
+        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
+        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
+    }
+
+    #[test]
+    fn a_wide_research_retry_with_a_malformed_id_is_no_request() {
+        for body in [
+            json!({"retry_of_child_run_id": ""}),
+            json!({"retry_of_child_run_id": "run 1"}),
+            json!({"retry_of_child_run_id": "r".repeat(MAX_WIDE_RESEARCH_RUN_ID_CHARS + 1)}),
+            json!({"retry_of_child_run_id": "run-1", "batch_id": "a\nb"}),
+        ] {
+            assert_eq!(
+                wide_research_request(true, Some(&body), false, org(8)),
+                None,
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lineage_edge_adds_goal_batch_and_status_only_when_stored() {
+        let lineage = SubagentLineage {
+            thread_id: "thread-1".to_owned(),
+            max_depth: 1,
+            edges: vec![
+                mp_contracts::model_plane::v1::LineageEdge {
+                    parent_run_id: "run-p".to_owned(),
+                    child_run_id: "run-old".to_owned(),
+                    role: SubagentRole::Generic as i32,
+                    ..Default::default()
+                },
+                mp_contracts::model_plane::v1::LineageEdge {
+                    parent_run_id: "run-p".to_owned(),
+                    child_run_id: "run-item".to_owned(),
+                    role: SubagentRole::Researcher as i32,
+                    goal_summary: "look up carrier docs".to_owned(),
+                    batch_id: "run-p:tool_1_fan-1".to_owned(),
+                    status: "attached".to_owned(),
+                    ..Default::default()
+                },
+            ],
+        };
+        let value = lineage_value(&lineage);
+        // An edge without the readback fields serialises exactly as before them.
+        assert_eq!(
+            value["edges"][0],
+            json!({
+                "parent_run_id": "run-p",
+                "child_run_id": "run-old",
+                "role": SubagentRole::Generic.as_str_name(),
+            })
+        );
+        assert_eq!(value["edges"][1]["goal_summary"], "look up carrier docs");
+        assert_eq!(value["edges"][1]["batch_id"], "run-p:tool_1_fan-1");
+        assert_eq!(value["edges"][1]["status"], "attached");
+    }
+
+    #[test]
+    fn wide_research_cap_without_an_enforced_policy_is_the_platform_default() {
+        let platform = WideResearchCap::of(None);
+        assert_eq!(platform.items, 8);
+        assert_eq!(platform.source, "platform_default");
+        let held = WideResearchCap::of(Some(40));
+        assert_eq!(held.items, MAX_WIDE_RESEARCH_ITEMS);
+        assert_eq!(held.source, "org_policy");
+    }
+
+    #[test]
+    fn wide_research_estimate_clamps_to_the_org_cap_and_bounds_minutes_by_the_deadline() {
+        let estimate = WideResearchEstimate::compute(10, org(5), 12, 600);
+        assert_eq!(estimate.items_requested, 10);
+        assert_eq!(estimate.items_after_cap, 5);
+        assert_eq!(estimate.concurrency, 4);
+        assert_eq!(estimate.rounds_per_item, 2, "(12 - 2) rounds over 5 items");
+        assert!(estimate.minutes_low <= estimate.minutes_high);
+        assert!(estimate.minutes_high <= 10, "never past the 600 s deadline");
+        let off = WideResearchEstimate::compute(10, org(0), 12, 600);
+        assert_eq!(off.items_after_cap, 0);
+        assert_eq!(off.rounds_per_item, 0);
+    }
+
+    #[test]
+    fn wide_research_estimate_usd_is_null_without_a_list_price() {
+        let estimate = WideResearchEstimate::compute(4, org(8), 12, 600);
+        assert_eq!(estimate.usd(None), None);
+        let body = estimate.json(None, crate::pricing::CostBasis::Subscription);
+        assert!(body["usd_low"].is_null() && body["usd_high"].is_null(), "{body}");
+        assert_eq!(body["cost_basis"], "subscription");
+        assert_eq!(body["cap_source"], "org_policy");
+
+        let list = crate::pricing::ListPrice {
+            input_per_million: 1.0,
+            output_per_million: 2.0,
+            currency: "USD".to_owned(),
+            source: crate::pricing::PriceSource::Exact,
+        };
+        let (low, high) = estimate.usd(Some(&list)).expect("a priced, metered route");
+        assert!(low > 0.0 && low < high, "{low} {high}");
+    }
+
+    /// The golden case `e_zdr_token_wide_research_estimate_refused` (EP-2 S8): a feature refusal,
+    /// so it lives here and in the ZDR feature table, not as a posture-matrix row.
+    #[test]
+    fn wide_research_estimate_refuses_a_zdr_caller_with_the_agentic_feature() {
+        let (status, Json(body)) =
+            wide_research_estimate_posture(&claims(true)).expect_err("a ZDR caller is refused");
+        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(body["error"]["feature"], "agentic", "{body}");
+        assert!(wide_research_estimate_posture(&claims(false)).is_ok());
+    }
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -8807,10 +12335,30 @@ async fn plan_approval(
         state.plan_mode.grant_expires_at(&claims.org_id, &thread_id)
     };
 
+    // WS14 S2: what the client does next. `execute_now` needs the grant recorded durably for this
+    // plan (the durable switch on, the write landed, not waived) and an execute turn accepted here
+    // (the execute switch and the approval-resume switch both on). Otherwise the grant waits for the
+    // person's own next turn, as it always has.
+    let continuation = crate::sse::approval_continuation(
+        crate::sse::plan_execute_on_approve_enabled(),
+        durable_grant && durably_recorded && !body.plan_id.is_empty(),
+        state.plan_mode.execute_enabled() && state.plan_mode.approval_resume_enabled(),
+    );
+    // WS25-S9: the rung the run will actually hold. An enforced org rung cap clamps the grant at dispatch (and the
+    // in-memory copy at record), so the answer states the clamped rung rather than the one asked for.
+    let effective_rung = crate::org_agent_policy::clamp_rung(
+        Some(escalation.to()),
+        crate::org_agent_policy::held_rung_cap(
+            crate::org_agent_policy::policy_mode(),
+            crate::org_agent_policy::shared_cache(),
+            &claims.org_id,
+        ),
+    )
+    .unwrap_or(escalation.to());
     Ok(Json(json!({
         "run_id": run_id,
         "was_in_plan_mode": exited.was_active,
-        "granted_rung": label(escalation.to()),
+        "granted_rung": label(effective_rung),
         "justification": escalation.justification(),
         "persisted": durably_recorded,
         "plan": approved_plan.map(|plan| plan_value(&plan)),
@@ -8819,6 +12367,8 @@ async fn plan_approval(
         // so and refuse to offer a rung that has run out. `null` when no grant is held
         // (a rung the store does not record).
         "grant_expires_at_unix": grant_expires_at_unix,
+        // WS14 S2, additive: `execute_now` or `next_message` (see above).
+        "continuation": continuation,
     })))
 }
 
@@ -9335,6 +12885,41 @@ struct ModelDescriptor {
     /// ladder off serves the same JSON as before.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     effort_levels: Vec<String>,
+    /// The context window in tokens from the declared record. Left out when no sourced
+    /// row names the model, so an unknown model serves the JSON it served before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_window_tokens: Option<u32>,
+    /// The synchronous output ceiling in tokens this model is served at. Left out when
+    /// unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<u32>,
+    /// `ga`, `preview` or `deprecated`. Left out when no sourced row names the model.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    lifecycle: String,
+    /// The catalogue's list price for a chat model, behind
+    /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
+    /// with the switch off serves the same JSON as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    price: Option<crate::catalogue_prices::ModelPrice>,
+    /// What the provider states about this model's request data (`data_use` on inference-core's
+    /// `ModelInfo`). Left out when nothing is stated, so a deploy without an attested deployment
+    /// serves the JSON it served before (EP-9 C5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_use: Option<DataUseDescriptor>,
+}
+
+/// The data-use statements one model's provider makes (`data_use` on `/v1/models`). A field is
+/// left out unless a source states it: an absent field is "not stated", never "no".
+#[derive(Debug, Serialize)]
+struct DataUseDescriptor {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trains_on_inputs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retention_days: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    zdr_attested: Option<bool>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    statement_ref: String,
 }
 
 /// Wire-numeric → tier label. Mirrors inference-core's `PrivacyTier::label`;
@@ -9351,6 +12936,12 @@ pub(crate) fn privacy_tier_label(value: i32) -> &'static str {
     }
 }
 
+/// A token count the record declares, or `None` when it declares none, so the descriptor
+/// leaves the field out rather than stating zero tokens.
+fn known_tokens(value: u32) -> Option<u32> {
+    (value > 0).then_some(value)
+}
+
 #[derive(Debug, Serialize)]
 struct ListModelsHttpResponse {
     models: Vec<ModelDescriptor>,
@@ -9359,10 +12950,19 @@ struct ListModelsHttpResponse {
     /// same JSON as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     entitlement: Option<ModelEntitlementMeta>,
+    /// Whether side tasks ask the platform role table (`MODEL_GATEWAY_ROLE_ROUTING`, EP-13 S4).
+    /// Left out while off, so a deploy with the switch off serves the same JSON as before.
+    #[serde(skip_serializing_if = "is_false")]
+    role_routing: bool,
     /// What a chat turn may attach, enforced by the stream route. Left out when
     /// the attachment contract is off, so the client keeps its own constants.
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment_policy: Option<crate::attachment_policy::DeclaredAttachmentPolicy>,
+}
+
+/// The serde skip predicate for a flag that is left out while it is off.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// `ModelAccessMeta` as the catalogue's sibling field: counts, a revision and
@@ -9413,18 +13013,35 @@ async fn list_models(
         })?
         .into_inner();
 
+    // One catalogue snapshot prices the whole listing, and none is taken while the switch is off.
+    let rates = crate::catalogue_prices::snapshot_for_listing(&state.pricing).await;
     let models: Vec<ModelDescriptor> = resp
         .models
         .into_iter()
-        .map(|m| ModelDescriptor {
-            id: m.id,
-            provider: m.provider,
-            modality: m.modality,
-            streaming: m.streaming,
-            features: m.features,
-            privacy_tier: privacy_tier_label(m.privacy_tier),
-            residency: m.residency,
-            effort_levels: m.effort_levels,
+        .map(|m| {
+            let price = rates.as_ref().and_then(|rates| {
+                crate::catalogue_prices::model_price(rates, &m.id, &m.provider, &m.modality)
+            });
+            ModelDescriptor {
+                id: m.id,
+                provider: m.provider,
+                modality: m.modality,
+                streaming: m.streaming,
+                features: m.features,
+                privacy_tier: privacy_tier_label(m.privacy_tier),
+                residency: m.residency,
+                effort_levels: m.effort_levels,
+                context_window_tokens: known_tokens(m.context_window_tokens),
+                max_output_tokens: known_tokens(m.max_output_tokens),
+                lifecycle: m.lifecycle,
+                price,
+                data_use: m.data_use.map(|data_use| DataUseDescriptor {
+                    trains_on_inputs: data_use.trains_on_inputs,
+                    retention_days: data_use.retention_days,
+                    zdr_attested: data_use.zdr_attested,
+                    statement_ref: data_use.statement_ref,
+                }),
+            }
         })
         .collect();
     let entitlement = resp.access.map(|access| ModelEntitlementMeta {
@@ -9448,6 +13065,7 @@ async fn list_models(
         models,
         entitlement,
         attachment_policy,
+        role_routing: crate::role_routing::role_routing_enabled(),
     }))
 }
 
@@ -9577,6 +13195,14 @@ struct ThreadMessage {
     /// string". Presentation identity, never an authority claim.
     #[serde(skip_serializing_if = "String::is_empty")]
     author_subject_id: String,
+    /// `post` for a human message written to the room; omitted for a conversation turn
+    /// (`turn`, or a row from before post kinds), so a turn keeps the shape it always had.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    post_kind: String,
+    /// When session-core stored this turn, as RFC3339. A room shows a time beside each
+    /// message. Omitted when session-core sent none, so a reader never sees a made-up time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_at: Option<String>,
     /// The turn's persisted evidence, flattened so its keys (today
     /// `grounding`) sit directly on the message the way the live SSE path
     /// delivers them. Omitted entirely for turns recorded before metadata was
@@ -9587,6 +13213,110 @@ struct ThreadMessage {
     /// only on a versioned thread, so every other transcript keeps its shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<ThreadMessageVersion>,
+    /// The typed room entry of a human post (WS15): its own field, never flattened with the free
+    /// metadata. An unknown future kind arrives as `{kind, version}` only. Omitted when none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<ThreadMessageEntry>,
+    /// The mentions recorded on a post (WS08), with the wake state derived from the newest run per
+    /// (post, agent). Ids and closed words only; omitted when the row has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<ThreadMessageMention>,
+    /// The latest applied edit or deletion of this message (WS12-S6), flattened so its keys sit on
+    /// the turn. Omitted for a message that was never revised, so every other transcript keeps its
+    /// shape. `content` is already the effective text (empty for a deleted turn).
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    revision: Option<ThreadMessageRevision>,
+}
+
+/// The revision state of a turn as the transcript serialises it (WS12-S6). Ids, closed words and
+/// a time: never the original text.
+#[derive(Debug, Serialize)]
+struct ThreadMessageRevision {
+    /// `edited` or `deleted`.
+    revision_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revised_at: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    revised_by_subject_id: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    revision_no: u32,
+    /// Set only on a deleted turn that an agent run answered before the deletion.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    agent_followed_up: bool,
+}
+
+/// The revision fields of a conversation row, or `None` when it was never revised.
+fn thread_message_revision(
+    m: &mp_contracts::model_plane::v1::SessionMessage,
+) -> Option<ThreadMessageRevision> {
+    if m.revision_state.is_empty() {
+        return None;
+    }
+    Some(ThreadMessageRevision {
+        revision_state: m.revision_state.clone(),
+        revised_at: message_created_at(m.revised_at.as_ref()),
+        revised_by_subject_id: m.revised_by_subject_id.clone(),
+        revision_no: m.revision_no,
+        agent_followed_up: m.agent_followed_up,
+    })
+}
+
+/// One recorded mention of a post as the transcript serialises it (WS08).
+#[derive(Debug, Serialize)]
+struct ThreadMessageMention {
+    subject_id: String,
+    kind: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    wake_state: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    reason: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    source: String,
+    ordinal: u32,
+}
+
+/// A typed room entry as the transcript serialises it (WS15-S6; stored and validated by WS15-S9).
+#[derive(Debug, Serialize)]
+struct ThreadMessageEntry {
+    kind: String,
+    version: u32,
+    /// Present only for the `link_previews` kind.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    link_previews: Vec<ThreadMessageLinkPreview>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadMessageLinkPreview {
+    url: String,
+    final_url: String,
+    host: String,
+    title: String,
+    description: String,
+    site_name: String,
+    fetched_at: String,
+}
+
+fn thread_message_entry(
+    entry: Option<mp_contracts::model_plane::v1::MessageEntry>,
+) -> Option<ThreadMessageEntry> {
+    let entry = entry.filter(|entry| !entry.kind.is_empty())?;
+    Some(ThreadMessageEntry {
+        kind: entry.kind,
+        version: entry.version,
+        link_previews: entry
+            .link_previews
+            .into_iter()
+            .map(|preview| ThreadMessageLinkPreview {
+                url: preview.url,
+                final_url: preview.final_url,
+                host: preview.host,
+                title: preview.title,
+                description: preview.description,
+                site_name: preview.site_name,
+                fetched_at: timestamp_to_rfc3339(preview.fetched_at),
+            })
+            .collect(),
+    })
 }
 
 /// A turn's place in the message tree, as the version switcher reads it.
@@ -9616,6 +13346,11 @@ struct ListThreadMessagesResponse {
     /// page. Absent on the unpaged read, which stays byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     has_more: Option<bool>,
+    /// Set only on a read that asked for the first turn (`include_first`, WS15-S6) while
+    /// `SPACE_TIMELINE_API` is on: how many readable turns lie between the first turn and the tail
+    /// window. When positive, `messages[0]` is the first turn and the rest is the contiguous tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    omitted_before: Option<u32>,
     /// Set only when this gateway runs with message versions on (WS17 S8), so the
     /// client can offer the version switcher. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -9648,6 +13383,87 @@ struct ListThreadsQuery {
     starred_only: Option<bool>,
 }
 
+/// The wire name of a derived attention state (WS16 S1). `None` for the unspecified value, which
+/// is what a replica with the switch off returns, so the field is omitted and the response is
+/// unchanged. A number this build does not name reads the same way.
+fn attention_state_name(state: i32) -> Option<&'static str> {
+    use mp_contracts::model_plane::v1::AttentionState;
+    match AttentionState::try_from(state).ok()? {
+        AttentionState::Unspecified => None,
+        AttentionState::NeedsApproval => Some("needs_approval"),
+        AttentionState::NeedsInput => Some("needs_input"),
+        AttentionState::PlanReady => Some("plan_ready"),
+        AttentionState::Working => Some("working"),
+        AttentionState::Completed => Some("completed"),
+        AttentionState::Failed => Some("failed"),
+        AttentionState::Archived => Some("archived"),
+        AttentionState::Idle => Some("idle"),
+    }
+}
+
+/// The wire name of an attention reason (WS16 S1): the pending row behind a waiting state, or
+/// `goal` for a thread goal that stopped (EP-7 S5). Tag 4 is reserved for the parked loop of WS03,
+/// so this build names nothing for it.
+fn attention_reason_name(reason: i32) -> Option<&'static str> {
+    use mp_contracts::model_plane::v1::AttentionReason;
+    match AttentionReason::try_from(reason).ok()? {
+        AttentionReason::Unspecified => None,
+        AttentionReason::Approval => Some("approval"),
+        AttentionReason::Plan => Some("plan"),
+        AttentionReason::Input => Some("input"),
+        AttentionReason::Goal => Some("goal"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAttentionQuery {
+    /// Page size, 1 to 200. Absent or out of range reads as 200 in Session Core.
+    limit: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct AttentionItemResponse {
+    thread_id: String,
+    /// Omitted for a state this build does not name, rather than guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+    /// When the state began, RFC 3339. Omitted when the state has no start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    since: Option<String>,
+    /// Whether the thread holds an assistant reply the owner has not read.
+    unseen: bool,
+    /// The thread's latest run, for a deep link. Omitted when the thread has no run.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    run_id: String,
+}
+
+/// The counts behind the attention badge.
+#[derive(Debug, Serialize)]
+struct AttentionCountsResponse {
+    needs_you: i32,
+    working: i32,
+    unseen: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct ListAttentionResponse {
+    /// False while the attention switch is off; the items and counts are then empty.
+    enabled: bool,
+    /// Whether the live stream is served (WS16 S5). Omitted while it is off, so the listing reads as
+    /// it did before the stream existed.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stream: bool,
+    items: Vec<AttentionItemResponse>,
+    counts: AttentionCountsResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MarkThreadSeenResponse {
+    thread_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct ThreadSummaryResponse {
     thread_id: String,
@@ -9676,6 +13492,9 @@ struct ThreadSummaryResponse {
     /// `true` here for a pre-persona session-core replica during a rolling
     /// deploy — fail open, never silently disable persona fleet-wide.
     persona_enabled: bool,
+    /// The thread this one was forked from; omitted for a thread that was not forked.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    forked_from_thread_id: String,
     /// Set when the owner archived the thread; omitted for an active thread.
     #[serde(skip_serializing_if = "String::is_empty")]
     archived_at: String,
@@ -9684,6 +13503,42 @@ struct ThreadSummaryResponse {
     /// Whether the thread has a reply the owner has not read yet. This is the one
     /// unread definition (build plan DEC-11); the sidebar dot reads it as is.
     unread: bool,
+    /// The derived attention state (WS16 S1), as its wire name. Omitted while the attention
+    /// switch is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_state: Option<&'static str>,
+    /// When the attention state began, RFC 3339. Omitted when the state has no start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_since: Option<String>,
+    /// Whether the thread has an unread reply. Present only with an attention state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attention_unseen: Option<bool>,
+    /// Replies after the first message, under the reader's audience ceiling (Session Core's
+    /// count); omitted when zero so a thread without replies keeps its shape.
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    reply_count: u32,
+    /// Who wrote the latest human row; omitted when Session Core names none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_author_subject_id: String,
+    /// Thread activity summary (WS15-S6): present only on a timeline window, omitted from every
+    /// other listing so those keep their shape. `last_message_seq` is the window's keyset position.
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    last_message_seq: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    recent_author_subject_ids: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    last_role: String,
+    #[serde(skip_serializing_if = "is_zero_u32")]
+    turn_count: u32,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -9929,6 +13784,7 @@ async fn list_threads(
             updated_at: timestamp_to_rfc3339(thread.updated_at),
             pinned: thread.pinned,
             space_id: thread.space_id,
+            forked_from_thread_id: thread.forked_from_thread_id,
             latest_run_id: thread.latest_run_id,
             latest_run_status: thread.latest_run_status,
             latest_run_updated_at: thread
@@ -9940,6 +13796,18 @@ async fn list_threads(
             archived_at: timestamp_to_rfc3339(thread.archived_at),
             starred: thread.starred,
             unread: thread.unread,
+            attention_state: attention_state_name(thread.attention_state),
+            attention_since: thread
+                .attention_since
+                .map(|value| timestamp_to_rfc3339(Some(value))),
+            attention_unseen: attention_state_name(thread.attention_state)
+                .map(|_| thread.attention_unseen),
+            reply_count: thread.reply_count,
+            last_author_subject_id: thread.last_author_subject_id,
+            last_message_seq: thread.last_message_seq,
+            recent_author_subject_ids: thread.recent_author_subject_ids,
+            last_role: thread.last_role,
+            turn_count: thread.turn_count,
         })
         .collect();
 
@@ -9994,6 +13862,185 @@ async fn update_thread_presentation(
         .into_inner();
 
     Ok(Json(UpdateThreadPresentationResponse {
+        thread_id: response.thread_id,
+    }))
+}
+
+/// The caller's threads that need attention or are working (WS16 S1). The scope comes from the
+/// verified claims, so a query naming another user changes nothing, and the answer carries
+/// identifiers and the closed state only.
+async fn list_attention(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Query(query): Query<ListAttentionQuery>,
+) -> Result<Json<ListAttentionResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListAttentionRequest;
+
+    let response = state
+        .attention_client
+        .clone()
+        .list_attention(authenticated_session_request(
+            ListAttentionRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: query.limit.unwrap_or_default(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core list_attention failed", &error))?
+        .into_inner();
+
+    Ok(Json(ListAttentionResponse {
+        enabled: response.enabled,
+        stream: response.stream_enabled,
+        items: response
+            .items
+            .into_iter()
+            .map(attention_item_response)
+            .collect(),
+        counts: attention_counts_response(response.counts.unwrap_or_default()),
+    }))
+}
+
+/// `GET /v1/attention/stream`: the caller's attention stream as server-sent events (WS16 S5). Each frame
+/// is one event named for its kind, with `<epoch>:<seq>` as its id. Session Core refuses the stream
+/// before its first frame (switch off, cap reached, zero-retention caller), and the refusal reaches the
+/// browser as Session Core sent it.
+async fn stream_attention(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Sse<ReceiverStream<Result<SseEvent, Infallible>>>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::StreamAttentionRequest;
+
+    let mut frames = state
+        .attention_client
+        .clone()
+        .stream_attention(authenticated_session_request(
+            StreamAttentionRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core stream_attention failed", &error))?
+        .into_inner();
+
+    // The relay ends when Session Core ends the stream or the browser leaves. Dropping `frames` then
+    // releases Session Core's side of the stream.
+    let (tx, rx) = tokio::sync::mpsc::channel(ATTENTION_STREAM_BUFFER);
+    tokio::spawn(async move {
+        while let Ok(Some(frame)) = frames.message().await {
+            let Some(event) = attention_stream_event(frame) else {
+                continue;
+            };
+            if tx.send(Ok(event)).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok(Sse::new(ReceiverStream::new(rx)))
+}
+
+/// The frames a stream holds while the browser reads them.
+const ATTENTION_STREAM_BUFFER: usize = 16;
+
+/// One frame of the attention stream as a server-sent event. The name is the frame's kind; the id is
+/// `<epoch>:<seq>`, so a restarted replica reads as a new epoch rather than as a gap in the old sequence.
+fn attention_stream_event(
+    frame: mp_contracts::model_plane::v1::StreamAttentionResponse,
+) -> Option<SseEvent> {
+    use mp_contracts::model_plane::v1::stream_attention_response::Frame;
+
+    let id = format!("{}:{}", frame.epoch, frame.seq);
+    let (name, data) = match frame.frame? {
+        Frame::Snapshot(snapshot) => (
+            "attention_snapshot",
+            json!({
+                "items": snapshot.items.into_iter().map(attention_item_response).collect::<Vec<_>>(),
+                "counts": attention_counts_response(snapshot.counts.unwrap_or_default()),
+            }),
+        ),
+        Frame::ThreadChanged(changed) => (
+            "attention_changed",
+            json!({
+                "item": attention_item_response(changed.item.unwrap_or_default()),
+                "counts": attention_counts_response(changed.counts.unwrap_or_default()),
+            }),
+        ),
+        Frame::Resync(_) => ("attention_resync", json!({})),
+        Frame::Heartbeat(_) => ("attention_heartbeat", json!({})),
+    };
+    Some(
+        SseEvent::default()
+            .event(name)
+            .id(id)
+            .data(data.to_string()),
+    )
+}
+
+/// One listed thread as the browser reads it (WS16 S1, S5).
+fn attention_item_response(
+    item: mp_contracts::model_plane::v1::AttentionItem,
+) -> AttentionItemResponse {
+    AttentionItemResponse {
+        thread_id: item.thread_id,
+        state: attention_state_name(item.state),
+        reason: attention_reason_name(item.reason),
+        since: item.since.map(|value| timestamp_to_rfc3339(Some(value))),
+        unseen: item.unseen,
+        run_id: item.run_id,
+    }
+}
+
+/// The counts behind the badge, as the browser reads them (WS16 S1, S5).
+fn attention_counts_response(
+    counts: mp_contracts::model_plane::v1::AttentionCounts,
+) -> AttentionCountsResponse {
+    AttentionCountsResponse {
+        needs_you: counts.needs_you,
+        working: counts.working,
+        unseen: counts.unseen,
+    }
+}
+
+/// Marks one of the caller's threads read (WS16 S1). Session Core refuses a zero-retention or
+/// waived caller, and answers 412 while the attention switch is off.
+async fn mark_thread_seen(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<MarkThreadSeenResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::MarkThreadSeenRequest;
+
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+
+    let response = state
+        .attention_client
+        .clone()
+        .mark_thread_seen(authenticated_session_request(
+            MarkThreadSeenRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                thread_id: thread_id.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core mark_thread_seen failed", &error))?
+        .into_inner();
+
+    Ok(Json(MarkThreadSeenResponse {
         thread_id: response.thread_id,
     }))
 }
@@ -10092,7 +14139,7 @@ async fn delete_thread(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_thread failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_thread failed", &error))?
         .into_inner();
 
     Ok(Json(DeleteThreadResponse {
@@ -10122,7 +14169,7 @@ async fn delete_threads(
             &bearer,
         )?)
         .await
-        .map_err(|error| session_thread_error("session-core delete_threads failed", &error))?
+        .map_err(|error| thread_erase_error("session-core delete_threads failed", &error))?
         .into_inner();
 
     Ok(Json(DeleteThreadsResponse {
@@ -10405,6 +14452,10 @@ struct ThreadMessagesQuery {
     /// before it, so it is read only together with a positive `limit`.
     #[serde(default)]
     before: Option<String>,
+    /// `1` or `true`: also return the thread's first readable turn ahead of the newest page
+    /// (WS15-S6). Honoured only while `SPACE_TIMELINE_API` is on and only without `before`.
+    #[serde(default)]
+    include_first: Option<String>,
 }
 
 /// Caps the tail page `GET /v1/threads/{id}/messages` serves. Operators set
@@ -10469,6 +14520,21 @@ async fn list_thread_messages(
     let limit = query.limit.unwrap_or(0).min(thread_messages_page_ceiling(
         std::env::var(THREAD_MESSAGES_MAX_LIMIT_ENV).ok().as_deref(),
     ));
+    let include_first = limit > 0
+        && before.is_empty()
+        && mp_contracts::space_timeline::api_enabled()
+        && query
+            .include_first
+            .as_deref()
+            .is_some_and(|raw| matches!(raw.trim(), "1" | "true"));
+    // A shared-Space read (it carries a Control decision) sees only the
+    // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
+    let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
+    let legacy_metadata_passthrough = crate::room_metadata::legacy_passthrough(
+        std::env::var(crate::room_metadata::LEGACY_PASSTHROUGH_ENV)
+            .ok()
+            .as_deref(),
+    );
 
     let response = state
         .session_client
@@ -10478,13 +14544,19 @@ async fn list_thread_messages(
                 org_id: claims.org_id.clone(),
                 thread_id: trimmed.to_owned(),
                 space_id: query.space_id.unwrap_or_default(),
-                space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
+                space_read_decision_ref: space_read_decision_ref.clone(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
                 // The transcript a client shows is the active path; turns on other
                 // branches are not read through this route.
                 include_inactive: false,
                 limit,
                 before_message_id: before,
+                // The UI transcript route is the only reader that shows human posts. Every
+                // other caller keeps the default (false), so a post never reaches model
+                // context or reattach_context.
+                include_human_posts: true,
+                post_context_cap: 0,
+                include_first,
             },
             &bearer,
         )?)
@@ -10512,6 +14584,8 @@ async fn list_thread_messages(
                     include_inactive: true,
                     limit: 0,
                     before_message_id: String::new(),
+                    // A personal thread holds no human posts; the internal read keeps them out.
+                    ..Default::default()
                 },
                 &bearer,
             )?)
@@ -10526,21 +14600,47 @@ async fn list_thread_messages(
     // Only a paged read says whether more exists, so an unpaged body keeps the
     // exact shape every caller already parses.
     let has_more = (limit > 0).then_some(response.has_more);
+    let omitted_before = include_first.then_some(response.omitted_before);
     let messages =
         response
             .messages
             .into_iter()
             .map(|m| ThreadMessage {
+                revision: thread_message_revision(&m),
                 message_id: m.message_id,
                 role: m.role,
                 content: m.content,
                 agent_name: m.agent_name,
                 author_subject_id: m.author_subject_id,
-                metadata: m.metadata.as_ref().map(prost_struct_to_json).and_then(
-                    |value| match value {
-                        Value::Object(map) if !map.is_empty() => Some(map),
-                        _ => None,
-                    },
+                post_kind: if m.post_kind == "post" { m.post_kind } else { String::new() },
+                created_at: message_created_at(m.created_at.as_ref()),
+                entry: thread_message_entry(m.entry),
+                mentions: m
+                    .mentions
+                    .into_iter()
+                    .map(|r| ThreadMessageMention {
+                        subject_id: r.subject_id,
+                        kind: r.kind,
+                        wake_state: r.wake_state,
+                        reason: r.reason,
+                        source: r.source,
+                        ordinal: r.ordinal,
+                    })
+                    .collect(),
+                metadata: crate::room_metadata::visible_metadata(
+                    m.metadata.as_ref().map(prost_struct_to_json).and_then(
+                        |value| match value {
+                            // `entry` is the typed field above; a stored free key of that name
+                            // must never produce a second `entry` in the body.
+                            Value::Object(mut map) => {
+                                map.remove("entry");
+                                (!map.is_empty()).then_some(map)
+                            }
+                            _ => None,
+                        },
+                    ),
+                    &space_read_decision_ref,
+                    legacy_metadata_passthrough,
                 ),
                 version: (m.sibling_count > 0).then(|| ThreadMessageVersion {
                     siblings: sibling_ids
@@ -10559,6 +14659,7 @@ async fn list_thread_messages(
         thread_id: trimmed.to_owned(),
         messages,
         has_more,
+        omitted_before,
         versions_enabled: message_versions_enabled().then_some(true),
     }))
 }
@@ -10685,6 +14786,95 @@ pub(crate) fn history_versions_disabled() -> HttpJsonError {
     )
 }
 
+/// Body of `POST /v1/threads/{id}/fork`: the assistant turn the copy ends with, and an optional
+/// title for the new thread.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ForkThreadBody {
+    from_message_id: String,
+    #[serde(default)]
+    title: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ForkThreadResponse {
+    thread_id: String,
+    forked_from_thread_id: String,
+    copied_message_count: u32,
+}
+
+/// Start a new thread from a copy of this one, up to an assistant turn (build plan WS17 S6). A
+/// zero-retention caller is refused before anything is written. Session Core decides the rest: the
+/// switch, the owner, a Space or waived source, and whether the turn lies on the active path.
+async fn fork_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+    Json(body): Json<ForkThreadBody>,
+) -> Result<Json<ForkThreadResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ForkThreadRequest;
+
+    require_non_zdr_durable_mutation(&claims)?;
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "thread_id is required"})),
+        ));
+    }
+    let response = state
+        .thread_fork_client
+        .clone()
+        .fork_thread(authenticated_session_request(
+            ForkThreadRequest {
+                org_id: claims.org_id.clone(),
+                thread_id: thread_id.to_owned(),
+                from_message_id: body.from_message_id,
+                title: body.title,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| fork_thread_error(&error))?
+        .into_inner();
+
+    Ok(Json(ForkThreadResponse {
+        thread_id: response.new_thread_id,
+        forked_from_thread_id: thread_id.to_owned(),
+        copied_message_count: response.copied_message_count,
+    }))
+}
+
+/// Session Core's refusals of a fork, as the typed codes the client acts on. A switch that is off
+/// answers 503 `history_fork_disabled`. A source that cannot be forked answers 409
+/// `history_fork_refused`, carrying Session Core's reason.
+pub(crate) fn fork_thread_error(error: &tonic::Status) -> HttpJsonError {
+    match error.code() {
+        tonic::Code::Unavailable if error.message() == "thread_fork_disabled" => {
+            history_fork_disabled()
+        }
+        tonic::Code::FailedPrecondition => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {
+                "code": "history_fork_refused",
+                "message": error.message(),
+            }})),
+        ),
+        _ => session_thread_error("session-core fork_thread failed", error),
+    }
+}
+
+pub(crate) fn history_fork_disabled() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {
+            "code": "history_fork_disabled",
+            "message": "forking is not enabled on this deployment",
+        }})),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct ReplayThreadEventsQuery {
     /// Resume after this event id (exclusive). Empty means from the beginning.
@@ -10804,6 +14994,7 @@ fn durable_thread_event_type(event: &Event) -> String {
             Some("THREAD_PRESENTATION_UPDATED")
         }
         "type.googleapis.com/model_plane.v1.ThreadArchived" => Some("THREAD_ARCHIVED"),
+        "type.googleapis.com/model_plane.v1.ThreadForked" => Some("THREAD_FORKED"),
         _ => None,
     };
 
@@ -10863,6 +15054,14 @@ struct MemorySummaryResponse {
     /// unknown row "stated" would be the one wrong answer: it is the claim a
     /// user would rely on when deciding whether to keep it.
     provenance: &'static str,
+    /// Closed vocabulary; omitted for an ordinary row. "room_origin_unverified" marks a
+    /// row learned in a shared room before containment: listed to its owner, never
+    /// recalled (WS17-S2).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+    /// Space the withheld row was learned in (an id, never content); omitted when empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    origin_space_ref: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -10894,6 +15093,7 @@ async fn list_memories(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 limit: query.limit.unwrap_or(100),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -10910,6 +15110,8 @@ async fn list_memories(
             content: entry.content,
             updated_at: timestamp_to_rfc3339(entry.updated_at),
             provenance: memory_provenance_label(entry.provenance),
+            withheld_reason: entry.withheld_reason,
+            origin_space_ref: entry.origin_space_ref,
         })
         .collect();
 
@@ -11042,6 +15244,7 @@ async fn delete_memory_entry(
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
                 memory_id: trimmed.to_owned(),
+                ..Default::default()
             },
             &bearer,
         )?)
@@ -11054,6 +15257,219 @@ async fn delete_memory_entry(
         degraded: response.degraded,
         degradation_reason: response.degradation_reason,
     }))
+}
+
+/// Upper bounds of the Space memory routes' body fields (EP-8 S7), the run-control route's own.
+const SPACE_MEMORY_MAX_ID_BYTES: usize = 200;
+const SPACE_MEMORY_MAX_DECISION_REF_BYTES: usize = 512;
+const SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES: usize = 8 * 1024;
+
+/// `POST /v1/spaces/:space_id/memory/{list,delete}` body. The Control `model.space.memory.manage`
+/// decision rides in the body; `memory_id` only on a delete.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpaceMemoryBody {
+    #[serde(default)]
+    space_control_decision_ref: String,
+    #[serde(default)]
+    space_control_decision_token: String,
+    #[serde(default)]
+    memory_id: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// The decision and ids of a Space memory call, bounded; `None` is a malformed request.
+fn space_memory_fields(space_id: &str, body: &SpaceMemoryBody) -> Option<(String, String, String)> {
+    let space_id = space_id.trim();
+    let decision_ref = body.space_control_decision_ref.trim();
+    let token = body.space_control_decision_token.trim();
+    let bounded = !space_id.is_empty()
+        && space_id.len() <= SPACE_MEMORY_MAX_ID_BYTES
+        && decision_ref.len() <= SPACE_MEMORY_MAX_DECISION_REF_BYTES
+        && token.len() <= SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES
+        && body.memory_id.trim().len() <= SPACE_MEMORY_MAX_ID_BYTES;
+    bounded.then(|| (space_id.to_owned(), decision_ref.to_owned(), token.to_owned()))
+}
+
+/// Session Core's refusal of a Space memory call in fixed words. A permission refusal is one code
+/// whatever its cause (no decision, another role, a revoked member), so nothing about the Space leaks.
+fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
+    let (code, http, message) = match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
+            "space_memory_not_authorized",
+            StatusCode::FORBIDDEN,
+            "managing this Space's memory is not permitted",
+        ),
+        tonic::Code::NotFound => (
+            "memory_not_found",
+            StatusCode::NOT_FOUND,
+            "the memory is not available",
+        ),
+        tonic::Code::InvalidArgument => (
+            "invalid_request",
+            StatusCode::BAD_REQUEST,
+            "the Space memory request is invalid",
+        ),
+        _ => (
+            "space_memory_unavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Space memory is unavailable",
+        ),
+    };
+    (
+        http,
+        Json(json!({"error": {"code": code, "message": message, "details": {}}})),
+    )
+}
+
+#[derive(Debug, Serialize)]
+struct SpaceMemorySummaryResponse {
+    memory_id: String,
+    content: String,
+    updated_at: String,
+    provenance: &'static str,
+    /// `room_statement` or `member_save`.
+    source_label: String,
+    /// The thread the row was learned in, for the source link.
+    thread_id: String,
+    /// `audience_changed` when the room's current audience does not recall the row; omitted otherwise.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    withheld_reason: String,
+}
+
+/// The memory of one Space, for its owner or admin (EP-8 S7). Session Core verifies the Control
+/// Space memory decision; this hop checks the shape only. A read: a zero-retention caller is
+/// answered empty by Session Core, as the personal list is.
+async fn list_space_memories(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(space_id): Path<String>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ListMemoryRequest;
+    let (space_id, decision_ref, token) = space_memory_fields(&space_id, &body).ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .list_memory(authenticated_session_request(
+            ListMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                limit: body.limit.unwrap_or(100).clamp(1, 200),
+                space_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    let withheld = response
+        .entries
+        .iter()
+        .filter(|entry| !entry.withheld_reason.is_empty())
+        .count();
+    let memories: Vec<SpaceMemorySummaryResponse> = response
+        .entries
+        .into_iter()
+        .map(|entry| SpaceMemorySummaryResponse {
+            memory_id: entry.memory_id,
+            content: entry.content,
+            updated_at: timestamp_to_rfc3339(entry.updated_at),
+            provenance: memory_provenance_label(entry.provenance),
+            source_label: entry.source_label,
+            thread_id: entry.thread_id,
+            withheld_reason: entry.withheld_reason,
+        })
+        .collect();
+    Ok(Json(json!({
+        "memories": memories,
+        "withheld": withheld,
+        "degraded": response.degraded,
+        "degradation_reason": response.degradation_reason,
+    })))
+}
+
+/// Deletes one row of a Space's memory under a decision issued for that row (EP-8 S7). Allowed
+/// under every posture, as every delete is.
+async fn delete_space_memory_entry(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path(space_id): Path<String>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<DeleteMemoryHttpResponse>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::DeleteMemoryRequest;
+    let memory_id = body.memory_id.trim().to_owned();
+    let fields = space_memory_fields(&space_id, &body).filter(|_| !memory_id.is_empty());
+    let (space_id, decision_ref, token) = fields.ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .delete_memory(authenticated_session_request(
+            DeleteMemoryRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                memory_id,
+                space_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    Ok(Json(DeleteMemoryHttpResponse {
+        deleted: response.deleted,
+        degraded: response.degraded,
+        degradation_reason: response.degradation_reason,
+    }))
+}
+
+#[cfg(test)]
+mod space_memory_route_tests {
+    use super::*;
+
+    fn body(decision_ref: &str, token: &str, memory_id: &str) -> SpaceMemoryBody {
+        SpaceMemoryBody {
+            space_control_decision_ref: decision_ref.to_owned(),
+            space_control_decision_token: token.to_owned(),
+            memory_id: memory_id.to_owned(),
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn space_memory_fields_are_bounded_and_trimmed() {
+        assert_eq!(
+            space_memory_fields(" space-1 ", &body(" ref ", " tok ", "")),
+            Some(("space-1".to_owned(), "ref".to_owned(), "tok".to_owned()))
+        );
+        assert_eq!(space_memory_fields("  ", &body("ref", "tok", "")), None);
+        assert_eq!(space_memory_fields(&"s".repeat(201), &body("ref", "tok", "")), None);
+        assert_eq!(space_memory_fields("space-1", &body("ref", &"t".repeat(8 * 1024 + 1), "")), None);
+        assert_eq!(space_memory_fields("space-1", &body("ref", "tok", &"m".repeat(201))), None);
+    }
+
+    #[test]
+    fn space_memory_refusals_use_fixed_words_and_object_details() {
+        let (status, Json(body)) =
+            space_memory_error(&tonic::Status::permission_denied("Space membership required for space-1"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "space_memory_not_authorized");
+        assert!(body["error"]["details"].is_object());
+        assert!(!body.to_string().contains("space-1"), "upstream text never crosses");
+        let (status, _) = space_memory_error(&tonic::Status::internal("db down"));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
 }
 
 fn memory_state_label(tag: i32) -> &'static str {
@@ -11232,6 +15648,130 @@ async fn reset_memory(
     })))
 }
 
+/// The profile as JSON: its text, the ids of the memories behind it (never their
+/// content), how it was made, and why it is not used when it is not.
+fn user_profile_json(response: &mp_contracts::model_plane::v1::UserProfileResponse) -> Value {
+    json!({
+        "profile": response.profile.as_ref().map_or(Value::Null, |profile| json!({
+            "content": profile.content,
+            "source_memory_ids": profile.source_memory_ids,
+            "origin": profile.origin,
+            "revision": profile.revision,
+            "updated_at": profile
+                .updated_at
+                .as_ref()
+                .map_or(Value::Null, prost_ts_to_rfc3339),
+            "sources_deleted_since_edit": profile.sources_deleted_since_edit,
+        })),
+        "skip_reason": response.skip_reason,
+    })
+}
+
+/// A profile write refused for a ZDR or waived credential keeps its catalogue
+/// code and feature; every other refusal (`profile_not_enabled`,
+/// `profile_revision_stale`, `memory_not_enabled:<reason>`) is mapped as the
+/// other memory routes map theirs.
+fn session_profile_error(context: &str, error: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        return (StatusCode::CONFLICT, Json(refusal.json_body()));
+    }
+    session_memory_error(context, error)
+}
+
+/// The signed-in user's standing profile. A ZDR caller is answered with no
+/// profile and `skip_reason=zdr` by session-core, so there is no ZDR branch here.
+async fn get_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::GetUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .get_user_profile(authenticated_session_request(
+            GetUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core get_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
+#[derive(Debug, Deserialize)]
+struct SetUserProfileBody {
+    content: String,
+    /// The revision the edit was made against; 0 (the default) when there was none.
+    #[serde(default)]
+    expected_revision: u64,
+}
+
+/// Stores the signed-in user's own edit of their profile. Org and user come from
+/// the verified claims, never the body.
+async fn set_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<SetUserProfileBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::SetUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .set_user_profile(authenticated_session_request(
+            SetUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                content: body.content,
+                expected_revision: body.expected_revision,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core set_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RebuildUserProfileBody {
+    /// Replace an edited profile too; without it the edit is kept.
+    #[serde(default)]
+    force: bool,
+}
+
+/// Rebuilds the signed-in user's profile from their accepted memories.
+async fn rebuild_user_profile(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Json(body): Json<RebuildUserProfileBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::RebuildUserProfileRequest;
+
+    let response = state
+        .memory_client
+        .clone()
+        .rebuild_user_profile(authenticated_session_request(
+            RebuildUserProfileRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                force: body.force,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|e| session_profile_error("session-core rebuild_user_profile failed", &e))?
+        .into_inner();
+    Ok(Json(user_profile_json(&response)))
+}
+
 #[derive(Debug, Deserialize)]
 struct LearningLedgerQuery {
     cursor: Option<String>,
@@ -11374,6 +15914,303 @@ async fn undo_learning_entry(
     })))
 }
 
+/// The ZDR feature key a `/learn` refusal names (`zdr-refusals.json`, EP-11 S7).
+pub const LEARN_COMMAND_ZDR_FEATURE: &str = "learn_command";
+
+/// The longest note a `/learn` carries, in characters. capability-core refuses a longer one too;
+/// it is checked here so an oversized body never crosses the hop.
+const LEARN_NOTE_MAX_CHARS: usize = 500;
+
+/// The longest thread id a `/learn` names, as the SPA's action contract bounds it.
+const LEARN_THREAD_ID_MAX_BYTES: usize = 128;
+
+/// `current_thread_id` of the thread check below. The check reuses the thread reference read, which
+/// refuses reading the thread a turn runs in; no turn is reading here, so this names no thread.
+const LEARN_PROBE_CURRENT_THREAD: &str = "learn-command";
+
+/// Whether a `/learn` caller's posture is refused, before anything is read. A ZDR credential and a
+/// waived one are refused with the `learn_command` feature: a review sends the transcript to the
+/// review model and keeps what it distils, which neither posture allows (DEC-32). Any other
+/// posture refusal is answered as the resolver words it.
+#[must_use]
+pub fn learn_command_refusal(claims: &Claims) -> Option<mp_contracts::zdr_refusal::Refusal> {
+    use crate::zdr_posture::{decide_for, Route, TurnPosture};
+    use mp_contracts::zdr_refusal::{code, Refusal};
+    match decide_for(claims, &Route::plain(false)) {
+        Ok(TurnPosture::Persistent) => None,
+        Ok(TurnPosture::Zdr { .. } | TurnPosture::Waived { .. }) => {
+            Some(Refusal::feature_not_supported(LEARN_COMMAND_ZDR_FEATURE))
+        }
+        // A waiver binds one chat route; on this route it is a waived caller like any other.
+        Err(refusal) if refusal.code() == code::WAIVER_ROUTE_MISMATCH => {
+            Some(Refusal::feature_not_supported(LEARN_COMMAND_ZDR_FEATURE))
+        }
+        Err(refusal) => Some(refusal),
+    }
+}
+
+fn learn_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+    )
+}
+
+/// Session Core's answer to the thread check, as `/learn` answers it. A thread that holds a ZDR or
+/// waived run is the catalogue's `learn_command` refusal; a Space, agent or other non-chat thread and
+/// an archived one are not a person's conversation to learn from; a thread the caller does not own
+/// reads as one that does not exist.
+fn learn_thread_refusal(error: &tonic::Status) -> HttpJsonError {
+    match (error.code(), error.message()) {
+        (tonic::Code::FailedPrecondition, "thread_reference_retention") => {
+            crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                LEARN_COMMAND_ZDR_FEATURE,
+            ))
+        }
+        (tonic::Code::FailedPrecondition, "thread_reference_not_chat") => learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_thread_not_chat",
+            "only your own chat conversations can be learned from",
+        ),
+        (tonic::Code::FailedPrecondition, "thread_reference_archived") => learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_thread_archived",
+            "an archived conversation is not learned from",
+        ),
+        (tonic::Code::NotFound | tonic::Code::PermissionDenied, _) => learn_error(
+            StatusCode::NOT_FOUND,
+            "learn_thread_not_found",
+            "no such conversation",
+        ),
+        _ => learn_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LearnFromThreadBody {
+    thread_id: String,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// The body forwarded to capability-core, or the refusal of a malformed one. Only the thread and
+/// the trimmed note cross; whose thread it is comes from the verified claims on both sides.
+fn learn_forward_body(body: &LearnFromThreadBody) -> Result<Value, HttpJsonError> {
+    let thread_id = body.thread_id.trim();
+    if thread_id.is_empty() || thread_id.len() > LEARN_THREAD_ID_MAX_BYTES {
+        return Err(learn_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_thread_id",
+            "thread_id is required",
+        ));
+    }
+    let note = body.note.as_deref().map_or("", str::trim);
+    if note.chars().count() > LEARN_NOTE_MAX_CHARS {
+        return Err(learn_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "learn_note_too_long",
+            "the note is longer than 500 characters",
+        ));
+    }
+    Ok(json!({ "thread_id": thread_id, "note": note }))
+}
+
+/// `/learn` (EP-11 S7): the signed-in person asks Verevon to distil one of their own chat threads
+/// into a skill proposal for their learning inbox. The caller's posture is refused first, then
+/// Session Core confirms on the person's own credential that the thread is theirs, a chat thread,
+/// not archived and holds no ZDR or waived run (the thread reference read applies exactly those
+/// rules, and refuses before it reads a turn). capability-core then runs the learning review's own
+/// gates and answers 202 `{ data: { state: "queued" } }` or a typed refusal, relayed unchanged; it
+/// answers 404 while `LEARN_COMMAND_ENABLED` is off there.
+async fn learn_from_thread(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    capability_bearer: VerifiedCapabilityBearer,
+    Json(body): Json<LearnFromThreadBody>,
+) -> Result<(StatusCode, Json<Value>), HttpJsonError> {
+    use mp_contracts::model_plane::v1::{ReadThreadForReferenceRequest, ThreadReferenceMode};
+    if let Some(refusal) = learn_command_refusal(&claims) {
+        return Err(crate::zdr_posture::http(&refusal));
+    }
+    let forward = learn_forward_body(&body)?;
+    let thread_id = forward["thread_id"].as_str().unwrap_or_default().to_owned();
+
+    // One outline line is the smallest read the RPC offers; it is discarded, and every refusal
+    // above comes before Session Core reads a turn.
+    state
+        .thread_reference_client
+        .clone()
+        .read_thread_for_reference(authenticated_session_request(
+            ReadThreadForReferenceRequest {
+                org_id: claims.org_id.clone(),
+                user_id: claims.user_id.clone(),
+                thread_id,
+                mode: ThreadReferenceMode::Outline as i32,
+                before_message_id: String::new(),
+                limit: 1,
+                current_thread_id: LEARN_PROBE_CURRENT_THREAD.to_owned(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| learn_thread_refusal(&error))?;
+
+    if state.capability_core_base_url.is_empty() {
+        return Err(learn_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        ));
+    }
+    let url = format!("{}/api/v1/learning/learn", state.capability_core_base_url);
+    let response = state
+        .http_client
+        .post(url)
+        .bearer_auth(capability_bearer.as_str())
+        .json(&forward)
+        .send()
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "capability-core /learn unavailable");
+            learn_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "learn_unavailable",
+                "learning from a conversation is unavailable",
+            )
+        })?;
+    let status = StatusCode::from_u16(response.status().as_u16())
+        .unwrap_or(StatusCode::BAD_GATEWAY);
+    match response.json::<Value>().await {
+        Ok(body) if status.is_success() => Ok((status, Json(body))),
+        Ok(body) => Err((status, Json(body))),
+        // The mux's own 404 (the switch is off there) and any other bodiless answer keep their
+        // status with a typed body.
+        Err(_) if status == StatusCode::NOT_FOUND => Err(learn_error(
+            StatusCode::NOT_FOUND,
+            "learn_command_disabled",
+            "learning from a conversation is not enabled on this deployment",
+        )),
+        Err(_) => Err(learn_error(
+            StatusCode::BAD_GATEWAY,
+            "learn_unavailable",
+            "learning from a conversation is unavailable",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod learn_command_tests {
+    use super::*;
+
+    fn claims(payload: Value) -> Claims {
+        let mut base = json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+        });
+        if let (Some(base), Some(extra)) = (base.as_object_mut(), payload.as_object()) {
+            base.extend(extra.clone());
+        }
+        serde_json::from_value(base).expect("a minted token's payload is valid Claims")
+    }
+
+    #[test]
+    fn a_persistent_caller_is_not_refused() {
+        assert!(learn_command_refusal(&claims(json!({ "zdr": false, "org_zdr": false }))).is_none());
+    }
+
+    #[test]
+    fn a_zdr_or_waived_caller_is_refused_with_the_learn_command_feature() {
+        let waiver = json!({
+            "version": 1,
+            "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+            "connection": "conn-1",
+        });
+        for token in [
+            claims(json!({ "zdr": true })),
+            claims(json!({ "zdr": false, "org_zdr": true, "zdr_waiver": waiver })),
+        ] {
+            let refusal = learn_command_refusal(&token).expect("refused");
+            assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+            assert_eq!(refusal.feature(), Some(LEARN_COMMAND_ZDR_FEATURE));
+        }
+    }
+
+    #[test]
+    fn learn_thread_refusals_are_typed() {
+        let cases = [
+            (
+                tonic::Status::failed_precondition("thread_reference_retention"),
+                StatusCode::PRECONDITION_FAILED,
+                "zdr_feature_not_supported",
+            ),
+            (
+                tonic::Status::failed_precondition("thread_reference_not_chat"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "learn_thread_not_chat",
+            ),
+            (
+                tonic::Status::failed_precondition("thread_reference_archived"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "learn_thread_archived",
+            ),
+            (
+                tonic::Status::not_found("thread not found"),
+                StatusCode::NOT_FOUND,
+                "learn_thread_not_found",
+            ),
+            (
+                tonic::Status::unavailable("down"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "learn_unavailable",
+            ),
+        ];
+        for (error, status, code) in cases {
+            let (got_status, Json(body)) = learn_thread_refusal(&error);
+            assert_eq!(got_status, status, "{error:?}");
+            assert_eq!(body["error"]["code"], code, "{error:?}");
+        }
+        let (_, Json(body)) =
+            learn_thread_refusal(&tonic::Status::failed_precondition("thread_reference_retention"));
+        assert_eq!(body["error"]["feature"], LEARN_COMMAND_ZDR_FEATURE);
+    }
+
+    #[test]
+    fn learn_forward_body_carries_only_the_thread_and_the_trimmed_note() {
+        let body = LearnFromThreadBody {
+            thread_id: " thread-1 ".to_owned(),
+            note: Some("  keep the steps  ".to_owned()),
+        };
+        assert_eq!(
+            learn_forward_body(&body).expect("valid"),
+            json!({ "thread_id": "thread-1", "note": "keep the steps" })
+        );
+        let blank = LearnFromThreadBody {
+            thread_id: "  ".to_owned(),
+            note: None,
+        };
+        assert_eq!(learn_forward_body(&blank).unwrap_err().0, StatusCode::BAD_REQUEST);
+        let long = LearnFromThreadBody {
+            thread_id: "thread-1".to_owned(),
+            note: Some("å".repeat(LEARN_NOTE_MAX_CHARS + 1)),
+        };
+        let (status, Json(refusal)) = learn_forward_body(&long).unwrap_err();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(refusal["error"]["code"], "learn_note_too_long");
+        assert!(refusal["error"]["details"].is_object());
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn invoke(
     State(state): State<AppState>,
@@ -11387,6 +16224,18 @@ async fn invoke(
     if req.features.iter().any(|f| f == "conversation_only") {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
             "code": "source_scope_requires_stream", "message": "Conversation-only tasks require the streaming chat endpoint."
+        }}))).into());
+    }
+    // An agent mode this build does not know is refused before anything runs (WS25-S6). The unary
+    // endpoint runs no agent loop, so a known mode changes nothing here and is not applied.
+    if crate::profile::chosen_agent_mode(
+        crate::profile::agent_modes_enabled(),
+        req.agent_mode.as_deref(),
+    )
+    .is_err()
+    {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
+            "code": mp_contracts::agent_mode::UNKNOWN_MODE_CODE, "message": "The agent mode is not one this server knows."
         }}))).into());
     }
     let start = std::time::Instant::now();
@@ -11467,6 +16316,7 @@ async fn invoke(
             .clone()
             .infer(authenticated_inference_request(
                 mp_contracts::model_plane::v1::InferRequest {
+                    purpose: InferPurpose::Answer as i32,
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
@@ -11675,6 +16525,7 @@ async fn invoke(
                     req.edited_resubmit,
                     req.idempotency_key.as_deref(),
                 ),
+                None,
             )
             .await
         }
@@ -11728,6 +16579,7 @@ async fn invoke(
             "model": normalized.model,
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -11768,6 +16620,7 @@ async fn invoke(
             .clone()
             .infer(authenticated_inference_request(
                 InferRequest {
+                    purpose: InferPurpose::Answer as i32,
                     request_id: request_id.clone(),
                     org_id: claims.org_id.clone(),
                     model: normalized.model.clone(),
@@ -11936,6 +16789,7 @@ async fn invoke(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr: effective_zdr,
+        ..Default::default()
     };
 
     if let Err(e) = state
@@ -12115,6 +16969,66 @@ mod browser_suggestion_tests {
         assert!(prompt.contains("...[truncated]"));
         assert!(prompt.contains("Inspect page"));
     }
+
+    /// WS12.S4: a credential in the page (an accessibility value the user typed, a title,
+    /// a URL query, the vision model's reading of the screenshot) never reaches the
+    /// planner prompt; ordinary prose and ordinary URLs come through untouched. Secrets
+    /// are built from fragments so no secret-shaped literal sits in the source.
+    #[test]
+    fn browser_suggestion_prompt_masks_ax_value_and_visual_summary() {
+        let jwt = [
+            "eyJhbGciOiJI",
+            "UzI1NiIsInR5cCI6IkpXVCJ9",
+            ".eyJzdWIiOiIxMjM0NTY3ODkw",
+            ".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        ]
+        .concat();
+        let key = ["sk-proj-", "Ab12Cd34Ef56", "Gh78Ij90Kl12"].concat();
+        let pat = ["ghp_", "aB3dE6gH9jK2mN5pQ8sT1uV4wX7yZ0"].concat();
+        let req = BrowserSuggestActionRequest {
+            goal: "Log in".to_owned(),
+            url: format!("https://app.example.com/cb?page=2&access_token={pat}&limit=5"),
+            title: format!("Welcome back {key}"),
+            observation: json!({
+                "extracted_text": "the bearer of the message arrived",
+                "page_url": format!("https://svc:hunter2-pw@h.example/p?token={pat}"),
+                "ax": [{ "role": "textbox", "value": jwt, "name": "Token" }],
+            }),
+            visual_observation: json!({ "ocr": [format!("key {key}")] }),
+            ..Default::default()
+        };
+
+        let prompt = browser_suggestion_prompt(
+            &req,
+            Some(&format!("The page shows an API key field containing {key}.")),
+        );
+
+        for secret in [&jwt, &key, &pat, &"hunter2-pw".to_owned()] {
+            assert!(!prompt.contains(secret.as_str()), "secret leaked: {prompt}");
+        }
+        assert!(prompt.contains("access_token=[REDACTED]&limit=5"));
+        assert!(prompt.contains("the bearer of the message arrived"));
+        assert!(prompt.contains("Welcome back [REDACTED]"));
+        assert!(prompt.contains("h.example/p?token=[REDACTED]"));
+        // The request is read, never rewritten.
+        assert!(req.observation.to_string().contains("eyJhbGciOiJI"));
+    }
+
+    #[test]
+    fn browser_suggestion_prompt_leaves_an_ordinary_page_alone() {
+        let req = BrowserSuggestActionRequest {
+            goal: "Inspect page".to_owned(),
+            url: "https://example.com/search?q=rust&page=2#top".to_owned(),
+            title: "Search results".to_owned(),
+            observation: json!({ "extracted_text": "max_tokens=4096 status=completed" }),
+            ..Default::default()
+        };
+        let prompt = browser_suggestion_prompt(&req, Some("a login form"));
+        assert!(prompt.contains("https://example.com/search?q=rust&page=2#top"));
+        assert!(prompt.contains("max_tokens=4096 status=completed"));
+        assert!(prompt.contains("a login form"));
+        assert!(!prompt.contains("[REDACTED]"));
+    }
 }
 
 #[cfg(test)]
@@ -12135,6 +17049,8 @@ mod invoke_zdr_tests {
     #[test]
     fn issuer_enforced_zdr_cannot_be_downgraded_by_the_request_body() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -12241,6 +17157,8 @@ mod approval_resume_auth_tests {
     #[test]
     fn issuer_zdr_blocks_run_lifecycle_persistence() {
         let claims = Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "issuer".to_owned(),
             exp: i64::MAX,
@@ -12276,6 +17194,8 @@ mod capability_contract_tests {
 
     fn proxy_claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -12696,6 +17616,8 @@ mod capability_contract_tests {
 
     fn mail_task_bridge_claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "service:verevon-gateway".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -12906,6 +17828,14 @@ mod run_owner_publish_tests {
 
     #[tonic::async_trait]
     impl RunService for OwnerResolver {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn resolve_approval_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+        }
+
         async fn get_run(
             &self,
             _: TonicRequest<GetRunRequest>,
@@ -13020,6 +17950,20 @@ mod run_owner_publish_tests {
                 "scheduled step authority not needed in route test",
             ))
         }
+
+        async fn authorize_room_run_attach(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+            Err(Status::unimplemented("room run attach not needed in this test"))
+        }
+
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<TonicResponse<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+            Err(Status::unimplemented("room run stop not needed in this test"))
+        }
     }
 
     async fn owner_resolver_client() -> RunServiceClient<tonic::transport::Channel> {
@@ -13060,6 +18004,11 @@ mod run_owner_publish_tests {
             privacy_tier: "unspecified",
             residency: String::new(),
             effort_levels: effort_levels.iter().map(|level| (*level).to_owned()).collect(),
+            context_window_tokens: None,
+            max_output_tokens: None,
+            lifecycle: String::new(),
+            price: None,
+            data_use: None,
         }
     }
 
@@ -13072,8 +18021,26 @@ mod run_owner_publish_tests {
         assert!(without.get("effort_levels").is_none(), "{without}");
     }
 
+    #[test]
+    fn list_models_descriptor_carries_a_price_only_when_there_is_one() {
+        let unpriced = serde_json::to_value(descriptor(&[])).unwrap();
+        assert!(unpriced.get("price").is_none(), "{unpriced}");
+        let mut priced = descriptor(&[]);
+        priced.price = Some(crate::catalogue_prices::ModelPrice {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            currency: "USD".to_owned(),
+            source: "prefix",
+        });
+        let json = serde_json::to_value(priced).unwrap();
+        assert_eq!(json["price"]["source"], "prefix");
+        assert_eq!(json["id"], "gpt-5-mini", "the price sits beside the model's own fields");
+    }
+
     fn claims(org_id: &str, user_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: user_id.to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -14460,8 +19427,10 @@ mod speech_route_tests {
     /// refuses speech that asks for zero retention. `attested` stands for a
     /// future attested deployment that serves ZDR speech.
     #[derive(Clone, Default)]
-    struct SpeechInference {
+    pub(super) struct SpeechInference {
         attested: bool,
+        /// When set, `infer` answers with this instead of the clean-up stand-in (the ai_chat tests).
+        reply: Arc<Mutex<Option<pb::InferResponse>>>,
         transcribe: Arc<Mutex<Vec<pb::TranscribeSpeechRequest>>>,
         synthesize: Arc<Mutex<Vec<pb::SynthesizeSpeechRequest>>>,
         infer: Arc<Mutex<Vec<pb::InferRequest>>>,
@@ -14488,7 +19457,11 @@ mod speech_route_tests {
             self.synthesize.lock().expect("synthesis capture").clone()
         }
 
-        fn cleanups(&self) -> Vec<pb::InferRequest> {
+        pub(super) fn answering(&self, reply: pb::InferResponse) {
+            *self.reply.lock().expect("reply setting") = Some(reply);
+        }
+
+        pub(super) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
         }
     }
@@ -14512,6 +19485,9 @@ mod speech_route_tests {
                 .lock()
                 .expect("clean-up capture")
                 .push(request.into_inner());
+            if let Some(reply) = self.reply.lock().expect("reply setting").clone() {
+                return Ok(tonic::Response::new(reply));
+            }
             Ok(tonic::Response::new(pb::InferResponse {
                 content: "Hei der.".to_owned(),
                 model_used: "cleanup-model".to_owned(),
@@ -14686,7 +19662,7 @@ mod speech_route_tests {
     }
 
     /// An `AppState` whose inference client talks to `inference`.
-    async fn state_with(inference: SpeechInference) -> AppState {
+    pub(super) async fn state_with(inference: SpeechInference) -> AppState {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind inference stand-in");
@@ -14712,6 +19688,8 @@ mod speech_route_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -14730,7 +19708,7 @@ mod speech_route_tests {
         }
     }
 
-    fn bearer() -> VerifiedInferenceBearer {
+    pub(super) fn bearer() -> VerifiedInferenceBearer {
         VerifiedInferenceBearer::for_test("inference-test-bearer")
     }
 
@@ -15147,6 +20125,8 @@ mod tool_policy_proxy_tests {
 
     fn claims(zdr: bool) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -15413,6 +20393,306 @@ mod tool_policy_proxy_tests {
 }
 
 #[cfg(test)]
+mod org_agent_policy_proxy_tests {
+    use super::*;
+    use crate::auth::VerifiedCapabilityBearer;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    fn claims(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// What a stand-in capability-core received, in order: `METHOD path?query`, the `If-Match` header and the body.
+    type Received = Arc<Mutex<Vec<(String, Option<String>, Value)>>>;
+
+    async fn recorder() -> (String, Received, tokio::task::JoinHandle<()>) {
+        let received: Received = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new().fallback(axum::routing::any({
+            let received = Arc::clone(&received);
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  body: String| {
+                let received = Arc::clone(&received);
+                async move {
+                    let if_match = headers
+                        .get("if-match")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_owned);
+                    let body = serde_json::from_str(&body).unwrap_or(Value::Null);
+                    received.lock().expect("recorder lock").push((
+                        format!("{method} {uri}"),
+                        if_match,
+                        body,
+                    ));
+                    Json(json!({"ok": true}))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind recorder");
+        let address = listener.local_addr().expect("recorder address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve recorder");
+        });
+        (format!("http://{address}"), received, task)
+    }
+
+    #[tokio::test]
+    async fn a_policy_write_names_its_revision_in_if_match_and_forwards_the_rest() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let settings = json!({"mode_cap": "read_only", "lockdown": false});
+
+        let _ = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(json!({"settings": settings.clone(), "revision": 4})),
+        )
+        .await
+        .expect("a write at a revision");
+        let _ = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(json!({"settings": settings.clone()})),
+        )
+        .await
+        .expect("a write with no revision is forwarded, for capability-core to refuse");
+
+        let received = received.lock().expect("lock").clone();
+        assert_eq!(received[0].0, "PUT /api/v1/org-agent-policy");
+        assert_eq!(received[0].1.as_deref(), Some("4"));
+        // The revision leaves the body: capability-core refuses unknown fields.
+        assert_eq!(received[0].2, json!({"settings": settings}));
+        assert_eq!(received[1].1, None);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_revision_that_is_not_a_non_negative_integer_is_refused_before_forwarding() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        for revision in [json!("4"), json!(-1), json!(1.5), json!(null)] {
+            let refused = set_org_agent_policy_proxy(
+                State(state.clone()),
+                Extension(claims(false)),
+                bearer.clone(),
+                Json(json!({"settings": {}, "revision": revision.clone()})),
+            )
+            .await
+            .expect_err("a malformed revision must be refused");
+            assert_eq!(refused.0, StatusCode::BAD_REQUEST, "{revision}");
+        }
+        assert!(
+            received.lock().expect("lock").is_empty(),
+            "a malformed revision was forwarded"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_is_refused_every_org_policy_and_hook_write_before_anything_is_forwarded()
+    {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let zdr = claims(true);
+        let rule = json!({
+            "event": "pre_tool",
+            "tool_matcher": "shell",
+            "decision": "deny",
+            "reason": "no shell"
+        });
+
+        let set = set_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Json(json!({"settings": {}, "revision": 0})),
+        )
+        .await
+        .expect_err("a ZDR policy write must be refused");
+        assert_eq!(set.0, StatusCode::PRECONDITION_FAILED);
+        let create = create_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Json(rule.clone()),
+        )
+        .await
+        .expect_err("a ZDR hook create must be refused");
+        assert_eq!(create.0, StatusCode::PRECONDITION_FAILED);
+        let update = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+            Json(rule.clone()),
+        )
+        .await
+        .expect_err("a ZDR hook update must be refused");
+        assert_eq!(update.0, StatusCode::PRECONDITION_FAILED);
+        let delete = delete_org_hook_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+        )
+        .await
+        .expect_err("a ZDR hook retirement must be refused");
+        assert_eq!(delete.0, StatusCode::PRECONDITION_FAILED);
+        assert!(
+            received.lock().expect("lock").is_empty(),
+            "a ZDR write was forwarded"
+        );
+
+        // Reading the policy and the rules is not a durable mutation and stays open under ZDR.
+        let _ = get_org_agent_policy_proxy(
+            State(state.clone()),
+            Extension(zdr.clone()),
+            bearer.clone(),
+        )
+        .await
+        .expect("a ZDR caller may read the policy in force");
+        let _ = list_org_hooks_proxy(State(state), Extension(zdr), bearer)
+            .await
+            .expect("a ZDR caller may read the hook rules");
+        assert_eq!(received.lock().expect("lock").len(), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_gateway_names_the_capability_core_paths_and_pins_the_effective_read() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let rule = json!({
+            "event": "pre_tool",
+            "tool_matcher": "*",
+            "decision": "ask",
+            "reason": "check first",
+            "priority": 5
+        });
+
+        let _ = get_org_agent_policy_effective_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+        )
+        .await
+        .expect("effective");
+        let _ = list_org_hooks_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+        )
+        .await
+        .expect("list");
+        let _ = create_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Json(rule.clone()),
+        )
+        .await
+        .expect("create");
+        let _ = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("ohr_1".to_owned()),
+            Json(rule.clone()),
+        )
+        .await
+        .expect("update");
+        let _ = delete_org_hook_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Path("ohr_1".to_owned()),
+        )
+        .await
+        .expect("delete");
+
+        let received = received.lock().expect("lock").clone();
+        let lines: Vec<&str> = received.iter().map(|(line, _, _)| line.as_str()).collect();
+        assert_eq!(
+            lines,
+            [
+                "GET /api/v1/org-agent-policy/effective?user=me",
+                "GET /api/v1/org-hooks",
+                "POST /api/v1/org-hooks",
+                "PUT /api/v1/org-hooks/ohr_1",
+                "DELETE /api/v1/org-hooks/ohr_1",
+            ]
+        );
+        // A rule is forwarded as sent: the gateway adds no org id and drops nothing from it.
+        assert_eq!(received[2].2, rule);
+        assert_eq!(received[3].2, rule);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_hook_id_that_is_not_an_identifier_is_refused_before_forwarding() {
+        let (base_url, received, task) = recorder().await;
+        let mut state = AppState::new();
+        state.capability_core_base_url = base_url;
+        let bearer = VerifiedCapabilityBearer::for_test("capability-test-bearer");
+        let rule = json!({"event": "pre_tool", "decision": "deny", "reason": "no"});
+
+        let refused = update_org_hook_proxy(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer.clone(),
+            Path("../org-agent-policy".to_owned()),
+            Json(rule),
+        )
+        .await
+        .expect_err("a path-walking hook id must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        let refused = delete_org_hook_proxy(
+            State(state),
+            Extension(claims(false)),
+            bearer,
+            Path("ohr_1/../../x".to_owned()),
+        )
+        .await
+        .expect_err("a hook id with a slash must be refused");
+        assert_eq!(refused.0, StatusCode::BAD_REQUEST);
+        assert!(received.lock().expect("lock").is_empty());
+        task.abort();
+    }
+}
+
+#[cfg(test)]
 mod memory_controls_route_tests {
     use super::*;
     use mp_contracts::model_plane::v1::{MemoryControls, MemoryState};
@@ -15454,6 +20734,273 @@ mod memory_controls_route_tests {
         assert_eq!(refused.0, StatusCode::CONFLICT);
         assert_eq!(refused.1 .0["error"]["code"], "memory_not_enabled");
         assert_eq!(refused.1 .0["error"]["details"]["reason"], "user_paused");
+    }
+}
+
+#[cfg(test)]
+mod user_profile_route_tests {
+    //! EP-8 S4: the three profile routes send session-core the verified claims' org and user and
+    //! the verified session bearer, whatever the body says, and map its refusals to typed bodies.
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
+
+    /// What session-core received: the RPC, its org and user, and the forwarded authorization.
+    type Seen = Arc<Mutex<Vec<(&'static str, String, String, String)>>>;
+
+    #[derive(Clone, Default)]
+    struct ProfileMemory {
+        seen: Seen,
+    }
+
+    impl ProfileMemory {
+        fn record<T>(&self, rpc: &'static str, request: &TonicRequest<T>, org: &str, user: &str) {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            self.seen
+                .lock()
+                .expect("capture")
+                .push((rpc, org.to_owned(), user.to_owned(), authorization));
+        }
+    }
+
+    fn unused<T>() -> Result<TonicResponse<T>, Status> {
+        Err(Status::unimplemented("not used by the profile route tests"))
+    }
+
+    fn profile_answer() -> pb::UserProfileResponse {
+        pb::UserProfileResponse {
+            profile: Some(pb::UserProfile {
+                content: "- Prefers tables".to_owned(),
+                source_memory_ids: vec!["m-1".to_owned()],
+                origin: "built".to_owned(),
+                revision: 3,
+                updated_at: None,
+                sources_deleted_since_edit: 0,
+            }),
+            skip_reason: String::new(),
+        }
+    }
+
+    #[tonic::async_trait]
+    impl pb::memory_service_server::MemoryService for ProfileMemory {
+        async fn search_memory(
+            &self,
+            _: TonicRequest<pb::SearchMemoryRequest>,
+        ) -> Result<TonicResponse<pb::SearchMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn index_memory(
+            &self,
+            _: TonicRequest<pb::IndexMemoryRequest>,
+        ) -> Result<TonicResponse<pb::IndexMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn list_memory(
+            &self,
+            _: TonicRequest<pb::ListMemoryRequest>,
+        ) -> Result<TonicResponse<pb::ListMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn delete_memory(
+            &self,
+            _: TonicRequest<pb::DeleteMemoryRequest>,
+        ) -> Result<TonicResponse<pb::DeleteMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn health(
+            &self,
+            _: TonicRequest<pb::MemoryHealthRequest>,
+        ) -> Result<TonicResponse<pb::MemoryHealthResponse>, Status> {
+            unused()
+        }
+
+        async fn get_memory_controls(
+            &self,
+            _: TonicRequest<pb::GetMemoryControlsRequest>,
+        ) -> Result<TonicResponse<pb::GetMemoryControlsResponse>, Status> {
+            unused()
+        }
+
+        async fn set_memory_controls(
+            &self,
+            _: TonicRequest<pb::SetMemoryControlsRequest>,
+        ) -> Result<TonicResponse<pb::SetMemoryControlsResponse>, Status> {
+            unused()
+        }
+
+        async fn reset_memory(
+            &self,
+            _: TonicRequest<pb::ResetMemoryRequest>,
+        ) -> Result<TonicResponse<pb::ResetMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn get_user_profile(
+            &self,
+            request: TonicRequest<pb::GetUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record("get", &request, &org, &user);
+            Ok(TonicResponse::new(profile_answer()))
+        }
+
+        async fn set_user_profile(
+            &self,
+            request: TonicRequest<pb::SetUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record("set", &request, &org, &user);
+            // A ZDR refusal arrives as the catalogue status with its trailers.
+            if request.get_ref().content.contains("zdr") {
+                return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("user_profile")
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            if request.get_ref().expected_revision != 3 {
+                return Err(Status::failed_precondition("profile_revision_stale"));
+            }
+            Ok(TonicResponse::new(profile_answer()))
+        }
+
+        async fn rebuild_user_profile(
+            &self,
+            request: TonicRequest<pb::RebuildUserProfileRequest>,
+        ) -> Result<TonicResponse<pb::UserProfileResponse>, Status> {
+            let (org, user) = (request.get_ref().org_id.clone(), request.get_ref().user_id.clone());
+            self.record(if request.get_ref().force { "rebuild_force" } else { "rebuild" }, &request, &org, &user);
+            Ok(TonicResponse::new(profile_answer()))
+        }
+    }
+
+    async fn state_with(memory: ProfileMemory) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind memory stand-in");
+        let address = listener.local_addr().expect("memory stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(pb::memory_service_server::MemoryServiceServer::new(memory))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("memory stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect memory stand-in");
+        let mut state = AppState::new();
+        state.memory_client = pb::memory_service_client::MemoryServiceClient::new(channel);
+        state
+    }
+
+    fn claims(org_id: &str, user_id: &str) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: user_id.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: org_id.to_owned(),
+            user_id: user_id.to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr: false,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_routes_take_identity_from_claims() {
+        let memory = ProfileMemory::default();
+        let state = state_with(memory.clone()).await;
+        let bearer = || VerifiedModelBearer::for_test("session-core-token");
+
+        let read = get_user_profile(State(state.clone()), Extension(claims("org-a", "user-a")), bearer())
+            .await
+            .expect("read");
+        assert_eq!(read.0["profile"]["content"], "- Prefers tables");
+        assert_eq!(read.0["profile"]["source_memory_ids"], json!(["m-1"]));
+        assert_eq!(read.0["profile"]["revision"], 3);
+        assert_eq!(read.0["skip_reason"], "");
+
+        // A body naming another user or org cannot reach session-core: the body has no such field.
+        let body: SetUserProfileBody = serde_json::from_value(json!({
+            "content": "- Prefers prose",
+            "expected_revision": 3,
+            "user_id": "user-b",
+            "org_id": "org-b",
+        }))
+        .expect("extra fields are ignored");
+        set_user_profile(State(state.clone()), Extension(claims("org-a", "user-a")), bearer(), Json(body))
+            .await
+            .expect("edit");
+        rebuild_user_profile(
+            State(state.clone()),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(RebuildUserProfileBody { force: true }),
+        )
+        .await
+        .expect("rebuild");
+
+        let seen = memory.seen.lock().expect("capture").clone();
+        assert_eq!(
+            seen.iter().map(|(rpc, _, _, _)| *rpc).collect::<Vec<_>>(),
+            ["get", "set", "rebuild_force"]
+        );
+        for (rpc, org, user, authorization) in &seen {
+            assert_eq!((org.as_str(), user.as_str()), ("org-a", "user-a"), "{rpc}");
+            assert_eq!(authorization, "Bearer session-core-token", "{rpc}");
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_refusals_keep_their_typed_codes() {
+        let state = state_with(ProfileMemory::default()).await;
+        let bearer = || VerifiedModelBearer::for_test("session-core-token");
+        let edit = |content: &str, expected_revision: u64| SetUserProfileBody {
+            content: content.to_owned(),
+            expected_revision,
+        };
+
+        let stale = set_user_profile(
+            State(state.clone()),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(edit("- Late", 1)),
+        )
+        .await
+        .expect_err("a stale edit is refused");
+        assert_eq!(stale.0, StatusCode::CONFLICT);
+        assert_eq!(stale.1 .0["error"]["code"], "profile_revision_stale");
+
+        let zdr = set_user_profile(
+            State(state),
+            Extension(claims("org-a", "user-a")),
+            bearer(),
+            Json(edit("- zdr", 3)),
+        )
+        .await
+        .expect_err("a ZDR write is refused");
+        assert_eq!(zdr.0, StatusCode::CONFLICT);
+        assert_eq!(zdr.1 .0["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(zdr.1 .0["error"]["feature"], "user_profile");
     }
 }
 
@@ -15714,6 +21261,8 @@ mod model_access_route_tests {
 
     fn claims(org_id: &str) -> Claims {
         Claims {
+            key_id: None,
+            acting_user_id: None,
             sub: "user-a".to_owned(),
             iss: "test-issuer".to_owned(),
             exp: i64::MAX,
@@ -15883,6 +21432,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -15898,6 +21448,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: Some(false),
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -15916,10 +21467,16 @@ mod thread_messages_page_tests {
                 content: "hi".to_owned(),
                 agent_name: String::new(),
                 author_subject_id: String::new(),
+                post_kind: String::new(),
+                created_at: None,
                 metadata: None,
                 version: None,
+                entry: None,
+                mentions: Vec::new(),
+                revision: None,
             }],
             has_more: None,
+            omitted_before: None,
             versions_enabled: None,
         })
         .expect("the response serialises");
@@ -15938,8 +21495,13 @@ mod thread_messages_page_tests {
             message_id: "m2".to_owned(),
             role: "assistant".to_owned(),
             content: "answer".to_owned(),
+            entry: None,
+            mentions: Vec::new(),
+            revision: None,
             agent_name: String::new(),
             author_subject_id: String::new(),
+            post_kind: String::new(),
+            created_at: None,
             metadata: None,
             version: Some(ThreadMessageVersion {
                 siblings: Vec::new(),
@@ -15985,6 +21547,7 @@ mod thread_messages_page_tests {
             thread_id: "thread-1".to_owned(),
             messages: Vec::new(),
             has_more: None,
+            omitted_before: None,
             versions_enabled: Some(true),
         })
         .expect("the response serialises");
@@ -16035,6 +21598,28 @@ mod run_replay_projection_tests {
     }
 
     const RUN_TERMINAL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
+
+    #[test]
+    fn compat_attach_replay_requires_signature_and_matching_run() {
+        let key = "test-only-compat-key-32-characters-long";
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let receipt = crate::browser_attach_compat::Receipt { run_id: "run-1".into(), plan_id: "plan-1".into(), session_run_id: "session-1".into(), attach_id: "attach-1".into(), tab_id: "tab-1".into(), issued_at: now };
+        let envelope = crate::browser_attach_compat::sign(key.as_bytes(), &receipt).unwrap();
+        let payload = json!({"run_id":"run-1","plan_id":"plan-1","action_id":crate::browser_attach_compat::ACTION_ID,"status":envelope}).to_string();
+        let make_event = || event(EventType::BrowserObservationReceived as i32, "run:run-1", "run-1", "type.googleapis.com/model_plane.v1.BrowserObservationReceived", &payload);
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+        assert!(project_run_replay_event("run-1", make_event()).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", "0".repeat(37));
+        assert!(project_run_replay_event("run-1", make_event()).is_none());
+        std::env::set_var("BROWSER_ATTACH_COMPAT_HMAC_KEY", key);
+        assert!(project_run_replay_event("run-other", make_event()).is_none());
+        let projected = project_run_replay_event("run-1", make_event()).unwrap();
+        assert_eq!(projected.event_type, "EVENT_TYPE_BROWSER_ATTACH_SHARED_JAR");
+        assert_eq!(projected.payload, json!({"run_id":"run-1","plan_id":"plan-1","session_run_id":"session-1","attach_id":"attach-1","tab_id":"tab-1"}));
+        let forged = event(EventType::BrowserAttachSharedJar as i32, "run:run-1", "run-1", "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar", r#"{"run_id":"run-1"}"#);
+        assert!(project_run_replay_event("run-1", forged).is_none(), "unsigned typed event must not become proof");
+        std::env::remove_var("BROWSER_ATTACH_COMPAT_HMAC_KEY");
+    }
 
     #[test]
     fn a_managed_run_failed_is_projected_exactly() {
@@ -16150,6 +21735,31 @@ mod run_replay_projection_tests {
     }
 
     #[test]
+    fn an_unsigned_attach_shared_jar_event_is_not_replayed() {
+        let payload = r#"{"run_id":"run-1","plan_id":"plan-1","attach_id":"att-1","session_run_id":"user-run-9","tab_id":"tab-3"}"#;
+        let projected = project_run_replay_event(
+            "run-1",
+            event(
+                EventType::BrowserAttachSharedJar as i32,
+                "run:run-1",
+                "run-1",
+                "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+                payload,
+            ),
+        );
+        assert!(projected.is_none(), "unsigned audit event must not become attachment proof");
+        // Another run's attach event is not replayed.
+        let other = event(
+            EventType::BrowserAttachSharedJar as i32,
+            "run:run-2",
+            "run-2",
+            "type.googleapis.com/model_plane.v1.BrowserAttachSharedJar",
+            r#"{"run_id":"run-2"}"#,
+        );
+        assert!(project_run_replay_event("run-1", other).is_none());
+    }
+
+    #[test]
     fn a_non_slug_failure_code_is_dropped() {
         for code in [
             "Browser_failed",
@@ -16217,5 +21827,1809 @@ mod run_replay_projection_tests {
             r#"{"run_id":"run-1"}"#,
         );
         assert!(project_run_replay_event("run-1", unrelated).is_none());
+    }
+}
+
+#[cfg(test)]
+mod fork_route_tests {
+    use super::*;
+
+    #[test]
+    fn fork_body_reads_camel_case_defaults_the_title_and_refuses_unknown_fields() {
+        let body: ForkThreadBody =
+            serde_json::from_value(json!({"fromMessageId": "turn-4"})).unwrap();
+        assert_eq!(body.from_message_id, "turn-4");
+        assert!(body.title.is_empty());
+        assert!(serde_json::from_value::<ForkThreadBody>(
+            json!({"fromMessageId": "turn-4", "copyEverything": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn fork_refusals_answer_typed_codes() {
+        let (status, Json(body)) = fork_thread_error(&tonic::Status::unavailable(
+            "thread_fork_disabled",
+        ));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "history_fork_disabled");
+
+        let (status, Json(body)) = fork_thread_error(&tonic::Status::failed_precondition(
+            "fork_source_not_forkable",
+        ));
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "history_fork_refused");
+        assert_eq!(body["error"]["message"], "fork_source_not_forkable");
+    }
+}
+
+#[cfg(test)]
+mod space_post_wire_tests {
+    use super::*;
+
+    fn message(post_kind: &str) -> ThreadMessage {
+        ThreadMessage {
+            message_id: "m-1".to_owned(),
+            role: "user".to_owned(),
+            content: "hello".to_owned(),
+            agent_name: String::new(),
+            author_subject_id: "user-2".to_owned(),
+            post_kind: post_kind.to_owned(),
+            created_at: None,
+            metadata: None,
+            version: None,
+            entry: None,
+            mentions: Vec::new(),
+            revision: None,
+        }
+    }
+
+    fn summary(reply_count: u32, last_author: &str) -> ThreadSummaryResponse {
+        ThreadSummaryResponse {
+            attention_state: None, attention_since: None, attention_unseen: None, forked_from_thread_id: String::new(),
+            thread_id: "t-1".to_owned(),
+            session_key: "k".to_owned(),
+            title: "title".to_owned(),
+            preview: "preview".to_owned(),
+            created_at: "2026-10-27T00:00:00Z".to_owned(),
+            updated_at: "2026-10-27T00:00:00Z".to_owned(),
+            pinned: false,
+            space_id: "space-1".to_owned(),
+            owner_subject_id: "user-1".to_owned(),
+            latest_run_id: String::new(),
+            latest_run_status: String::new(),
+            latest_run_updated_at: None,
+            origin: "space".to_owned(),
+            persona_enabled: true,
+            archived_at: String::new(),
+            starred: false,
+            unread: false,
+            reply_count,
+            last_author_subject_id: last_author.to_owned(),
+            last_message_seq: 0,
+            recent_author_subject_ids: Vec::new(),
+            last_role: String::new(),
+            turn_count: 0,
+        }
+    }
+
+    #[test]
+    fn thread_message_json_carries_created_at_as_rfc3339_and_omits_it_when_unset() {
+        // 2026-10-31T09:30:15.250Z
+        let stored = prost_types::Timestamp {
+            seconds: 1_793_439_015,
+            nanos: 250_000_000,
+        };
+        let mut stamped = message("post");
+        stamped.created_at = message_created_at(Some(&stored));
+        let body = serde_json::to_value(stamped).expect("serialises");
+        let created_at = body["created_at"].as_str().expect("created_at is a string");
+        let parsed = chrono::DateTime::parse_from_rfc3339(created_at).expect("RFC3339");
+        assert_eq!(parsed.timestamp(), 1_793_439_015);
+        assert_eq!(parsed.timestamp_subsec_millis(), 250);
+        // A row session-core sent no time for keeps the shape it always had.
+        assert_eq!(message_created_at(None), None);
+        let unset = serde_json::to_value(message("")).expect("serialises");
+        assert!(unset.get("created_at").is_none(), "{unset}");
+    }
+
+    #[test]
+    fn thread_message_json_omits_post_kind_for_turns_and_carries_it_for_posts() {
+        // The handler maps a turn (or a row from before post kinds) to an empty kind, which is
+        // omitted, so a turn keeps the shape it always had.
+        let turn = serde_json::to_value(message("")).expect("serialises");
+        assert!(turn.get("post_kind").is_none(), "{turn}");
+        assert_eq!(turn["author_subject_id"], "user-2");
+        let post = serde_json::to_value(message("post")).expect("serialises");
+        assert_eq!(post["post_kind"], "post");
+        assert_eq!(post["author_subject_id"], "user-2");
+        assert_eq!(post["message_id"], "m-1");
+    }
+
+    #[test]
+    fn thread_summary_omits_reply_count_when_zero_and_last_author_when_empty() {
+        let quiet = serde_json::to_value(summary(0, "")).expect("serialises");
+        assert!(quiet.get("reply_count").is_none(), "{quiet}");
+        assert!(quiet.get("last_author_subject_id").is_none(), "{quiet}");
+        let busy = serde_json::to_value(summary(3, "user-2")).expect("serialises");
+        assert_eq!(busy["reply_count"], 3);
+        assert_eq!(busy["last_author_subject_id"], "user-2");
+        // One of the two alone is carried independently of the other.
+        let only_author = serde_json::to_value(summary(0, "user-9")).expect("serialises");
+        assert!(only_author.get("reply_count").is_none());
+        assert_eq!(only_author["last_author_subject_id"], "user-9");
+        let only_count = serde_json::to_value(summary(1, "")).expect("serialises");
+        assert_eq!(only_count["reply_count"], 1);
+        assert!(only_count.get("last_author_subject_id").is_none());
+    }
+}
+
+#[cfg(test)]
+mod memory_withheld_json_tests {
+    use super::*;
+
+    fn summary(withheld_reason: &str, origin_space_ref: &str) -> MemorySummaryResponse {
+        MemorySummaryResponse {
+            memory_id: "mem-1".to_owned(),
+            topic: "USER".to_owned(),
+            content: "likes tea".to_owned(),
+            updated_at: "2026-10-27T12:00:00Z".to_owned(),
+            provenance: "unknown",
+            withheld_reason: withheld_reason.to_owned(),
+            origin_space_ref: origin_space_ref.to_owned(),
+        }
+    }
+
+    #[test]
+    fn memories_json_omits_withheld_fields_for_an_ordinary_row() {
+        let ordinary = serde_json::to_value(summary("", "")).expect("serialises");
+        assert!(ordinary.get("withheld_reason").is_none(), "{ordinary}");
+        assert!(ordinary.get("origin_space_ref").is_none(), "{ordinary}");
+        // The shape an older SPA reads is unchanged.
+        for key in ["memory_id", "topic", "content", "updated_at", "provenance"] {
+            assert!(ordinary.get(key).is_some(), "{key} must stay: {ordinary}");
+        }
+    }
+
+    #[test]
+    fn memories_json_carries_withheld_reason_and_origin_space_when_set() {
+        let withheld = serde_json::to_value(summary("room_origin_unverified", "space-room-1")).expect("serialises");
+        assert_eq!(withheld["withheld_reason"], "room_origin_unverified");
+        assert_eq!(withheld["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn memories_json_carries_each_withheld_field_independently() {
+        let only_reason = serde_json::to_value(summary("room_origin_unverified", "")).expect("serialises");
+        assert_eq!(only_reason["withheld_reason"], "room_origin_unverified");
+        assert!(only_reason.get("origin_space_ref").is_none());
+        let only_space = serde_json::to_value(summary("", "space-room-1")).expect("serialises");
+        assert!(only_space.get("withheld_reason").is_none());
+        assert_eq!(only_space["origin_space_ref"], "space-room-1");
+    }
+
+    #[test]
+    fn the_listing_envelope_still_serialises_with_withheld_rows_inside() {
+        let body = serde_json::to_value(ListMemoriesResponse {
+            memories: vec![summary("room_origin_unverified", "space-room-1"), summary("", "")],
+            degraded: false,
+            degradation_reason: String::new(),
+        })
+        .expect("serialises");
+        let rows = body["memories"].as_array().expect("array");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["withheld_reason"], "room_origin_unverified");
+        assert!(rows[1].get("withheld_reason").is_none());
+    }
+}
+
+#[cfg(test)]
+mod ai_chat_lane_tests {
+    //! WS16.S1: `POST /v1/ai/chat` as a machine route. The handler runs against a real inference
+    //! stand-in (the speech tests' gRPC server, which records every `InferRequest`), so what these
+    //! tests assert is what inference-core would have received and what the bus would have carried.
+    use super::speech_route_tests::{bearer, state_with, SpeechInference};
+    use super::*;
+    use mp_contracts::model_plane::v1 as pb;
+
+    fn user(zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn service(sub: &str, zdr: bool) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: sub.to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: vec!["models:invoke".to_owned()],
+            zdr,
+            sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some(sub.to_owned()),
+            reason: Some("extract structured data from page text".to_owned()),
+        }
+    }
+
+    fn quarry(zdr: bool) -> Claims {
+        service("service:quarry-edge", zdr)
+    }
+
+    fn request(extra: Value) -> AiChatRequest {
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "extract the title" }],
+            "model": "test-model",
+        });
+        for (key, value) in extra.as_object().expect("extra fields are an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("an ai_chat body parses")
+    }
+
+    fn reply() -> pb::InferResponse {
+        pb::InferResponse {
+            content: "{\"title\":\"Hello\"}".to_owned(),
+            model_used: "test-model".to_owned(),
+            provider_used: "azure".to_owned(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            ..Default::default()
+        }
+    }
+
+    async fn call(
+        inference: &SpeechInference,
+        claims: Claims,
+        extra: Value,
+        metering: AiChatMetering,
+    ) -> (AppState, Result<Json<Value>, HttpJsonError>) {
+        let mut state = state_with(inference.clone()).await;
+        state.pricing = crate::pricing::PricingCache::with_rate_for_test("test-model", 1.0, 2.0);
+        let outcome = ai_chat_with(state.clone(), claims, bearer(), request(extra), metering).await;
+        (state, outcome)
+    }
+
+    #[tokio::test]
+    async fn ai_chat_defaults_are_unchanged_without_new_fields() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a plain chat call succeeds");
+
+        let sent = inference.cleanups();
+        assert_eq!(sent.len(), 1);
+        assert!((sent[0].temperature - 0.7).abs() < f32::EPSILON, "{}", sent[0].temperature);
+        assert_eq!(sent[0].max_tokens, 4096);
+        // The keys every caller already read are all still there.
+        assert_eq!(body["content"], "{\"title\":\"Hello\"}");
+        assert_eq!(body["model_used"], "test-model");
+        assert_eq!(body["usage"]["input_tokens"], 1000);
+        assert_eq!(body["usage"]["output_tokens"], 500);
+        assert!(body["id"].as_str().is_some_and(|id| !id.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn ai_chat_accepts_the_bounds_and_passes_them_through() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(
+            &inference,
+            user(false),
+            json!({ "temperature": 0.0, "max_tokens": 8192 }),
+            AiChatMetering::Off,
+        )
+        .await;
+        let _ = outcome.expect("the inclusive bounds are accepted");
+        let sent = inference.cleanups();
+        assert!(sent[0].temperature.abs() < f32::EPSILON);
+        assert_eq!(sent[0].max_tokens, 8192);
+    }
+
+    #[tokio::test]
+    async fn ai_chat_rejects_temperature_above_one_and_max_tokens_above_8192() {
+        for extra in [
+            json!({ "temperature": 1.01 }),
+            json!({ "temperature": -0.1 }),
+            json!({ "max_tokens": 8193 }),
+            json!({ "max_tokens": 0 }),
+            json!({ "max_tokens": -5 }),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(&inference, user(false), extra.clone(), AiChatMetering::Off).await;
+            let (status, _) = outcome.expect_err("an out-of-range field is refused");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}");
+            assert!(inference.cleanups().is_empty(), "{extra}: no model call");
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_chat_returns_cost_and_provider() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("a service call succeeds");
+        assert_eq!(body["provider_used"], "azure");
+        // 1000 input tokens at 1.0 per million plus 500 output tokens at 2.0 per million.
+        let cost = body["usage"]["cost_usd"].as_f64().expect("a metered call is priced");
+        assert!((cost - 0.002).abs() < 1e-9, "{cost}");
+        assert!(body["usage"]["latency_ms"].is_u64(), "{body}");
+
+        // Under ZDR the cost is null, never a number.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(true), json!({}), AiChatMetering::Service).await;
+        let Json(body) = outcome.expect("a ZDR service call succeeds");
+        assert!(body["usage"]["cost_usd"].is_null(), "{body}");
+        assert_eq!(body["provider_used"], "azure");
+        assert!(inference.cleanups()[0].zdr, "the ZDR flag reaches inference-core");
+    }
+
+    #[tokio::test]
+    async fn a_service_call_publishes_one_usage_envelope_and_a_zdr_call_none() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(false),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1, "{published:?}");
+        let (subject, envelope) = &published[0];
+        assert_eq!(subject, &subjects::usage_subject("org-a"));
+        assert_eq!(envelope.event_type, "USAGE_ENVELOPE");
+        assert_eq!(envelope.producer, "model-gateway");
+        assert_eq!(envelope.org_id, "org-a");
+        assert_eq!(envelope.user_id, "service:quarry-edge");
+        let id = body["id"].as_str().expect("the response id");
+        assert_eq!(envelope.idempotency_key, format!("{id}-USAGE_ENVELOPE"));
+        assert!(!envelope.zdr);
+        assert_eq!(envelope.payload["route"], "ai_chat");
+        assert_eq!(envelope.payload["purpose"], "quarry.extract");
+        assert_eq!(envelope.payload["input_tokens"], 1000);
+        assert_eq!(envelope.payload["output_tokens"], 500);
+        assert_eq!(envelope.payload["provider_used"], "azure");
+        assert_eq!(envelope.payload["user_id"], "service:quarry-edge");
+
+        // A ZDR call publishes nothing at all.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(
+            &inference,
+            quarry(true),
+            json!({ "purpose": "quarry.extract" }),
+            AiChatMetering::Service,
+        )
+        .await;
+        let _ = outcome.expect("the ZDR call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a ZDR call is never ledgered");
+    }
+
+    #[tokio::test]
+    async fn a_user_call_publishes_nothing_in_service_mode() {
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::Service).await;
+        let _ = outcome.expect("the user call succeeds");
+        assert!(state.publisher.drain().is_empty());
+
+        // `all` is the only mode that meters a user, and it attributes the user.
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, user(false), json!({}), AiChatMetering::All).await;
+        let _ = outcome.expect("the user call succeeds");
+        let published = state.publisher.drain();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].1.user_id, "user-a");
+        assert!(published[0].1.payload["purpose"].is_null());
+    }
+
+    /// New behaviour is off until switched on: no switch, an unknown value and `off` all meter nothing.
+    #[tokio::test]
+    async fn metering_defaults_to_off_and_only_the_literal_modes_enable_it() {
+        assert_eq!(AiChatMetering::parse(None), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("1")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("off")), AiChatMetering::Off);
+        assert_eq!(AiChatMetering::parse(Some("service")), AiChatMetering::Service);
+        assert_eq!(AiChatMetering::parse(Some(" ALL ")), AiChatMetering::All);
+
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (state, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::default()).await;
+        let _ = outcome.expect("the call succeeds");
+        assert!(state.publisher.drain().is_empty(), "a service call is unmetered by default");
+    }
+
+    const CONTRACT_DIR: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/ai-chat-v1"
+    );
+
+    fn contract(name: &str) -> String {
+        std::fs::read_to_string(format!("{CONTRACT_DIR}/{name}"))
+            .unwrap_or_else(|error| panic!("cannot read ai-chat-v1/{name}: {error}"))
+    }
+
+    /// The `ai-chat-v1` fixtures are what a caller's fake gateway replays (Quarry vendors them), so
+    /// they must be what this handler speaks: the request parses, with its schema as a STRING; the
+    /// ok response has exactly the keys the handler writes; the 412 is the catalogue's own body; and
+    /// the pin file matches the bytes.
+    #[tokio::test]
+    async fn the_ai_chat_v1_fixtures_are_what_the_handler_speaks() {
+        let request_text = contract("request.ok.json");
+        let request: AiChatRequest = serde_json::from_str(&request_text).expect("request.ok.json parses");
+        let schema = request.structured_output_schema.as_deref().expect("the schema is a string");
+        assert!(serde_json::from_str::<Value>(schema).is_ok_and(|v| v.is_object()));
+        assert!(
+            ai_chat_params(&request, &quarry(false)).is_ok(),
+            "the fixture request is admitted for service:quarry-edge"
+        );
+
+        // The ok response and the handler's own body have the same keys.
+        let fixture: Value = serde_json::from_str(&contract("response.ok.json")).expect("response.ok.json");
+        assert_eq!(fixture["status"], 200);
+        let inference = SpeechInference::default();
+        inference.answering(reply());
+        let (_, outcome) = call(&inference, quarry(false), json!({}), AiChatMetering::Off).await;
+        let Json(body) = outcome.expect("the call succeeds");
+        let keys = |value: &Value| -> Vec<String> {
+            let mut keys: Vec<String> = value.as_object().expect("an object").keys().cloned().collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(keys(&body), keys(&fixture["body"]));
+        assert_eq!(keys(&body["usage"]), keys(&fixture["body"]["usage"]));
+
+        let denied: Value = serde_json::from_str(&contract("response.route-denied.json")).expect("route-denied");
+        assert_eq!(denied["status"], 403);
+        let unavailable: Value =
+            serde_json::from_str(&contract("response.zdr-unavailable.json")).expect("zdr-unavailable");
+        assert_eq!(unavailable["status"], 412);
+        assert_eq!(
+            unavailable["body"],
+            mp_contracts::zdr_refusal::Refusal::UNAVAILABLE.json_body()
+        );
+
+        // SHA256SUMS pins every other file in the directory, byte for byte.
+        use sha2::{Digest, Sha256};
+        let sums = contract("SHA256SUMS");
+        let mut pinned = 0;
+        for line in sums.lines() {
+            let (digest, name) = line.split_once(" *").expect("`<digest> *<file>` lines");
+            let bytes = std::fs::read(format!("{CONTRACT_DIR}/{name}")).expect("a pinned file");
+            assert_eq!(digest, format!("{:x}", Sha256::digest(&bytes)), "{name}");
+            pinned += 1;
+        }
+        assert_eq!(pinned, 4);
+    }
+
+    #[tokio::test]
+    async fn purpose_is_for_service_quarry_edge_only() {
+        for (claims, purpose, expected) in [
+            (user(false), "quarry.extract", StatusCode::FORBIDDEN),
+            (service("service:someone-else", false), "quarry.extract", StatusCode::FORBIDDEN),
+            (quarry(false), "something.else", StatusCode::BAD_REQUEST),
+        ] {
+            let inference = SpeechInference::default();
+            let (_, outcome) = call(
+                &inference,
+                claims.clone(),
+                json!({ "purpose": purpose }),
+                AiChatMetering::Service,
+            )
+            .await;
+            let (status, _) = outcome.expect_err("the purpose is refused");
+            assert_eq!(status, expected, "{} / {purpose}", claims.sub);
+            assert!(inference.cleanups().is_empty(), "no model call for a refused purpose");
+        }
+    }
+}
+
+/// INNH-10 MP-3: an `api_key` principal reaches the two key-grant routes and nothing else. The
+/// route list is read from the source, so a route added anywhere later is covered without a
+/// change here.
+#[cfg(test)]
+mod api_key_route_fence_tests {
+    use super::*;
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    /// Routes outside `authed_routes`: the unauthenticated probes of `build_router_with_readiness`.
+    const PUBLIC: &[&str] = &["/healthz", "/readyz", "/version", "/metrics"];
+
+    /// Every production `.route("<path>", ..)` in the crate, as `(file, path)`.
+    fn production_route_paths() -> Vec<(String, String)> {
+        let pattern = regex::Regex::new(r#"\.route\(\s*"([^"]+)""#).expect("a valid pattern");
+        let mut paths = Vec::new();
+        for (file, text) in crate::zdr_posture::tests::read_sources() {
+            let code: String = crate::zdr_posture::tests::strip_test_items(&text)
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for capture in pattern.captures_iter(&code) {
+                paths.push((file.clone(), capture[1].to_owned()));
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    fn concrete(path: &str) -> String {
+        path.split('/')
+            .map(|segment| {
+                if segment.starts_with(':') || segment.starts_with('*') {
+                    "x1"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn key_claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "apikey:key-1",
+            "iss": "auth-core",
+            "exp": 4_102_444_800_i64,
+            "org_id": "org-a",
+            "zdr": false,
+            "principal_type": "api_key",
+            "key_id": "key-1",
+            "acting_user_id": "user-a",
+            "scopes": ["browser:agent"],
+        }))
+        .expect("an api key token decodes")
+    }
+
+    #[tokio::test]
+    async fn api_key_is_refused_on_every_other_route() {
+        let paths = production_route_paths();
+        let fenced: Vec<&(String, String)> = paths
+            .iter()
+            .filter(|(_, path)| !PUBLIC.contains(&path.as_str()))
+            .collect();
+        assert!(
+            fenced.len() > 100,
+            "the source scan found only {} routes; it is not reading the route table",
+            fenced.len()
+        );
+        for (_, key_route) in auth::API_KEY_ROUTES {
+            assert!(
+                paths.iter().any(|(_, path)| path == key_route),
+                "{key_route} is not registered"
+            );
+        }
+        let mut state = AppState::new();
+        // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
+        state.browser_key_grants = Some(true);
+        // With the Agent API routes merged, so the scan proves a key reaches none of them while
+        // the switch is off (EP-12 S5; this test leaves the environment unset).
+        let router = authed_routes_with(true)
+            .layer(middleware::from_fn(auth::authorize_principal_route))
+            .layer(Extension(key_claims()))
+            .with_state(state);
+
+        let mut failures = Vec::new();
+        for (file, path) in fenced {
+            let uri = concrete(path);
+            let is_key_path = auth::API_KEY_ROUTES.iter().any(|(_, key)| key == path);
+            let mut refused = false;
+            for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                let status = router
+                    .clone()
+                    .oneshot(
+                        HttpRequest::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("content-type", "application/json")
+                            .body(Body::from("{}"))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .status();
+                if auth::API_KEY_ROUTES
+                    .iter()
+                    .any(|(key_method, key_path)| *key_method == method && key_path == path)
+                {
+                    if status != StatusCode::UNAUTHORIZED {
+                        failures.push(format!("{method} {path}: the key route answered {status}"));
+                    }
+                    continue;
+                }
+                match status {
+                    StatusCode::FORBIDDEN => refused = true,
+                    StatusCode::METHOD_NOT_ALLOWED => {}
+                    other => failures.push(format!("{method} {path} ({file}): {other}")),
+                }
+            }
+            if !refused && !is_key_path {
+                failures.push(format!(
+                    "{path} ({file}): no method was refused; is it outside authed_routes?"
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "an api key principal reached a route it may not:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+/// WS10.S6: the run trace route against a stand-in Session Core EventLog.
+#[cfg(test)]
+mod run_trace_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        event_log_client::EventLogClient,
+        event_log_server::{EventLog, EventLogServer},
+        AgentRef, AppendEventRequest, AppendEventResponse, Cursor, QueryEventsRequest,
+        QueryEventsResponse, RunOrigin, SubscribeEventsRequest,
+    };
+    use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct FakeEventLog {
+        seen: Arc<Mutex<Vec<(QueryEventsRequest, Option<String>)>>>,
+        failure: Option<tonic::Code>,
+        /// When set, the answer to every query (C6 builds its page here).
+        page: Option<QueryEventsResponse>,
+    }
+
+    #[tonic::async_trait]
+    impl EventLog for FakeEventLog {
+        async fn append_event(
+            &self,
+            _: tonic::Request<AppendEventRequest>,
+        ) -> Result<tonic::Response<AppendEventResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn query_events(
+            &self,
+            request: tonic::Request<QueryEventsRequest>,
+        ) -> Result<tonic::Response<QueryEventsResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.into_inner(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if let Some(page) = &self.page {
+                return Ok(tonic::Response::new(page.clone()));
+            }
+            Ok(tonic::Response::new(QueryEventsResponse {
+                events: vec![Event {
+                    event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+                    event_type: EventType::BrowserStepReceiptRecorded as i32,
+                    schema_version: 1,
+                    ts: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                    producer: "quarry-edge".to_owned(),
+                    org_id: "org-a".to_owned(),
+                    user_id: "user-a".to_owned(),
+                    payload: Some(prost_types::Any {
+                        type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                        value: br#"{"action":"click","step":7}"#.to_vec(),
+                    }),
+                    producer_seq: 7,
+                    agent: Some(AgentRef {
+                        id: "general-v1".to_owned(),
+                        role: "subagent".to_owned(),
+                        parent_id: "primary-v1".to_owned(),
+                    }),
+                    origin: RunOrigin::Agent as i32,
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    ..Default::default()
+                }],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }))
+        }
+
+        type SubscribeEventsStream = futures::stream::Empty<Result<Event, tonic::Status>>;
+
+        async fn subscribe_events(
+            &self,
+            _: tonic::Request<SubscribeEventsRequest>,
+        ) -> Result<tonic::Response<Self::SubscribeEventsStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+    }
+
+    fn claims() -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": false
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeEventLog, with_session_bearer: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(EventLogServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.event_log_client = EventLogClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        let mut router = Router::new()
+            .route("/v1/runs/:run_id/trace", get(get_run_trace))
+            .with_state(state)
+            .layer(Extension(claims()));
+        if with_session_bearer {
+            router = router.layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )));
+        }
+        router
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_requires_the_verified_bearer() {
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+
+        let (status, body) = get_json(
+            app(fake.clone(), true).await,
+            "/v1/runs/run_1/trace?cursor=41&limit=9999&types=BROWSER_STEP_RECEIPT_RECORDED,%20RUN_COMPLETED",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let seen = fake.seen.lock().unwrap();
+        let (request, authorization) = &seen[0];
+        assert_eq!(authorization.as_deref(), Some("Bearer session-core-bearer"));
+        let filter = request.filter.as_ref().expect("a filter");
+        assert_eq!(filter.org_id, "org-a", "the org is the token's");
+        assert_eq!(filter.run_id, "run_1");
+        assert_eq!(
+            filter.event_types,
+            [
+                EventType::BrowserStepReceiptRecorded as i32,
+                EventType::RunCompleted as i32
+            ]
+        );
+        assert_eq!(request.cursor.as_ref().map(|c| c.value.as_str()), Some("41"));
+        assert_eq!(request.limit, 500, "the limit is clamped to 1..500");
+        assert!(!request.reverse);
+        assert_eq!(body["meta"], json!({ "next_cursor": "42", "has_more": true }));
+        let event = &body["data"]["events"][0];
+        assert_eq!(event["event_type"], "BROWSER_STEP_RECEIPT_RECORDED");
+        assert_eq!(event["origin"], "AGENT");
+        assert_eq!(event["ts"], "2026-11-01T09:30:15.250Z");
+        assert_eq!(event["payload"], json!({ "action": "click", "step": 7 }));
+        assert_eq!(event["agent"]["parent_id"], "primary-v1");
+        assert_eq!(event["producer_seq"], 7);
+        assert_eq!(event["zdr"], false);
+    }
+
+    /// WS10.S9 C6: the read-API shape of `GET /v1/runs/:run_id/trace`, pinned as an authored
+    /// fixture that the Frontend gateway's type test also reads. The body below is built by the
+    /// real handler from a Session Core page; it must equal the fixture, field for field.
+    #[tokio::test]
+    async fn run_trace_read_response_matches_the_c6_fixture() {
+        use sha2::{Digest, Sha256};
+        const FIXTURE: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../api/contracts/run-trace-read-v1.golden.json"
+        );
+        let text = std::fs::read_to_string(FIXTURE).expect("the C6 fixture");
+        assert!(!text.contains('\r'), "the fixture is hashed byte for byte: LF only");
+        let pin = std::fs::read_to_string(format!("{FIXTURE}.sha256")).expect("the C6 pin");
+        assert_eq!(
+            pin.trim(),
+            format!("{:x} *run-trace-read-v1.golden.json", Sha256::digest(text.as_bytes())),
+            "the fixture changed without its pin (and the sync-script digest)"
+        );
+        let expected: Value = serde_json::from_str(&text).expect("the fixture parses");
+
+        let first = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            event_type: EventType::BrowserStepReceiptRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_415,
+                nanos: 250_000_000,
+            }),
+            producer: "quarry-edge".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            payload: Some(prost_types::Any {
+                type_url: RUN_TRACE_PAYLOAD_TYPE_URL.to_owned(),
+                value: br#"{"action":"click","step":7}"#.to_vec(),
+            }),
+            producer_seq: 7,
+            agent: Some(AgentRef {
+                id: "general-v1".to_owned(),
+                role: "subagent".to_owned(),
+                parent_id: "primary-v1".to_owned(),
+            }),
+            origin: RunOrigin::Agent as i32,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let second = Event {
+            event_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9B".to_owned(),
+            event_type: EventType::BrowserArtifactRecorded as i32,
+            schema_version: 1,
+            ts: Some(prost_types::Timestamp {
+                seconds: 1_793_525_416,
+                nanos: 0,
+            }),
+            producer: "quarry-edge".to_owned(),
+            correlation_id: "corr_1".to_owned(),
+            causation_id: "01JC7K3M9Q4R8T2V5W6X7Y8Z9A".to_owned(),
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            resource_ref: "artifact_1".to_owned(),
+            // Another payload type is reported by its type_url, never as bytes.
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"raw bytes".to_vec(),
+            }),
+            zdr: true,
+            producer_seq: 8,
+            run_id: "run_1".to_owned(),
+            request_id: "req_1".to_owned(),
+            ..Default::default()
+        };
+        let fake = FakeEventLog {
+            page: Some(QueryEventsResponse {
+                events: vec![first, second],
+                next_cursor: Some(Cursor {
+                    value: "42".to_owned(),
+                }),
+                has_more: true,
+            }),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, expected, "the handler's body drifted from the C6 fixture");
+
+        // The last page: no events, no cursor. The same envelope with the cursor null.
+        let empty = FakeEventLog {
+            page: Some(QueryEventsResponse::default()),
+            ..Default::default()
+        };
+        let (status, body) = get_json(app(empty, true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body,
+            json!({ "data": { "events": [] }, "meta": { "next_cursor": null, "has_more": false } })
+        );
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_maps_unimplemented_and_not_found() {
+        for (code, want, error_code) in [
+            (tonic::Code::NotFound, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::PermissionDenied, StatusCode::NOT_FOUND, "run_not_found"),
+            (tonic::Code::Unimplemented, StatusCode::NOT_IMPLEMENTED, "trace_unavailable"),
+            (tonic::Code::InvalidArgument, StatusCode::BAD_REQUEST, "invalid_trace_query"),
+        ] {
+            let fake = FakeEventLog {
+                failure: Some(code),
+                ..Default::default()
+            };
+            let (status, body) = get_json(app(fake, true).await, "/v1/runs/run_1/trace").await;
+            assert_eq!(status, want, "{code:?}");
+            assert_eq!(body["error"]["code"], error_code, "{code:?}");
+            assert!(
+                !body.to_string().contains("session-core says no"),
+                "the upstream message is not echoed: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_trace_route_refuses_bad_input_before_session_core() {
+        for uri in [
+            "/v1/runs/run.1/trace",
+            "/v1/runs/run_1/trace?types=NOT_A_TYPE",
+            "/v1/runs/run_1/trace?types=UNSPECIFIED",
+            "/v1/runs/run_1/trace?types=EVENT_TYPE_RUN_COMPLETED",
+        ] {
+            let fake = FakeEventLog::default();
+            let (status, _) = get_json(app(fake.clone(), true).await, uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+            assert!(fake.seen.lock().unwrap().is_empty(), "{uri}");
+        }
+        let long_cursor = format!("/v1/runs/run_1/trace?cursor={}", "1".repeat(513));
+        let fake = FakeEventLog::default();
+        let (status, _) = get_json(app(fake.clone(), true).await, &long_cursor).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A missing limit reads the default page, and an unknown payload type is never raw bytes.
+        let (status, _) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/trace").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(fake.seen.lock().unwrap()[0].0.limit, 100);
+        let opaque = Event {
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/other".to_owned(),
+                value: b"secret bytes".to_vec(),
+            }),
+            ..Default::default()
+        };
+        let json = trace_event_json(&opaque);
+        assert_eq!(json["payload"], json!({ "type_url": "type.googleapis.com/other" }));
+        assert_eq!(json["origin"], Value::Null);
+    }
+}
+
+/// EP-14 S5: the run timing route against a stand-in Session Core RunLedgerService.
+#[cfg(test)]
+mod run_timing_route_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use mp_contracts::model_plane::v1::{
+        run_ledger_service_client::RunLedgerServiceClient,
+        run_ledger_service_server::{RunLedgerService, RunLedgerServiceServer},
+        GetRequestSnapshotRequest, GetRequestSnapshotResponse, GetRunTimingRequest,
+        GetRunTimingResponse, PromptSection, RecordRequestSnapshotRequest,
+        RecordRequestSnapshotResponse, RecordRunTimingRequest, RecordRunTimingResponse,
+        RunActionTiming, RunTimingRecorded,
+    };
+    use tower::ServiceExt;
+
+    /// Session Core as the owner check sees it: `run_1` is user-a's, every other run is absent.
+    #[derive(Clone, Default)]
+    struct FakeRunLedger {
+        seen: Arc<Mutex<Vec<(GetRunTimingRequest, Option<String>)>>>,
+        inspected: Arc<Mutex<Vec<GetRequestSnapshotRequest>>>,
+        failure: Option<tonic::Code>,
+    }
+
+    #[tonic::async_trait]
+    impl RunLedgerService for FakeRunLedger {
+        async fn record_request_snapshot(
+            &self,
+            _: tonic::Request<RecordRequestSnapshotRequest>,
+        ) -> Result<tonic::Response<RecordRequestSnapshotResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn record_run_timing(
+            &self,
+            _: tonic::Request<RecordRunTimingRequest>,
+        ) -> Result<tonic::Response<RecordRunTimingResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn get_run_timing(
+            &self,
+            request: tonic::Request<GetRunTimingRequest>,
+        ) -> Result<tonic::Response<GetRunTimingResponse>, tonic::Status> {
+            let authorization = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let request = request.into_inner();
+            self.seen
+                .lock()
+                .unwrap()
+                .push((request.clone(), authorization));
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if request.run_id != "run_1" {
+                return Err(tonic::Status::not_found("run not found"));
+            }
+            Ok(tonic::Response::new(GetRunTimingResponse {
+                timings: vec![RunTimingRecorded {
+                    run_id: "run_1".to_owned(),
+                    request_id: "req_1".to_owned(),
+                    schema: "turn-timing-v1".to_owned(),
+                    report_json: r#"{"server_ms":1200,"phases":[]}"#.to_owned(),
+                    phases_dropped: 0,
+                    recorded_at: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 250_000_000,
+                    }),
+                }],
+                actions: vec![RunActionTiming {
+                    action_id: "act_1".to_owned(),
+                    tool: "web_search".to_owned(),
+                    status: "completed".to_owned(),
+                    reserved_at: Some(prost_types::Timestamp {
+                        seconds: 1_793_525_415,
+                        nanos: 0,
+                    }),
+                    finalized_at: None,
+                    effect_class: String::new(),
+                }],
+                truncated: false,
+            }))
+        }
+
+        /// Call 1 of `run_1` is user-a's; Session Core has already dropped the platform section's text.
+        async fn get_request_snapshot(
+            &self,
+            request: tonic::Request<GetRequestSnapshotRequest>,
+        ) -> Result<tonic::Response<GetRequestSnapshotResponse>, tonic::Status> {
+            let request = request.into_inner();
+            self.inspected.lock().unwrap().push(request.clone());
+            if let Some(code) = self.failure {
+                return Err(tonic::Status::new(code, "session-core says no"));
+            }
+            if request.run_id != "run_1" || request.call_seq != 1 {
+                return Err(tonic::Status::not_found("request snapshot not found"));
+            }
+            Ok(tonic::Response::new(GetRequestSnapshotResponse {
+                snapshot_json: r#"{"schema":"request-snapshot-v1","model":"gpt-5.1"}"#.to_owned(),
+                system_sections: vec![
+                    PromptSection {
+                        label: "stable".to_owned(),
+                        source: "platform".to_owned(),
+                        digest: "a".repeat(64),
+                        chars: 40,
+                        text: String::new(),
+                    },
+                    PromptSection {
+                        label: "Memory".to_owned(),
+                        source: "memory".to_owned(),
+                        digest: "b".repeat(64),
+                        chars: 30,
+                        text: "The user prefers metric units.".to_owned(),
+                    },
+                ],
+                tools_json: r#"[{"name":"web_search"}]"#.to_owned(),
+                dropped: 2,
+                tools_truncated: false,
+                system_truncated: false,
+                call_purpose: "answer".to_owned(),
+            }))
+        }
+    }
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    async fn app(fake: FakeRunLedger, zdr: bool) -> Router {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(RunLedgerServiceServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await;
+        });
+        let mut state = AppState::new();
+        state.run_ledger_client = RunLedgerServiceClient::connect(format!("http://{address}"))
+            .await
+            .unwrap();
+        Router::new()
+            .route("/v1/runs/:run_id/timing", get(get_run_timing))
+            // The inspector with its switch on, and with it off; the env read stays out of parallel tests.
+            .route(
+                "/v1/runs/:run_id/requests/:call_seq",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<(String, String)>| {
+                        run_request_inspection(state, claims, bearer, path, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/runs/:run_id/requests/:call_seq",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<(String, String)>| {
+                        run_request_inspection(state, claims, bearer, path, false)
+                    },
+                ),
+            )
+            .with_state(state)
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )))
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn get_run_timing_owner_only() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["timings"][0]["schema"], "turn-timing-v1");
+        assert_eq!(data["timings"][0]["report"]["server_ms"], 1200);
+        assert!(data["timings"][0]["recorded_at"].as_str().is_some_and(|at| at.ends_with(".250Z")));
+        assert_eq!(data["actions"][0]["tool"], "web_search");
+        assert_eq!(data["actions"][0]["finalized_at"], Value::Null);
+        assert_eq!(data["actions"][0]["effect_class"], Value::Null);
+        assert_eq!(data["truncated"], false);
+        {
+            let seen = fake.seen.lock().unwrap();
+            assert_eq!(seen[0].1.as_deref(), Some("Bearer session-core-bearer"), "the owner's bearer");
+        }
+
+        // Another user's run reads exactly like a run that does not exist.
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_2/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_not_found");
+        let denied = FakeRunLedger {
+            failure: Some(tonic::Code::PermissionDenied),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(denied, false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_not_found");
+
+        // Session Core with the read switched off.
+        let off = FakeRunLedger {
+            failure: Some(tonic::Code::Unimplemented),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(off, false).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_timing_unavailable");
+
+        let (status, _) = get_json(app(fake.clone(), false).await, "/v1/runs/run.1/timing").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_run_timing_refuses_zdr_bearer() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/timing").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "run_inspection");
+        assert!(fake.seen.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+
+    #[tokio::test]
+    async fn inspector_route_serves_the_owner_the_filtered_call() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let data = &body["data"];
+        assert_eq!(data["call_seq"], 1);
+        assert_eq!(data["call_purpose"], "answer");
+        assert_eq!(data["snapshot"]["model"], "gpt-5.1");
+        assert_eq!(data["system_sections"][0]["source"], "platform");
+        assert_eq!(data["system_sections"][0]["text"], Value::Null, "no platform text");
+        assert_eq!(data["system_sections"][1]["text"], "The user prefers metric units.");
+        assert_eq!(data["tools"][0]["name"], "web_search");
+        assert_eq!(data["dropped"], 2);
+
+        // Another user's run, an org admin and an unknown call all read as one 404.
+        let (status, body) = get_json(app(fake.clone(), false).await, "/v1/runs/run_2/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_request_not_found");
+        let off = FakeRunLedger {
+            failure: Some(tonic::Code::Unimplemented),
+            ..FakeRunLedger::default()
+        };
+        let (status, body) = get_json(app(off, false).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "run_request_not_found");
+
+        for bad in ["/v1/runs/run.1/requests/1", "/v1/runs/run_1/requests/0", "/v1/runs/run_1/requests/x"] {
+            let (status, _) = get_json(app(fake.clone(), false).await, bad).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn inspector_route_off_is_a_404() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), false).await, "/off/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+        assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+
+    #[tokio::test]
+    async fn inspector_refuses_zdr_bearer() {
+        let fake = FakeRunLedger::default();
+        let (status, body) = get_json(app(fake.clone(), true).await, "/v1/runs/run_1/requests/1").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "run_inspection");
+        assert!(fake.inspected.lock().unwrap().is_empty(), "nothing reaches Session Core");
+    }
+}
+
+#[cfg(test)]
+mod approval_preview_route_tests {
+    //! EP-10-S1: the full-draft preview route. Off and zero-retention answers are decided before
+    //! anything reaches Session Core, so these tests need no Session Core at all.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests.
+    /// The orchestration client is the lazy default, which nothing here may reach.
+    fn app(zdr: bool) -> Router {
+        Router::new()
+            .route(
+                "/v1/orchestration/approvals/:approval_id/preview",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<String>| approval_preview(state, claims, bearer, path, true),
+                ),
+            )
+            .route(
+                "/off/v1/orchestration/approvals/:approval_id/preview",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: VerifiedModelBearer,
+                     path: Path<String>| approval_preview(state, claims, bearer, path, false),
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )))
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn preview_route_off_by_default() {
+        for unset in [None, Some(""), Some("1"), Some("yes"), Some("on")] {
+            assert!(
+                !mp_contracts::loop_fold::switch_from(unset),
+                "{unset:?} must not enable the preview"
+            );
+        }
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        let (status, body) =
+            get_json(app(false), "/off/v1/orchestration/approvals/appr_1/preview").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "preview_unavailable");
+        assert!(body["error"]["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn preview_route_refuses_zdr_token() {
+        let (status, body) =
+            get_json(app(true), "/v1/orchestration/approvals/appr_1/preview").await;
+        let (expected_status, Json(expected)) =
+            crate::zdr_posture::continuation_gate(&claims(true)).expect_err("a ZDR bearer is refused");
+        assert_eq!(status, expected_status);
+        assert_eq!(body, expected, "the typed refusal of a decision, before any lookup");
+        assert!(body["error"]["code"].is_string());
+    }
+
+    #[test]
+    fn preview_route_maps_not_found() {
+        for status in [
+            tonic::Status::not_found("approval not found"),
+            tonic::Status::permission_denied("user-bound approval credential required"),
+            tonic::Status::unimplemented("older session-core"),
+        ] {
+            let (code, Json(body)) = approval_preview_status_to_http(&status);
+            assert_eq!(code, StatusCode::NOT_FOUND, "{status:?}");
+            assert_eq!(body["error"]["code"], "approval_not_found");
+        }
+        let (code, Json(body)) =
+            approval_preview_status_to_http(&tonic::Status::invalid_argument("approval_id is required"));
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_approval_preview");
+
+        // A waived caller's typed refusal from Session Core keeps its catalogue body.
+        let refused = mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH
+            .grpc_status(tonic::Code::PermissionDenied);
+        let (code, Json(body)) = approval_preview_status_to_http(&refused);
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body,
+            mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH.json_body(),
+            "not flattened into a 404"
+        );
+    }
+
+    #[test]
+    fn preview_value_is_the_shaped_draft_as_plain_text() {
+        let preview = mp_contracts::model_plane::v1::ApprovalPreview {
+            kind: "mail_send".to_owned(),
+            provider: "google".to_owned(),
+            operation: "gmail.send".to_owned(),
+            connection_id: "conn-1".to_owned(),
+            to: vec!["a@example.com".to_owned(), "b@example.com".to_owned()],
+            subject: "S".to_owned(),
+            body_text: "<b>not markup</b>".to_owned(),
+            has_html: true,
+            is_reply: false,
+            raw_only: false,
+            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
+            action_fingerprint: "f".repeat(64),
+            revision: 0,
+        };
+        let value = approval_preview_value(&preview);
+        assert_eq!(value["kind"], "mail_send");
+        assert_eq!(value["to"], json!(["a@example.com", "b@example.com"]));
+        assert_eq!(value["body_text"], "<b>not markup</b>");
+        assert_eq!(value["format"], "plain_text");
+        assert_eq!(value["editable_fields"], json!(["to", "subject", "body_text"]));
+        assert_eq!(value["revision"], 0);
+    }
+
+    #[test]
+    fn preview_can_edit_follows_the_edit_switch() {
+        let mut preview = mp_contracts::model_plane::v1::ApprovalPreview {
+            kind: "mail_send".to_owned(),
+            editable_fields: vec!["to".to_owned(), "subject".to_owned(), "body_text".to_owned()],
+            ..Default::default()
+        };
+        assert!(!preview_can_edit(&preview, false), "the switch off never offers an edit");
+        assert!(preview_can_edit(&preview, true));
+        preview.raw_only = true;
+        assert!(!preview_can_edit(&preview, true), "a raw-only draft is not editable");
+        preview.raw_only = false;
+        preview.editable_fields.clear();
+        assert!(!preview_can_edit(&preview, true), "no editable fields, no edit mode");
+        preview.editable_fields = vec!["to".to_owned()];
+        preview.kind = "calendar_create".to_owned();
+        assert!(!preview_can_edit(&preview, true), "only a mail send is editable");
+    }
+}
+
+#[cfg(test)]
+mod deck_templates_route_tests {
+    //! Wave 3 EP-5 S7: the deck template list route. The switch, the zero-retention refusal and the
+    //! missing credential are all decided before capability-core is asked, so these tests need none;
+    //! which bundles are listed is covered by `deck_templates::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests. The
+    /// capability client is the lazy default, which nothing here may reach.
+    fn app(zdr: bool, with_bearer: bool) -> Router {
+        let router = Router::new()
+            .route(
+                "/v1/deck-templates",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>| {
+                        deck_templates_listing(state, claims, bearer, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/deck-templates",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>| {
+                        deck_templates_listing(state, claims, bearer, false)
+                    },
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearer {
+            router.layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
+        } else {
+            router
+        }
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller and a caller with no credential too.
+        for (zdr, with_bearer) in [(false, true), (true, true), (false, false)] {
+            let (status, body) = get_json(app(zdr, with_bearer), "/off/v1/deck-templates").await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearer={with_bearer}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_zdr_token_is_refused() {
+        let (status, body) = get_json(app(true, true), "/v1/deck-templates").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "skills");
+    }
+
+    #[tokio::test]
+    async fn deck_templates_route_needs_a_capability_credential() {
+        let (status, body) = get_json(app(false, false), "/v1/deck-templates").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "capability_credential_required");
+    }
+
+    #[test]
+    fn deck_templates_invoke_field_parses_as_before_and_takes_the_spa_spelling() {
+        let base = json!({ "content": "Lag en presentasjon", "zdr": false });
+        let plain: InvokeRequest = serde_json::from_value(base.clone()).unwrap();
+        assert!(plain.deck_template.is_none());
+        let mut picked = base.clone();
+        picked["deckTemplate"] = json!("skill-brand");
+        let picked: InvokeRequest = serde_json::from_value(picked).unwrap();
+        assert_eq!(
+            crate::deck_templates::requested(picked.deck_template.as_ref()),
+            Some("skill-brand")
+        );
+        // A value of the wrong type still parses, as the field did not exist before: it is never a pick.
+        let mut odd = base;
+        odd["deck_template"] = json!({ "id": "skill-brand" });
+        let odd: InvokeRequest = serde_json::from_value(odd).unwrap();
+        assert_eq!(crate::deck_templates::requested(odd.deck_template.as_ref()), None);
+    }
+}
+
+#[cfg(test)]
+mod mcp_app_resource_route_tests {
+    //! Wave 3 EP-4 S8: the MCP app resource route. The switch, the zero-retention refusal, the
+    //! query and the missing credential are all decided before capability-core or an MCP server is
+    //! asked, so these tests need neither; the read itself is covered by `mcp_apps::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on and with it off; the env read stays out of parallel tests.
+    fn app(zdr: bool, with_bearer: bool) -> Router {
+        let router = Router::new()
+            .route(
+                "/v1/mcp-apps/resource",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>,
+                     query: Query<McpAppResourceQuery>| {
+                        mcp_app_resource(state, claims, bearer, query, true)
+                    },
+                ),
+            )
+            .route(
+                "/off/v1/mcp-apps/resource",
+                get(
+                    |state: State<AppState>,
+                     claims: Extension<Claims>,
+                     bearer: Option<Extension<VerifiedCapabilityBearer>>,
+                     query: Query<McpAppResourceQuery>| {
+                        mcp_app_resource(state, claims, bearer, query, false)
+                    },
+                ),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearer {
+            router.layer(Extension(VerifiedCapabilityBearer::for_test("capability-bearer")))
+        } else {
+            router
+        }
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    const QUERY: &str = "?server_id=srv-1&tool=show_chart";
+
+    #[tokio::test]
+    async fn route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no query.
+        for (zdr, with_bearer, query) in [(false, true, QUERY), (true, true, QUERY), (false, false, "")] {
+            let (status, body) =
+                get_json(app(zdr, with_bearer), &format!("/off/v1/mcp-apps/resource{query}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "zdr={zdr} bearer={with_bearer}");
+            assert_eq!(body["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_token_is_refused() {
+        let (status, body) = get_json(app(true, true), &format!("/v1/mcp-apps/resource{QUERY}")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "mcp_execution");
+    }
+
+    #[tokio::test]
+    async fn server_and_tool_are_required() {
+        for query in ["", "?server_id=srv-1", "?tool=show_chart", "?server_id=%20&tool=show_chart"] {
+            let (status, body) =
+                get_json(app(false, true), &format!("/v1/mcp-apps/resource{query}")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(body["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn needs_a_capability_credential() {
+        let (status, body) =
+            get_json(app(false, false), &format!("/v1/mcp-apps/resource{QUERY}")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "capability_credential_required");
+    }
+}
+
+#[cfg(test)]
+mod mcp_app_tool_call_route_tests {
+    //! Wave 3 EP-4 S10: the app tool-call route. The switch, the zero-retention refusal, the body
+    //! and the missing credentials are all decided before session-core, capability-core,
+    //! execution-core or an MCP server is asked, so these tests need none of them; the gate itself is
+    //! covered by `mcp_app_calls::tests`.
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    /// The route with its switch on (`/v1/...`) and off (`/off/v1/...`); the env read stays out of
+    /// parallel tests.
+    fn app(zdr: bool, with_bearers: bool) -> Router {
+        fn route(enabled: bool) -> axum::routing::MethodRouter<AppState> {
+            post(
+                move |state: State<AppState>,
+                      claims: Extension<Claims>,
+                      capability: Option<Extension<VerifiedCapabilityBearer>>,
+                      session: Option<Extension<VerifiedModelBearer>>,
+                      execution: Option<Extension<VerifiedExecutionBearer>>,
+                      data_plane: Option<Extension<VerifiedBearer>>,
+                      inference: Option<Extension<VerifiedInferenceBearer>>,
+                      body: Bytes| {
+                    let bearers = McpAppCallBearers {
+                        capability,
+                        session,
+                        execution,
+                        data_plane,
+                        inference,
+                    };
+                    mcp_app_tool_call(state, claims, bearers, body, enabled)
+                },
+            )
+        }
+        let router = Router::new()
+            .route("/v1/mcp-apps/tool-call", route(true))
+            .route("/off/v1/mcp-apps/tool-call", route(false))
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)));
+        if with_bearers {
+            router
+                .layer(Extension(VerifiedCapabilityBearer::for_test(
+                    "capability-bearer",
+                )))
+                .layer(Extension(VerifiedModelBearer::for_test("session-bearer")))
+                .layer(Extension(VerifiedExecutionBearer::for_test(
+                    "execution-bearer",
+                )))
+                .layer(Extension(VerifiedBearer::for_test("data-plane-bearer")))
+                .layer(Extension(VerifiedInferenceBearer::for_test(
+                    "inference-bearer",
+                )))
+        } else {
+            router
+        }
+    }
+
+    async fn post_json(router: Router, uri: &str, body: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_owned()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    const BODY: &str = r#"{"run_id":"run-1","server_id":"srv-1","tool":"echo_read","arguments":{"q":"x"},"frame_nonce":"frame-0123456789abcdef"}"#;
+
+    #[tokio::test]
+    async fn route_404_when_switch_off() {
+        // Off reads as no route at all, for a ZDR caller, a caller with no credential and no body.
+        for (zdr, with_bearers, body) in
+            [(false, true, BODY), (true, true, BODY), (false, false, "")]
+        {
+            let (status, response) =
+                post_json(app(zdr, with_bearers), "/off/v1/mcp-apps/tool-call", body).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "zdr={zdr} bearers={with_bearers}"
+            );
+            assert_eq!(response["error"]["code"], "not_found");
+        }
+    }
+
+    #[tokio::test]
+    async fn zdr_token_refused() {
+        let (status, body) = post_json(app(true, true), "/v1/mcp-apps/tool-call", BODY).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(body["error"]["feature"], "mcp_execution");
+    }
+
+    #[tokio::test]
+    async fn the_body_must_be_a_valid_call() {
+        for body in [
+            "",
+            "not json",
+            "[]",
+            r#"{"server_id":"srv-1","tool":"echo_read","frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv__x","tool":"t","frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","arguments":[1],"frame_nonce":"frame-0123456789abcdef"}"#,
+            r#"{"run_id":"run-1","server_id":"srv-1","tool":"t","frame_nonce":"short"}"#,
+        ] {
+            let (status, response) =
+                post_json(app(false, true), "/v1/mcp-apps/tool-call", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+
+    #[tokio::test]
+    async fn needs_every_delegated_credential() {
+        let (status, body) = post_json(app(false, false), "/v1/mcp-apps/tool-call", BODY).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "delegated_credential_required");
     }
 }

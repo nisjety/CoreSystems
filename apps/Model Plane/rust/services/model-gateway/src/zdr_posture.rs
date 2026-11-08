@@ -244,6 +244,18 @@ pub fn zdr_or_refuse(
         .map_err(|refusal| http(&refusal))
 }
 
+/// Whether a live view of a run is refused before Session Core is asked. A ZDR credential is refused
+/// here, and so is any posture refusal but the waiver's route mismatch, which is not a verdict yet: a
+/// waiver binds one connection, and the run's own route is decided once Session Core has verdicted the
+/// run (see [`decide_for`] on that route). A posture that cannot be decided is refused, fail closed.
+#[must_use]
+pub fn live_view_refused_before_verdict(claims: &Claims) -> bool {
+    match decide_for(claims, &Route::plain(false)) {
+        Ok(posture) => posture.zdr(),
+        Err(refusal) => refusal.code() != code::WAIVER_ROUTE_MISMATCH,
+    }
+}
+
 /// The gate in front of a durable continuation: a stored run, plan, todo or approval is started or
 /// advanced (an approval or rejection, a todo update, a plan approval, a resume, a cancel, a plan-mode
 /// change). A ZDR credential is refused as a durable mutation before any lookup, because a ZDR run keeps
@@ -301,7 +313,7 @@ fn is_credential_refusal(refusal: &Refusal) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mp_contracts::agentic_subscription::PROVIDER_ID;
     use serde_json::json;
@@ -384,6 +396,36 @@ mod tests {
         ))
         .expect_err("a waiver of an unknown version is not read as the current one");
         assert_eq!(body.0["error"]["code"], code::POSTURE_MISMATCH);
+    }
+
+    /// A room live view is decided on the route the run names (WS09-S4, owner answer 2026-11-03). A
+    /// waiver is honoured only for a run bound to the waived connection, as for an ordinary chat turn.
+    /// A waived credential on a run that names no connection, or another one, is refused by the
+    /// resolver. A ZDR credential stays ZDR.
+    #[test]
+    fn a_live_view_honours_a_waiver_only_for_the_connection_its_run_is_bound_to() {
+        let waived = token(false, Some(true), Some(waiver(1, PROVIDER_ID, "conn-1")));
+        let bound_posture = decide_for(&waived, &bound()).expect("a waiver bound to the run is honoured");
+        assert!(matches!(bound_posture, TurnPosture::Waived { .. }));
+        assert!(!bound_posture.zdr(), "a waived run is persistent for its connection, never ZDR");
+        assert!(
+            !live_view_refused_before_verdict(&waived),
+            "a waiver waits for the run's route rather than being refused before the verdict"
+        );
+
+        let unbound = decide_for(&waived, &Route::plain(false))
+            .expect_err("a run that names no connection is refused for a waiver");
+        assert_eq!(unbound.code(), code::WAIVER_ROUTE_MISMATCH);
+
+        let other = Route::named(Some(PROVIDER_ID), Some("conn-2"), false);
+        let other_connection = decide_for(&waived, &other)
+            .expect_err("a run bound to another connection is refused for a waiver");
+        assert_eq!(other_connection.code(), code::WAIVER_ROUTE_MISMATCH);
+
+        let zdr = token(true, Some(true), None);
+        let zdr_posture = decide_for(&zdr, &Route::plain(false)).expect("a ZDR credential is decided");
+        assert!(zdr_posture.zdr(), "a plain ZDR credential stays ZDR");
+        assert!(live_view_refused_before_verdict(&zdr));
     }
 
     #[test]
@@ -714,6 +756,16 @@ mod tests {
                 "posture equality across the user bearers of one request, not a decision",
             ),
             (
+                "auth.rs",
+                "verify_delegated_api_key_browser_bearer",
+                "posture equality between an api key's ingress and broker bearers, not a decision",
+            ),
+            (
+                "auth.rs",
+                "verify_delegated_api_key_session_bearer",
+                "posture equality between an api key's ingress and session bearers, not a decision",
+            ),
+            (
                 "grpc_auth.rs",
                 "verify_delegated_bearer",
                 "posture equality across the user bearers of one gRPC request, not a decision",
@@ -767,7 +819,7 @@ mod tests {
         const ENTRY_POINTS: &[(&str, &str)] = &[
             ("sse.rs", "invoke_stream_sse"),
             ("http_routes.rs", "invoke"),
-            ("http_routes.rs", "ai_chat"),
+            ("http_routes.rs", "ai_chat_with"),
             ("http_routes.rs", "recommend_plan"),
             ("http_routes.rs", "ai_embeddings"),
             ("http_routes.rs", "ai_dictate"),
@@ -791,6 +843,7 @@ mod tests {
             ("finetune_routes.rs", "require_non_zdr_finetune_mutation"),
             ("finetune_routes.rs", "get_job"),
             ("browser_run.rs", "browser_run_zdr_blocked"),
+            ("browser_grants.rs", "issue_key_grant"),
             ("grpc_auth.rs", "posture"),
             ("grpc_auth.rs", "authorize_request"),
             ("grpc.rs", "require_explicit_zdr_contract"),
@@ -830,6 +883,10 @@ mod tests {
             ("http_routes.rs", "plan_approval"),
             ("http_routes.rs", "create_document"),
             ("http_routes.rs", "proxy_to_capability_core"),
+            ("http_routes.rs", "set_org_agent_policy_proxy"),
+            ("http_routes.rs", "create_org_hook_proxy"),
+            ("http_routes.rs", "update_org_hook_proxy"),
+            ("http_routes.rs", "delete_org_hook_proxy"),
             ("http_routes.rs", "approve_plan"),
             ("http_routes.rs", "reject_plan"),
             ("http_routes.rs", "update_todo_status"),
@@ -845,6 +902,16 @@ mod tests {
             // gated too, since a waived run never owns a question.
             ("http_routes.rs", "list_run_questions"),
             ("http_routes.rs", "answer_run_question"),
+            // Human posts in a Space room (WS01-S4) store free text under a member's name.
+            ("space_routes/posts.rs", "create_space_post"),
+            ("space_routes/posts.rs", "append_space_post"),
+            // A manager's Stop writes a RUN_CANCELLED receipt on someone else's run (WS09-S8).
+            ("space_routes/runs.rs", "room_run_stop"),
+            // A member's approval decision keeps its free-text reason (WS10-S6).
+            ("space_routes/approvals.rs", "decide_space_approval"),
+            // A thread goal is user content in a durable store (EP-7 S1).
+            ("thread_goal_routes.rs", "set_thread_goal"),
+            ("thread_goal_routes.rs", "update_thread_goal"),
         ];
         let mut missing = Vec::new();
         for (file, function) in DURABLE_MUTATIONS {
@@ -960,13 +1027,26 @@ mod tests {
                 "synthesize_report",
                 "refused on a waived turn at the stream entry",
             ),
+            (
+                "deep_research.rs",
+                "ledger_inference",
+                "refused on a waived turn at the stream entry; copies the turn's zdr and privacy floor",
+            ),
             // The gRPC surface, each decided by zdr_for before its call.
             ("grpc.rs", "invoke", "the request's route (zdr_for)"),
             ("grpc.rs", "invoke_stream", "the request's route (zdr_for)"),
             (
-                "grpc.rs",
-                "extract_structured",
-                "the request's route (zdr_for)",
+                "agent_api_run.rs",
+                "run_ask_turn",
+                "persistent only: a ZDR key is refused in admit before any call (EP-12 D6)",
+            ),
+            // The extraction's one inference call (WS16.S8). Its callers decide the posture first:
+            // the gRPC method through `zdr_for` on the request's route, the chat tool with the
+            // turn's own `zdr`; the call carries it on the request and on the page scrape.
+            (
+                "web_extraction.rs",
+                "infer_once",
+                "the caller's route (zdr_for in the gRPC method, the turn's zdr in the tool)",
             ),
             (
                 "grpc.rs",
@@ -986,7 +1066,7 @@ mod tests {
             ),
             (
                 "http_routes.rs",
-                "ai_chat",
+                "ai_chat_with",
                 "the request's route (zdr_or_refuse)",
             ),
             (
@@ -1166,7 +1246,7 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
     }
 
-    fn read_sources() -> Vec<(String, String)> {
+    pub(crate) fn read_sources() -> Vec<(String, String)> {
         let mut files = Vec::new();
         for entry in std::fs::read_dir(source_dir()).expect("the source directory is readable") {
             let path = entry.expect("a directory entry").path();
@@ -1178,6 +1258,22 @@ mod tests {
                     .into_owned();
                 let text = std::fs::read_to_string(&path).expect("a source file is readable");
                 files.push((name, text));
+            }
+        }
+        // Space room routes live one level down and are named by subpath, so a function in
+        // `space_routes/` is found by the same scans as a top-level one (WS01-S4, K2-04).
+        let space_routes = source_dir().join("space_routes");
+        if let Ok(entries) = std::fs::read_dir(&space_routes) {
+            for entry in entries {
+                let path = entry.expect("a directory entry").path();
+                if path.extension().is_some_and(|ext| ext == "rs") {
+                    let name = format!(
+                        "space_routes/{}",
+                        path.file_name().expect("a file name").to_string_lossy()
+                    );
+                    let text = std::fs::read_to_string(&path).expect("a source file is readable");
+                    files.push((name, text));
+                }
             }
         }
         files.sort();
@@ -1244,7 +1340,7 @@ mod tests {
     }
 
     /// The source with every `#[cfg(test)]` item blanked out, newlines kept.
-    fn strip_test_items(source: &str) -> String {
+    pub(crate) fn strip_test_items(source: &str) -> String {
         const MARK: &str = "#[cfg(test)]";
         let mut out = String::with_capacity(source.len());
         let mut rest = source;
@@ -1278,5 +1374,280 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    /// WS01-S4: a function under `space_routes/` is found by its subpath (so every scan that
+    /// reads `read_sources` covers it), and each post handler refuses a zero-retention or waived
+    /// token before the flag, the body or any upstream call.
+    #[test]
+    fn a_function_in_space_routes_is_found_by_subpath_and_refuses_zdr_first() {
+        for function in ["create_space_post", "append_space_post"] {
+            let body = function_body("space_routes/posts.rs", function)
+                .unwrap_or_else(|| panic!("{function} is found by its subpath"));
+            let gate = body
+                .find("require_non_zdr_durable_mutation(")
+                .unwrap_or_else(|| panic!("{function} calls the durable-mutation gate"));
+            for later in ["api_enabled(", "parse_body(", "session_flow::"] {
+                let at = body
+                    .find(later)
+                    .unwrap_or_else(|| panic!("{function} calls {later}"));
+                assert!(gate < at, "{function}: the ZDR refusal must come before {later}");
+            }
+        }
+        // A subpath-less name does not resolve: the file is named by its subpath.
+        assert!(function_body("posts.rs", "create_space_post").is_none());
+        let names: Vec<String> = read_sources().into_iter().map(|(name, _)| name).collect();
+        for expected in ["space_routes/posts.rs", "space_routes/artifacts.rs"] {
+            assert!(names.iter().any(|name| name == expected), "{expected} is scanned");
+        }
+    }
+
+    // ---- WS06-S4: the Space surface registry lint -------------------------------------------
+
+    /// The vendored copy of `api/contracts/space-surface.v1.json` and its pin (scripts/tests/
+    /// zdr-contract-sync.test.sh keeps both byte-identical to the golden).
+    const SPACE_SURFACE: &str = include_str!("../tests/fixtures/space-surface.v1.json");
+    const SPACE_SURFACE_PIN: &str = include_str!("../tests/fixtures/space-surface.v1.json.sha256");
+
+    fn space_surface() -> Value {
+        serde_json::from_str(SPACE_SURFACE).expect("space-surface.v1.json is JSON")
+    }
+
+    fn surface_rows(surface: &Value) -> Vec<Value> {
+        surface["rows"].as_array().expect("rows").clone()
+    }
+
+    /// The sources that register routes: the router, the browser routes, the SSE route and every
+    /// file under `space_routes/`.
+    fn route_sources() -> Vec<(String, String)> {
+        read_sources()
+            .into_iter()
+            .filter(|(name, _)| {
+                matches!(
+                    name.as_str(),
+                    "http_routes.rs" | "browser_run.rs" | "browser_grants.rs" | "space_sse.rs"
+                ) || name.starts_with("space_routes/")
+            })
+            .collect()
+    }
+
+    /// Every `(METHOD, path)` with a method other than GET that `source` registers with
+    /// `.route(path, verb(handler)...)`. A path that is not a string literal is reported as
+    /// `("?", "<non-literal path>")`, so a computed route can never hide from the lint.
+    fn non_get_routes(source: &str) -> Vec<(String, String)> {
+        let code = strip_test_items(source);
+        let verbs = regex::Regex::new(r"\b(get|post|put|patch|delete)\s*\(").expect("regex");
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(offset) = code[from..].find(".route(") {
+            let open = from + offset + ".route(".len();
+            from = open;
+            let mut depth = 1_usize;
+            let mut end = code.len();
+            for (index, character) in code[open..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + index;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let arguments = &code[open..end];
+            let trimmed = arguments.trim_start();
+            let Some(rest) = trimmed.strip_prefix('"') else {
+                found.push(("?".to_owned(), "<non-literal path>".to_owned()));
+                continue;
+            };
+            let Some(close) = rest.find('"') else { continue };
+            let path = &rest[..close];
+            for verb in verbs.captures_iter(&rest[close..]) {
+                let method = verb[1].to_ascii_uppercase();
+                if method != "GET" {
+                    found.push((method, path.to_owned()));
+                }
+            }
+        }
+        found
+    }
+
+    /// The `mg:<METHOD>:<path>` ids of `routes` that have no row, or a row without a valid
+    /// `zdr_class`.
+    fn unclassified(routes: &[(String, String)], surface: &Value) -> Vec<String> {
+        let classes: Vec<&str> = surface["zdr_classes"]
+            .as_object()
+            .expect("zdr_classes")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let rows = surface_rows(surface);
+        let mut missing = Vec::new();
+        for (method, path) in routes {
+            let id = format!("mg:{method}:{path}");
+            match rows.iter().find(|row| row["id"] == id.as_str()) {
+                None => missing.push(format!("{id} has no row")),
+                Some(row) => {
+                    let class = row["zdr_class"].as_str().unwrap_or_default();
+                    if !classes.contains(&class) {
+                        missing.push(format!("{id} has no valid zdr_class ({class:?})"));
+                    }
+                }
+            }
+        }
+        missing
+    }
+
+    #[test]
+    fn every_non_get_route_is_classified() {
+        let surface = space_surface();
+        let mut routes = Vec::new();
+        for (file, text) in route_sources() {
+            for (method, path) in non_get_routes(&text) {
+                assert_ne!(method, "?", "{file} registers a computed route");
+                routes.push((method, path));
+            }
+        }
+        assert!(
+            routes.len() > 60,
+            "the scan found only {} non-GET routes: it is not reading the router",
+            routes.len()
+        );
+        let missing = unclassified(&routes, &surface);
+        assert!(
+            missing.is_empty(),
+            "non-GET model-gateway routes without a classified row in space-surface.v1.json \
+             (add the row to api/contracts, re-vendor and re-pin):\n{missing:#?}"
+        );
+    }
+
+    #[test]
+    fn a_synthetic_unclassified_route_fails_the_lint() {
+        let surface = space_surface();
+        let source = r#"
+            fn router() -> Router {
+                Router::new()
+                    .route("/v1/spaces/:space_id/synthetic-write", post(synthetic).delete(synthetic_gone))
+                    .route("/v1/spaces/:space_id/synthetic-read", get(synthetic_read))
+            }
+        "#;
+        let routes = non_get_routes(source);
+        assert_eq!(
+            routes,
+            [
+                ("POST".to_owned(), "/v1/spaces/:space_id/synthetic-write".to_owned()),
+                ("DELETE".to_owned(), "/v1/spaces/:space_id/synthetic-write".to_owned()),
+            ],
+            "GET routes are not scanned; every other verb of one route is"
+        );
+        let missing = unclassified(&routes, &surface);
+        assert_eq!(missing.len(), 2, "{missing:?}");
+        assert!(missing[0].starts_with("mg:POST:/v1/spaces/:space_id/synthetic-write has no row"));
+        // A computed path cannot hide either.
+        let computed = non_get_routes("Router::new().route(PATH, post(h))");
+        assert_eq!(computed, [("?".to_owned(), "<non-literal path>".to_owned())]);
+        // A handler named like a verb is not a verb.
+        assert!(non_get_routes(r#"Router::new().route("/a", get(get_chunks))"#).is_empty());
+    }
+
+    #[test]
+    fn a_row_without_a_valid_zdr_class_fails_the_lint() {
+        let mut surface = space_surface();
+        let rows = surface["rows"].as_array_mut().expect("rows");
+        let row = rows
+            .iter_mut()
+            .find(|row| row["id"] == "mg:POST:/v1/threads/archive")
+            .expect("a known row");
+        row["zdr_class"] = json!("not-a-class");
+        let missing = unclassified(&[("POST".to_owned(), "/v1/threads/archive".to_owned())], &surface);
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert!(missing[0].contains("no valid zdr_class"));
+    }
+
+    /// The `(file, function)` pairs of `DURABLE_MUTATIONS`, read from this file's own source so
+    /// the lint follows the list rather than a copy of it.
+    fn durable_mutations() -> Vec<(String, String)> {
+        let source = include_str!("zdr_posture.rs");
+        let start = source
+            .find("const DURABLE_MUTATIONS")
+            .expect("the durable mutation inventory exists");
+        let list = &source[start..];
+        let list = &list[..list.find("];").expect("the list ends")];
+        let pairs = regex::Regex::new(r#"\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)"#).expect("regex");
+        pairs
+            .captures_iter(list)
+            .map(|pair| (pair[1].to_owned(), pair[2].to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn every_durable_mutation_handler_row_is_zdr_class_refuse() {
+        let surface = space_surface();
+        let rows = surface_rows(&surface);
+        let mutations = durable_mutations();
+        assert!(mutations.len() >= 10, "read only {} entries", mutations.len());
+        let mut wrong = Vec::new();
+        let mut routed = 0;
+        for (file, function) in &mutations {
+            let handler = format!("{file}::{function}");
+            let handled: Vec<&Value> = rows.iter().filter(|row| row["handler"] == handler.as_str()).collect();
+            if !handled.is_empty() {
+                routed += 1;
+            }
+            for row in handled {
+                if row["zdr_class"] != "refuse" {
+                    wrong.push(format!("{} (handler {handler}) is {}", row["id"], row["zdr_class"]));
+                }
+            }
+        }
+        assert!(routed >= 10, "only {routed} durable handlers have a route row");
+        assert!(wrong.is_empty(), "durable mutation rows that do not refuse:\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn the_space_surface_golden_is_well_formed() {
+        let surface = space_surface();
+        assert_eq!(surface["schema"], "space-surface.v1");
+        let classes: Vec<&str> = surface["zdr_classes"].as_object().expect("zdr_classes").keys().map(String::as_str).collect();
+        let route_classes: Vec<&str> = surface["route_classes"].as_object().expect("route_classes").keys().map(String::as_str).collect();
+        let basis_values: Vec<&str> = surface["basis_values"].as_object().expect("basis_values").keys().map(String::as_str).collect();
+        let kinds: Vec<&str> = surface["kinds"].as_array().expect("kinds").iter().filter_map(Value::as_str).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for row in surface_rows(&surface) {
+            let id = row["id"].as_str().expect("an id").to_owned();
+            assert!(seen.insert(id.clone()), "duplicate row id {id}");
+            let class = row["zdr_class"].as_str().unwrap_or_default();
+            assert!(classes.contains(&class), "{id}: zdr_class {class:?} is not in zdr_classes");
+            assert!(kinds.contains(&row["kind"].as_str().unwrap_or_default()), "{id}: unknown kind");
+            if let Some(route_class) = row.get("route_class").and_then(Value::as_str) {
+                assert!(route_classes.contains(&route_class), "{id}: route_class {route_class:?}");
+                if route_class == "DurableWrite" {
+                    assert_eq!(class, "refuse", "{id}: a DurableWrite route must refuse ZDR");
+                }
+            }
+            let basis = row["basis"].as_str().unwrap_or_default();
+            assert!(
+                basis_values.contains(&basis) || (basis.starts_with("guard:") && basis_values.contains(&"guard:<fn>")),
+                "{id}: basis {basis:?} is not in basis_values"
+            );
+            if row["kind"] == "route" {
+                let method = row["method"].as_str().unwrap_or_default();
+                let path = row["path"].as_str().unwrap_or_default();
+                let prefix = row["id"].as_str().unwrap_or_default().split(':').next().unwrap_or_default().to_owned();
+                assert_eq!(id, format!("{prefix}:{method}:{path}"), "{id}: id is <plane>:<method>:<path>");
+            }
+        }
+    }
+
+    #[test]
+    fn the_vendored_space_surface_matches_its_pin() {
+        use sha2::{Digest as _, Sha256};
+        let digest = format!("{:x}", Sha256::digest(SPACE_SURFACE.as_bytes()));
+        // The pin is `<sha256> *<file name>`; the digest is its first word.
+        let pinned = SPACE_SURFACE_PIN.split_whitespace().next().unwrap_or_default();
+        assert_eq!(digest, pinned, "re-vendor the golden and its pin (zdr-contract-sync.test.sh)");
     }
 }

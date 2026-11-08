@@ -6,7 +6,9 @@
 //! is parsed; attachments, quoted material and tool output are never authority.
 
 use futures::StreamExt;
-use mp_contracts::model_plane::v1::{ChatMessage, InferChunk, InferRequest, InferResponse};
+use mp_contracts::model_plane::v1::{
+    ChatMessage, InferChunk, InferPurpose, InferRequest, InferResponse,
+};
 use serde::Serialize;
 
 pub const CHECKER_VERSION: &str = "direct-word-range-v1";
@@ -569,6 +571,7 @@ where
     let context_hash = hasher.finalize().to_hex().to_string();
     let source_context = crate::source_validation::SourceContext::from_messages(&request.messages);
     let mut next = request.clone();
+    next.purpose = InferPurpose::Validation as i32;
     next.messages.push(ChatMessage {
         role: "system".to_owned(),
         content: range.instruction(),
@@ -861,6 +864,7 @@ mod tests {
             kind: "document".into(),
             title: "Campaign".into(),
             version: 3,
+            provenance: None,
             content: "## Overview\nShared offices".into(),
         }];
         let (summary, receipt) = revision_completion(

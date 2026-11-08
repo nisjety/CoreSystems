@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 )
@@ -88,6 +89,8 @@ func (r leaseRow) Scan(dest ...any) error {
 			*target = r.values[i].(time.Time)
 		case *bool:
 			*target = r.values[i].(bool)
+		case *pgtype.Timestamptz:
+			*target = r.values[i].(pgtype.Timestamptz)
 		default:
 			return fmt.Errorf("leaseRow.Scan: unsupported dest type %T", d)
 		}
@@ -101,7 +104,16 @@ func rowFor(l *Lease) leaseRow {
 	return leaseRow{values: []any{
 		l.ID, l.ScopeID, l.ScopeType, l.OrgID, l.OwnerID, l.Endpoint,
 		l.SpaceID, l.BackendID, l.ProcessesPermitted, l.AudienceRevision, int32(l.State), l.ExpiresAt, l.CreatedAt,
+		int32(l.FailureCause), l.LastActivityAt, heartbeatValue(l.HeartbeatAt),
 	}}
+}
+
+// heartbeatValue is the nullable column as pgx scans it: unset when the lease has no heartbeat.
+func heartbeatValue(at *time.Time) pgtype.Timestamptz {
+	if at == nil {
+		return pgtype.Timestamptz{}
+	}
+	return pgtype.Timestamptz{Time: *at, Valid: true}
 }
 
 func newTestStore(row pgx.Row) (*Store, *leaseDatabaseStub) {
@@ -156,6 +168,10 @@ func TestCreateInsertsAScratchLease(t *testing.T) {
 	}
 	if args[10] != int32(mpv1.SandboxLifecycleState_SCRATCH) {
 		t.Fatalf("state arg = %v, want SCRATCH", args[10])
+	}
+	// A grant that names no egress tier is recorded as off (migration 0008, EP-9 E3).
+	if args[13] != "off" {
+		t.Fatalf("egress_tier_permitted arg = %v, want off for a grant that carried none", args[13])
 	}
 }
 
@@ -396,6 +412,74 @@ func TestReleaseScopedMarksDestroyedOnMatch(t *testing.T) {
 	args := database.lastArgs()
 	if args[1] != int32(mpv1.SandboxLifecycleState_DESTROYED) {
 		t.Fatalf("state arg = %v, want DESTROYED", args[1])
+	}
+}
+
+func TestAcquireThreadStampsActivityAndReadsTheLifecycleColumns(t *testing.T) {
+	want := testLease(mpv1.SandboxLifecycleState_SCRATCH, "", "backend-1", time.Now().Add(time.Hour))
+	want.ScopeType = "thread"
+	want.ScopeID = "thread-1"
+	want.OrgID = "org-1"
+	want.OwnerID = "user-1"
+	want.LastActivityAt = time.Now()
+	s, db := newTestStore(rowFor(want))
+	if _, err := s.AcquireThread(context.Background(), "thread-1", "org-1", "user-1", "backend-1", time.Minute); err != nil {
+		t.Fatalf("AcquireThread: %v", err)
+	}
+	for _, must := range []string{
+		"last_activity_at = EXCLUDED.last_activity_at",
+		"RETURNING id, scope_id, scope_type, org_id, owner_id, endpoint, space_id, backend_id, processes_permitted, recipient_audience_revision, state, expires_at, created_at, failure_cause, last_activity_at, heartbeat_at",
+	} {
+		if !strings.Contains(db.lastQueryRowQuery, must) {
+			t.Fatalf("upsert is missing %q:\n%s", must, db.lastQueryRowQuery)
+		}
+	}
+}
+
+func TestScanLeaseCarriesTheFailureCauseActivityAndHeartbeat(t *testing.T) {
+	at := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	want := testLease(mpv1.SandboxLifecycleState_ACTIVE, "", "backend-1", time.Now().Add(time.Hour))
+	want.FailureCause = mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_WORKSPACE_CONFLICT
+	want.LastActivityAt = at
+	s, _ := newTestStore(rowFor(want))
+	got, err := s.GetAny(context.Background(), want.ID, want.OrgID, want.OwnerID, want.BackendID)
+	if err != nil {
+		t.Fatalf("GetAny: %v", err)
+	}
+	if got.FailureCause != want.FailureCause || !got.LastActivityAt.Equal(at) {
+		t.Fatalf("lifecycle = (%v, %v), want (%v, %v)", got.FailureCause, got.LastActivityAt, want.FailureCause, at)
+	}
+	if got.HeartbeatAt != nil {
+		t.Fatalf("heartbeat = %v, want unset until WS22-S8 writes one", got.HeartbeatAt)
+	}
+	heartbeat := at.Add(time.Second)
+	want.HeartbeatAt = &heartbeat
+	s, _ = newTestStore(rowFor(want))
+	got, err = s.GetAny(context.Background(), want.ID, want.OrgID, want.OwnerID, want.BackendID)
+	if err != nil {
+		t.Fatalf("GetAny with a heartbeat: %v", err)
+	}
+	if got.HeartbeatAt == nil || !got.HeartbeatAt.Equal(heartbeat) {
+		t.Fatalf("heartbeat = %v, want %v", got.HeartbeatAt, heartbeat)
+	}
+}
+
+func TestRecordActivityWritesTheCauseAndActivityOnlyWithinTheOwner(t *testing.T) {
+	store, database := newTestStore(nil)
+	at := time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC)
+	if err := store.RecordActivity(context.Background(), "lease-1", "org-a", "user-a", mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED, at); err != nil {
+		t.Fatalf("RecordActivity: %v", err)
+	}
+	if database.execCount() != 1 || !strings.Contains(database.lastQuery(), "UPDATE leases SET failure_cause = $4, last_activity_at = $5") {
+		t.Fatalf("query = %q, want one UPDATE of failure_cause and last_activity_at", database.lastQuery())
+	}
+	if !strings.Contains(database.lastQuery(), "WHERE id = $1 AND org_id = $2 AND owner_id = $3") {
+		t.Fatalf("query = %q, want the write bound to the org and the owner", database.lastQuery())
+	}
+	args := database.lastArgs()
+	if args[0] != "lease-1" || args[1] != "org-a" || args[2] != "user-a" ||
+		args[3] != int32(mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED) || !args[4].(time.Time).Equal(at) {
+		t.Fatalf("args = %v", args)
 	}
 }
 

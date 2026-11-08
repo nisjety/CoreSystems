@@ -1,19 +1,35 @@
 // @vitest-environment jsdom
 
-import { createRouter, memoryHistory } from '@solidjs/router'
+import { createRouter, memoryHistory, useLocation, useNavigate } from '@solidjs/router'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import type { JSX } from '@solidjs/web'
-import { flush } from 'solid-js'
+import { createSignal, flush, onCleanup } from 'solid-js'
+import { DashboardComposer } from '@/features/dashboard/home/DashboardComposer'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { QueryProvider } from '@/app/providers/QueryProvider'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 import { readActiveChatThreadId, setActiveChatThreadId, upsertChatThreadHistory } from '@/features/chat/lib/chat-thread-history'
 import { CoreSidebar } from '@/features/core/components/CoreSidebar'
+import { CoreShell } from '@/features/core/components/CoreShell'
+import type { AssistantAgentView } from '@/features/core/components/GlobalAssistant'
+import { createAssistantBrowserAgent } from '@/features/core/assistant-agent/assistant-browser-agent'
+import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
+import { createAssistantNavigationAgent } from '@/features/core/assistant-agent/assistant-navigation-agent'
 import { demoWorkspaceIdentity, routeFromPath } from '@/features/core/lib/shell-data'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import DashboardHome from '@/features/dashboard/home/DashboardHome'
 import { I18nProvider } from '@/shared/i18n'
 import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
+
+vi.mock('@/features/core/assistant-agent/assistant-browser-agent', async (importOriginal) => {
+  const module = await importOriginal<typeof import('@/features/core/assistant-agent/assistant-browser-agent')>()
+  return { ...module, createAssistantBrowserAgent: vi.fn(module.createAssistantBrowserAgent) }
+})
+
+vi.mock('@/features/core/assistant-agent/assistant-navigation-agent', async (importOriginal) => {
+  const module = await importOriginal<typeof import('@/features/core/assistant-agent/assistant-navigation-agent')>()
+  return { ...module, createAssistantNavigationAgent: vi.fn(module.createAssistantNavigationAgent) }
+})
 
 function renderWithRouter(component: () => JSX.Element, path = '/dashboard') {
   const TestRouter = createRouter({
@@ -30,6 +46,10 @@ function renderWithRouter(component: () => JSX.Element, path = '/dashboard') {
   ))
 }
 
+function TestComposer() {
+  const [message, setMessage] = createSignal('')
+  return <DashboardComposer message={message()} onMessageChange={setMessage} />
+}
 function createStorageMock(): Storage {
   const entries = new Map<string, string>()
 
@@ -51,6 +71,140 @@ afterEach(() => {
 })
 
 describe('v2 dashboard shell port', () => {
+  it('opens Nett once the browser task starts and preserves the assistant result if the user leaves Nett', async () => {
+    const starting: AssistantAgentView = { available: true, kind: 'browser', status: 'starting', goal: 'Read example.com', error: null, action: null, sessionId: 'session-1', runId: null, receipt: null }
+    let publish!: (task: AssistantAgentView) => void
+    vi.mocked(createAssistantBrowserAgent).mockImplementationOnce(({ onChange }) => {
+      publish = onChange
+      const noop = () => undefined
+      const resolve = async () => undefined
+      return { send: resolve, stop: noop, retry: resolve, allowSiteAccess: resolve, declineSiteAccess: noop, decide: resolve, reset: noop, dispose: noop, claimRetained: () => false, state: () => starting }
+    })
+    const LocationProbe = () => {
+      const location = useLocation()
+      const navigate = useNavigate()
+      return <><output data-testid="agent-route">{location.pathname}{location.search}</output><button type="button" onClick={() => navigate('/dashboard?ref=mail')}>Leave Nett</button></>
+    }
+    renderWithRouter(() => <CoreShell><LocationProbe /></CoreShell>, '/dashboard?ref=mail&overview=knowledge')
+
+    publish(starting); flush()
+    expect(screen.getByTestId('agent-route').textContent).toBe('/dashboard?ref=mail&overview=knowledge')
+
+    const accepted = { ...starting, runId: 'run-1' }
+    publish(accepted); flush()
+    await waitFor(() => expect(screen.getByTestId('agent-route').textContent).toBe('/dashboard?ref=mail&tab=web'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Leave Nett' }))
+    await waitFor(() => expect(screen.getByTestId('agent-route').textContent).toBe('/dashboard?ref=mail'))
+    publish({ ...accepted, status: 'completed', result: 'The page title is Example Domain.' }); flush()
+    expect(screen.getByTestId('agent-route').textContent).toBe('/dashboard?ref=mail')
+    expect(screen.getByText('The page title is Example Domain.')).toBeTruthy()
+    expect(screen.queryByLabelText('Agentens nettleser')).toBeNull()
+  })
+
+  it('reads only the current live Nett tab and discards a late owner response after the workspace changes', async () => {
+    setSessionUser({ id: 'user-1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'owner' })
+    flush()
+    let resolveTarget!: NonNullable<Parameters<typeof createAssistantNavigationAgent>[0]['currentBrowserTarget']>
+    vi.mocked(createAssistantNavigationAgent).mockImplementationOnce((options) => {
+      resolveTarget = options.currentBrowserTarget!
+      const noop = () => undefined
+      return { send: async () => undefined, stop: noop, reset: noop, dispose: noop, state: () => ({ status: 'idle', error: null }) }
+    })
+    const projection = (live: boolean) => new Response(JSON.stringify({ data: {
+      runId: 'net-session', live, controlMode: 'human_takeover', controlEpoch: 1,
+      viewport: { width: 1280, height: 800 }, zdr: false, profileScope: 'ephemeral', profileStorage: 'ephemeral',
+      currentUrl: 'https://example.org/old', tabs: [
+        { tabId: 'old', active: false, url: 'https://example.org/old' },
+        { tabId: 'active', active: true, url: 'https://example.org/current' },
+      ],
+    } }), { headers: { 'Content-Type': 'application/json' } })
+    const ownerRead = vi.fn<() => Promise<Response>>()
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).endsWith('/api/v1/browser/sessions/net-session')) return ownerRead()
+      return new Response(null, { status: 404 })
+    }))
+    const [visible, setVisible] = createSignal(true)
+    const NettProbe = () => {
+      const browser = useAssistantBrowser()
+      onCleanup(browser.registerNettBrowser!(() => visible() ? { userId: 'user-1', orgId: 'org-1', sessionId: 'net-session' } : null))
+      return <span>Nett probe</span>
+    }
+    renderWithRouter(() => <CoreShell><NettProbe /></CoreShell>, '/dashboard?tab=web')
+    const signal = new AbortController().signal
+
+    ownerRead.mockResolvedValueOnce(projection(true)).mockResolvedValueOnce(projection(false))
+    const initialTarget = await resolveTarget(signal)
+    expect(ownerRead).toHaveBeenCalledTimes(1)
+    expect(initialTarget).toBe('https://example.org/current')
+    expect(await resolveTarget(signal)).toBeNull()
+    setVisible(false)
+    flush()
+    expect(await resolveTarget(signal)).toBeNull()
+    expect(ownerRead).toHaveBeenCalledTimes(2)
+
+    setVisible(true)
+    flush()
+    let reply!: (value: Response) => void
+    ownerRead.mockImplementationOnce(() => new Promise(resolve => { reply = resolve }))
+    const pending = resolveTarget(signal)
+    await waitFor(() => expect(ownerRead).toHaveBeenCalledTimes(3))
+    markSessionOnboardingComplete({ id: 'org-2', name: 'Another workspace', role: 'owner' })
+    flush()
+    reply(projection(true))
+    expect(await pending).toBeNull()
+  })
+
+  it('requires a fresh matching owner tab before sending a continuation', async () => {
+    setSessionUser({ id: 'user-1', email: 'user@example.com', name: 'User', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org-1', name: 'Verevon', role: 'owner' })
+    flush()
+    const send = vi.fn(async () => undefined)
+    vi.mocked(createAssistantBrowserAgent).mockImplementationOnce((options) => ({
+      ...vi.mocked(createAssistantBrowserAgent).getMockImplementation()!(options),
+      send,
+    }))
+    let tabEpoch = 6
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (!String(input).endsWith('/api/v1/browser/sessions/net-session')) return new Response(null, { status: 404 })
+      return Response.json({ data: {
+        runId: 'net-session', live: true, controlMode: 'human_takeover', controlEpoch: 1,
+        viewport: { width: 1280, height: 800 }, zdr: false, profileScope: 'ephemeral', profileStorage: 'ephemeral',
+        currentUrl: 'https://example.org/page', tabs: [
+          { tabId: 'selected', active: true, url: 'https://example.org/page', tabEpoch, holder: 'human' },
+        ],
+      } })
+    }))
+    const NettProbe = () => {
+      const browser = useAssistantBrowser()
+      onCleanup(browser.registerNettBrowser!(() => ({ userId: 'user-1', orgId: 'org-1', sessionId: 'net-session' })))
+      return <button type="button" onClick={() => browser.prepareContinuation?.({ sessionId: 'net-session', tabId: 'selected', origin: 'https://example.org', tabEpoch: 7 })}>Choose tab</button>
+    }
+    renderWithRouter(() => <CoreShell><NettProbe /></CoreShell>, '/dashboard?tab=web')
+    fireEvent.click(screen.getByRole('button', { name: 'Choose tab' }))
+    flush()
+    expect(await screen.findByText('Fortsett i denne fanen · example.org')).toBeTruthy()
+    const input = screen.getByRole('textbox', { name: 'Oppgave til Verevon' }) as HTMLTextAreaElement
+    fireEvent.input(input, { target: { value: 'Les overskriften' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Start oppgave' }))
+    await screen.findByText(/Fanen er endret/)
+    expect(input.value).toBe('Les overskriften')
+    expect(send).not.toHaveBeenCalled()
+
+    tabEpoch = 7
+    fireEvent.click(screen.getByRole('button', { name: 'Choose tab' }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Start oppgave' }))
+    await waitFor(() => expect(send).toHaveBeenCalledWith('Les overskriften', 'https://example.org', {
+      sessionId: 'net-session', tabId: 'selected', expectedEpoch: 7, expectedOrigin: 'https://example.org',
+    }))
+    expect(screen.queryByText('Fortsett i denne fanen · example.org')).toBeNull()
+  })
+
   it('renders the v2-style navbar, sidebar, and dashboard overview surfaces', () => {
     const { container } = renderWithRouter(() => (
       <>
@@ -70,25 +224,19 @@ describe('v2 dashboard shell port', () => {
     expect(container.querySelector('header.core-navbar')).toBeTruthy()
     expect(screen.getByRole('navigation', { name: 'Arbeidsområdeseksjoner' })).toBeTruthy()
     expect(screen.getByRole('navigation', { name: 'Snarveier i arbeidsområdet' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Chat' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Assistent' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /God (morgen|ettermiddag|kveld), Verevon/ })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Fortsett der du slapp' })).toBeTruthy()
     expect(screen.getByText('Lokalt værbilde')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Norske nyheter' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Klar for neste steg' })).toBeTruthy()
 
-    const dock = screen.getByRole('region', { name: 'Spør Verevon' })
-    expect(within(dock).getByRole('textbox', { name: 'Meld Verevon' })).toBeTruthy()
-    expect(within(dock).getByRole('button', { name: 'Legg til filer' })).toBeTruthy()
-    fireEvent.click(within(dock).getByRole('button', { name: 'Flere chattevalg' }))
-    flush()
-    expect(within(dock).getByRole('button', { name: 'Velg AI-modell' })).toBeTruthy()
-    expect(within(dock).getByText('Opprett agent')).toBeTruthy()
-    expect(within(dock).getAllByRole('button', { name: 'Dyp research' }).length).toBeGreaterThanOrEqual(1)
+    // The single assistant is mounted by CoreShell, not a second Home composer.
+    expect(screen.queryByRole('region', { name: 'Spør Verevon' })).toBeNull()
   })
 
-  it('uses the round Chat bubble and freeform Studio icon in the mini rail', () => {
-    renderWithRouter(() => (
+  it('keeps the engagement icon consistent and omits Studio and Calendar from the mini rail', () => {
+    const first = renderWithRouter(() => (
       <AgentsProvider>
         <CoreSidebar
           activeRoute="/dashboard"
@@ -101,11 +249,24 @@ describe('v2 dashboard shell port', () => {
 
     const workspaceNavigation = screen.getByRole('navigation', { name: /arbeidsområ|arbeidsomr/i })
     const chatIcon = within(workspaceNavigation).getByRole('link', { name: 'Chat' }).querySelector('svg')
-    const studioIcon = within(workspaceNavigation).getByRole('link', { name: 'Studio' }).querySelector('svg')
+    const engagementIcon = within(workspaceNavigation).getByRole('link', { name: 'Engasjement' }).querySelector('svg')
 
     expect(chatIcon?.getAttribute('class')).toContain('lucide-message-circle-more')
     expect(chatIcon?.getAttribute('class')).not.toContain('lucide-bot-message-square')
-    expect(studioIcon?.getAttribute('class')).toContain('lucide-layout-freeform')
+    expect(engagementIcon?.getAttribute('class')).toContain('lucide-target')
+    expect(within(workspaceNavigation).queryByRole('link', { name: 'Studio' })).toBeNull()
+    expect(within(workspaceNavigation).queryByRole('link', { name: 'Kalender' })).toBeNull()
+    first.unmount()
+
+    renderWithRouter(() => (
+      <AgentsProvider>
+        <CoreSidebar activeRoute="/engagement" expanded={false} onExpandedChange={vi.fn()} onOpenSearch={vi.fn()} />
+      </AgentsProvider>
+    ), '/engagement')
+    const activeIcon = within(screen.getByRole('navigation', { name: /arbeidsområ|arbeidsomr/i }))
+      .getByRole('link', { name: 'Engasjement' }).querySelector('svg')
+    expect(activeIcon?.getAttribute('class')).toContain('core-rail-filled-icon')
+    expect(activeIcon?.querySelector('path')?.getAttribute('d')).toContain('a7 7')
   })
 
   it('renders v2-shaped dashboard search and knowledge tab panels', async () => {
@@ -169,7 +330,7 @@ describe('v2 dashboard shell port', () => {
   })
 
   it('renders v2-style dashboard composer attachment previews', () => {
-    const { container } = renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
+    const { container } = renderWithRouter(() => <TestComposer />)
     const input = container.querySelector('input[type="file"]') as HTMLInputElement
     const file = new File(['hello'], 'brief.pdf', { type: 'application/pdf' })
 
@@ -206,7 +367,7 @@ describe('v2 dashboard shell port', () => {
     }))
     vi.stubGlobal('fetch', fetchMock)
 
-    renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
+    renderWithRouter(() => <TestComposer />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Historikk' }))
     await waitFor(() => expect(screen.getByText('Vis alle samtaler')).toBeTruthy())
@@ -240,7 +401,7 @@ describe('v2 dashboard shell port', () => {
   })
 
   it('stores submitted dashboard composer turns in the v2-style history panel', async () => {
-    renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
+    renderWithRouter(() => <TestComposer />)
 
     fireEvent.input(screen.getByRole('textbox', { name: 'Meld Verevon' }), {
       target: { value: 'Oppsummer kundesaker' },
@@ -490,9 +651,11 @@ describe('v2 dashboard shell port', () => {
     expect(screen.getByRole('navigation', { name: 'Romnavigasjon' })).toBeTruthy()
     expect(await screen.findByRole('link', { name: 'Personlig rom' })).toBeTruthy()
     expect(screen.getByRole('textbox', { name: /search rooms and conversations|søk i rom og samtaler/i })).toBeTruthy()
-    // A Space conversation opens in its room; the shared record never routes
-    // out to /chat from the sidebar.
-    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Planning/ }).getAttribute('href')).toBe('/spaces/space%20personal')
+    // A Space conversation opens in its room, on that thread (`spaceThreadHref`); the shared record
+    // never routes out to /chat from the sidebar.
+    expect(screen.getByRole('link', { name: /(?:Open|Åpne) Planning/ }).getAttribute('href')).toBe(
+      '/spaces/space%20personal?thread_id=thread%20%2F%20planning#chat',
+    )
     expect(screen.queryByRole('link', { name: /Åpne rommet|open room/i })).toBeNull()
   })
 
@@ -719,7 +882,6 @@ describe('v2 dashboard shell port', () => {
     flush()
 
     expect(screen.getByText('Search knowledge base')).toBeTruthy()
-    expect(screen.getByText('Create agent')).toBeTruthy()
-    expect(screen.getByRole('textbox', { name: 'Message Verevon' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Assistant' })).toBeTruthy()
   })
 })

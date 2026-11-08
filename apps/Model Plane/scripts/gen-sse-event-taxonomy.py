@@ -78,8 +78,12 @@ LITERAL_PRODUCERS = {
     "when it cannot authorise or open the orchestration stream",
     "awaiting_approval": "agentic run paused for approval at the run boundary, before a "
     "derived `step_update` exists",
-    "run_parked": "parked agentic run on the owner's turn stream; the orchestration "
-    "`RunParked` event shares the name",
+}
+
+# model-gateway files that serve a different SSE stream with its own vocabulary and its own
+# golden; their `.event("...")` literals are not run-event producers.
+OTHER_STREAMS = {
+    "space_sse.rs": "Space room event stream, pinned by apps/Model Plane/api/contracts/space-events.json",
 }
 
 VARIANT_ARM = re.compile(
@@ -225,6 +229,11 @@ def parse_arms(body: str) -> dict[str, str | None]:
 def orchestration_arms(body: str) -> dict[str, str]:
     """Map each OrchestrationEvent oneof variant to the wire name its arm returns."""
     flat = " ".join(strip_line_comments(body).split())
+    # Count only inside the naming match: guards before it (an early `return None`
+    # or a verified early event) name variants too, but they are not arms.
+    start = flat.find("let event_name = match")
+    if start >= 0:
+        flat = flat[start:]
     arms = ORCHESTRATION_ARM.findall(flat)
     written = flat.count("orchestration_event::Event::")
     if not arms or len(arms) != written:
@@ -289,6 +298,14 @@ def without_test_items(source: str) -> str:
             # A one-line item such as `mod controls;` or `use x;`: all of it is test-only.
             index += 1
             continue
+        generics = header.replace("=>", "").replace("->", "")
+        if one_line and header.endswith(",") and header.count("(") == header.count(")") \
+                and generics.count("<") == generics.count(">"):
+            # A one-line enum variant, struct field or match arm such as `Scripted(VecDeque<Vec<u8>>),`
+            # or `Self::Scripted(c) => Ok(c.pop_front()),`: its brackets close on the line, so the
+            # trailing comma ends the whole item.
+            index += 1
+            continue
         if not (TEST_ITEM.match(header) or "{" in header):
             raise TaxonomyError(
                 f"unsupported #[cfg(test)] item {header.strip()!r}: expected a mod, fn or "
@@ -305,9 +322,11 @@ def without_test_items(source: str) -> str:
 
 
 def literal_writers(rust: dict[str, str]) -> set[str]:
-    """Names written by a literal `.event("...")` outside test modules."""
+    """Names written by a literal `.event("...")` outside test modules and other streams."""
     found: set[str] = set()
-    for text in rust.values():
+    for key, text in rust.items():
+        if key in OTHER_STREAMS:
+            continue
         production = WHOLE_LINE_COMMENT.sub("", without_test_items(text))
         found.update(EVENT_LITERAL.findall(production))
     return found
@@ -420,7 +439,10 @@ def build(rust: dict[str, str], proto: str, consumer: str) -> Taxonomy:
     )
     members = oneof_fields(proto)
     cases = native_cases(consumer)
-    literals = literal_writers(rust)
+    # A literal write under an orchestration arm's own name (the verified attach receipt,
+    # browser_attach_compat) is the run-events vocabulary the run console reads, not a
+    # chat-stream frame, so it is checked as that arm, not as a literal producer.
+    literals = literal_writers(rust) - set(arms.values())
 
     events = sorted((names[variant], variant, families[variant]) for variant in names)
     chat_names = {name for name, _, _ in events}
@@ -511,7 +533,7 @@ def main() -> int:
 
     if not args.check:
         DOC.parent.mkdir(parents=True, exist_ok=True)
-        DOC.write_text(rendered, encoding="utf-8")
+        DOC.write_text(rendered, encoding="utf-8", newline="\n")  # LF on every platform, like the committed doc
         print(f"wrote {DOC.relative_to(REPO_ROOT)} ({count} events)")
         return 0
 

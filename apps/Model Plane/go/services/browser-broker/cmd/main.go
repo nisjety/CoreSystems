@@ -51,6 +51,10 @@ func main() {
 		slog.Error("browser-broker grant configuration is invalid", "error", err)
 		os.Exit(1)
 	}
+	if err := keyRevokeGate(cfg, os.Getenv); err != nil {
+		slog.Error("browser-broker key grant configuration is invalid", "error", err)
+		os.Exit(1)
+	}
 	// The effective limits only: never a host list or an org.
 	slog.Info("browser-broker grant limits",
 		"grant_ttl_seconds", int(cfg.TTL.Seconds()),
@@ -62,6 +66,12 @@ func main() {
 		"human_absolute_ttl_seconds", int(cfg.HumanAbsoluteTTL.Seconds()),
 		"max_attach_domains", cfg.MaxAttachDomains,
 		"deny_suffix_count", denySuffixCount(cfg),
+		// INNH-10: API-key grants (dark unless switched on).
+		"key_grants_enabled", cfg.KeyGrantsEnabled,
+		"key_grant_ttl_seconds", int(cfg.KeyGrantTTL.Seconds()),
+		"max_active_grants_per_key", cfg.MaxActivePerKey,
+		// E3.2-e1 (OD13): origin extensions (dark unless switched on).
+		"origin_extension_enabled", cfg.OriginExtensionEnabled,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -127,7 +137,12 @@ func main() {
 	slog.Info("browser site policy", "mode", string(options.SitePolicy))
 
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
-	bbserver.Register(grpcServer, bbserver.NewServerWithConfig(grants, cfg).WithOptions(options))
+	brokerServer := bbserver.NewServerWithConfig(grants, cfg).WithOptions(options)
+	// Before Serve: a broker whose revoke consumer cannot bind never issues a
+	// key grant (it disables them for the process).
+	stopKeyRevoke := startKeyRevokeConsumer(cfg, os.Getenv, brokerServer)
+	defer stopKeyRevoke()
+	bbserver.Register(grpcServer, brokerServer)
 	healthServerGRPC := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
 	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)
@@ -202,24 +217,29 @@ func purgeOnce(ctx context.Context, purger grant.Purger, now time.Time) {
 
 // Environment variables read by serverOptionsFromEnv.
 const (
-	envSitePolicy      = "BROWSER_BROKER_SITE_POLICY"
-	envGrantMaxTTL     = "BROWSER_GRANT_MAX_TTL"
-	envOrgCoreURL      = "ORG_CORE_URL"
-	envOrgCoreToken    = "BROWSER_BROKER_ORG_CORE_TOKEN"
-	browserBrokerSvcID = "browser-broker"
+	envSitePolicy          = "BROWSER_BROKER_SITE_POLICY"
+	envAssistantTaskGrants = "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED"
+	envGrantMaxTTL         = "BROWSER_GRANT_MAX_TTL"
+	envOrgCoreURL          = "ORG_CORE_URL"
+	envOrgCoreToken        = "BROWSER_BROKER_ORG_CORE_TOKEN"
+	browserBrokerSvcID     = "browser-broker"
 )
 
 // serverOptionsFromEnv reads the site-policy mode, the lifetime cap and, when the
 // policy is on, the org-core client. Enforce and shadow both refuse to start
 // without the client: a broker that cannot ask org-core must not run as if it had.
 func serverOptionsFromEnv(getenv func(string) string) (bbserver.Options, error) {
-	options := bbserver.Options{SitePolicy: sitepolicy.ParseMode(getenv(envSitePolicy))}
+	assistantTaskGrants := strings.ToLower(strings.TrimSpace(getenv(envAssistantTaskGrants)))
+	options := bbserver.Options{
+		SitePolicy:                 sitepolicy.ParseMode(getenv(envSitePolicy)),
+		AssistantTaskGrantsEnabled: assistantTaskGrants == "1" || assistantTaskGrants == "true" || assistantTaskGrants == "on",
+	}
 	maxTTL, err := grantMaxTTLFromEnv(getenv)
 	if err != nil {
 		return bbserver.Options{}, err
 	}
 	options.MaxRequestTTL = maxTTL
-	if options.SitePolicy == sitepolicy.ModeOff {
+	if options.SitePolicy == sitepolicy.ModeOff && !options.AssistantTaskGrantsEnabled {
 		return options, nil
 	}
 	resolver, err := sitepolicy.NewClient(getenv(envOrgCoreURL), browserBrokerSvcID, getenv(envOrgCoreToken))

@@ -9,6 +9,7 @@ workspace = true
 [dependencies]
 mp-content-safety = { path = "../../crates/mp-content-safety" }
 mp-contracts = { path = "../../crates/mp-contracts" }
+mp-scrub = { path = "../../crates/mp-scrub" }
 mp-events = { path = "../../crates/mp-events" }
 mp-ids = { path = "../../crates/mp-ids" }
 mp-telemetry = { path = "../../crates/mp-telemetry" }
@@ -45,6 +46,7 @@ hmac = "0.12"
 rand = "0.8"
 
 [dev-dependencies]
+mp-inference-replay = { path = "../../crates/mp-inference-replay" }
 reqwest = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 serial_test = "3"

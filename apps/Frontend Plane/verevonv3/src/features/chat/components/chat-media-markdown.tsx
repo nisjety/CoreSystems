@@ -5,8 +5,9 @@ import {
   Square,
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
-import { For } from 'solid-js'
+import { createSignal, For, Show } from 'solid-js'
 import katex from 'katex'
+import { CitedPassageViewer, citedPassageOf } from './CitedPassageViewer'
 import {
   imageArtifactSrc,
   looksLikeImageContent,
@@ -39,6 +40,7 @@ import {
 } from './chat-types'
 import { useI18n } from '@/shared/i18n'
 import { isSafeLinkHref } from '../lib/safe-href'
+import { linkHost, looksSpoofed, safeHref } from '@/shared/lib/safe-link'
 
 export function collectArtifactItems(turns: ChatTurn[]): ArtifactPanelItem[] {
   const byId = new Map<string, ArtifactPanelItem>()
@@ -1224,7 +1226,11 @@ export function InlineCitationMarker(props: {
     (entry) => citationGroupKey(entry.citation),
     (entry) => citationGroupLabel(entry.citation),
   )
+  // The source whose passage is open (EP-2-S4). The sheet sits outside the popover, so closing the chip does
+  // not take the passage away mid-read.
+  const [opened, setOpened] = createSignal<Citation | null>(null)
   return (
+    <>
     <details class="verevon-chat-citation-chip">
       <summary aria-label={i18n.tr(`Kilde ${props.indexes.join(', ')}`, `Source ${props.indexes.join(', ')}`)}>{label}</summary>
       <div class="verevon-chat-citation-chip__popover" role="group" aria-label={i18n.tr('Kildedetaljer', 'Source details')}>
@@ -1245,7 +1251,7 @@ export function InlineCitationMarker(props: {
                       </span>
                     </>
                   )
-                  return isSafeLinkHref(entry.citation.url)
+                  const source = isSafeLinkHref(entry.citation.url)
                     ? (
                       <a
                         href={entry.citation.url}
@@ -1264,6 +1270,22 @@ export function InlineCitationMarker(props: {
                         {content}
                       </span>
                     )
+                  // Only a source the server sent a passage for offers one: with the gateway switch off the chip is
+                  // exactly what it was.
+                  return citedPassageOf(entry.citation)
+                    ? (
+                      <>
+                        {source}
+                        <button
+                          type="button"
+                          class="verevon-chat-citation-chip__passage"
+                          onClick={() => setOpened(() => entry.citation)}
+                        >
+                          {i18n.tr('Vis passasjen', 'Show the passage')}
+                        </button>
+                      </>
+                    )
+                    : source
                 }}
               </For>
             </div>
@@ -1271,6 +1293,10 @@ export function InlineCitationMarker(props: {
         </For>
       </div>
     </details>
+    <Show when={opened()}>
+      {(citation) => <CitedPassageViewer citation={citation()} onClose={() => setOpened(null)} />}
+    </Show>
+    </>
   )
 }
 
@@ -1362,8 +1388,15 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
         .slice(1, -1)
         .split(',')
         .map((value) => Number(value.trim()))
+      // The server numbers each source and the numbering has gaps (an unread source takes no number), so a
+      // marker binds to the source carrying its number. Array position is the fallback only when no source in
+      // the turn has a number: an older gateway, or a stored turn written before numbers were kept.
+      const numbered = citations.some((citation) => typeof citation.number === 'number')
       const sources = indexes
-        .map((index) => ({ index, citation: citations[index - 1] }))
+        .map((index) => ({
+          index,
+          citation: numbered ? citations.find((citation) => citation.number === index) : citations[index - 1],
+        }))
         .filter((entry): entry is { index: number; citation: Citation } => Boolean(entry.citation))
       // Keep a marker unchanged if even one requested source is absent. A
       // partial chip would silently rewrite the model's intended evidence set.
@@ -1378,14 +1411,20 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
       // autolinks these; trim trailing sentence punctuation off the link so
       // "... se https://example.com." doesn't pull the period into the href.
       const { url, trailing } = splitUrlTrailingPunctuation(token)
-      nodes.push(<a href={url} target="_blank" rel="noopener noreferrer">{url}</a>)
+      nodes.push(<a href={url} title={url} target="_blank" rel="noopener noreferrer">{url}</a>)
       if (trailing) nodes.push(trailing)
     } else {
       const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token)
       const label = unescapeMarkdown(link?.[1] ?? '')
       const target = link?.[2] ?? ''
       if (!link) nodes.push(token)
-      else if (isSafeLinkHref(target)) nodes.push(<a href={target} target="_blank" rel="noopener noreferrer">{label}</a>)
+      else if (safeHref(target)) {
+        const href = safeHref(target) as string
+        nodes.push(<a href={href} title={href} target="_blank" rel="noopener noreferrer">{label}</a>)
+        // Visible text that reads as a different site than the real target
+        // shows where the link actually goes.
+        if (looksSpoofed(label, href)) nodes.push(` (→ ${linkHost(href)})`)
+      }
       // The model wrote this target, so an unsafe one keeps its visible label as
       // inert text rather than becoming a link to javascript:, data: or file:.
       else nodes.push(<span class="verevon-chat-link-blocked" title={i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}>{label}</span>)

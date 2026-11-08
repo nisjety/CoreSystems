@@ -18,6 +18,7 @@ use crate::provider::language::{
     LanguageAnalyticsChain, LanguageAnalyticsRequest, LanguageOperation,
 };
 use crate::provider::realtime::{RealtimeChain, RealtimeSessionRequest};
+use crate::provider::role::RoleCall;
 use crate::provider::speech::{
     AudioFormat, SpeechChain, SpeechSynthesisRequest, SpeechTranscriptionRequest,
 };
@@ -55,6 +56,16 @@ const MAX_VIDEO_PROMPT_LEN: usize = 4_000;
 const MAX_VIDEO_DURATION_SECONDS: u32 = 20;
 const MAX_VIDEO_VARIANTS: u32 = 4;
 
+/// The data-use statement of a deployment whose zero-retention attestation is in force (see
+/// [`attests_zdr`]). Only `zdr_attested` is set: no cited source yet states training or retention
+/// for any provider, and the attestation cites no public text for `statement_ref`.
+fn attested_data_use() -> pb::ProviderDataUse {
+    pb::ProviderDataUse {
+        zdr_attested: Some(true),
+        ..Default::default()
+    }
+}
+
 /// Convert an internal [`provider::ModelInfo`] into the wire [`pb::ModelInfo`].
 ///
 /// The proto `ModelInfo` has no dedicated cost field, so the internal `cheap`
@@ -64,6 +75,8 @@ const MAX_VIDEO_VARIANTS: u32 = 4;
 /// any proto change.
 impl From<provider::ModelInfo> for pb::ModelInfo {
     fn from(model: provider::ModelInfo) -> Self {
+        // Read before the fields below move out of the model.
+        let data_use = attests_zdr(&model).then(attested_data_use);
         let mut features = model.features;
         if model.cheap {
             features.push("cheap".to_owned());
@@ -84,6 +97,16 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
                 .into_iter()
                 .map(|level| level.as_str().to_owned())
                 .collect(),
+            // Zero and empty mean no sourced row names the model, never a guess.
+            context_window_tokens: model.context_window_tokens,
+            max_output_tokens: model.max_output_tokens,
+            lifecycle: model
+                .lifecycle
+                .map(|lifecycle| lifecycle.as_str().to_owned())
+                .unwrap_or_default(),
+            // Set only for a deployment whose zero-retention attestation is in force, the one
+            // data-use statement a verified source makes today. Unset is "not stated", never "no".
+            data_use,
         }
     }
 }
@@ -126,6 +149,9 @@ pub(crate) struct InferenceService {
     language: LanguageAnalyticsChain,
     realtime: RealtimeChain,
     video: VideoChain,
+    /// Request snapshots (EP-14 S6). `None` unless `INFERENCE_REQUEST_CAPTURE`
+    /// is on, and then the handlers do exactly what they did before capture.
+    capture: Option<crate::request_capture::RequestCapture>,
 }
 
 trait TenantRequest {
@@ -188,7 +214,7 @@ catalog_requests!(
 );
 
 impl InferenceService {
-    async fn authorize<T: TenantRequest>(
+    async fn authorize<T: TenantRequest + 'static>(
         &self,
         request: &Request<T>,
     ) -> Result<AuthenticatedPrincipal, Status> {
@@ -196,6 +222,11 @@ impl InferenceService {
         // From here the call has a verified caller, whatever the checks below
         // decide: the metering decorator counts it under that service.
         crate::metered::note_caller(request.extensions(), &principal);
+        // EP-12 S6: an API-key principal reaches only the chat turn (Infer, InferStream, both
+        // `pb::InferRequest`); every other RPC, including request types added later, is refused.
+        principal.authorize_api_key_rpc(
+            std::any::TypeId::of::<T>() == std::any::TypeId::of::<pb::InferRequest>(),
+        )?;
         if request.get_ref().is_catalog() {
             principal.authorize_catalog()?;
         } else {
@@ -333,13 +364,30 @@ impl InferenceCore for InferenceService {
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
-        let result = if no_store {
-            self.chain.infer_without_response_cache(&internal_req).await
-        } else {
-            self.chain.infer(&internal_req).await
-        }.map_err(provider_error_to_status)?;
+        let outcome = self
+            .chain
+            .infer_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model), !no_store)
+            .await;
+        // Behind the provider call and never awaited: a failed call is captured
+        // too, under the model it asked for, because a failed run is what gets
+        // debugged.
+        if let Some(capture) = &self.capture {
+            let (served_model, served_provider) = outcome
+                .as_ref()
+                .map(|(result, _)| (result.model_used.as_str(), result.provider_used.as_str()))
+                .unwrap_or_default();
+            capture.offer(&crate::request_capture::CapturedCall {
+                run_id: &req.run_id,
+                purpose: req.purpose,
+                request: &internal_req,
+                waived: principal.zdr_waiver().is_some(),
+                served_model,
+                served_provider,
+            });
+        }
+        let (result, route_note) = outcome.map_err(provider_error_to_status)?;
 
-        let mut response = Response::new(infer_response_to_wire(result, &clock));
+        let mut response = Response::new(infer_response_to_wire(result, &clock, route_note));
         if no_store { response.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata")); }
         Ok(response)
     }
@@ -367,13 +415,26 @@ impl InferenceCore for InferenceService {
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
         clock.enter_chain();
-        let rx = self
+        let outcome = self
             .chain
-            .infer_stream(&internal_req)
-            .await
-            .map_err(provider_error_to_status)?;
+            .infer_stream_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model))
+            .await;
+        // Behind the provider call and never awaited. The serving model is named
+        // only by the stream's chunks, so a streamed call records the model it
+        // asked for.
+        if let Some(capture) = &self.capture {
+            capture.offer(&crate::request_capture::CapturedCall {
+                run_id: &req.run_id,
+                purpose: req.purpose,
+                request: &internal_req,
+                waived: principal.zdr_waiver().is_some(),
+                served_model: "",
+                served_provider: "",
+            });
+        }
+        let (rx, route_note) = outcome.map_err(provider_error_to_status)?;
 
-        let grpc_rx = streaming::bridge_to_grpc(rx, clock);
+        let grpc_rx = streaming::bridge_to_grpc(rx, clock, route_note);
 
         Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
             grpc_rx,
@@ -1112,6 +1173,7 @@ impl InferenceCore for InferenceService {
 fn infer_response_to_wire(
     result: provider::InferResponse,
     clock: &HandlerClock,
+    route_note: Option<provider::fallback::RouteNote>,
 ) -> pb::InferResponse {
     pb::InferResponse {
         request_id: result.request_id,
@@ -1130,6 +1192,7 @@ fn infer_response_to_wire(
             clock.stamp(&mut timing);
             timing.into()
         }),
+        route_note: route_note.map(Into::into),
         tool_calls: result
             .tool_calls
             .into_iter()
@@ -1515,6 +1578,7 @@ pub async fn serve_with_providers_and_readiness(
         language,
         realtime,
         video,
+        capture: crate::request_capture::RequestCapture::from_env(),
     };
     // Every RPC is counted by the decorator, so none can ship unmetered.
     let grpc_service = InferenceCoreServer::new(crate::metered::MeteredCore::new(service))
@@ -2064,7 +2128,7 @@ mod tests {
             ..provider::InferResponse::default()
         };
 
-        let wire = infer_response_to_wire(result, &clock);
+        let wire = infer_response_to_wire(result, &clock, None);
 
         let timing = wire
             .provider_timing
@@ -2584,6 +2648,66 @@ mod tests {
         let mut models = catalogue();
         catalogue_access(&applied(Mode::Enforce, policy), &mut models);
         assert_eq!(ids(&models), ["gpt-5", "gpt-5-mini", "text-embedding-3"]);
+    }
+
+    #[test]
+    fn list_models_carries_record_v2_fields() {
+        use provider::model_record::Lifecycle;
+        let declared = provider::ModelInfo {
+            id: "claude-sonnet-5-5".to_owned(),
+            provider: "anthropic".to_owned(),
+            modality: "chat".to_owned(),
+            context_window_tokens: 1_000_000,
+            max_output_tokens: 128_000,
+            lifecycle: Some(Lifecycle::Ga),
+            ..Default::default()
+        };
+        let wire = pb::ModelInfo::from(declared);
+        assert_eq!(wire.context_window_tokens, 1_000_000);
+        assert_eq!(wire.max_output_tokens, 128_000);
+        assert_eq!(wire.lifecycle, "ga");
+
+        // A model with no sourced row carries zero and empty, which the gateway leaves out.
+        let unknown = pb::ModelInfo::from(provider::ModelInfo {
+            id: "gpt-5-mini".to_owned(),
+            ..Default::default()
+        });
+        assert_eq!(unknown.context_window_tokens, 0);
+        assert_eq!(unknown.max_output_tokens, 0);
+        assert_eq!(unknown.lifecycle, "");
+    }
+
+    #[test]
+    fn data_use_is_stated_only_by_an_attested_deployment() {
+        use provider::PrivacyTier;
+        // An attested deployment states its zero-retention attestation and nothing it has no
+        // source for.
+        for privacy_tier in [PrivacyTier::ZdrContractual, PrivacyTier::Sovereign] {
+            let attested = pb::ModelInfo::from(provider::ModelInfo {
+                id: "claude-sonnet-5-5".to_owned(),
+                provider: "azure-anthropic".to_owned(),
+                modality: "chat".to_owned(),
+                privacy_tier,
+                ..Default::default()
+            });
+            let data_use = attested
+                .data_use
+                .expect("an attested deployment states its data use");
+            assert_eq!(data_use.zdr_attested, Some(true), "{privacy_tier:?}");
+            assert_eq!(data_use.trains_on_inputs, None);
+            assert_eq!(data_use.retention_days, None);
+            assert!(data_use.statement_ref.is_empty());
+        }
+
+        // A deployment without an attestation states nothing, so the field stays unset: "not
+        // stated", never "no".
+        for privacy_tier in [PrivacyTier::Global, PrivacyTier::EuResident] {
+            let unattested = pb::ModelInfo::from(provider::ModelInfo {
+                privacy_tier,
+                ..Default::default()
+            });
+            assert_eq!(unattested.data_use, None, "{privacy_tier:?}");
+        }
     }
 
     fn chat_models() -> Vec<provider::ModelInfo> {

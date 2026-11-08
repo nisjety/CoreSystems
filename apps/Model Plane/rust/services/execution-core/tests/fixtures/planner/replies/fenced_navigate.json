@@ -1,0 +1,7 @@
+{
+  "raw": "```json\n{\"action\":\"navigate\",\"url\":\"https://example.com/hours\"}\n```",
+  "expect": {
+    "kind": "action",
+    "type": "goto"
+  }
+}

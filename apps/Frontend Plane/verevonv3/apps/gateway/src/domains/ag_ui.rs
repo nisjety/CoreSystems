@@ -90,13 +90,15 @@ async fn stream_agent_ui(
         return shared::invalid_chat_request(message).into_response();
     }
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
-    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+    // WS08-S4: same wake handling as native chat (the injector chain is shared).
+    let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(
         &state, &user, &org_id, &mut body,
     )
     .await
     {
-        return (status, body).into_response();
-    }
+        Ok(intent) => intent,
+        Err((status, body)) => return (status, body).into_response(),
+    };
     if let Err((status, body)) =
         crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut body)
             .await
@@ -109,14 +111,21 @@ async fn stream_agent_ui(
     {
         return (status, body).into_response();
     }
-    if let Err((status, body)) =
-        crate::domains::spaces::inject_personal_thread_context(&state, &user, &org_id, &mut body)
-            .await
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
+        &state,
+        &user,
+        &org_id,
+        &mut body,
+        wake_intent.as_ref(),
+    )
+    .await
     {
         return (status, body).into_response();
     }
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
-    let mut body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let body = shared::with_identity_context(body, &user.user_name, &org_name);
+    let body = shared::with_locale_context(body);
+    let mut body = shared::with_viewer_locale(body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut body).await;
     // After `inject_personal_thread_context`: only minted once Control has
     // actually scoped this turn to a Space (same rule as native chat).
@@ -494,6 +503,7 @@ fn normalize_run_agent_input(body: Value) -> Result<Value, String> {
             out.insert(output_key.to_owned(), Value::Bool(value));
         }
     }
+    crate::domains::spaces::mentions::carry_ag_ui_wake(&body, &mut out); // WS08-S4 AG-UI wake parity
 
     Ok(Value::Object(out))
 }
@@ -915,7 +925,9 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         // WS15 lifecycle notices: counts and closed tokens only, shown as they arrive.
         | "retry_scheduled"
         | "compaction"
-        | "context_change" => {
+        | "context_change"
+        // WS22-S6: a tool call's workspace state, closed tokens only, shown as it arrives.
+        | "sandbox_state" => {
             vec![ag_ui_event(json!({
                 "type": "CUSTOM",
                 "name": event,
@@ -1373,6 +1385,11 @@ mod tests {
                 r#"{"change":"history_shed","messages_dropped":4,"request_id":"req_1"}"#,
                 "history_shed",
             ),
+            (
+                "sandbox_state",
+                r#"{"scope":"thread","state":"conflict","cause":"workspace_conflict","request_id":"req_1"}"#,
+                "workspace_conflict",
+            ),
         ] {
             let mut run = AgUiRunState::default();
             let events = map_upstream_frame(
@@ -1432,5 +1449,42 @@ mod tests {
         let rendered = format!("{:?}", events[0]);
         assert!(rendered.contains("RAW"), "{rendered}");
         assert!(!rendered.contains("CUSTOM"), "{rendered}");
+    }
+
+    /// WS08-S4: AG-UI parity for the wake branch. The AG-UI stream and the native chat stream
+    /// must run the same injector chain in the same order and hand the wake the mention injector
+    /// verified (never a body field) to the thread-context injector, so a `wake` in an AG-UI run
+    /// is verified, rate limited, ZDR-checked and signed exactly like a native chat one.
+    #[test]
+    fn the_wake_branch_runs_the_same_injector_chain_in_ag_ui_and_native_chat() {
+        let chain = [
+            "inject_mentioned_space_agent(",
+            "inject_authored_instructions(",
+            "inject_persona_instructions(",
+            "inject_personal_thread_context_for_wake(",
+            "wake_intent.as_ref()",
+        ];
+        for (name, source) in [
+            ("ag_ui", include_str!("ag_ui.rs")),
+            ("chat/streams", include_str!("chat/streams.rs")),
+        ] {
+            let mut last = 0;
+            for needle in chain {
+                let at = source
+                    .find(needle)
+                    .unwrap_or_else(|| panic!("{name} no longer calls {needle}"));
+                assert!(at >= last, "{name}: {needle} runs out of order");
+                last = at;
+            }
+            // the wake is the typed return of the mention injector, bound once
+            assert!(
+                source.contains("let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent("),
+                "{name}: the wake comes from the mention injector"
+            );
+            // neither entry reads a `wake` field itself: only the shared injector does
+            let production = source.split("mod tests {").next().unwrap_or(source);
+            assert!(!production.contains("\"wake_context\""), "{name} must not build wake_context itself");
+            assert!(!production.contains("get(\"wake\")"), "{name} must not read the browser's wake field");
+        }
     }
 }

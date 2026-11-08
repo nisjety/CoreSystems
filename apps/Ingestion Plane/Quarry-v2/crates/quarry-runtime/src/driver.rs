@@ -153,6 +153,14 @@ pub trait Driver: Send + Sync {
             "driver does not support bounded discovery hops",
         ))
     }
+    /// Read the Location of a single public HTTP redirect without reading its
+    /// body, following it, or sending cookies. Other drivers fail closed.
+    async fn probe_redirect(&self, _url: &Url) -> QuarryResult<Option<Url>> {
+        Err(quarry_core::error::QuarryError::new(
+            quarry_core::error::ErrorCode::Unsupported,
+            "driver does not support redirect probes",
+        ))
+    }
     /// Conditional GET: send `If-None-Match` / `If-Modified-Since`
     /// when validators are provided. Default impl ignores the hints
     /// and delegates to `fetch` — backward-compatible for drivers

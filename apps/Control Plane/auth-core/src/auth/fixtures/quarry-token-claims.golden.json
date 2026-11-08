@@ -18,7 +18,11 @@
           "wiki.read",
           "wiki.write"
         ],
-        "zdr": true
+        "zdr": true,
+        "web_policy": {
+          "v": 1,
+          "rev": "0"
+        }
       }
     },
     "user_in_standard_org": {
@@ -38,7 +42,11 @@
           "wiki.read",
           "wiki.write"
         ],
-        "zdr": false
+        "zdr": false,
+        "web_policy": {
+          "v": 1,
+          "rev": "0"
+        }
       }
     },
     "service_model_gateway": {
@@ -55,7 +63,11 @@
           "scrape:read",
           "search:read"
         ],
-        "zdr": true
+        "zdr": true,
+        "web_policy": {
+          "v": 1,
+          "rev": "0"
+        }
       }
     },
     "service_execution_core": {
@@ -74,7 +86,142 @@
           "scrape:write",
           "search:read"
         ],
-        "zdr": true
+        "zdr": true,
+        "web_policy": {
+          "v": 1,
+          "rev": "0"
+        }
+      }
+    },
+    "user_in_org_with_web_policy": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "user-golden",
+        "org_id": "org-web-policy-golden",
+        "user_id": "user-golden",
+        "principal_type": "user",
+        "email": "member@example.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": false,
+        "web_policy": {
+          "v": 1,
+          "rev": "0123456789ab",
+          "caps": {
+            "browser.act.upload": "disabled"
+          },
+          "robots_max": "respect"
+        }
+      }
+    },
+    "user_in_org_without_policy": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "user-golden",
+        "org_id": "org-without-web-policy-golden",
+        "user_id": "user-golden",
+        "principal_type": "user",
+        "email": "member@example.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": false,
+        "web_policy": {
+          "v": 1,
+          "rev": "0"
+        }
+      }
+    },
+    "service_execution_core_with_web_policy": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "service:execution-core",
+        "org_id": "org-web-policy-golden",
+        "principal_type": "service",
+        "service_id": "service:execution-core",
+        "reason": "agent web tools",
+        "scopes": [
+          "browser:execute",
+          "extract:read",
+          "scrape:write",
+          "search:read"
+        ],
+        "zdr": true,
+        "web_policy": {
+          "v": 1,
+          "rev": "0123456789ab",
+          "caps": {
+            "browser.act.upload": "disabled"
+          },
+          "robots_max": "respect"
+        }
+      }
+    },
+    "service_model_gateway_with_web_policy": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "service:model-gateway",
+        "org_id": "org-web-policy-golden",
+        "principal_type": "service",
+        "service_id": "service:model-gateway",
+        "reason": "chat web search",
+        "scopes": [
+          "scrape:read",
+          "search:read"
+        ],
+        "zdr": true,
+        "web_policy": {
+          "v": 1,
+          "rev": "0123456789ab",
+          "caps": {
+            "browser.act.upload": "disabled"
+          },
+          "robots_max": "respect"
+        }
+      }
+    },
+    "user_in_org_with_origin_consent_defaults": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "user-golden",
+        "org_id": "org-origin-consent-golden",
+        "user_id": "user-golden",
+        "principal_type": "user",
+        "email": "member@example.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": false,
+        "web_policy": {
+          "v": 1,
+          "rev": "abcdef012345",
+          "caps": {
+            "browser.consent.max_scope": "conversation"
+          }
+        }
       }
     }
   }

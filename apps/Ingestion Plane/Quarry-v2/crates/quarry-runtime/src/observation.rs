@@ -23,8 +23,9 @@ use quarry_core::contracts::{
     SnapshotTarget,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
-use quarry_core::event::EventType;
+use quarry_core::event::{ActionStartedPayload, EventType};
 use quarry_core::ids::kinds::ArtifactKind;
+use quarry_core::lease::BrowserViewport;
 use quarry_core::redaction::{self, FieldKind, Tally, RULE_VERSION};
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use serde_json::{json, Value};
@@ -34,6 +35,64 @@ use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, Cla
 use crate::events::EventSink;
 use crate::observation_redaction::{self, Redactor, ScreenshotReport};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
+
+fn agent_scroll_action(target: &str, viewport: Option<BrowserViewport>) -> Action {
+    let direction = match target.trim().to_ascii_lowercase().as_str() {
+        "" | "viewport" | "down" | "page down" | "pagedown" | "scroll down" => 1.0,
+        "up" | "page up" | "pageup" | "scroll up" => -1.0,
+        "top" => {
+            return Action::Scroll { to: ScrollTarget::Top };
+        }
+        "bottom" => {
+            return Action::Scroll { to: ScrollTarget::Bottom };
+        }
+        _ => {
+            return Action::Scroll {
+                to: ScrollTarget::Selector(target.to_owned()),
+            };
+        }
+    };
+
+    match viewport.filter(|viewport| viewport.width > 0 && viewport.height > 0) {
+        Some(viewport) => Action::MouseWheel {
+            x: f64::from(viewport.width / 2),
+            y: f64::from(viewport.height / 2),
+            delta_x: 0.0,
+            delta_y: direction * (f64::from(viewport.height) * 0.75).clamp(1.0, 900.0),
+        },
+        // A keyboard page scroll needs no guessed coordinates.
+        None => Action::Press {
+            key: String::from(if direction > 0.0 { "PageDown" } else { "PageUp" }),
+        },
+    }
+}
+
+/// A pointer is moved only for an admitted attached click with a known viewport.
+/// For a verified top-level target, use the visible portion of its advisory
+/// rectangle. This never selects or authorizes the underlying browser action.
+fn agent_pointer_point(
+    action: &AgentAction,
+    rect: Option<quarry_core::contracts::ElementRect>,
+    viewport: Option<quarry_core::lease::BrowserViewport>,
+) -> Option<(u32, u32)> {
+    let viewport = viewport?;
+    if viewport.width == 0 || viewport.height == 0 { return None; }
+    let (x, y) = match action {
+        AgentAction::ClickPoint { x, y } => (*x, *y),
+        AgentAction::ClickRef { .. } | AgentAction::ClickSemantic { .. } => {
+            let r = rect?;
+            let (left, top) = (r.x.max(0.0), r.y.max(0.0));
+            let (right, bottom) = ((r.x + r.width).min(f64::from(viewport.width)), (r.y + r.height).min(f64::from(viewport.height)));
+            if right <= left || bottom <= top { return None; }
+            ((left + right) / 2.0, (top + bottom) / 2.0)
+        }
+        // A child-frame rectangle has no verified transform; selector clicks
+        // have no exact native binding. Omit rather than invent a position.
+        _ => return None,
+    };
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 || x >= f64::from(viewport.width) || y >= f64::from(viewport.height) { return None; }
+    Some((x.floor() as u32, y.floor() as u32))
+}
 
 pub struct ObservationRunner {
     pub browser: Arc<dyn BrowserDriver>,
@@ -50,6 +109,10 @@ pub struct ObservationRunner {
 #[derive(Default)]
 pub struct ObservationContext {
     pub step: u32,
+    /// Set only by the authorized attached-agent lane for live event correlation.
+    pub live_attach_id: Option<String>,
+    /// Recheck live ownership after a visible pointer pause, before the action.
+    pub live_attach_valid: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub current_url: String,
     pub page_hash: String,
     pub previous_screenshot: Option<Vec<u8>>,
@@ -229,6 +292,10 @@ impl ObservationRunner {
                 "the file was attached to the exact input, but the page has not confirmed submission",
             ),
             AgentAction::DownloadRef { .. } | AgentAction::FrameDownloadRef { .. } => ActionOutcome::verified("download_captured_as_artifact"),
+            AgentAction::FillOtpRef { .. } => ActionOutcome::unknown(
+                "postcondition_required",
+                "the one-time code was inserted, but the page has not confirmed sign-in",
+            ),
             AgentAction::Click { .. }
             | AgentAction::ClickRef { .. }
             | AgentAction::FrameClickRef { .. }
@@ -276,7 +343,8 @@ impl ObservationRunner {
             | AgentAction::UploadRef { .. }
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
-            | AgentAction::FrameDownloadRef { .. } => {
+            | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. } => {
                 return Err(QuarryError::new(
                     ErrorCode::TargetRepairRequired,
                     "snapshot actions require ObservationContext target resolution",
@@ -294,9 +362,7 @@ impl ObservationRunner {
                 text: text.clone(),
             },
             AgentAction::Press { key } => Action::Press { key: key.clone() },
-            AgentAction::Scroll { target } => Action::Scroll {
-                to: ScrollTarget::Selector(target.clone()),
-            },
+            AgentAction::Scroll { target } => agent_scroll_action(target, None),
             AgentAction::MouseWheel {
                 x,
                 y,
@@ -344,16 +410,22 @@ impl ObservationRunner {
     ) -> QuarryResult<BrowserObservation> {
         let observation_started_at = Instant::now();
         let run_id = &request.run_id;
-        // This must happen inside the shared execution path, not just the
-        // REST handler: browser WebSocket actions and any future internal
-        // caller use the same run-scoped policy before a page can make an
-        // effectful request.
-        let egress = match ctx.egress_policy.as_ref() {
-            Some(resolved) => resolved.clone(),
-            None => BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains)
-                .with_denied_domains(&ctx.egress_denied),
-        };
-        self.browser.configure_egress_policy(session, egress).await?;
+        if ctx.live_attach_id.is_some() {
+            // The attachment's policy is installed on its own tab at open.
+            // The session policy belongs to the owner and all their tabs.
+            if session.tab_pin().is_none() {
+                return Err(QuarryError::unsupported_action("unpinned_attachment_step"));
+            }
+        } else {
+            // Install the run boundary in the shared REST and WebSocket path
+            // before a page can make an effectful request.
+            let egress = match ctx.egress_policy.as_ref() {
+                Some(resolved) => resolved.clone(),
+                None => BrowserEgressPolicy::from_allowed_domains(&request.constraints.allowed_domains)
+                    .with_denied_domains(&ctx.egress_denied),
+            };
+            self.browser.configure_egress_policy(session, egress).await?;
+        }
         if action_requires_atomic_target(&request.action)
             && !self.browser.capabilities().atomic_target_actions
         {
@@ -404,23 +476,36 @@ impl ObservationRunner {
             .resolve_snapshot_action(&request.action, session, ctx)
             .await?;
 
+        // Bounds are presentation only and never authorize the action.
+        let explicit_child_frame = matches!(&request.action,
+            AgentAction::FrameClickRef { .. } | AgentAction::FrameTypeRef { .. }
+            | AgentAction::FrameSelectRef { .. } | AgentAction::FrameWaitForRef { .. }
+            | AgentAction::FrameUploadRef { .. } | AgentAction::FrameDownloadRef { .. });
+        let rect = match verified_target_action.as_ref().and_then(|action| action.native_target.as_ref()).filter(|_| !explicit_child_frame) {
+            Some(target) => self.browser.native_target_rect(session, target).await,
+            None => None,
+        };
         if let Some(events) = &self.events {
+            let started = ActionStartedPayload {
+                step: ctx.step,
+                action: observation_redaction::action_for_event(
+                    &request.action,
+                    typed_kind,
+                    // X-19: the event keeps what the stored receipt keeps.
+                    quarry_core::redaction::action::record_policy(),
+                    redaction::mode(),
+                    &mut Tally::new(),
+                ),
+                rect,
+                attach_id: ctx.live_attach_id.clone(),
+                tab_id: ctx.live_attach_id.as_ref().and_then(|_| session.tab_pin.as_ref().map(|id| id.to_string())),
+            };
             events
                 .emit_for_zdr(
                     request.zdr,
                     run_id.clone(),
                     EventType::ActionStarted,
-                    json!({
-                        "step": ctx.step,
-                        "action": observation_redaction::action_for_event(
-                            &request.action,
-                            typed_kind,
-                            // X-19: the event keeps what the stored receipt keeps.
-                            quarry_core::redaction::action::record_policy(),
-                            redaction::mode(),
-                            &mut Tally::new(),
-                        ),
-                    }),
+                    started.to_value(),
                     format!("{}:action:{}:started", run_id, ctx.step),
                 )
                 .await;
@@ -443,6 +528,19 @@ impl ObservationRunner {
             self.browser.ensure_page(session).await?;
         }
 
+        // The pointer is a real CDP movement, not a synthetic overlay. It is
+        // visible only for this admitted agent action and cleared before the
+        // action itself can move the pointer to a different position.
+        if let (Some(attach_id), Some((x, y))) = (ctx.live_attach_id.as_deref(), agent_pointer_point(&request.action, rect, session.lease.viewport)) {
+            if self.browser.move_agent_pointer(session, attach_id, x, y).await.is_ok() {
+                // The owner frame stream samples every 250 ms by default.
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                self.browser.clear_agent_pointer(session, attach_id).await;
+                if !ctx.live_attach_valid.as_ref().is_some_and(|valid| valid()) {
+                    return Err(QuarryError::new(ErrorCode::UserTookOver, "the agent no longer holds this browser tab"));
+                }
+            }
+        }
         if let Some(verified_target_action) = verified_target_action {
             self.browser
                 .act_on_verified_target(session, verified_target_action)
@@ -466,9 +564,21 @@ impl ObservationRunner {
                     self.browser.press(session, key).await?;
                 }
                 AgentAction::Scroll { target } => {
-                    self.browser
-                        .scroll(session, &ScrollTarget::Selector(target.clone()))
-                        .await?;
+                    match agent_scroll_action(target, session.lease.viewport) {
+                        Action::Scroll { to } => self.browser.scroll(session, &to).await?,
+                        Action::MouseWheel {
+                            x,
+                            y,
+                            delta_x,
+                            delta_y,
+                        } => {
+                            self.browser
+                                .mouse_wheel(session, x, y, delta_x, delta_y)
+                                .await?;
+                        }
+                        Action::Press { key } => self.browser.press(session, &key).await?,
+                        _ => unreachable!("the scroll decoder returns only scroll operations"),
+                    }
                 }
                 AgentAction::MouseWheel {
                     x,
@@ -589,6 +699,15 @@ impl ObservationRunner {
                         )
                         .await?;
                 }
+                AgentAction::FillOtpRef { .. } => {
+                    // E3.1-a: the contract exists, the executor does not yet (E3.1-c
+                    // preconditions, E3.1-d OtpSource). Fail closed before any driver
+                    // call; the edge already refuses it while QUARRY_EDGE__FILL_OTP is off.
+                    return Err(QuarryError::new(
+                        ErrorCode::Unsupported,
+                        "fill_otp_ref has no executor on this runtime",
+                    ));
+                }
                 AgentAction::Evaluate { .. } => {
                     // Raw script is refused before any driver call. The edge
                     // gates it first; this keeps library callers (agent loop,
@@ -630,6 +749,17 @@ impl ObservationRunner {
         }
 
         ctx.key_focus = focus_after;
+
+        // E3.3-j: how long the page took to go quiet after this action, when the settle is on.
+        // A read-only action is not settled. A failed action returned above, so only an action
+        // that ran is settled. Nothing is retried.
+        let settle_ms = match crate::browser_driver::action_settle_bound() {
+            Some(bound) if !action_only_observes(&effective_action) => Some(
+                crate::browser_driver::settle_after_action(self.browser.as_ref(), session, bound)
+                    .await,
+            ),
+            _ => None,
+        };
 
         // SC4 T3: a page that did not answer one of the reads below in time does not
         // answer the next one either (a load that still holds it, a renderer in a
@@ -1069,6 +1199,7 @@ impl ObservationRunner {
             observed_action_count: ctx.observed_action_count,
             challenge_observation_count: ctx.challenge_observation_count,
             challenge_rate_per_mille,
+            settle_ms,
             ..driver_telemetry
         };
         let mut artifact_ids = Vec::new();
@@ -2808,6 +2939,24 @@ fn strip_tags(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_pointer_uses_only_bounded_supported_click_positions() {
+        use quarry_core::lease::BrowserViewport;
+        use quarry_core::contracts::ElementRect;
+        let viewport = Some(BrowserViewport { width: 100, height: 80, device_scale_factor: 1.0, is_mobile: false });
+        let click = AgentAction::ClickRef { snapshot_id: "s".into(), generation: 1, ref_id: "@e1".into() };
+        let rect = Some(ElementRect { x: -20.0, y: 10.0, width: 40.0, height: 20.0 });
+        assert_eq!(agent_pointer_point(&click, rect, viewport), Some((10, 20)));
+        assert_eq!(agent_pointer_point(&click, None, viewport), None);
+        assert_eq!(agent_pointer_point(&click, rect, None), None);
+        assert_eq!(agent_pointer_point(&AgentAction::ClickPoint { x: 99.0, y: 79.0 }, None, viewport), Some((99, 79)));
+        assert_eq!(agent_pointer_point(&AgentAction::ClickPoint { x: 100.0, y: 79.0 }, None, viewport), None);
+        assert_eq!(agent_pointer_point(&AgentAction::ClickPoint { x: f64::NAN, y: 1.0 }, None, viewport), None);
+        assert_eq!(agent_pointer_point(&AgentAction::Click { selector: "button".into() }, rect, viewport), None);
+        assert_eq!(agent_pointer_point(&AgentAction::FrameClickRef { snapshot_id: "s".into(), generation: 1, frame_id: "f".into(), ref_id: "@e1".into() }, rect, viewport), None);
+    }
+
     use crate::artifact_store::{ArtifactStore, InMemoryStore};
     use crate::vision::{
         VisualObservationArtifact, VisualObservationResult, VisualPreprocessInput,
@@ -3284,6 +3433,7 @@ mod tests {
         assert!(!signal.requires_escalation);
         assert_eq!(observation.telemetry.challenge_observation_count, 0);
         assert_eq!(observation.telemetry.challenge_rate_per_mille, 0);
+        assert_eq!(observation.telemetry.settle_ms, None, "the settle is off unless its flag is set");
         // Repeated visits never exhaust anything: it is not a block.
         for _ in 0..4 {
             runner.execute(&request, &session, &mut ctx).await.expect("login stays reachable");
@@ -4488,6 +4638,70 @@ mod tests {
             Action::Click { selector } => assert_eq!(selector, "#btn"),
             _ => panic!("wrong action type"),
         }
+    }
+
+    #[test]
+    fn viewport_scroll_uses_bounded_wheel_at_the_session_center() {
+        let viewport = BrowserViewport {
+            width: 1001,
+            height: 800,
+            device_scale_factor: 1.0,
+            is_mobile: false,
+        };
+        for (target, expected_delta) in [
+            ("", 600.0),
+            ("viewport", 600.0),
+            ("down", 600.0),
+            ("UP", -600.0),
+        ] {
+            let Action::MouseWheel {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } = agent_scroll_action(target, Some(viewport))
+            else {
+                panic!("expected a wheel action for {target:?}");
+            };
+            assert_eq!(
+                (x, y, delta_x, delta_y),
+                (500.0, 400.0, 0.0, expected_delta)
+            );
+        }
+        let tall_viewport = BrowserViewport {
+            height: 3000,
+            ..viewport
+        };
+        let Action::MouseWheel { delta_y, .. } = agent_scroll_action("down", Some(tall_viewport))
+        else {
+            panic!("expected a wheel action for a tall viewport");
+        };
+        assert_eq!(delta_y, 900.0);
+    }
+
+    #[test]
+    fn scroll_preserves_absolute_and_selector_targets_and_handles_missing_viewport() {
+        assert!(matches!(
+            agent_scroll_action("top", None),
+            Action::Scroll { to: ScrollTarget::Top }
+        ));
+        assert!(matches!(
+            agent_scroll_action("bottom", None),
+            Action::Scroll { to: ScrollTarget::Bottom }
+        ));
+        assert!(matches!(
+            agent_scroll_action("#LeadStory", None),
+            Action::Scroll { to: ScrollTarget::Selector(selector) } if selector == "#LeadStory"
+        ));
+        assert!(matches!(
+            agent_scroll_action("up", None),
+            Action::Press { key } if key == "PageUp"
+        ));
+        let viewport_action = ObservationRunner::agent_action_to_browser_action(
+            &AgentAction::Scroll { target: "viewport".to_owned() },
+        )
+        .unwrap();
+        assert!(matches!(viewport_action, Action::Press { key } if key == "PageDown"));
     }
 
     #[test]

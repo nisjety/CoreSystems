@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CancelRunRequest, CancelRunResponse, GetRunRequest, GetScheduledStepContextRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, ResolveScheduledStepAuthorityRequest, ResolveScheduledStepAuthorityResponse, ResolveThreadOwnerRequest, ResolveThreadOwnerResponse, RunDetail, ScheduledStepContext } from "./runs_pbjs";
+import { AuthorizeRoomRunAttachRequest, AuthorizeRoomRunAttachResponse, CancelRunAsRoomManagerRequest, CancelRunAsRoomManagerResponse, CancelRunRequest, CancelRunResponse, GetRunRequest, GetScheduledStepContextRequest, ListRunsRequest, ListRunsResponse, ListSystemRunsRequest, ResolveApprovalAuthorityRequest, ResolveApprovalAuthorityResponse, ResolveRunActionAuthorityRequest, ResolveRunActionAuthorityResponse, ResolveRunOwnerRequest, ResolveRunOwnerResponse, ResolveScheduledStepAuthorityRequest, ResolveScheduledStepAuthorityResponse, ResolveThreadOwnerRequest, ResolveThreadOwnerResponse, RunDetail, ScheduledStepContext } from "./runs_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -64,7 +64,7 @@ export const RunService = {
     },
     /**
      * ListSystemRuns — org-scoped listing of runs with no human owner.
-     *
+     * 
      * ListRuns is thread-scoped, and a run created by a durable workflow lives in
      * a thread that same workflow owns, so no person's thread listing can ever
      * reach it. Without this RPC a system-initiated run is unreachable by
@@ -125,6 +125,21 @@ export const RunService = {
       kind: MethodKind.Unary,
     },
     /**
+     * ResolveApprovalAuthority returns the content-free bindings Control needs before it signs a
+     * `model.approval.decide` decision for a Space member (build plan WS10 S6): who raised the
+     * approval, who it is addressed to, and the run's Space bindings. Same restriction as
+     * ResolveRunActionAuthority (Control's action-authorizer identity); it returns no approval
+     * context, tool input, reason or card text.
+     *
+     * @generated from rpc model_plane.v1.RunService.ResolveApprovalAuthority
+     */
+    resolveApprovalAuthority: {
+      name: "ResolveApprovalAuthority",
+      I: ResolveApprovalAuthorityRequest,
+      O: ResolveApprovalAuthorityResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * ResolveScheduledStepAuthority returns the exact active prepared scheduled
      * run binding for Control's per-step decision. It is narrower than ordinary
      * run inspection: the caller supplies only immutable identifiers/digests,
@@ -138,6 +153,42 @@ export const RunService = {
       name: "ResolveScheduledStepAuthority",
       I: ResolveScheduledStepAuthorityRequest,
       O: ResolveScheduledStepAuthorityResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * AuthorizeRoomRunAttach answers whether the calling room member may watch one run live
+     * (build plan WS09-S4). The caller presents the Control `model.thread.read` decision for the
+     * Space; Session Core verifies it, the viewer's membership, that the run is a root run of a
+     * thread inside the decision's audience ceiling, and that nothing about the run or the
+     * decision is zero-retention. NotFound for any run outside the audience (no oracle). Returns
+     * ids, the honest run phase and a validity window; never run content. Called at subscribe and
+     * again every 15 seconds for as long as the stream lives.
+     *
+     * @generated from rpc model_plane.v1.RunService.AuthorizeRoomRunAttach
+     */
+    authorizeRoomRunAttach: {
+      name: "AuthorizeRoomRunAttach",
+      I: AuthorizeRoomRunAttachRequest,
+      O: AuthorizeRoomRunAttachResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * CancelRunAsRoomManager cancels one live room run on behalf of a room manager or owner who is
+     * NOT the run's owner (build plan WS09-S8). The caller presents the Control `model.run.control`
+     * decision (action model.run.control, permissions exactly [run:cancel], audience model-plane,
+     * payload digest bound to run_id and operation "cancel"). Session Core verifies it, the
+     * caller's membership, that the run is a root run of a thread of the decision's Space inside
+     * its audience ceiling, and that nothing about the run or the decision is zero-retention, then
+     * cancels through the same transaction as CancelRun and records `acting_as` and the decision
+     * reference on the RUN_CANCELLED receipt. NotFound for a run outside the audience (no oracle).
+     * Returns the run owner's identity so the caller can stop that owner's live producer.
+     *
+     * @generated from rpc model_plane.v1.RunService.CancelRunAsRoomManager
+     */
+    cancelRunAsRoomManager: {
+      name: "CancelRunAsRoomManager",
+      I: CancelRunAsRoomManagerRequest,
+      O: CancelRunAsRoomManagerResponse,
       kind: MethodKind.Unary,
     },
   }

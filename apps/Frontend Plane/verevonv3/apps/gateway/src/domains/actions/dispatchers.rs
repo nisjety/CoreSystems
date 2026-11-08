@@ -36,6 +36,7 @@ use crate::domains::chat::json_handlers::{
     queue_invocation_input as queue_chat_invocation_input, submit_feedback as submit_chat_feedback,
 };
 use crate::domains::inbox::{create_ai_text_proposal, require_support_ai_review};
+use crate::domains::ingestions::jobs::control_job as control_ingestion_job;
 use crate::domains::ingestions::runs::create_run as create_ingestion_run;
 use crate::domains::ingestions::schedules::{
     create_schedule as create_ingestion_schedule, schedule_actions as run_ingestion_schedule_action,
@@ -53,15 +54,22 @@ use crate::domains::integrations::model_subscriptions::{
 };
 use crate::domains::integrations::providers::start_connect_session as start_integration_connect_session;
 use crate::domains::knowledge::documents::create_document;
+use crate::domains::knowledge::quarry::{
+    crawl_cancel, crawl_pause, crawl_resume, crawl_status,
+};
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
-use crate::domains::learning::{decide_proposal, undo_entry, LearningDecisionBody};
+use crate::domains::learning::{
+    decide_proposal, learn_from_thread, undo_entry, LearnBody, LearningDecisionBody,
+};
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::{
     delete_memory, remember_memory, reset_memory, set_memory_controls, RememberBody, ResetBody,
     SetControlsBody,
 };
-use crate::domains::monitoring::{check_now, CheckRequest};
+use crate::domains::monitoring::{
+    check_now, create_monitor, delete_monitor, CheckRequest, CreateMonitorRequest,
+};
 use crate::domains::orchestration::{
     cancel_run as cancel_orchestration_run, decide_approval as decide_orchestration_approval,
     resume_run as resume_orchestration_run,
@@ -346,6 +354,33 @@ pub(super) async fn dispatch_crawl_site(
                 .into_response();
         }
     };
+
+    // E3.7.9a: the approval gate on the action path. A whole-site crawl above the threshold
+    // (CRAWL_APPROVAL_PAGES, default 50) is refused with 409 approval_required in enforce mode
+    // and logged in observe mode (the default). The action path is Surface::Model, so it can
+    // never confirm its own page count (D-E379a-2).
+    let approval_policy = crate::domains::knowledge::crawl_approval_policy();
+    match crate::domains::knowledge::decide_crawl_approval(
+        input,
+        approval_policy,
+        crate::domains::knowledge::quarry::Surface::Model,
+    ) {
+        crate::domains::knowledge::CrawlApprovalDecision::Proceed => {}
+        crate::domains::knowledge::CrawlApprovalDecision::Observed { estimated_pages } => {
+            // The page counts only: no URL, organization or user in the log.
+            tracing::info!(
+                estimated_pages,
+                threshold_pages = approval_policy.threshold_pages,
+                "crawl action above the approval threshold (observe mode, not refused)"
+            );
+        }
+        crate::domains::knowledge::CrawlApprovalDecision::Refuse { estimated_pages } => {
+            return crate::domains::knowledge::approval_required_response(
+                estimated_pages,
+                approval_policy.threshold_pages,
+            );
+        }
+    }
 
     let (status, Json(resp)) = proxy_bearer_json(
         state,
@@ -928,7 +963,7 @@ fn ticket_remap(input: &Value, pairs: &[(&str, &str)]) -> serde_json::Map<String
     out
 }
 
-fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
+pub(super) fn ticket_string<'a>(input: &'a Value, key: &str) -> &'a str {
     input
         .get(key)
         .and_then(Value::as_str)
@@ -958,7 +993,7 @@ fn ticket_classification_body(input: &Value) -> serde_json::Map<String, Value> {
     body
 }
 
-fn ticket_bad_request(message: &str) -> Response {
+pub(super) fn ticket_bad_request(message: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
         Json(error("invalid_input", message)),
@@ -3369,9 +3404,15 @@ pub(super) async fn dispatch_inbox_workspace_set_read(
     owner_json_response_to_envelope("inbox.set_conversation_read", user, status, resp)
 }
 
+// WS14-S4: both actions go to documents-api (the owning service), which proves
+// the signed-in user owns the document before Control writes the grant. The
+// gateway no longer calls Control's grant surface. The actions stay out of
+// MODEL_EXECUTABLE_ACTION_IDS (model-access.ts exempts them as no_owner_executor),
+// so only the signed-in user reaches these dispatchers.
 pub(super) async fn dispatch_ownership_share_document(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let doc_id = ticket_string(input, "docId");
@@ -3381,24 +3422,9 @@ pub(super) async fn dispatch_ownership_share_document(
             "ownership.share_document requires non-empty 'docId' and 'subjectId'",
         );
     }
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = actor_for_user(user);
-    let url = format!("{}/api/v1/internal/authz/grant", state.user_core_url);
-    let payload = json!({
-        "org_id": org_id,
-        "resource_type": "document",
-        "resource_id": doc_id,
-        "subject_id": subject_id,
-        "subject_type": "user",
-    });
-    let (status, Json(resp)) = proxy_json(
-        state,
-        Method::POST,
-        &url,
-        Some(payload),
-        Some(&org_id),
-        Some(&actor),
-        None,
+    let role = input.get("role").and_then(Value::as_str);
+    let (status, resp) = crate::domains::shares::share_document_upstream(
+        state, user, headers, doc_id, subject_id, role,
     )
     .await;
     owner_json_response_to_envelope("ownership.share_document", user, status, resp)
@@ -3407,6 +3433,7 @@ pub(super) async fn dispatch_ownership_share_document(
 pub(super) async fn dispatch_ownership_revoke_document_share(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let doc_id = ticket_string(input, "docId");
@@ -3416,23 +3443,8 @@ pub(super) async fn dispatch_ownership_revoke_document_share(
             "ownership.revoke_document_share requires non-empty 'docId' and 'subjectId'",
         );
     }
-    let org_id = crate::upstream::authorized_org_id(state, user).await;
-    let actor = actor_for_user(user);
-    let url = format!(
-        "{}/api/v1/internal/authz/grant?org_id={}&resource_type=document&resource_id={}&subject_id={}&subject_type=user",
-        state.user_core_url,
-        urlencoding::encode(&org_id),
-        urlencoding::encode(doc_id),
-        urlencoding::encode(subject_id),
-    );
-    let (status, Json(resp)) = proxy_json(
-        state,
-        Method::DELETE,
-        &url,
-        None,
-        Some(&org_id),
-        Some(&actor),
-        None,
+    let (status, resp) = crate::domains::shares::revoke_document_share_upstream(
+        state, user, headers, doc_id, subject_id,
     )
     .await;
     owner_json_response_to_envelope("ownership.revoke_document_share", user, status, resp)
@@ -3630,6 +3642,37 @@ pub(super) async fn dispatch_learning_undo(
     owner_json_response_to_envelope("learning.undo", user, status, payload)
 }
 
+/// EP-11 S7: `/learn` through the action surface, the same call as the BFF route. The thread and
+/// the optional note are all that cross; the owner is the verified session.
+pub(super) async fn dispatch_learning_learn_from_thread(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let thread_id = ticket_string(input, "threadId");
+    if thread_id.is_empty() {
+        return ticket_bad_request("learning.learn_from_thread requires a non-empty 'threadId'");
+    }
+    let note = input
+        .get("note")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let response = learn_from_thread(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(LearnBody {
+            thread_id: thread_id.to_owned(),
+            note,
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("learning.learn_from_thread", user, status, payload)
+}
+
 pub(super) async fn dispatch_settings_update_me(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -3705,6 +3748,181 @@ pub(super) async fn dispatch_settings_update_setting(
     )
     .await;
     owner_json_response_to_envelope("settings.update_setting", user, status, resp)
+}
+
+// Saves the caller's reply tone (EP-8-S3). user-core writes every AI field back on a PUT, so the
+// four existing fields are read first and sent unchanged; a PUT of the tone alone would reset them.
+pub(super) async fn dispatch_settings_set_tone_preset(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let tone = ticket_string(input, "tonePreset");
+    if !crate::domains::persona::is_tone_preset(tone) {
+        return ticket_bad_request(
+            "settings.set_tone_preset requires a tonePreset of default, professional, friendly, direct, warm or neutral",
+        );
+    }
+    let actor = actor_for_user(user);
+    let url = format!("{}/api/v1/settings/ai", state.user_core_url);
+    let (status, Json(mut settings)) =
+        proxy_json(state, Method::GET, &url, None, None, Some(&actor), None).await;
+    if !status.is_success() {
+        return owner_json_response_to_envelope("settings.set_tone_preset", user, status, settings);
+    }
+    if let Some(object) = settings.as_object_mut() {
+        object.remove("tonePresetsAvailable");
+        object.remove("personalSetupAvailable");
+        object.insert("tonePreset".to_owned(), json!(tone));
+    }
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::PUT,
+        &url,
+        Some(settings),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    owner_json_response_to_envelope("settings.set_tone_preset", user, status, resp)
+}
+
+// Saves the personal first-run step (EP-8-S8). Every value is checked before the first write. The
+// writes overwrite, and the first-run state is written last: if an earlier write fails the step stays
+// pending, so a retry never leaves a half-saved step marked done.
+pub(super) async fn dispatch_settings_complete_personal_setup(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let display_name = ticket_string(input, "displayName").trim();
+    let timezone = ticket_string(input, "timezone").trim();
+    let language = ticket_string(input, "language").trim();
+    let tone = ticket_string(input, "tonePreset").trim();
+    if display_name.chars().count() > 80 {
+        return ticket_bad_request(
+            "settings.complete_personal_setup takes a displayName of at most 80 characters",
+        );
+    }
+    if !language.is_empty() && !matches!(language, "nb-NO" | "en-US") {
+        return ticket_bad_request(
+            "settings.complete_personal_setup takes a language of nb-NO or en-US",
+        );
+    }
+    if !tone.is_empty() && !crate::domains::persona::is_tone_preset(tone) {
+        return ticket_bad_request(
+            "settings.complete_personal_setup takes a tonePreset of default, professional, friendly, direct, warm or neutral",
+        );
+    }
+    let actor = actor_for_user(user);
+    // user-core checks the time zone itself. It is the first write, so a bad zone stops the step
+    // before anything is saved.
+    if !timezone.is_empty() || !language.is_empty() {
+        let mut preferences = serde_json::Map::new();
+        if !timezone.is_empty() {
+            preferences.insert("timezone".to_owned(), json!(timezone));
+        }
+        if !language.is_empty() {
+            preferences.insert("language".to_owned(), json!(language));
+        }
+        let (status, Json(resp)) = proxy_json(
+            state,
+            Method::PATCH,
+            &format!("{}/api/v1/preferences", state.user_core_url),
+            Some(Value::Object(preferences)),
+            None,
+            Some(&actor),
+            None,
+        )
+        .await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                resp,
+            );
+        }
+    }
+    if !display_name.is_empty() {
+        let (status, Json(resp)) = proxy_json(
+            state,
+            Method::PATCH,
+            &format!("{}/api/v1/users/me", state.user_core_url),
+            Some(json!({ "name": display_name })),
+            None,
+            Some(&actor),
+            None,
+        )
+        .await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                resp,
+            );
+        }
+    }
+    if !tone.is_empty() {
+        let url = format!("{}/api/v1/settings/ai", state.user_core_url);
+        let (status, Json(mut settings)) =
+            proxy_json(state, Method::GET, &url, None, None, Some(&actor), None).await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                settings,
+            );
+        }
+        if let Some(object) = settings.as_object_mut() {
+            object.remove("tonePresetsAvailable");
+            object.remove("personalSetupAvailable");
+            object.insert("tonePreset".to_owned(), json!(tone));
+        }
+        let (status, Json(resp)) =
+            proxy_json(state, Method::PUT, &url, Some(settings), None, Some(&actor), None).await;
+        if !status.is_success() {
+            return owner_json_response_to_envelope(
+                "settings.complete_personal_setup",
+                user,
+                status,
+                resp,
+            );
+        }
+    }
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::PUT,
+        &format!("{}/api/v1/settings/onboarding", state.user_core_url),
+        Some(json!({ "personalStep": "completed" })),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    owner_json_response_to_envelope("settings.complete_personal_setup", user, status, resp)
+}
+
+// Records that the person skipped the personal first-run step (EP-8-S8). The card does not show again.
+pub(super) async fn dispatch_settings_skip_personal_setup(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Response {
+    let actor = actor_for_user(user);
+    let (status, Json(resp)) = proxy_json(
+        state,
+        Method::PUT,
+        &format!("{}/api/v1/settings/onboarding", state.user_core_url),
+        Some(json!({ "personalStep": "skipped" })),
+        None,
+        Some(&actor),
+        None,
+    )
+    .await;
+    owner_json_response_to_envelope("settings.skip_personal_setup", user, status, resp)
 }
 
 // Reuses the real create_api_key/delete_api_key rather than re-deriving them:
@@ -3838,6 +4056,54 @@ pub(super) async fn dispatch_monitoring_check_now(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("monitoring.check_now", user, status, payload)
+}
+
+// Reuses the real create_monitor so the SSRF guard and the hourly/daily/weekly
+// preset check stay in one place.
+pub(super) async fn dispatch_monitoring_create_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    if url.is_empty() {
+        return ticket_bad_request("monitoring.create_monitor requires a non-empty 'url'");
+    }
+    let preset = ticket_string(input, "preset");
+    let response = create_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(CreateMonitorRequest {
+            url: Some(url.to_owned()),
+            preset: (!preset.is_empty()).then(|| preset.to_owned()),
+        }),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.create_monitor", user, status, payload)
+}
+
+pub(super) async fn dispatch_monitoring_delete_monitor(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let monitor_id = ticket_string(input, "monitorId");
+    if monitor_id.is_empty() {
+        return ticket_bad_request("monitoring.delete_monitor requires a non-empty 'monitorId'");
+    }
+    let response = delete_monitor(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(monitor_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("monitoring.delete_monitor", user, status, payload)
 }
 
 // Reuses the real erase handler rather than reconstructing its URL and
@@ -4108,7 +4374,7 @@ pub(super) async fn dispatch_studio_export_social_draft(
     owner_json_response_to_envelope("studio.export_social_draft", user, status, payload)
 }
 
-// The five ingestions dispatchers below all reuse the real handlers directly.
+// The ingestions dispatchers below all reuse the real handlers directly.
 // create_source alone has confirmed, tested logic worth not re-deriving
 // (SSRF guards on the target URL, cross-tenant org stripping — see
 // domains::ingestions::sources::tests); create_run/create_schedule/
@@ -4135,6 +4401,88 @@ pub(super) async fn dispatch_ingestions_create_run(
     owner_json_response_to_envelope("ingestions.create_run", user, status, payload)
 }
 
+/// `ingestions.job_control` → pause, resume or cancel a crawl or batch job. The
+/// same function the REST route calls, so the action and the page cannot disagree.
+pub(super) async fn dispatch_ingestions_job_control(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let job_id = ticket_string(input, "jobId");
+    if job_id.is_empty() {
+        return ticket_bad_request("ingestions.job_control requires a non-empty 'jobId'");
+    }
+    let action = ticket_string(input, "action");
+    let response = control_ingestion_job(state, user, headers, job_id, action).await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("ingestions.job_control", user, status, payload)
+}
+
+/// `ingestions.start_agent_run` → open a browser session on `url` and start a
+/// durable browser-agent run with `goal`. Both steps are the handlers the browser
+/// workspace uses, so an agent run started here is the same run the browser shows.
+pub(super) async fn dispatch_ingestions_start_agent_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let url = ticket_string(input, "url");
+    let goal = ticket_string(input, "goal");
+    if url.is_empty() || goal.is_empty() {
+        return ticket_bad_request("ingestions.start_agent_run requires a non-empty 'url' and 'goal'");
+    }
+    let Ok(session_body) = serde_json::from_value::<CreateSessionBody>(json!({ "url": url })) else {
+        return ticket_bad_request("ingestions.start_agent_run requires a valid 'url'");
+    };
+    let session = create_browser_session(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(session_body),
+    )
+    .await;
+    let (status, session_payload) = response_to_status_and_json(session).await;
+    if !status.is_success() {
+        return owner_json_response_to_envelope("ingestions.start_agent_run", user, status, session_payload);
+    }
+    let session_id = session_payload
+        .pointer("/data/session/id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if session_id.is_empty() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(error("upstream_invalid", "The browser session had no id.")),
+        )
+            .into_response();
+    }
+    let Ok(run_body) = serde_json::from_value::<StartAiRunBody>(json!({
+        "goal": goal,
+        "maxSteps": input.get("maxSteps").cloned().unwrap_or(Value::Null),
+        "allowedDomains": input.get("allowedDomains").cloned().unwrap_or(Value::Null),
+    })) else {
+        return ticket_bad_request("ingestions.start_agent_run requires a valid 'maxSteps'");
+    };
+    let run = start_browser_ai_run(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.clone()),
+        Json(run_body),
+    )
+    .await;
+    let (status, mut payload) = response_to_status_and_json(run).await;
+    if status.is_success() {
+        if let Some(data) = payload.get_mut("data").and_then(Value::as_object_mut) {
+            data.insert("session_id".into(), json!(session_id));
+        }
+    }
+    owner_json_response_to_envelope("ingestions.start_agent_run", user, status, payload)
+}
+
 pub(super) async fn dispatch_ingestions_create_schedule(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4143,7 +4491,15 @@ pub(super) async fn dispatch_ingestions_create_schedule(
 ) -> Response {
     let name = ticket_string(input, "name");
     let kind = ticket_string(input, "kind");
-    let target_url = ticket_string(input, "targetUrl");
+    // A batch schedule names its pages in 'urls'; every other kind names one 'targetUrl'.
+    let has_target = if kind == "batch" {
+        input
+            .get("urls")
+            .and_then(Value::as_array)
+            .is_some_and(|urls| !urls.is_empty())
+    } else {
+        !ticket_string(input, "targetUrl").is_empty()
+    };
     let has_timing = input
         .get("cron")
         .and_then(Value::as_str)
@@ -4152,23 +4508,182 @@ pub(super) async fn dispatch_ingestions_create_schedule(
             .get("scheduleAt")
             .and_then(Value::as_str)
             .is_some_and(|v| !v.trim().is_empty());
-    if name.is_empty() || kind.is_empty() || target_url.is_empty() || !has_timing {
+    if name.is_empty() || kind.is_empty() || !has_target || !has_timing {
         return ticket_bad_request(
-            "ingestions.create_schedule requires 'name', 'kind', 'targetUrl', and either 'cron' or 'scheduleAt'",
+            "ingestions.create_schedule requires 'name', 'kind', either 'cron' or 'scheduleAt', and 'targetUrl' (or 'urls' for kind 'batch')",
         );
+    }
+    // A schedule is created inactive and this action never activates it, whatever
+    // the input says.
+    let mut body = input.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.remove("activate");
     }
     let response = create_ingestion_schedule(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
-        Json(input.clone()),
+        Json(body),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("ingestions.create_schedule", user, status, payload)
 }
 
-pub(super) async fn dispatch_ingestions_run_schedule_action(
+/// What a run-control action does to one crawl (WS15.L5).
+#[derive(Clone, Copy)]
+enum IngestionRunVerb {
+    Status,
+    Pause,
+    Resume,
+    Cancel,
+}
+
+/// The crawl a run-control action addresses. 'kind' may be left out or be 'crawl';
+/// crawl is the only job family the gateway proxies, so any other kind is refused
+/// here instead of reaching a route that does not exist.
+fn ingestions_run_target<'a>(action_id: &str, input: &'a Value) -> Result<&'a str, Response> {
+    let run_id = ticket_string(input, "runId");
+    if run_id.is_empty() {
+        return Err(ticket_bad_request(&format!(
+            "{action_id} requires a non-empty 'runId'"
+        )));
+    }
+    match input.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(kind)) if kind == "crawl" => {}
+        Some(_) => {
+            return Err(ticket_bad_request(&format!(
+                "{action_id} controls a 'crawl' run only"
+            )));
+        }
+    }
+    Ok(run_id)
+}
+
+async fn dispatch_ingestions_run_control(
+    action_id: &'static str,
+    verb: IngestionRunVerb,
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let run_id = match ingestions_run_target(action_id, input) {
+        Ok(run_id) => run_id.to_owned(),
+        Err(response) => return response,
+    };
+    let (state_arg, user_arg, path_arg) = (
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor(run_id),
+    );
+    let response = match verb {
+        IngestionRunVerb::Status => crawl_status(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Pause => crawl_pause(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Resume => crawl_resume(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Cancel => crawl_cancel(state_arg, user_arg, headers.clone(), path_arg).await,
+    };
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(action_id, user, status, payload)
+}
+
+pub(super) async fn dispatch_ingestions_get_run_status(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.get_run_status",
+        IngestionRunVerb::Status,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ingestions_pause_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.pause_run",
+        IngestionRunVerb::Pause,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ingestions_resume_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.resume_run",
+        IngestionRunVerb::Resume,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+pub(super) async fn dispatch_ingestions_cancel_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    dispatch_ingestions_run_control(
+        "ingestions.cancel_run",
+        IngestionRunVerb::Cancel,
+        state,
+        user,
+        headers,
+        input,
+    )
+    .await
+}
+
+/// Pausing a schedule is reversible and needs no approval. It is its own action so
+/// the approval-gated `ingestions.change_schedule_state` cannot be reached with it.
+pub(super) async fn dispatch_ingestions_pause_schedule(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let schedule_id = ticket_string(input, "scheduleId");
+    if schedule_id.is_empty() {
+        return ticket_bad_request("ingestions.pause_schedule requires a non-empty 'scheduleId'");
+    }
+    let body = json!({ "action": "pause_schedule", "scheduleId": schedule_id });
+    let response = run_ingestion_schedule_action(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(body),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("ingestions.pause_schedule", user, status, payload)
+}
+
+/// Unpause, trigger, backfill and delete: every schedule state change except a pause.
+/// The caller's own 'pause_schedule' verb is refused here (it has its own action),
+/// and only the four fields the verbs read are forwarded.
+pub(super) async fn dispatch_ingestions_change_schedule_state(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
@@ -4178,26 +4693,33 @@ pub(super) async fn dispatch_ingestions_run_schedule_action(
     let schedule_id = ticket_string(input, "scheduleId");
     if !matches!(
         action,
-        "pause_schedule"
-            | "unpause_schedule"
-            | "trigger_schedule"
-            | "backfill_schedule"
-            | "delete_schedule"
+        "unpause_schedule" | "trigger_schedule" | "backfill_schedule" | "delete_schedule"
     ) || schedule_id.is_empty()
     {
         return ticket_bad_request(
-            "ingestions.run_schedule_action requires a non-empty 'scheduleId' and a known 'action'",
+            "ingestions.change_schedule_state requires a non-empty 'scheduleId' and an 'action' of unpause_schedule, trigger_schedule, backfill_schedule or delete_schedule",
         );
+    }
+    let mut body = json!({ "action": action, "scheduleId": schedule_id });
+    if action == "backfill_schedule" {
+        let (start_at, end_at) = (ticket_string(input, "startAt"), ticket_string(input, "endAt"));
+        if start_at.is_empty() || end_at.is_empty() {
+            return ticket_bad_request(
+                "ingestions.change_schedule_state backfill_schedule requires 'startAt' and 'endAt'",
+            );
+        }
+        body["startAt"] = json!(start_at);
+        body["endAt"] = json!(end_at);
     }
     let response = run_ingestion_schedule_action(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
-        Json(input.clone()),
+        Json(body),
     )
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
-    owner_json_response_to_envelope("ingestions.run_schedule_action", user, status, payload)
+    owner_json_response_to_envelope("ingestions.change_schedule_state", user, status, payload)
 }
 
 pub(super) async fn dispatch_ingestions_create_source(
@@ -5228,6 +5750,11 @@ pub(super) async fn dispatch_browser_run_start(
     if session_id.is_empty() || goal.is_empty() {
         return ticket_bad_request("browser_run.start requires non-empty 'sessionId' and 'goal'");
     }
+    let require_attached = match input.get("requireAttached") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return ticket_bad_request("browser_run.start 'requireAttached' must be a boolean"),
+    };
     let allowed_domains = input
         .get("allowedDomains")
         .and_then(Value::as_array)
@@ -5238,7 +5765,11 @@ pub(super) async fn dispatch_browser_run_start(
                 .collect()
         });
     let body = StartAiRunBody {
+        continue_in_tab: None,
         goal: goal.to_owned(),
+        require_attached,
+        assistant_interactive: false,
+        plan_mode: None,
         allowed_domains,
         max_steps: input
             .get("maxSteps")
@@ -5450,6 +5981,7 @@ pub(super) async fn dispatch_browser_create_session(
     });
     let body = CreateSessionBody {
         url: url.to_owned(),
+        purpose: None,
         profile_id: input
             .get("profileId")
             .and_then(Value::as_str)
@@ -6178,7 +6710,10 @@ pub(super) async fn dispatch_space_add_member(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         PathExtractor(space_ref.to_owned()),
-        Json(json!({ "member_id": member_id })),
+        Json(match ticket_string(input, "role") {
+            "" => json!({ "member_id": member_id }),
+            role => json!({ "member_id": member_id, "role": role }),
+        }),
     )
     .await;
     owner_json_response_to_envelope("spaces.add_member", user, status, payload)
@@ -7547,5 +8082,387 @@ mod tests {
         assert!(outbound.get("payloadDigest").is_none());
         assert!(outbound.get("space_ref").is_none());
         assert!(outbound.get("decision").is_none());
+    }
+}
+
+/// WS15.L5: the run-control and schedule-state dispatchers. They reach the same
+/// gateway handlers the SPA routes do, with the session user only.
+#[cfg(test)]
+mod ingestions_job_control_tests {
+    use super::*;
+    use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    async fn body_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn mount(quarry: &MockServer, verb: &str, route: &str, status: u16, body: Value) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .and(wm_header("x-user-id", "user-1"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(1)
+            .mount(quarry)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_four_run_actions_reach_the_crawl_routes_and_wrap_the_answer() {
+        let quarry = MockServer::start().await;
+        let accepted = json!({ "data": { "job_id": JOB, "phase": "pausing", "control": { "desired": "pause", "pending": true } } });
+        mount(&quarry, "GET", &format!("/v1/crawl/{JOB}"), 200, json!({ "data": { "job_id": JOB, "status": "running" } })).await;
+        mount(&quarry, "POST", &format!("/v1/crawl/{JOB}/pause"), 200, accepted.clone()).await;
+        mount(&quarry, "POST", &format!("/v1/crawl/{JOB}/resume"), 200, accepted.clone()).await;
+        mount(&quarry, "DELETE", &format!("/v1/crawl/{JOB}"), 200, accepted).await;
+        let state = state_for(&quarry);
+        let headers = HeaderMap::new();
+        let input = json!({ "runId": JOB, "kind": "crawl" });
+
+        let responses = [
+            ("ingestions.get_run_status", dispatch_ingestions_get_run_status(&state, &caller(), &headers, &input).await),
+            ("ingestions.pause_run", dispatch_ingestions_pause_run(&state, &caller(), &headers, &input).await),
+            ("ingestions.resume_run", dispatch_ingestions_resume_run(&state, &caller(), &headers, &input).await),
+            ("ingestions.cancel_run", dispatch_ingestions_cancel_run(&state, &caller(), &headers, &json!({ "runId": JOB })).await),
+        ];
+        for (id, response) in responses {
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::OK, "{id}");
+            assert_eq!(body["data"]["actionId"], id);
+            assert_eq!(body["data"]["status"], "completed");
+            assert!(body["data"]["result"].is_object(), "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn while_the_edge_flag_is_off_a_control_action_returns_the_typed_501() {
+        let quarry = MockServer::start().await;
+        let off = json!({ "ok": false, "error": { "code": "UNSUPPORTED", "message": "job control is not enabled" } });
+        mount(&quarry, "POST", &format!("/v1/crawl/{JOB}/pause"), 501, off.clone()).await;
+        mount(&quarry, "DELETE", &format!("/v1/crawl/{JOB}"), 501, off).await;
+        let state = state_for(&quarry);
+        let input = json!({ "runId": JOB });
+
+        for response in [
+            dispatch_ingestions_pause_run(&state, &caller(), &HeaderMap::new(), &input).await,
+            dispatch_ingestions_cancel_run(&state, &caller(), &HeaderMap::new(), &input).await,
+        ] {
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(body["error"]["code"], "UNSUPPORTED");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_run_action_without_a_run_or_for_another_kind_is_refused_before_upstream() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        for input in [
+            json!({}),
+            json!({ "runId": "" }),
+            json!({ "runId": "  " }),
+            json!({ "runId": 7 }),
+            json!({ "runId": JOB, "kind": "batch" }),
+            json!({ "runId": JOB, "kind": 1 }),
+            json!({ "runId": "../x" }),
+        ] {
+            for response in [
+                dispatch_ingestions_get_run_status(&state, &caller(), &HeaderMap::new(), &input).await,
+                dispatch_ingestions_pause_run(&state, &caller(), &HeaderMap::new(), &input).await,
+                dispatch_ingestions_resume_run(&state, &caller(), &HeaderMap::new(), &input).await,
+                dispatch_ingestions_cancel_run(&state, &caller(), &HeaderMap::new(), &input).await,
+            ] {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+            }
+        }
+        assert!(quarry.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn pause_schedule_posts_the_pause_verb_and_nothing_else() {
+        let quarry = MockServer::start().await;
+        mount(&quarry, "POST", "/v1/schedules/sch_1/pause", 200, json!({ "data": { "schedule_id": "sch_1", "status": "paused" } })).await;
+        let state = state_for(&quarry);
+        let response = dispatch_ingestions_pause_schedule(
+            &state,
+            &caller(),
+            &HeaderMap::new(),
+            &json!({ "scheduleId": "sch_1", "action": "delete_schedule" }),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["data"]["actionId"], "ingestions.pause_schedule");
+        // The extra 'action' in the input did not turn the pause into a delete.
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method.as_str(), "POST");
+
+        let refused = dispatch_ingestions_pause_schedule(&state, &caller(), &HeaderMap::new(), &json!({})).await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn change_schedule_state_routes_the_four_verbs_and_refuses_a_pause() {
+        let quarry = MockServer::start().await;
+        mount(&quarry, "POST", "/v1/schedules/sch_1/unpause", 200, json!({ "data": { "schedule_id": "sch_1", "status": "active" } })).await;
+        mount(&quarry, "DELETE", "/v1/schedules/sch_1", 200, json!({ "data": {} })).await;
+        let state = state_for(&quarry);
+        let headers = HeaderMap::new();
+
+        for (action, expected) in [("unpause_schedule", "ingestions.change_schedule_state"), ("delete_schedule", "ingestions.change_schedule_state")] {
+            let response = dispatch_ingestions_change_schedule_state(
+                &state,
+                &caller(),
+                &headers,
+                &json!({ "action": action, "scheduleId": "sch_1", "orgId": "org-2" }),
+            )
+            .await;
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::OK, "{action}");
+            assert_eq!(body["data"]["actionId"], expected);
+        }
+
+        for input in [
+            json!({ "action": "pause_schedule", "scheduleId": "sch_1" }),
+            json!({ "action": "run_everything", "scheduleId": "sch_1" }),
+            json!({ "action": "delete_schedule" }),
+            json!({ "scheduleId": "sch_1" }),
+            json!({ "action": "backfill_schedule", "scheduleId": "sch_1", "startAt": "2026-11-01T00:00:00Z" }),
+        ] {
+            let response = dispatch_ingestions_change_schedule_state(&state, &caller(), &headers, &input).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert_eq!(quarry.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_gated_schedule_verb_stays_a_typed_501_until_its_capability_is_on() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        let response = dispatch_ingestions_change_schedule_state(
+            &state,
+            &caller(),
+            &HeaderMap::new(),
+            &json!({ "action": "trigger_schedule", "scheduleId": "sch_1" }),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(body["error"]["code"], "schedule_action_unavailable");
+        assert!(quarry.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_batch_schedule_needs_urls_not_a_target_and_never_carries_activate() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/schedules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "schedule_id": "sch_9", "name": "Nightly", "kind": "batch", "status": "paused" }
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let mut state = state_for(&quarry);
+        state.schedule_capabilities.kinds = vec!["batch".to_owned()];
+        let headers = HeaderMap::new();
+
+        let no_target = dispatch_ingestions_create_schedule(
+            &state,
+            &caller(),
+            &headers,
+            &json!({ "name": "Nightly", "kind": "batch", "cron": "0 3 * * *" }),
+        )
+        .await;
+        assert_eq!(no_target.status(), StatusCode::BAD_REQUEST);
+        let crawl_without_target = dispatch_ingestions_create_schedule(
+            &state,
+            &caller(),
+            &headers,
+            &json!({ "name": "Nightly", "kind": "crawl", "cron": "0 3 * * *", "urls": ["https://example.com/"] }),
+        )
+        .await;
+        assert_eq!(crawl_without_target.status(), StatusCode::BAD_REQUEST);
+
+        let response = dispatch_ingestions_create_schedule(
+            &state,
+            &caller(),
+            &headers,
+            &json!({
+                "name": "Nightly", "kind": "batch", "cron": "0 3 * * *",
+                "urls": ["https://example.com/a", "https://example.com/b"],
+                "activate": true
+            }),
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        let sent: Value = serde_json::from_slice(&seen[0].body).unwrap();
+        assert!(sent.get("activate").is_none(), "{sent}");
+        assert_eq!(sent["kind"], "batch");
+        assert_eq!(sent["config"]["urls"].as_array().map(Vec::len), Some(2));
+    }
+}
+
+
+// WS14-S4: ownership.share_document / ownership.revoke_document_share go to
+// documents-api (the owning service) and wrap its answer in the action
+// envelope; they never reach user-core's grant surface.
+#[cfg(test)]
+mod ownership_share_tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use http_body_util::BodyExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User One".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    async fn read(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// The state and the three mock servers it points at. The auth-core server is returned too: a
+    /// server dropped here shuts down on its own schedule, so a token mint could race it.
+    async fn stack() -> (AppState, MockServer, MockServer, MockServer) {
+        let auth_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/data-plane/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "token": "dp-token-aaaaaaaaaaaa" })))
+            .mount(&auth_core)
+            .await;
+        let documents = MockServer::start().await;
+        let user_core = MockServer::start().await;
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth_core.uri();
+        state.documents_api_url = documents.uri();
+        state.user_core_url = user_core.uri();
+        (state, documents, user_core, auth_core)
+    }
+
+    #[tokio::test]
+    async fn share_document_dispatches_through_documents_api_and_wraps_the_envelope() {
+        let (state, documents, user_core, _auth_core) = stack().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/documents/doc-1/shares"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "subject_type": "user", "subject_id": "user-2", "role": "view"
+            })))
+            .mount(&documents)
+            .await;
+
+        let input = json!({ "docId": " doc-1 ", "subjectId": "user-2", "orgId": "forged", "grantedBy": "forged" });
+        let (status, body) = read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "ownership.share_document");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["result"]["subject_id"], "user-2");
+
+        let sent = documents.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 1);
+        let payload: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert_eq!(payload, json!({ "subject_id": "user-2" }), "only the subject is client-supplied");
+        assert_eq!(
+            sent[0].headers.get("authorization").unwrap().to_str().unwrap(),
+            "Bearer dp-token-aaaaaaaaaaaa"
+        );
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_document_share_dispatches_through_documents_api_and_wraps_the_envelope() {
+        let (state, documents, user_core, _auth_core) = stack().await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/documents/doc-1/shares/user-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "success": true })))
+            .mount(&documents)
+            .await;
+
+        let input = json!({ "docId": "doc-1", "subjectId": "user-2" });
+        let (status, body) =
+            read(dispatch_ownership_revoke_document_share(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["data"]["actionId"], "ownership.revoke_document_share");
+        assert_eq!(body["data"]["status"], "completed");
+        assert_eq!(body["data"]["result"]["success"], true);
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn both_actions_refuse_missing_ids_without_calling_anything() {
+        let (state, documents, user_core, _auth_core) = stack().await;
+        for input in [json!({}), json!({ "docId": "doc-1" }), json!({ "subjectId": "u" }), json!({ "docId": "  ", "subjectId": "u" })] {
+            let (status, body) =
+                read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+            assert_eq!(body["error"]["code"], "invalid_input");
+            let (status, _) =
+                read(dispatch_ownership_revoke_document_share(&state, &user(), &HeaderMap::new(), &input).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{input}");
+        }
+        assert!(documents.received_requests().await.unwrap().is_empty());
+        assert!(user_core.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_upstream_refusal_is_returned_as_the_browser_error_not_wrapped_as_success() {
+        let (state, documents, _user_core, _auth_core) = stack().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/documents/doc-1/shares"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(
+                json!({ "error": "role is not supported for documents", "code": "role_not_supported" }),
+            ))
+            .mount(&documents)
+            .await;
+        let input = json!({ "docId": "doc-1", "subjectId": "user-2", "role": "edit" });
+        let (status, body) = read(dispatch_ownership_share_document(&state, &user(), &HeaderMap::new(), &input).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "role_not_supported");
+        assert!(body.get("data").is_none());
     }
 }

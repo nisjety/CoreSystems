@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   activityFromProcess,
+  activityFromRun,
   activityFromThread,
   activitySentence,
   buildSpaceActivity,
@@ -174,6 +175,27 @@ describe('activity grammar', () => {
         expect(item.href).toContain('/spaces/space-room')
         expect(item.href?.endsWith('#chat')).toBe(true)
       }
+    })
+
+    // WS01-S7a: the link opens the thread in the room's side pane, so it names the thread.
+    it('links the thread and its run to /spaces/<ref>?thread_id=<id>#chat', () => {
+      const items = activityFromThread(
+        thread({ thread_id: 'thr_77', space_id: 'space-room', latest_run_status: 'awaiting_approval' }),
+      )
+      expect(items).toHaveLength(2)
+      for (const item of items) {
+        expect(item.href).toBe('/spaces/space-room?thread_id=thr_77#chat')
+      }
+    })
+
+    it('links a work-tab run through its thread the same way', () => {
+      const item = activityFromRun({ id: 'run_1', thread_id: 'thr_77', space_id: 'space-room', status: 'running' })
+      expect(item?.href).toBe('/spaces/space-room?thread_id=thr_77#chat')
+    })
+
+    it('never links a thread or run into /chat', () => {
+      const items = activityFromThread(thread({ space_id: 'space-room', latest_run_status: 'failed' }))
+      expect(items.every((item) => !item.href?.startsWith('/chat'))).toBe(true)
     })
 
     // Unchanged by the hash: an item whose owning Space is unknown still has

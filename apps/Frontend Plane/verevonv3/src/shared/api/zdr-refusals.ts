@@ -51,6 +51,8 @@ export type ZdrFeatureKey =
   | 'speech_transcription'
   | 'browser_run'
   | 'browser_run_control'
+  | 'browser_tool'
+  | 'browser_human_assist'
   | 'translation'
   | 'document_analysis'
   | 'language_analysis'
@@ -58,6 +60,15 @@ export type ZdrFeatureKey =
   | 'video_generation'
   | 'connector_read'
   | 'message_versions'
+  | 'sandbox_workspace'
+  | 'user_profile'
+  | 'agent_api'
+  | 'conversation_export'
+  | 'conversation_share'
+  | 'conversation_import'
+  | 'run_inspection'
+  | 'context_references'
+  | 'thread_goal'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -65,7 +76,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = 'a666f355c80c7ae59c109e26a64198b3129332b1db8fae24dad0455308fa017f'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = 'ae4473ce0a3ddd3d6d104aad3f90509014da63b60e2db27766983956708437d7'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -177,6 +188,8 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   speech_transcription: { no: 'transkribering av tale', en: 'speech transcription' },
   browser_run: { no: 'nettleserkjøringer', en: 'browser runs' },
   browser_run_control: { no: 'kontroll av nettleserkjøringer', en: 'browser run controls' },
+  browser_tool: { no: 'nettleserverktøy', en: 'browser tools' },
+  browser_human_assist: { no: 'hjelpeforespørsler i nettleseren', en: 'browser help requests' },
   translation: { no: 'oversettelse', en: 'translation' },
   document_analysis: { no: 'dokumentanalyse', en: 'document analysis' },
   language_analysis: { no: 'språkanalyse', en: 'language analysis' },
@@ -184,6 +197,15 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   video_generation: { no: 'videogenerering', en: 'video generation' },
   connector_read: { no: 'lesing fra tilkoblede apper', en: 'connected-app reads' },
   message_versions: { no: 'meldingsversjoner', en: 'message versions' },
+  sandbox_workspace: { no: 'filer som beholdes mellom kall i et trådarbeidsområde', en: 'files kept between calls in a thread workspace' },
+  user_profile: { no: 'den faste profilen', en: 'the standing profile' },
+  agent_api: { no: 'agent-API', en: 'the Agent API' },
+  conversation_export: { no: 'eksport av samtaler', en: 'conversation export and replay' },
+  conversation_share: { no: 'deling av samtaler', en: 'conversation sharing' },
+  conversation_import: { no: 'import av samtaler', en: 'conversation import' },
+  run_inspection: { no: 'tidslinje og innsyn i kjøringer', en: 'run timing and request inspection' },
+  context_references: { no: 'referanser til dokumenter, samtaler eller utvalg', en: 'references to documents, threads or selections' },
+  thread_goal: { no: 'varige mål', en: 'persistent goals' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

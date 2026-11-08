@@ -42,8 +42,8 @@ class ApprovalCause(BaseModel):
         if value is None:
             return value
 
-        if value not in set(['owner_effect_reserved', 'consent_to_disclose', 'risky_effect_under_ask', 'provider_write', 'capability_high_risk', 'capability_policy_ask', 'hook_ask', 'browser_action_risk', 'auto_posture_provider_write', 'unclassified_gate']):
-            raise ValueError("must be one of enum values ('owner_effect_reserved', 'consent_to_disclose', 'risky_effect_under_ask', 'provider_write', 'capability_high_risk', 'capability_policy_ask', 'hook_ask', 'browser_action_risk', 'auto_posture_provider_write', 'unclassified_gate')")
+        if value not in set(['owner_effect_reserved', 'consent_to_disclose', 'risky_effect_under_ask', 'provider_write', 'capability_high_risk', 'capability_policy_ask', 'hook_ask', 'browser_action_risk', 'auto_posture_provider_write', 'browser_human_assist', 'unclassified_gate']):
+            raise ValueError("must be one of enum values ('owner_effect_reserved', 'consent_to_disclose', 'risky_effect_under_ask', 'provider_write', 'capability_high_risk', 'capability_policy_ask', 'hook_ask', 'browser_action_risk', 'auto_posture_provider_write', 'browser_human_assist', 'unclassified_gate')")
         return value
 
     model_config = ConfigDict(

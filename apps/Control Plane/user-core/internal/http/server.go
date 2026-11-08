@@ -32,6 +32,10 @@ type Server struct {
 	removeMembershipProjection func(context.Context, string, string) error
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
+	// WS05-S5: Space decision audit events (flag-gated, off by default).
+	spaceDecisionAudit decisionAuditSink
+	spaceOrgPolicy             spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
+	peopleDirectory            peopleDirectory      // people search (WS04-S3)
 	mailTaskService            *mailtask.Service
 	mailTaskUserLookup         MailTaskUserLookup
 	mailTaskEffectPolicy       MailTaskEffectPolicyResolver
@@ -40,13 +44,24 @@ type Server struct {
 	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
 	// create request carrying a stored-consent contract is refused.
 	scheduleContractsEnabled bool
-	port                     string
-	httpClient               *http.Client
-	orgService               string
-	internalKey              string
-	authMembershipService    string
-	authMembershipToken      string
-	authInternalCredential   clients.AuthInternalClientCredential
+	// ownerAssertedGrants is CONTROL_OWNER_ASSERTED_GRANTS (WS14-S2). Off: the
+	// authz grant write surface stays fenced. On: only the registered owner
+	// service of a resource type may write its grants, for a verified user.
+	ownerAssertedGrants bool
+	// spaceSubjectGrants is CONTROL_SPACE_SUBJECT_GRANTS (WS14-S2). Off:
+	// file-grant and space-visible answer 404.
+	spaceSubjectGrants bool
+	// sharedImportDecisions is CONTROL_SPACE_SHARED_IMPORT (WS14-S1). Off: a
+	// shared Space import-decision answers 404 shared_import_disabled and the
+	// execution decision keeps the personal-only path.
+	sharedImportDecisions  bool
+	port                   string
+	httpClient             *http.Client
+	orgService             string
+	internalKey            string
+	authMembershipService  string
+	authMembershipToken    string
+	authInternalCredential clients.AuthInternalClientCredential
 	// publisher emits controlplane.acl.resource_grants.changed on
 	// grant/revoke so the Data Plane retrieval visibility cache evicts the
 	// affected (subject_id, org_id) immediately (TTL is the backstop). May be nil.
@@ -64,6 +79,9 @@ func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClient
 // authority must not be represented as an owner-resource ACL.
 func (s *Server) SetSpaceRepository(repository *spaces.Repository) {
 	s.spaceRepo = repository
+	if repository != nil {
+		s.spaceOrgPolicy.store = repository
+	}
 	// *spaces.Repository already satisfies MailTaskEffectPolicyResolver
 	// (mail_task_handlers.go) -- wiring it here means production callers
 	// need no separate setter call, while tests can still substitute a fake
@@ -280,6 +298,10 @@ func (s *Server) setupRoutes() {
 			settings.GET("/ai", s.getAISettings)
 			// PUT /api/v1/settings/ai - Update AI/Copilot settings
 			settings.PUT("/ai", s.updateAISettings)
+			// GET /api/v1/settings/onboarding - Get the personal first-run state (EP-8-S8)
+			settings.GET("/onboarding", s.getOnboardingSettings)
+			// PUT /api/v1/settings/onboarding - Update the personal first-run state (EP-8-S8)
+			settings.PUT("/onboarding", s.updateOnboardingSettings)
 
 			// GET /api/v1/settings/storage - Get storage & sync settings
 			settings.GET("/storage", s.getStorageSettings)
@@ -349,46 +371,9 @@ func (s *Server) setupRoutes() {
 			// enclosing group, same as every other internal route here.
 			internal.GET("/mail-task/resolve", s.resolveMailTaskAlias)
 
-			spacesGroup := internal.Group("/spaces")
-			{
-				spacesGroup.POST("/register", s.requireSpaceLifecycleRegistrar, s.registerSpace)
-				spacesGroup.POST("/deletion-authorizations", s.requireSpaceDeletionAuthorizer, s.authorizeSpaceDeletion)
-				spacesGroup.PUT("/deletion-policy", s.requireSpacePolicyWriter, s.upsertSpaceDeletionPolicy)
-				spacesGroup.PUT("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.applySpaceLegalHold)
-				spacesGroup.DELETE("/:space_ref/legal-hold", s.requireSpacePolicyWriter, s.releaseSpaceLegalHold)
-				spacesGroup.GET("", s.requireVerifiedSpaceResolver, s.listSpacesForSubject)
-				spacesGroup.GET("/:space_ref/roster", s.requireVerifiedSpaceResolver, s.spaceRoster)
-				spacesGroup.PUT("/:space_ref/memberships", s.requireSpaceMembershipWriter, s.replaceSpaceMemberships)
-				spacesGroup.POST("/recipient-audiences", s.requireSpaceAudiencePublisher, s.registerRecipientAudience)
-				spacesGroup.PUT("/effect-policy", s.requireSpacePolicyWriter, s.upsertSpaceEffectPolicy)
-				spacesGroup.GET("/:space_ref/membership", s.requireVerifiedSpaceResolver, s.resolveCurrentSpaceMembership)
-				spacesGroup.POST("/personal-thread-decision", s.requireVerifiedSpaceResolver, s.issuePersonalThreadDecision)
-				spacesGroup.POST("/thread-decision", s.requireVerifiedSpaceResolver, s.issueThreadDecision)
-				spacesGroup.POST("/thread-append-decision", s.requireVerifiedSpaceResolver, s.issueThreadAppendDecision)
-				spacesGroup.POST("/thread-read-decision", s.requireVerifiedSpaceResolver, s.issueThreadReadDecision)
-				spacesGroup.POST("/personal-retrieval-decision", s.requireVerifiedSpaceResolver, s.issuePersonalRetrievalDecision)
-				spacesGroup.POST("/retrieval-decision", s.requireVerifiedSpaceResolver, s.issueRetrievalDecision)
-				spacesGroup.POST("/personal-import-decision", s.requireVerifiedSpaceResolver, s.issuePersonalImportDecision)
-				spacesGroup.POST("/schedule-create-decision", s.requireVerifiedSpaceResolver, s.issueScheduleCreateDecision)
-				// S4.3 watches. Create is gateway-delegated (a member asks);
-				// observe is service-delegated (the sweeper asks, immediately
-				// before it records anything a human can read).
-				spacesGroup.POST("/watch-create-decision", s.requireVerifiedSpaceResolver, s.issueWatchCreateDecision)
-				spacesGroup.POST("/watch-observe-decision", s.requireVerifiedSpaceResolver, s.issueWatchObserveDecision)
-				spacesGroup.POST("/import-execution-decision", s.requireSpaceImportReauthorizer, s.issuePersonalImportExecutionDecision)
-				spacesGroup.POST("/schedule-fire-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduleFireDecision)
-				spacesGroup.POST("/sandbox-capability-decision", s.requireSpaceSandboxCapabilityReauthorizer, s.issueSpaceCapabilityDecision)
-				spacesGroup.POST("/scheduled-run-decision", s.requireSpaceScheduleFireReauthorizer, s.issueScheduledRunDecision)
-				spacesGroup.POST("/scheduled-run-execution-decision", s.requireSpaceScheduledRunExecutor, s.issueScheduledRunExecutionDecision)
-				spacesGroup.POST("/scheduled-step-decision", s.requireSpaceScheduledStepExecutor, s.issueScheduledStepDecision)
-				spacesGroup.POST("/owner-grant-decision", s.requireVerifiedSpaceResolver, s.issueOwnerGrantDecision)
-				spacesGroup.POST("/model-action-view", s.requireSpaceAgentActionViewer, s.issueModelActionView)
-				spacesGroup.POST("/run-action-decision", s.requireSpaceAgentActionAuthorizer, s.issueRunActionDecision)
-				spacesGroup.POST("/run-action-authority-check", s.requireCurrentRunActionAuthorityChecker, s.checkCurrentRunActionAuthority)
-				spacesGroup.POST("/owner-effect-reservations/reserve", s.requireOwnerEffectReservationCoordinator, s.reserveOwnerEffect)
-				spacesGroup.POST("/owner-effect-reservations/:reservation_id/commit", s.requireOwnerEffectReservationCoordinator, s.commitOwnerEffectReservation)
-				spacesGroup.GET("/owner-effect-reservations/:reservation_id", s.requireOwnerEffectReservationCoordinator, s.getOwnerEffectReservation)
-			}
+			// Space routes live in routes_spaces.go; features add their own
+			// routes_<feature>.go and register through registerSpaceFeatureRoutes.
+			s.registerSpaceRoutes(internal.Group("/spaces"))
 
 			// Per-user authz facade — the single internal surface Data Plane
 			// services (documents-api, retrieval) call to resolve a viewer's
@@ -399,6 +384,9 @@ func (s *Server) setupRoutes() {
 			{
 				authz.GET("/visible", s.authzVisible)
 				authz.GET("/check", s.authzCheck)
+				// WS14-S2: Space-attached resources a user may see through a Space
+				// right now. Behind CONTROL_SPACE_SUBJECT_GRANTS (404 when off).
+				authz.GET("/space-visible", s.authzSpaceVisible)
 				// Grant write surface backing the verevonv3 ShareDialog (PR-6).
 				// Disabled until verified delegation exists; resource_grants remains
 				// the single authority retrieval + documents-api enforce against.
@@ -406,6 +394,9 @@ func (s *Server) setupRoutes() {
 				authz.DELETE("/grant", s.authzRevoke)
 				authz.GET("/grants", s.authzGrantsByResource)
 			}
+
+			// Non-space feature routes register from their own routes_<feature>.go.
+			s.registerFeatureRoutes(v1, internal)
 		}
 	}
 

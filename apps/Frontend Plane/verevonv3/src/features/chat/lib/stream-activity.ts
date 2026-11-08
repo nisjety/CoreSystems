@@ -23,11 +23,16 @@
  */
 
 import { humanizeToolName } from '@/features/chat/components/chat-normalizers'
-import type { ChatToolCall } from '@/features/chat/components/chat-types'
+import type { ChatToolCall, LifecycleNotice } from '@/features/chat/components/chat-types'
 
 export type StreamActivity =
   /** A tool this turn opened has not reported back yet. */
   | { kind: 'tool-running'; tool: string }
+  /**
+   * That tool is out and is being retried after a transient failure (WS15): `attempt` is the try about to run,
+   * of `max`. Read from the turn's `retry_scheduled` notice, never guessed from elapsed time.
+   */
+  | { kind: 'retrying'; tool: string; attempt: number; max: number }
   /**
    * Every tool has settled and no answer token has arrived: the last thing that
    * demonstrably happened is this call finishing. Deliberately NOT reported as
@@ -43,10 +48,11 @@ export type StreamActivity =
  * rewritten by the tool result, which may carry any status string the backend
  * chose — so "running" is the absence of a result, not a list of end states.
  */
-const isRunning = (call: ChatToolCall) => !call.status || call.status === 'running'
+export const isToolCallRunning = (call: ChatToolCall) => !call.status || call.status === 'running'
 
 export function deriveStreamActivity(
   calls: readonly ChatToolCall[] | undefined,
+  notices?: readonly LifecycleNotice[],
 ): StreamActivity | null {
   if (!calls || calls.length === 0) return null
   // Scanned newest-first: several tools can be out at once, and the one that
@@ -54,7 +60,17 @@ export function deriveStreamActivity(
   // job, not this line's.
   for (let index = calls.length - 1; index >= 0; index -= 1) {
     const call = calls[index]
-    if (call && isRunning(call)) {
+    if (call && isToolCallRunning(call)) {
+      // A retry names the call it was matched to, so a later call of the same tool is not read as retrying.
+      const retry = notices?.findLast((notice) => notice.kind === 'retry' && notice.callId === call.id)
+      if (retry?.kind === 'retry') {
+        return {
+          kind: 'retrying',
+          tool: humanizeToolName(call.name),
+          attempt: retry.attempt,
+          max: retry.maxAttempts,
+        }
+      }
       return { kind: 'tool-running', tool: humanizeToolName(call.name) }
     }
   }
@@ -70,10 +86,21 @@ export function deriveStreamActivity(
   }
 }
 
-/** Norwegian, matching the indicator's own copy — see the module note. */
-export function streamActivityLabel(activity: StreamActivity): string {
-  if (activity.kind === 'tool-running') return `Kjører ${activity.tool}`
+/**
+ * The app's translator, `useI18n().tr`. Passed in rather than read here, so the visible line and the
+ * screen-reader sentence are worded by one function in whichever locale is active.
+ */
+export type Translator = { tr: (noText: string, enText: string) => string }
+
+export function streamActivityLabel(activity: StreamActivity, i18n: Translator): string {
+  if (activity.kind === 'tool-running') return i18n.tr(`Kjører ${activity.tool}`, `Running ${activity.tool}`)
+  if (activity.kind === 'retrying') {
+    return i18n.tr(
+      `Prøver ${activity.tool} på nytt (forsøk ${activity.attempt} av ${activity.max})`,
+      `Retrying ${activity.tool} (attempt ${activity.attempt} of ${activity.max})`,
+    )
+  }
   return activity.failed
-    ? `${activity.tool} feilet – venter på svar`
-    : `${activity.tool} fullført – venter på svar`
+    ? i18n.tr(`${activity.tool} feilet – venter på svar`, `${activity.tool} failed – waiting for answer`)
+    : i18n.tr(`${activity.tool} fullført – venter på svar`, `${activity.tool} done – waiting for answer`)
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/objectstore"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/threadworkspace"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
@@ -59,6 +60,17 @@ type Server struct {
 	// where the thread RPCs refuse rather than serve state a restart discards.
 	threads      ThreadWorkspaceStore
 	threadLimits threadworkspace.Limits
+	// threadErase deletes a thread's rows and threadBlobs its blobs (WS22-S5).
+	// Both stay nil until WithThreadErasure wires them, and DeleteThreadWorkspace
+	// refuses before it removes anything while either is nil.
+	threadErase ThreadEraser
+	threadBlobs threadworkspace.BlobEraser
+	// egressTiersEnabled is SANDBOX_MANAGER_EGRESS_TIERS (EP-9 E3). Off, every
+	// lease records egress off, the response leaves egress_tier unset, and an
+	// egress-capable claim the decision does not grant is refused exactly as
+	// before. On, that claim gets its lease at off instead (D-E2) and the
+	// granted tier is recorded on the lease and reported back.
+	egressTiersEnabled bool
 }
 
 // NewServer constructs a Server with the given stores. Space capability
@@ -97,6 +109,50 @@ func (s *Server) WithThreadWorkspace(enabled bool, store ThreadWorkspaceStore, l
 	s.threads = store
 	s.threadLimits = limits
 	return s
+}
+
+// WithThreadErasure wires the erase path (WS22-S5): the rows eraser and the blob
+// store that holds a thread's bytes. Without both, DeleteThreadWorkspace refuses
+// before it removes anything.
+func (s *Server) WithThreadErasure(rows ThreadEraser, blobs threadworkspace.BlobEraser) *Server {
+	s.threadErase = rows
+	s.threadBlobs = blobs
+	return s
+}
+
+// WithEgressTiers wires the SANDBOX_MANAGER_EGRESS_TIERS switch (EP-9 E3). See
+// the egressTiersEnabled field for what it changes.
+func (s *Server) WithEgressTiers(enabled bool) *Server {
+	s.egressTiersEnabled = enabled
+	return s
+}
+
+// egressTierProto maps a recorded tier word onto the wire enum. A word this
+// build does not know reads as OFF, never as a wider reach.
+func egressTierProto(tier string) mpv1.SandboxEgressTier {
+	switch tier {
+	case authz.EgressTierRegistries:
+		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_REGISTRIES
+	case authz.EgressTierAllowlist:
+		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_ALLOWLIST
+	default:
+		return mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_OFF
+	}
+}
+
+// permittedEgressTier is the tier a lease records for a verified decision.
+// 'all' is not storable in Wave 3 (D-E3): the verifier never grants it today,
+// and a decision that did is recorded as off rather than as the widest reach.
+func permittedEgressTier(enabled bool, granted string) string {
+	if !enabled {
+		return authz.EgressTierOff
+	}
+	switch granted {
+	case authz.EgressTierRegistries, authz.EgressTierAllowlist:
+		return granted
+	default:
+		return authz.EgressTierOff
+	}
 }
 
 // AcquireLease creates a new lease for the requested scope.
@@ -142,6 +198,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	spaceID := strings.TrimSpace(req.GetSpaceId())
 	backendID := ""
 	processesPermitted := false
+	egressTier := authz.EgressTierOff
 	var grant lease.SpaceGrant
 	if spaceID != "" {
 		if s.capabilityVerify == nil {
@@ -149,6 +206,11 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		}
 		verified, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
 			OrgID: principal.OrganizationID, SpaceRef: spaceID, SubjectID: principal.ActorID, Now: time.Now().UTC(),
+			// D-E2: with the switch on, an egress-capable claim the decision
+			// does not grant is verified at off instead of refused, as an
+			// ungranted process claim already is. execution-core enforces
+			// the recorded tier at its per-call boundary.
+			GrantEgressAtOff: s.egressTiersEnabled,
 		})
 		if err != nil {
 			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "capability_denied")))
@@ -172,8 +234,12 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// Control decision is in hand — and it becomes the ceiling the human
 		// read path applies to every process this lease admits (0004).
 		grant.RecipientAudienceRevision = verified.RecipientAudienceRevision
+		// Recorded for the same reason as processesPermitted: nothing later
+		// holds the decision. Hosts are never recorded, only the tier word.
+		egressTier = permittedEgressTier(s.egressTiersEnabled, verified.EgressTier)
 	}
 	grant.ProcessesPermitted = processesPermitted
+	grant.EgressTierPermitted = egressTier
 
 	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, grant, ttl)
 	if err != nil {
@@ -181,6 +247,12 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		return nil, mapErr(err)
 	}
 	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
+	// Unset while the switch is off, so the response is unchanged; read back
+	// off the created lease otherwise, like processes_permitted.
+	responseEgressTier := mpv1.SandboxEgressTier_SANDBOX_EGRESS_TIER_UNSPECIFIED
+	if s.egressTiersEnabled {
+		responseEgressTier = egressTierProto(l.EgressTierPermitted)
+	}
 	return &AcquireLeaseResponse{
 		LeaseId:   l.ID,
 		Endpoint:  l.Endpoint,
@@ -195,6 +267,7 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		// preparing a spawn `RegisterProcess` would deny; that denial remains
 		// the authoritative one.
 		ProcessesPermitted: l.ProcessesPermitted,
+		EgressTier:         responseEgressTier,
 	}, nil
 }
 
@@ -481,8 +554,16 @@ func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThre
 	}
 	res, err := s.threads.Apply(ctx, principal.OrganizationID, l.OwnerID, l.ScopeID, changes, deletions, s.threadLimits)
 	if err != nil {
+		if errors.Is(err, threadworkspace.ErrQuotaExceeded) {
+			s.recordActivity(ctx, l, mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_QUOTA_EXCEEDED)
+		}
 		return nil, threadWorkspaceErr(err)
 	}
+	cause := mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_UNSPECIFIED
+	if len(res.Conflicts) > 0 {
+		cause = mpv1.SandboxFailureCause_SANDBOX_FAILURE_CAUSE_WORKSPACE_CONFLICT
+	}
+	s.recordActivity(ctx, l, cause)
 	return &ApplyThreadWorkspaceChangesResponse{
 		ConflictingPaths: res.Conflicts,
 		Revision:         res.Revision,
@@ -491,18 +572,106 @@ func (s *Server) ApplyThreadWorkspaceChanges(ctx context.Context, req *ApplyThre
 	}, nil
 }
 
-// DeleteThreadWorkspace erases a thread's workspace. Its implementation arrives
-// with the retention sweeper (WS22-S5), which also owns the object-store
-// prefix delete, so until then it only reports whether the switch is on.
-func (s *Server) DeleteThreadWorkspace(ctx context.Context, _ *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
+// ThreadEraser is the rows half of erasure. threadworkspace.Eraser is the
+// production implementation.
+type ThreadEraser interface {
+	Erase(ctx context.Context, orgID, ownerID, threadID string) (int64, error)
+}
+
+// DeleteThreadWorkspace erases the caller's own thread workspace (WS22-S5). The
+// rows go first and the blobs under the thread's prefix after them. A blob
+// failure is reported, and a retry finds no rows and removes the prefix again,
+// so the erase always finishes. Only a user may erase, and only their own
+// threads: the rows are keyed by the caller's identity and no request field
+// names an owner.
+func (s *Server) DeleteThreadWorkspace(ctx context.Context, req *DeleteThreadWorkspaceRequest) (*DeleteThreadWorkspaceResponse, error) {
 	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "DeleteThreadWorkspace")))
-	if _, err := s.principal(ctx); err != nil {
+	principal, err := s.principal(ctx)
+	if err != nil {
 		return nil, err
 	}
 	if !s.threadWorkspaceEnabled || s.threads == nil {
 		return nil, status.Error(codes.FailedPrecondition, "thread workspace is not enabled")
 	}
-	return nil, status.Error(codes.Unimplemented, "thread workspace erasure arrives with the retention sweeper (WS22-S5)")
+	if principal.PrincipalType != "user" {
+		return nil, status.Error(codes.PermissionDenied, "a thread workspace belongs to a user, not a service principal")
+	}
+	if req.GetOrgId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "org_id is required")
+	}
+	if req.GetOrgId() != principal.OrganizationID {
+		return nil, status.Error(codes.PermissionDenied, "organization does not match verified identity")
+	}
+	prefix, err := objectstore.ThreadPrefix(principal.OrganizationID, req.GetThreadId())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "thread_id must be a plain key segment")
+	}
+	if s.threadErase == nil || s.threadBlobs == nil {
+		return nil, status.Error(codes.FailedPrecondition, "thread workspace erasure requires the object store")
+	}
+	files, err := s.threadErase.Erase(ctx, principal.OrganizationID, principal.ActorID, req.GetThreadId())
+	if errors.Is(err, threadworkspace.ErrThreadShared) {
+		return nil, status.Error(codes.PermissionDenied, "this thread is not yours to erase")
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "erase thread workspace rows: %v", err)
+	}
+	if _, err := s.threadBlobs.DeleteThreadBlobs(ctx, principal.OrganizationID, req.GetThreadId()); err != nil {
+		return nil, status.Errorf(codes.Internal, "thread workspace rows are erased but its blobs were not removed; retry the erase: %v", err)
+	}
+	return &DeleteThreadWorkspaceResponse{FilesDeleted: files, ObjectPrefix: prefix}, nil
+}
+
+// recordActivity stamps the lease's last use and the cause the apply produced. It is best effort: the
+// apply has already landed, and failing the call over a status write would make a client retry a batch
+// whose base hashes no longer match what it wrote.
+func (s *Server) recordActivity(ctx context.Context, l *lease.Lease, cause mpv1.SandboxFailureCause) {
+	_ = s.leases.RecordActivity(ctx, l.ID, l.OrgID, l.OwnerID, cause, time.Now().UTC())
+}
+
+// GetLeaseStatus reports a lease's lifecycle and the counts its thread workspace holds (WS22-S6). Like
+// GetProcess it is descriptive: a released or expired lease still answers, so a client can say why its
+// files are not kept. A thread lease belongs to its user, so a service principal may not read it.
+func (s *Server) GetLeaseStatus(ctx context.Context, req *GetLeaseStatusRequest) (*GetLeaseStatusResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetLeaseStatus")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.GetAny(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.ScopeType == "thread" && principal.PrincipalType != "user" {
+		return nil, status.Error(codes.PermissionDenied, "a thread workspace belongs to a user, not a service principal")
+	}
+	resp := &GetLeaseStatusResponse{
+		LeaseId:      l.ID,
+		State:        l.State,
+		FailureCause: l.FailureCause,
+		ExpiresAt:    timestamppb.New(l.ExpiresAt),
+		ScopeType:    l.ScopeType,
+	}
+	if !l.LastActivityAt.IsZero() {
+		resp.LastActivityAt = timestamppb.New(l.LastActivityAt)
+	}
+	if l.HeartbeatAt != nil {
+		resp.HeartbeatAt = timestamppb.New(*l.HeartbeatAt)
+	}
+	if l.ScopeType == "thread" && s.threads != nil {
+		snap, err := s.threads.Get(ctx, principal.OrganizationID, l.OwnerID, l.ScopeID)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "get thread workspace: %v", err)
+		}
+		for _, f := range snap.Files {
+			resp.FileCount++
+			resp.TotalBytes += f.SizeBytes
+		}
+	}
+	return resp, nil
 }
 
 // Health reports serving status.

@@ -97,6 +97,11 @@ pub enum Wire {
     OpenAiReasoningEffort,
     /// `reasoningEffort` on the subscription broker request.
     CodexEffort,
+    /// `thinkingConfig.thinkingBudget` on a Gemini generateContent body. The level
+    /// picks the budget through [`allowance`].
+    GeminiThinkingBudget,
+    /// `thinkingConfig.thinkingLevel` on a Gemini generateContent body.
+    GeminiThinkingLevel,
 }
 
 /// The provider family a model is served by. Wire support is a property of the
@@ -107,6 +112,7 @@ pub enum Family {
     OpenAi,
     Anthropic,
     Codex,
+    Gemini,
 }
 
 /// What one model can express.
@@ -161,6 +167,9 @@ const CODEX_LEVELS: &[Level] = &[Level::Low, Level::High];
 // Served only while this process's wide switch is on, which goes on after the
 // broker's own: the broker rejects these values until it has been widened.
 const CODEX_WIDE_LEVELS: &[Level] = &[Level::Low, Level::Medium, Level::High, Level::XHigh];
+// The level wire declares only low and high: the two levels the vendor's thinking page
+// lists for the 3-series Pro model, so a level outside them is never sent.
+const GEMINI_LEVEL_LEVELS: &[Level] = &[Level::Low, Level::High];
 
 struct Row {
     family: Family,
@@ -302,9 +311,49 @@ fn claude_version(model: &str) -> Option<(u32, u32)> {
 #[must_use]
 pub fn declared_support(family: Family, model: &str) -> Option<Support> {
     let model = model.trim().to_ascii_lowercase();
+    if family == Family::Gemini {
+        return Some(gemini_support(&model, gemini_effort_enabled()));
+    }
     ROWS.iter()
         .find(|row| row.family == family && (row.matches)(&model))
         .map(|row| row.support)
+}
+
+/// Switch for the Gemini effort wire. Off, a Gemini request carries no `thinkingConfig`
+/// and the catalogue lists no levels for Gemini. Only the literal `true` enables it, read
+/// once at startup.
+const GEMINI_EFFORT_ENV: &str = "INFERENCE_GEMINI_EFFORT_ENABLED";
+
+/// Whether the Gemini effort wire is on for this process.
+#[must_use]
+pub fn gemini_effort_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| parse_enabled(std::env::var(GEMINI_EFFORT_ENV).ok().as_deref()))
+}
+
+/// The support a Gemini model declares. The 2.5 generation takes a token budget through
+/// `thinkingConfig.thinkingBudget`, and the 3 generation a level through
+/// `thinkingConfig.thinkingLevel`. Both rows are read from the model name and are not yet
+/// probed live, so `verified_on` stays `None`.
+fn gemini_support(model: &str, enabled: bool) -> Support {
+    if !enabled {
+        return Support::NONE;
+    }
+    if in_series(model, "gemini-2.5") {
+        Support {
+            wire: Wire::GeminiThinkingBudget,
+            levels: THREE_LEVELS,
+            verified_on: None,
+        }
+    } else if in_series(model, "gemini-3") {
+        Support {
+            wire: Wire::GeminiThinkingLevel,
+            levels: GEMINI_LEVEL_LEVELS,
+            verified_on: None,
+        }
+    } else {
+        Support::NONE
+    }
 }
 
 /// What this model can express. A model with no declared row is treated as
@@ -830,6 +879,43 @@ mod tests {
             assert!(
                 declared_support(family, &model).is_some(),
                 "{model} ({family:?}) is shipped as a default but has no effort support row"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_wire_classes() {
+        let budget = gemini_support("gemini-2.5-pro", true);
+        assert_eq!(budget.wire, Wire::GeminiThinkingBudget);
+        assert_eq!(
+            budget.levels.to_vec(),
+            vec![Level::Low, Level::Medium, Level::High]
+        );
+        assert_eq!(
+            gemini_support("gemini-2.5-flash-lite", true).wire,
+            Wire::GeminiThinkingBudget
+        );
+        let level = gemini_support("gemini-3-pro-preview", true);
+        assert_eq!(level.wire, Wire::GeminiThinkingLevel);
+        assert_eq!(level.levels, GEMINI_LEVEL_LEVELS);
+        // A Gemini id outside both generations has no effort control, and so does every
+        // Gemini model while the switch is off.
+        assert_eq!(gemini_support("gemini-1.5-pro", true), Support::NONE);
+        assert_eq!(gemini_support("gemini-30-pro", true), Support::NONE);
+        assert_eq!(gemini_support("gemini-2.5-pro", false), Support::NONE);
+        // A level above the row's strongest is that strongest level, never a jump up.
+        let applied = resolve(Some(Level::Max), level).expect("the level wire has a level");
+        assert_eq!(applied.applied, Level::High);
+    }
+
+    #[test]
+    fn gemini_levels_advertised_only_with_switch() {
+        for model in ["gemini-2.5-pro", "gemini-3-pro-preview"] {
+            assert!(gemini_support(model, false).levels.is_empty(), "{model}");
+            assert!(!gemini_support(model, true).levels.is_empty(), "{model}");
+            assert_eq!(
+                declared_support(Family::Gemini, model),
+                Some(gemini_support(model, gemini_effort_enabled()))
             );
         }
     }

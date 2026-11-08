@@ -46,7 +46,7 @@ class TaxonomyGateTest(unittest.TestCase):
     def test_live_tree_builds_and_lists_every_other_producer(self):
         taxonomy = self.build()
         self.assertIn('## Other producers', taxonomy.doc)
-        self.assertIn('| `run_parked` | parked agentic run', taxonomy.doc)
+        self.assertIn('| `run_parked` | — (control) | `ChatEvent::RunParked` | ✅ |', taxonomy.doc)
         self.assertIn('| `awaiting_approval` | agentic run paused', taxonomy.doc)
         self.assertIn('| `plan_transitioned` | 10 | ✅ |', taxonomy.doc)
 

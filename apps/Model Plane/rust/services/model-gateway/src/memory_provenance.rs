@@ -239,6 +239,11 @@ mod tests {
             updated_at: None,
             user_id: "user-1".to_owned(),
             provenance: MemoryProvenance::Stated as i32,
+            origin_space_ref: String::new(),
+            withheld_reason: String::new(),
+            scope: String::new(),
+            scope_id: String::new(),
+            source_label: String::new(),
         };
         overrides(&mut entry);
         entry

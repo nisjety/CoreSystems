@@ -71,7 +71,10 @@ export function registerReloadGuard(isDirty: () => boolean): () => void {
   }
 }
 
-const anyGuardDirty = () => {
+/** How many guards are registered. Without any, no reload can be judged safe. */
+export const reloadGuardCount = (): number => guards.size
+
+export const anyReloadGuardDirty = () => {
   for (const guard of guards) {
     try {
       if (guard()) return true
@@ -107,6 +110,20 @@ const markReload = (now: number): boolean => {
 }
 
 /**
+ * Reload once for a stale build, for a caller that has already decided a reload is
+ * wanted (the `enforce` client-contract policy, WS07-S3). Shares the chunk-reload
+ * marker and window, so it can never loop with `vite:preloadError` or the boot
+ * watchdog. Returns false, and does nothing, when a guard is dirty, a reload
+ * already happened inside the window, or the marker cannot be written.
+ */
+export function reloadOnceForStaleBuild(reload: () => void = () => window.location.reload()): boolean {
+  const now = Date.now()
+  if (chunkRecoveryDisabled() || anyReloadGuardDirty() || reloadedRecently(now) || !markReload(now)) return false
+  reload()
+  return true
+}
+
+/**
  * Listen for `vite:preloadError`. Returns the function that removes the listener.
  * The event is left un-prevented on every path that does not reload, so the
  * failed import still rejects and the caller's own error handling runs.
@@ -115,7 +132,7 @@ export function installChunkRecovery(reload: () => void = () => window.location.
   if (chunkRecoveryDisabled()) return () => undefined
   const onPreloadError = (event: Event) => {
     const now = Date.now()
-    if (anyGuardDirty() || reloadedRecently(now) || !markReload(now)) {
+    if (anyReloadGuardDirty() || reloadedRecently(now) || !markReload(now)) {
       setNoticeVisible(true)
       return
     }

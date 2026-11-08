@@ -28,6 +28,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/notifications", get(list_notifications))
         .route("/api/v1/notifications/{id}/read", post(mark_read))
         .route("/api/v1/notifications/{id}", delete(delete_notification))
+        // Web Push (WS16-S6): the BFF relays the owner's own subscription; the VAPID private key never leaves
+        // notification-core.
+        .route("/api/v1/push/config", get(push_config))
+        .route("/api/v1/push/subscriptions", post(create_push_subscription))
+        .route(
+            "/api/v1/push/subscriptions/{id}",
+            delete(delete_push_subscription),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -151,6 +159,57 @@ async fn delete_notification(
     let org_id = authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/notifications/{}",
+        state.notification_core_url,
+        urlencoding::encode(&id)
+    );
+    proxy_notification_json(
+        &state,
+        Method::DELETE,
+        &url,
+        None,
+        &org_id,
+        &actor_for(&user),
+    )
+    .await
+}
+
+// ── Web Push (WS16-S6) ────────────────────────────────────────────────────────
+
+async fn push_config(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
+    let url = format!("{}/push/config", state.notification_core_url);
+    proxy_notification_json(&state, Method::GET, &url, None, &org_id, &actor_for(&user)).await
+}
+
+async fn create_push_subscription(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Json(body): Json<Value>,
+) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
+    let url = format!("{}/push/subscriptions", state.notification_core_url);
+    proxy_notification_json(
+        &state,
+        Method::POST,
+        &url,
+        Some(body),
+        &org_id,
+        &actor_for(&user),
+    )
+    .await
+}
+
+async fn delete_push_subscription(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(id): Path<String>,
+) -> impl axum::response::IntoResponse {
+    let org_id = authorized_org_id(&state, &user).await;
+    let url = format!(
+        "{}/push/subscriptions/{}",
         state.notification_core_url,
         urlencoding::encode(&id)
     );

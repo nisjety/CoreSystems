@@ -292,6 +292,7 @@ impl Stack {
             language: LanguageAnalyticsChain::from_env(),
             realtime: RealtimeChain::new_with_providers(vec![]),
             video: VideoChain::new_with_providers(vec![]),
+            capture: None,
         };
         Self {
             service,

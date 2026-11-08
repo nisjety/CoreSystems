@@ -1,6 +1,6 @@
 //! Sequential fallback chain — tries providers in order with bounded retries.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -8,7 +8,9 @@ use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
+use super::gemini::GeminiProvider;
 use super::policy_client::PolicyClient;
+use super::role::{self, RoleCall};
 use super::routing_policy::RoutingPolicy;
 use super::timing::{CallClock, StreamClock};
 use super::{
@@ -19,7 +21,7 @@ use super::{
     Residency,
 };
 use crate::cache::PromptCache;
-use crate::config::{EntitlementConfig, InferenceConfig};
+use crate::config::{EntitlementConfig, InferenceConfig, VertexGeminiConfig};
 use crate::entitlement::{EntitlementGate, RequestAccess};
 
 /// A boxed, type-erased provider.
@@ -109,6 +111,114 @@ pub struct FallbackChain {
     /// `MODEL_ENTITLEMENT_MODE` says otherwise; the handlers ask it, and the
     /// chain applies the answer a request carries.
     entitlement: Arc<EntitlementGate>,
+}
+
+/// Switch for the route note (WS27-S7): what the budget did to a Verevon call, carried on the wire. Off
+/// unless the literal `true`, read once at startup, as the other inference switches are.
+const ROUTE_NOTE_ENV: &str = "INFERENCE_ROUTE_NOTE";
+
+/// Whether an explicit env value turns the route note on. Pure so the policy is unit-testable without
+/// touching the process environment.
+fn route_note_enabled_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Whether the route note is on for this process.
+fn route_note_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| route_note_enabled_from(std::env::var(ROUTE_NOTE_ENV).ok().as_deref()))
+}
+
+/// What the budget did to one Verevon-routed call (WS27-S7), kept beside its response. Closed values and
+/// booleans only, never a price or a count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteNote {
+    pub budget_posture: intent::BudgetPosture,
+    /// Set only when the posture moved the model one tier cheaper: the same policy at a healthy budget
+    /// would have answered with another model.
+    pub tier_shifted: bool,
+    /// Set when an exhausted budget forced the cheap fallback model.
+    pub cheap_fallback_forced: bool,
+    /// The effort level the budget clamped the call to, when it clamped it.
+    pub applied_effort: Option<effort::Level>,
+    /// The role table's decision, for a `verevon-role` call (EP-13 S4). `None` for every other call.
+    pub role: Option<role::RoleDecision>,
+}
+
+impl RouteNote {
+    /// The note of a call the budget never priced: the posture is unknown, and nothing was
+    /// moved or forced. A role call carries it so its decision has a note to ride on.
+    const fn unbudgeted() -> Self {
+        Self {
+            budget_posture: intent::BudgetPosture::Unknown,
+            tier_shifted: false,
+            cheap_fallback_forced: false,
+            applied_effort: None,
+            role: None,
+        }
+    }
+}
+
+/// The route note with a role decision recorded on it. A role call always carries a note, even
+/// when the budget note is switched off, because its decision is what the note exists to show.
+/// Every other call keeps its note as it was.
+fn attach_role(note: Option<RouteNote>, decision: Option<role::RoleDecision>) -> Option<RouteNote> {
+    match decision {
+        None => note,
+        Some(decision) => Some(RouteNote {
+            role: Some(decision),
+            ..note.unwrap_or_else(RouteNote::unbudgeted)
+        }),
+    }
+}
+
+/// The note for a decision the intent layer resolved. `tier_shifted` is read against the same policy at a
+/// healthy budget, so a mode the caller chose is never reported as a budget move.
+fn budget_route_note(
+    policy: &RoutingPolicy,
+    decision: &intent::Decision,
+    applied_effort: Option<effort::Level>,
+) -> RouteNote {
+    let healthy = intent::choose(
+        policy,
+        decision.mode,
+        decision.complexity,
+        intent::BudgetPosture::Healthy,
+    );
+    RouteNote {
+        budget_posture: decision.posture,
+        tier_shifted: decision.posture == intent::BudgetPosture::Constrained
+            && healthy != decision.model,
+        cheap_fallback_forced: decision.posture == intent::BudgetPosture::Exhausted,
+        applied_effort,
+        role: None,
+    }
+}
+
+impl From<RouteNote> for mp_contracts::model_plane::v1::RouteNote {
+    fn from(note: RouteNote) -> Self {
+        let budget_posture = match note.budget_posture {
+            intent::BudgetPosture::Healthy => "healthy",
+            intent::BudgetPosture::Constrained => "constrained",
+            intent::BudgetPosture::Exhausted => "exhausted",
+            intent::BudgetPosture::Unknown => "unknown",
+        };
+        Self {
+            budget_posture: budget_posture.to_owned(),
+            tier_shifted: note.tier_shifted,
+            cheap_fallback_forced: note.cheap_fallback_forced,
+            applied_effort: note
+                .applied_effort
+                .map_or_else(String::new, |level| level.as_str().to_owned()),
+            role: note
+                .role
+                .and_then(|decision| decision.table_entry)
+                .map_or_else(String::new, |purpose| purpose.as_str().to_owned()),
+            role_source: note
+                .role
+                .map_or_else(String::new, |decision| decision.source.as_str().to_owned()),
+        }
+    }
 }
 
 /// The deployment names that gate each model family on this resource.
@@ -254,6 +364,12 @@ pub(crate) fn is_unspecified_model(model: &str) -> bool {
 /// chat-completions surface (which would 404 the deployment) and vice-versa.
 fn is_anthropic_model(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("claude")
+}
+
+/// True for a Gemini model id. Gemini ids are served only by the Vertex provider, so they
+/// never reach an OpenAI-shaped surface, which would answer them with a 404.
+fn is_gemini_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("gemini")
 }
 
 /// The Azure `model-router` deployment — Azure auto-routes it to the cheapest
@@ -483,11 +599,15 @@ fn provider_serves_model(
     model: &str,
 ) -> bool {
     if is_unspecified_model(model) {
-        return true;
+        // "Auto" resolves to a platform default that every provider may take, except
+        // Gemini: its catalogue is opt-in by model id, and an Auto prompt must not leave
+        // for Vertex just because the chain tried it first.
+        return caps.model_family != ModelFamily::Gemini;
     }
     let family_matches = match caps.model_family {
         ModelFamily::Anthropic => is_anthropic_model(model),
-        ModelFamily::OpenAiCompatible => !is_anthropic_model(model),
+        ModelFamily::OpenAiCompatible => !is_anthropic_model(model) && !is_gemini_model(model),
+        ModelFamily::Gemini => is_gemini_model(model),
     };
     if !family_matches {
         return false;
@@ -531,7 +651,14 @@ fn residency_gate_blocks(req: &InferRequest, caps_residency: Residency) -> bool 
 }
 
 impl FallbackChain {
-    /// Build a fallback chain from configuration.
+    /// Build a fallback chain from configuration. The Vertex Gemini settings are read from
+    /// the environment, so boot code calls this. Tests call
+    /// [`Self::from_config_with_gemini`] and choose those settings themselves.
+    pub fn from_config(cfg: &InferenceConfig) -> Self {
+        Self::from_config_with_gemini(cfg, &VertexGeminiConfig::from_env())
+    }
+
+    /// Build a fallback chain from configuration with the Vertex Gemini settings given.
     ///
     /// # Panics
     ///
@@ -542,7 +669,7 @@ impl FallbackChain {
     // Linear provider-registration table plus the intent/budget wiring; reads
     // top-to-bottom and isn't worth fragmenting across helpers.
     #[allow(clippy::too_many_lines)]
-    pub fn from_config(cfg: &InferenceConfig) -> Self {
+    pub fn from_config_with_gemini(cfg: &InferenceConfig, gemini: &VertexGeminiConfig) -> Self {
         let mut providers: Vec<(String, BoxedProvider)> = Vec::new();
 
         // Validated at config load; Arc'd once so each registration site shares
@@ -664,6 +791,18 @@ impl FallbackChain {
                                 providers.push(("anthropic".to_owned(), Arc::new(p)));
                                 info!(provider = "anthropic", "provider registered");
                             }
+                        }
+                    }
+                }
+                "vertex-gemini" | "gemini" => {
+                    // Refusals are logged inside `from_config`; the chain just goes without.
+                    if !providers
+                        .iter()
+                        .any(|(registered, _)| registered == "vertex-gemini")
+                    {
+                        if let Some(p) = GeminiProvider::from_config(gemini) {
+                            providers.push(("vertex-gemini".to_owned(), Arc::new(p)));
+                            info!(provider = "vertex-gemini", "provider registered");
                         }
                     }
                 }
@@ -1063,9 +1202,13 @@ impl FallbackChain {
     }
 
     /// Resolve a Verevon intent model id (`verevon-budget`/`-balance`/`-genius`)
-    /// to a concrete model, returning a rewritten request. Returns `None` when
-    /// the intent layer is off or the model is a pinned id (pass through).
-    async fn resolve_intent(&self, req: &InferRequest) -> Option<InferRequest> {
+    /// to a concrete model, returning a rewritten request and, while the route
+    /// note is on, what the budget did to it (WS27-S7). Returns `None` when the
+    /// intent layer is off or the model is a pinned id (pass through).
+    async fn resolve_intent(
+        &self,
+        req: &InferRequest,
+    ) -> Option<(InferRequest, Option<RouteNote>)> {
         let policy = self.policy.load();
         if !policy.enabled {
             return None;
@@ -1093,7 +1236,9 @@ impl FallbackChain {
             "verevon intent resolved"
         );
         let mut rewritten = req.clone();
-        rewritten.model = decision.model;
+        rewritten.model.clone_from(&decision.model);
+        // What the budget cut, for the route note: the effort it clamped to, when a clamp fired.
+        let mut applied_effort = None;
         if effort::budget_clamp_enabled() {
             if let Some(requested) = rewritten.reasoning_effort {
                 let applied = effort::clamp_to_cap(requested, decision.effort_cap);
@@ -1109,6 +1254,7 @@ impl FallbackChain {
                         "effort clamped by budget posture"
                     );
                     rewritten.reasoning_effort = Some(applied);
+                    applied_effort = Some(applied);
                 }
             } else {
                 // A request with no level carries only the legacy budget, which is
@@ -1127,10 +1273,87 @@ impl FallbackChain {
                         "thinking budget clamped by budget posture"
                     );
                     rewritten.thinking_budget_tokens = applied;
+                    applied_effort = decision.effort_cap;
                 }
             }
         }
-        Some(rewritten)
+        let note =
+            route_note_enabled().then(|| budget_route_note(&policy, &decision, applied_effort));
+        Some((rewritten, note))
+    }
+
+    /// The request a `verevon-role` call runs as: its model replaced by the model the role table chose,
+    /// with the decision for the route note. `None` for every other model, which is never touched here.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::RequestRejected`] when the call names no purpose the role table serves. Nothing
+    /// has been sent anywhere.
+    fn resolve_role_call(
+        &self,
+        req: &InferRequest,
+        role: Option<&RoleCall>,
+    ) -> Result<Option<(InferRequest, role::RoleDecision)>, ProviderError> {
+        if !req.model.trim().eq_ignore_ascii_case(role::ROLE_MODEL_ID) {
+            return Ok(None);
+        }
+        let purpose = role
+            .and_then(|call| call.purpose)
+            .ok_or_else(|| ProviderError::RequestRejected {
+                detail: format!(
+                    "`{}` needs a side-task purpose that the role table serves",
+                    role::ROLE_MODEL_ID
+                ),
+            })?;
+        let fallback_model = role.map_or("", |call| call.fallback_model.as_str());
+        let catalogue = self.list_models("chat", &req.provider_hint);
+        let policy = self.policy.load();
+        let choice = role::choose(&policy, purpose, fallback_model, |model| {
+            self.role_candidate_admitted(req, &catalogue, model)
+        });
+        let mut resolved = req.clone();
+        resolved.model.clone_from(&choice.model);
+        // The table's effort is the role's default, so it applies only when the caller names no effort.
+        if let Some(level) = choice.effort {
+            if resolved.reasoning_effort.is_none() && resolved.thinking_budget_tokens == 0 {
+                resolved.reasoning_effort = Some(level);
+            }
+        }
+        info!(
+            request_id = %req.request_id,
+            role = purpose.as_str(),
+            role_source = choice.decision.source.as_str(),
+            resolved_model = %choice.model,
+            "verevon role resolved"
+        );
+        Ok(Some((resolved, choice.decision)))
+    }
+
+    /// Whether a role candidate may serve this call (EP-13 S4). A candidate the chain does not list is
+    /// refused. A listed one must be served by a provider the call's hint allows, and that provider must
+    /// clear the call's ZDR, privacy-tier, residency, image and entitlement gates, the gates
+    /// `infer_one_model` applies, so the walk never has to refuse a candidate the table chose. An intent
+    /// id is admitted, because the intent layer resolves it and the walk gates the result.
+    fn role_candidate_admitted(&self, req: &InferRequest, catalogue: &[ModelInfo], model: &str) -> bool {
+        if intent::parse_mode(model).is_some() {
+            return true;
+        }
+        if !catalogue.iter().any(|known| known.id.eq_ignore_ascii_case(model)) {
+            return false;
+        }
+        self.providers.iter().any(|(name, provider)| {
+            let caps = provider.capabilities_dyn();
+            Self::hint_matches(&req.provider_hint, name, &caps.aliases)
+                && provider_serves_model(&caps, self.catalog_for(name), model)
+                && (!req.zdr || caps.supports_zdr)
+                && provider_meets_privacy_tier(&caps, req.min_privacy_tier)
+                && !residency_gate_blocks(req, caps.residency)
+                && req
+                    .access
+                    .as_ref()
+                    .is_none_or(|access| access.refuses(model, name).is_none())
+                && (req.image_parts.is_empty() || model_accepts_images(&caps, model))
+        })
     }
 
     /// Lower a request's effort to the org's `max_effort` ceiling. model-gateway
@@ -1377,21 +1600,61 @@ impl FallbackChain {
     ///
     /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
     pub async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        self.infer_with_response_cache(req, true).await
+        self.infer_noted(req, true)
+            .await
+            .map(|(response, _)| response)
     }
 
     /// Fresh inference for checks that must not reuse or store a completed
     /// response. Provider prefix caching and all route/privacy gates remain.
     pub async fn infer_without_response_cache(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
-        self.infer_with_response_cache(req, false).await
+        self.infer_noted(req, false)
+            .await
+            .map(|(response, _)| response)
     }
 
-    async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
+    /// The unary call with the route note the intent layer stamped on it (WS27-S7), when the note is on.
+    /// The note is never stored with a response, so a cache hit carries the note of the call that asked.
+    pub async fn infer_noted(
+        &self,
+        req: &InferRequest,
+        cache_response: bool,
+    ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
+        self.infer_noted_with_role(req, None, cache_response).await
+    }
+
+    /// [`Self::infer_noted`] for a `verevon-role` call (EP-13 S4): the role table picks the model, and
+    /// the chosen model runs as an ordinary call with the decision recorded on its route note.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::RequestRejected`] when the call names no purpose the role table serves, and
+    /// every error [`Self::infer_noted`] can return for the chosen model.
+    pub async fn infer_role_noted(
+        &self,
+        req: &InferRequest,
+        role: &RoleCall,
+        cache_response: bool,
+    ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
+        self.infer_noted_with_role(req, Some(role), cache_response).await
+    }
+
+    async fn infer_noted_with_role(
+        &self,
+        req: &InferRequest,
+        role: Option<&RoleCall>,
+        cache_response: bool,
+    ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
         // A retired Claude id is answered by its successor, so the entitlement check,
         // the cache key and every rung of the ladder all name the model that serves.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
+        // A `verevon-role` call is resolved to a concrete model before anything else reads it, so the
+        // name never reaches the entitlement check, the intent layer or a provider (EP-13 S4).
+        let roled = self.resolve_role_call(req, role)?;
+        let role_decision = roled.as_ref().map(|(_, decision)| *decision);
+        let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // A model the caller named is checked against their organisation's
         // entitlement first of all: before the intent layer spends a budget call
         // and before the cache can answer with a model they may not use.
@@ -1399,7 +1662,11 @@ impl FallbackChain {
         // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
-        let intent_req = self.resolve_intent(req).await;
+        let (intent_req, route_note) = self
+            .resolve_intent(req)
+            .await
+            .map_or((None, None), |(resolved, note)| (Some(resolved), note));
+        let route_note = attach_role(route_note, role_decision);
         // The ladder exists only for a model WE chose. `intent_req.is_some()` is
         // exactly that condition — see `attempt_models`.
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
@@ -1427,7 +1694,7 @@ impl FallbackChain {
                 // The stored copy may carry the timing of the call that filled
                 // the cache; this call reached no provider at all.
                 cached.provider_timing = Some(clock.cache_hit(&cached));
-                return Ok(cached);
+                return Ok((cached, route_note));
             }
         }
 
@@ -1469,7 +1736,7 @@ impl FallbackChain {
                     .await
                 {
                     if cache_response { self.cache.put(req, &response); }
-                    return Ok(response);
+                    return Ok((response, route_note));
                 }
                 // A refused subscription is not answered by the next rung.
                 if throttle.refused() {
@@ -1835,14 +2102,56 @@ impl FallbackChain {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        self.infer_stream_noted(req).await.map(|(rx, _)| rx)
+    }
+
+    /// The stream with the route note the intent layer stamped on it (WS27-S7), when the note is on. The
+    /// note rides the final chunk on the wire, so the caller attaches it there.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
+    pub async fn infer_stream_noted(
+        &self,
+        req: &InferRequest,
+    ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
+        self.infer_stream_noted_with_role(req, None).await
+    }
+
+    /// [`Self::infer_stream_noted`] for a `verevon-role` call (EP-13 S4), resolved as on the unary path.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Self::infer_role_noted`].
+    pub async fn infer_stream_role_noted(
+        &self,
+        req: &InferRequest,
+        role: &RoleCall,
+    ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
+        self.infer_stream_noted_with_role(req, Some(role)).await
+    }
+
+    async fn infer_stream_noted_with_role(
+        &self,
+        req: &InferRequest,
+        role: Option<&RoleCall>,
+    ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
         // A retired Claude id is answered by its successor, as on the unary path.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
+        // A `verevon-role` call is resolved first, as on the unary path.
+        let roled = self.resolve_role_call(req, role)?;
+        let role_decision = roled.as_ref().map(|(_, decision)| *decision);
+        let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // Entitlement of a pinned model first, as on the unary path.
         let pinned = self.pinned_model(req)?;
         // Verevon intent layer — same resolution as the unary path.
-        let intent_req = self.resolve_intent(req).await;
+        let (intent_req, route_note) = self
+            .resolve_intent(req)
+            .await
+            .map_or((None, None), |(resolved, note)| (Some(resolved), note));
+        let route_note = attach_role(route_note, role_decision);
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
             self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
         });
@@ -1886,7 +2195,7 @@ impl FallbackChain {
                     .stream_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
                     .await
                 {
-                    return Ok(rx);
+                    return Ok((rx, route_note));
                 }
                 if throttle.refused() {
                     break;
@@ -2637,6 +2946,118 @@ mod resolution_tests {
             ..RecordingProvider::default()
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
+    }
+
+    #[test]
+    fn route_note_switch_is_on_only_for_the_literal_true() {
+        assert!(route_note_enabled_from(Some("true")));
+        assert!(route_note_enabled_from(Some(" true ")));
+        for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE")] {
+            assert!(
+                !route_note_enabled_from(raw),
+                "{raw:?} must not turn the route note on"
+            );
+        }
+    }
+
+    #[test]
+    fn constrained_posture_stamps_tier_shifted() {
+        let policy = RoutingPolicy::default();
+        let decision = intent::Decision {
+            model: intent::choose(
+                &policy,
+                intent::VerevonMode::Balance,
+                intent::Complexity::Simple,
+                intent::BudgetPosture::Constrained,
+            )
+            .to_owned(),
+            mode: intent::VerevonMode::Balance,
+            complexity: intent::Complexity::Simple,
+            posture: intent::BudgetPosture::Constrained,
+            effort_cap: None,
+        };
+        let note = budget_route_note(&policy, &decision, None);
+        assert_eq!(note.budget_posture, intent::BudgetPosture::Constrained);
+        assert!(note.tier_shifted, "balance one tier cheaper must be stated");
+        assert!(!note.cheap_fallback_forced);
+        assert_eq!(note.applied_effort, None);
+
+        // Budget is already the floor: a constrained posture changes no model, so nothing is stated.
+        let floor = intent::Decision {
+            model: intent::choose(
+                &policy,
+                intent::VerevonMode::Budget,
+                intent::Complexity::Simple,
+                intent::BudgetPosture::Constrained,
+            )
+            .to_owned(),
+            mode: intent::VerevonMode::Budget,
+            complexity: intent::Complexity::Simple,
+            posture: intent::BudgetPosture::Constrained,
+            effort_cap: None,
+        };
+        assert!(!budget_route_note(&policy, &floor, None).tier_shifted);
+    }
+
+    #[test]
+    fn exhausted_stamps_cheap_fallback() {
+        let policy = RoutingPolicy::default();
+        let decision = intent::Decision {
+            model: policy.cheap_fallback.clone(),
+            mode: intent::VerevonMode::Genius,
+            complexity: intent::Complexity::Complex,
+            posture: intent::BudgetPosture::Exhausted,
+            effort_cap: Some(effort::Level::Low),
+        };
+        let note = budget_route_note(&policy, &decision, Some(effort::Level::Low));
+        assert!(note.cheap_fallback_forced);
+        assert!(!note.tier_shifted, "a forced fallback is not a tier move");
+        assert_eq!(note.applied_effort, Some(effort::Level::Low));
+    }
+
+    #[test]
+    fn plain_call_keeps_its_budget_note_and_a_role_call_adds_its_decision() {
+        let budget = RouteNote {
+            budget_posture: intent::BudgetPosture::Constrained,
+            tier_shifted: true,
+            cheap_fallback_forced: false,
+            applied_effort: None,
+            role: None,
+        };
+        // A call that is not a role call keeps its note exactly as the budget left it.
+        assert_eq!(attach_role(Some(budget), None), Some(budget));
+        assert_eq!(attach_role(None, None), None);
+
+        let decision = role::RoleDecision {
+            table_entry: None,
+            source: role::RoleSource::TurnModel,
+        };
+        assert_eq!(
+            attach_role(Some(budget), Some(decision)),
+            Some(RouteNote {
+                role: Some(decision),
+                ..budget
+            })
+        );
+        // A role call with no budget note still carries one: its decision is what it shows.
+        assert_eq!(
+            attach_role(None, Some(decision)),
+            Some(RouteNote {
+                role: Some(decision),
+                ..RouteNote::unbudgeted()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_model_stamps_nothing() {
+        let chain = FallbackChain::new_with_providers(Vec::new(), 0).with_intent_enabled(true);
+        let pinned = InferRequest {
+            request_id: "pinned".into(),
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+        assert!(chain.resolve_intent(&pinned).await.is_none());
     }
 
     #[tokio::test]

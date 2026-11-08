@@ -34,6 +34,23 @@ pub trait VisibilityClient: Send + Sync {
         verified_bearer: Option<&str>,
     ) -> Vec<String>;
 
+    /// WS14-S5: the documents attached to ONE Space that the subject may see
+    /// through it right now (Control's `space-visible` join: current member AND
+    /// current audience AND the owner's `subject_type='space'` view grant).
+    /// Only ever called with a verified Space decision for `space_ref`; the
+    /// caller unions the result into the viewer's grants for that one read.
+    /// Default (and every failure) is empty: fail CLOSED, so a lookup problem
+    /// hides room files and never reveals one.
+    async fn visible_space_documents(
+        &self,
+        _org_id: &str,
+        _user_id: &str,
+        _space_ref: &str,
+        _verified_bearer: Option<&str>,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Evict a cached entry on revoke (called by the grant invalidator below).
     /// Default no-op.
     async fn invalidate(&self, _org_id: &str, _user_id: &str) {}
@@ -113,6 +130,10 @@ pub struct HttpVisibilityClient {
     http: reqwest::Client,
     user_core_url: String,
     service_token: Option<String>,
+    /// `RETRIEVAL_SPACE_GRANTS` (strict literal `true`). Off: no Space-subject
+    /// grant is ever requested, so a room file stays visible to its uploader
+    /// only. A rollout control, never an authorization input.
+    space_grants_enabled: bool,
 }
 
 struct DelegationHeaders {
@@ -122,12 +143,42 @@ struct DelegationHeaders {
     signature: String,
 }
 
+#[cfg(test)]
 fn delegation_headers(
     token: &str,
     method: &str,
     uri: &str,
     org_id: &str,
     user_id: &str,
+    timestamp: &str,
+    nonce: &str,
+) -> DelegationHeaders {
+    delegation_headers_for(
+        token,
+        method,
+        uri,
+        org_id,
+        user_id,
+        "authz:visible",
+        "",
+        "resolve explicit document grants",
+        timestamp,
+        nonce,
+    )
+}
+
+/// The v2 delegation for one named operation. `resource_id` binds the signature
+/// to a specific resource (the Space reference for `authz:space-visible`).
+#[allow(clippy::too_many_arguments)]
+fn delegation_headers_for(
+    token: &str,
+    method: &str,
+    uri: &str,
+    org_id: &str,
+    user_id: &str,
+    operation: &str,
+    resource_id: &str,
+    reason: &str,
     timestamp: &str,
     nonce: &str,
 ) -> DelegationHeaders {
@@ -141,10 +192,10 @@ fn delegation_headers(
         uri,
         user_id,
         org_id,
-        "authz:visible",
+        operation,
         "document",
-        "",
-        "resolve explicit document grants",
+        resource_id,
+        reason,
         "true",
         nonce,
         &body_sha256,
@@ -171,7 +222,14 @@ impl HttpVisibilityClient {
             http,
             user_core_url: user_core_url.into(),
             service_token,
+            space_grants_enabled: false,
         }
+    }
+
+    /// Turn the Space-subject grant lookup on (`RETRIEVAL_SPACE_GRANTS=true`).
+    pub fn with_space_grants(mut self, enabled: bool) -> Self {
+        self.space_grants_enabled = enabled;
+        self
     }
 
     async fn fetch(
@@ -180,20 +238,70 @@ impl HttpVisibilityClient {
         user_id: &str,
         verified_bearer: Option<&str>,
     ) -> Result<Vec<String>, ()> {
+        self.fetch_ids(
+            "/api/v1/internal/authz/visible",
+            &[
+                ("org_id", org_id),
+                ("subject_id", user_id),
+                ("resource_type", "document"),
+            ],
+            org_id,
+            user_id,
+            verified_bearer,
+            "authz:visible",
+            "",
+            "resolve explicit document grants",
+        )
+        .await
+    }
+
+    /// WS14-S5: `GET /authz/space-visible`. The delegation names the operation
+    /// and binds the Space reference as its resource id, which Control requires
+    /// to match the `space_ref` query.
+    async fn fetch_space(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        space_ref: &str,
+        verified_bearer: Option<&str>,
+    ) -> Result<Vec<String>, ()> {
+        self.fetch_ids(
+            "/api/v1/internal/authz/space-visible",
+            &[
+                ("org_id", org_id),
+                ("subject_id", user_id),
+                ("resource_type", "document"),
+                ("space_ref", space_ref),
+            ],
+            org_id,
+            user_id,
+            verified_bearer,
+            "authz:space-visible",
+            space_ref,
+            "resolve room files visible through a Space",
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_ids(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+        org_id: &str,
+        user_id: &str,
+        verified_bearer: Option<&str>,
+        operation: &str,
+        resource_id: &str,
+        reason: &str,
+    ) -> Result<Vec<String>, ()> {
         let verified_bearer = verified_bearer
             .filter(|token| !token.is_empty() && !token.contains(char::is_whitespace))
             .ok_or_else(|| {
                 tracing::warn!("verified user proof unavailable; explicit grants fail closed");
             })?;
-        let url = format!(
-            "{}/api/v1/internal/authz/visible",
-            self.user_core_url.trim_end_matches('/')
-        );
-        let rb = self.http.get(&url).query(&[
-            ("org_id", org_id),
-            ("subject_id", user_id),
-            ("resource_type", "document"),
-        ]);
+        let url = format!("{}{}", self.user_core_url.trim_end_matches('/'), path);
+        let rb = self.http.get(&url).query(query);
         let mut request = rb.build().map_err(|e| {
             tracing::warn!(error = %e, "user-core authz facade request build failed");
         })?;
@@ -204,12 +312,15 @@ impl HttpVisibilityClient {
             };
             let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
             let nonce = uuid::Uuid::new_v4().to_string();
-            let delegation = delegation_headers(
+            let delegation = delegation_headers_for(
                 token,
                 request.method().as_str(),
                 &request_uri,
                 org_id,
                 user_id,
+                operation,
+                resource_id,
+                reason,
                 &timestamp,
                 &nonce,
             );
@@ -223,10 +334,10 @@ impl HttpVisibilityClient {
                 ("X-Delegation-Version", "v2"),
                 ("X-Delegation-Nonce", &delegation.nonce),
                 ("X-Delegation-Timestamp", &delegation.timestamp),
-                ("X-Delegation-Operation", "authz:visible"),
+                ("X-Delegation-Operation", operation),
                 ("X-Delegation-Resource-Type", "document"),
-                ("X-Delegation-Resource-Id", ""),
-                ("X-Delegation-Reason", "resolve explicit document grants"),
+                ("X-Delegation-Resource-Id", resource_id),
+                ("X-Delegation-Reason", reason),
                 ("X-Delegation-ZDR", "true"),
                 ("X-Delegation-Body-SHA256", &delegation.body_sha256),
                 ("X-Delegation-Signature", &delegation.signature),
@@ -266,6 +377,22 @@ impl VisibilityClient for HttpVisibilityClient {
         // Fail closed for grant-only documents. Owner and org-visible access are
         // independently evaluated by the canonical SQL visibility predicate.
         self.fetch(org_id, user_id, verified_bearer)
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn visible_space_documents(
+        &self,
+        org_id: &str,
+        user_id: &str,
+        space_ref: &str,
+        verified_bearer: Option<&str>,
+    ) -> Vec<String> {
+        if !self.space_grants_enabled || space_ref.trim().is_empty() {
+            return Vec::new();
+        }
+        // Fail closed: any error is "no room files", never "all of them".
+        self.fetch_space(org_id, user_id, space_ref, verified_bearer)
             .await
             .unwrap_or_default()
     }
@@ -358,5 +485,187 @@ mod tests {
             vec!["document-1"]
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // WS14-S5: the Space-visible lookup. Control is a local axum stub.
+
+    #[test]
+    fn space_visible_delegation_matches_the_independently_derived_control_vector() {
+        // Derived outside Rust from Control's canonical form
+        // (v2 \n service \n user-core \n ts \n method \n uri \n user \n org \n
+        // operation \n document \n resource id \n reason \n true \n nonce \n digest):
+        // the resource id is the Space reference, not empty.
+        let headers = delegation_headers_for(
+            "0123456789abcdef0123456789abcdef",
+            "GET",
+            "/api/v1/internal/authz/space-visible?org_id=org-1&subject_id=user-1&resource_type=document&space_ref=space%3Aorg-1%3Aroom-7",
+            "org-1",
+            "user-1",
+            "authz:space-visible",
+            "space:org-1:room-7",
+            "resolve room files visible through a Space",
+            "2026-11-02T06:00:00Z",
+            "test-nonce-1234567890",
+        );
+        assert_eq!(headers.body_sha256, "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU");
+        assert_eq!(headers.signature, "CHzhEvmD-Ai0t054Lx3veh6s8JHykPSiPK_g4yYskNU");
+        // The resource id is part of the signed text: another Space signs differently.
+        let other = delegation_headers_for(
+            "0123456789abcdef0123456789abcdef",
+            "GET",
+            "/api/v1/internal/authz/space-visible?org_id=org-1&subject_id=user-1&resource_type=document&space_ref=space%3Aorg-1%3Aroom-7",
+            "org-1",
+            "user-1",
+            "authz:space-visible",
+            "space:org-1:room-8",
+            "resolve room files visible through a Space",
+            "2026-11-02T06:00:00Z",
+            "test-nonce-1234567890",
+        );
+        assert_ne!(other.signature, headers.signature);
+    }
+
+    #[derive(Clone, Default)]
+    struct SpaceStub {
+        calls: std::sync::Arc<AtomicUsize>,
+        violations: std::sync::Arc<AtomicUsize>,
+        fail_org: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    async fn space_visible(
+        State(stub): State<SpaceStub>,
+        headers: HeaderMap,
+        uri: axum::http::Uri,
+    ) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+        stub.calls.fetch_add(1, Ordering::SeqCst);
+        let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or("");
+        let request_uri = uri
+            .path_and_query()
+            .map(|pq| pq.as_str().to_string())
+            .unwrap_or_default();
+        // Re-sign exactly as Control would verify, from what arrived.
+        let expected = delegation_headers_for(
+            "0123456789abcdef0123456789abcdef",
+            "GET",
+            &request_uri,
+            header("x-org-id"),
+            header("x-user-id"),
+            header("x-delegation-operation"),
+            header("x-delegation-resource-id"),
+            header("x-delegation-reason"),
+            header("x-delegation-timestamp"),
+            header("x-delegation-nonce"),
+        );
+        let ok = header("authorization") == "Bearer verified.jwt.token"
+            && header("x-service-id") == "retrieval-engine"
+            && header("x-delegation-version") == "v2"
+            && header("x-delegation-operation") == "authz:space-visible"
+            && header("x-delegation-resource-id") == "space:org-1:room-7"
+            && request_uri.contains("space_ref=space%3Aorg-1%3Aroom-7")
+            && header("x-delegation-signature") == expected.signature
+            && header("x-delegation-body-sha256") == expected.body_sha256;
+        if !ok {
+            stub.violations.fetch_add(1, Ordering::SeqCst);
+        }
+        if stub.fail_org.lock().unwrap().as_deref() == Some(header("x-org-id")) {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error":"down"})),
+            );
+        }
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "ids": ["doc-1", "doc-2"],
+                "space_ref": "space:org-1:room-7",
+                "audience_revision": 3
+            })),
+        )
+    }
+
+    async fn serve_space_stub(stub: SpaceStub) -> String {
+        let app = Router::new()
+            .route("/api/v1/internal/authz/space-visible", get(space_visible))
+            .with_state(stub);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve test") });
+        format!("http://{address}")
+    }
+
+    const SPACE: &str = "space:org-1:room-7";
+
+    #[tokio::test]
+    async fn space_documents_are_requested_with_a_signed_space_scoped_delegation_and_the_user_bearer() {
+        let stub = SpaceStub::default();
+        let base = serve_space_stub(stub.clone()).await;
+        let client = HttpVisibilityClient::new(base, Some("0123456789abcdef0123456789abcdef".into()))
+            .with_space_grants(true);
+
+        let ids = client
+            .visible_space_documents("org-1", "user-1", SPACE, Some("verified.jwt.token"))
+            .await;
+        assert_eq!(ids, vec!["doc-1", "doc-2"]);
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            stub.violations.load(Ordering::SeqCst),
+            0,
+            "operation, resource id, bearer, service id or signature did not verify"
+        );
+    }
+
+    #[tokio::test]
+    async fn space_documents_fail_closed_to_empty_without_a_bearer_on_non_200_and_with_the_flag_off() {
+        let stub = SpaceStub::default();
+        let base = serve_space_stub(stub.clone()).await;
+        let token = Some("0123456789abcdef0123456789abcdef".to_string());
+
+        // Flag off (the default): Control is never asked.
+        let off = HttpVisibilityClient::new(base.clone(), token.clone());
+        assert!(off
+            .visible_space_documents("org-1", "user-1", SPACE, Some("verified.jwt.token"))
+            .await
+            .is_empty());
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 0);
+
+        let on = HttpVisibilityClient::new(base, token).with_space_grants(true);
+        // No bearer, a bearer with whitespace, a blank Space: never asked.
+        for bearer in [None, Some(""), Some("two words")] {
+            assert!(on
+                .visible_space_documents("org-1", "user-1", SPACE, bearer)
+                .await
+                .is_empty());
+        }
+        assert!(on
+            .visible_space_documents("org-1", "user-1", "  ", Some("verified.jwt.token"))
+            .await
+            .is_empty());
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 0);
+
+        // A Control failure is "no room files", never "all of them".
+        *stub.fail_org.lock().unwrap() = Some("org-1".to_string());
+        assert!(on
+            .visible_space_documents("org-1", "user-1", SPACE, Some("verified.jwt.token"))
+            .await
+            .is_empty());
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 1);
+
+        // Unreachable Control: also empty.
+        let dead = HttpVisibilityClient::new("http://127.0.0.1:1", Some("0123456789abcdef0123456789abcdef".into()))
+            .with_space_grants(true);
+        assert!(dead
+            .visible_space_documents("org-1", "user-1", SPACE, Some("verified.jwt.token"))
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_default_and_noop_clients_never_return_space_documents() {
+        assert!(NoopVisibilityClient
+            .visible_space_documents("org-1", "user-1", SPACE, Some("verified.jwt.token"))
+            .await
+            .is_empty());
     }
 }

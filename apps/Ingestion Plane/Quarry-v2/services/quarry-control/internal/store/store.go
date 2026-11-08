@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -116,9 +117,9 @@ type WebhooksStore interface {
 }
 
 // SchedulesStore is the schedule table. The tenant methods (GetByOrg,
-// ListByOrg, DeleteByOrg, UpdateEnabledByOrg) are the only ones the edge
-// reaches; a row that belongs to another org answers exactly like a missing
-// one. The unscoped methods (Get, List, Delete, UpdateEnabled, ListDesired)
+// ListByOrg, ListByOrgTag, DeleteByOrg, UpdateEnabledByOrg, UpdateTagByOrg)
+// are the only ones the edge reaches; a row that belongs to another org
+// answers exactly like a missing one. The unscoped methods (Get, List, Delete, UpdateEnabled, ListDesired)
 // serve the orchestrator reconciler and the internal source-monitor path.
 type SchedulesStore interface {
 	ResourceStore[Schedule]
@@ -127,6 +128,15 @@ type SchedulesStore interface {
 	ListByOrg(orgID string, limit int, cursor string) ([]Schedule, string)
 	DeleteByOrg(id quarrycontracts.ID, orgID string) error
 	UpdateEnabledByOrg(id quarrycontracts.ID, orgID string, enabled bool) error
+	// ListByOrgTag is ListByOrg restricted to the schedules of orgID whose tag is
+	// tag. The tag goes through NormalizeTag first, so "Pricing" finds "pricing".
+	// "" lists the untagged schedules. An empty orgID, or a tag that does not
+	// normalise, matches nothing.
+	ListByOrgTag(orgID string, tag string, limit int, cursor string) ([]Schedule, string)
+	// UpdateTagByOrg sets the tag of the schedule id in orgID ("" clears it). A row
+	// of another org answers ErrNotFound, as a missing one does. It does not move
+	// updated_at, which stays the create or enable/disable stamp.
+	UpdateTagByOrg(id quarrycontracts.ID, orgID string, tag string) error
 	// ListDesired is the orchestrator's all-orgs read (internal path only).
 	ListDesired(limit int, cursor string) ([]Schedule, string)
 	// UpdateRuntime writes the executor's bookkeeping (WS15.S2 writes it; the
@@ -148,6 +158,29 @@ func invalid(reason, format string, args ...any) error {
 	return &ValidationError{Reason: reason, Message: fmt.Sprintf(format, args...)}
 }
 
+// maxTagLength bounds one tag (E3.5-6, migration 027). A tag is a short operator
+// label that groups monitors and sources; it is not free text.
+const maxTagLength = 32
+
+// tagPattern is the tag grammar once lowercased: a letter or a digit first, then
+// letters, digits, '.', '_' or '-'.
+var tagPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
+// NormalizeTag returns the stored form of a tag: trimmed and lowercased. The
+// empty string is the untagged value and is valid. Anything else must be 1 to
+// 32 characters of the tag grammar, or it is refused with reason invalid_tag.
+// The message never echoes the input, so a long value cannot inflate a response.
+func NormalizeTag(raw string) (string, error) {
+	t := strings.ToLower(strings.TrimSpace(raw))
+	if t == "" {
+		return "", nil
+	}
+	if len(t) > maxTagLength || !tagPattern.MatchString(t) {
+		return "", invalid("invalid_tag", "tag must be 1 to %d characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit", maxTagLength)
+	}
+	return t, nil
+}
+
 // SourcesStore is the durable registry of recurring ingestion targets a
 // tenant has registered (Cycle 23 `quarry_sources`, migration 005). Every
 // method is ORG-SCOPED: the org id is a verified value the edge stamps from
@@ -157,6 +190,12 @@ type SourcesStore interface {
 	// ListByOrg returns the org's non-deleted sources, newest-first, with an
 	// opaque keyset cursor.
 	ListByOrg(orgID string, limit int, cursor string) ([]Source, string)
+	// ListByOrgTag is ListByOrg restricted to the org's live sources whose tag is
+	// tag, with the same tag rules as SchedulesStore.ListByOrgTag.
+	ListByOrgTag(orgID, tag string, limit int, cursor string) ([]Source, string)
+	// UpdateTagByOrg sets the tag of a live source the org owns ("" clears it) and
+	// bumps updated_at. A cross-tenant or soft-deleted id answers ErrNotFound.
+	UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag string) error
 	// Create inserts a new source. The caller mints the org-prefixed id and
 	// stamps the org id; Create does not derive either.
 	Create(s Source) error
@@ -654,6 +693,9 @@ type Schedule struct {
 	// Name is the operator-facing label (WS15.S1, migration 017). Empty for
 	// legacy rows; the tenant view falls back to the target.
 	Name string `json:"name,omitempty"`
+	// Tag is the operator label that groups this monitor (E3.5-6, migration 027).
+	// "" is untagged; a stored value has been through NormalizeTag.
+	Tag string `json:"tag,omitempty"`
 	// Config is the per-kind payload: {url} for scrape and crawl, {urls} for
 	// batch, plus max_pages, max_depth and ingest. JSONB in the table.
 	Config map[string]any `json:"config,omitempty"`
@@ -708,6 +750,8 @@ func (s *Schedule) ApplyDefaults(now int64) {
 // without a Go-flavor envelope. OrgID is stamped server-side from the verified
 // JWT and is NOT NULL in the DB; the JSON tag carries it on the wire so the edge
 // surfaces it. CreatedAt/UpdatedAt are unix-millis to match the rest of the store.
+// Tag (E3.5-6, migration 027) is the operator label: "" is untagged, and a stored
+// value has been through NormalizeTag.
 type Source struct {
 	ID        quarrycontracts.ID `json:"source_id"`
 	OrgID     string             `json:"org_id"`
@@ -716,6 +760,7 @@ type Source struct {
 	Kind      string             `json:"kind"`   // crawl | scrape | search
 	Status    string             `json:"status"` // active | paused | deleted
 	Config    map[string]any     `json:"config,omitempty"`
+	Tag       string             `json:"tag,omitempty"`
 	CreatedAt int64              `json:"created_at"`
 	UpdatedAt int64              `json:"updated_at"`
 }
@@ -779,6 +824,7 @@ type memDB struct {
 	snapshotsV2  *memSnapshotsV2
 	jobClaims    *jobClaimTable
 	zdrTombs     *memZdrTombstones
+	schedReqs    *memScheduleRequests
 }
 
 func NewMemory() DB {
@@ -797,6 +843,7 @@ func NewMemory() DB {
 		snapshotsV2:  &memSnapshotsV2{},
 		jobClaims:    &jobClaimTable{until: map[quarrycontracts.ID]time.Time{}},
 		zdrTombs:     newMemZdrTombstones(),
+		schedReqs:    newMemScheduleRequests(),
 	}
 }
 
@@ -820,6 +867,11 @@ type memSchedules struct{ *genericStore[Schedule] }
 
 // Create applies the same defaults the pg store applies (ApplyDefaults).
 func (m *memSchedules) Create(s Schedule) error {
+	tag, err := NormalizeTag(s.Tag)
+	if err != nil {
+		return err
+	}
+	s.Tag = tag
 	s.ApplyDefaults(time.Now().Unix())
 	return m.genericStore.Create(s)
 }
@@ -857,6 +909,46 @@ func (m *memSchedules) ListByOrg(orgID string, limit int, cursor string) ([]Sche
 	}
 	m.mu.RUnlock()
 	return pageSchedulesMem(all, limit, cursor)
+}
+
+// ListByOrgTag is ListByOrg restricted to the schedules of orgID whose tag is
+// tag, after NormalizeTag. An empty orgID, or a tag that does not normalise,
+// matches nothing.
+func (m *memSchedules) ListByOrgTag(orgID, tag string, limit int, cursor string) ([]Schedule, string) {
+	norm, err := NormalizeTag(tag)
+	if err != nil || orgID == "" {
+		return nil, ""
+	}
+	m.mu.RLock()
+	all := make([]Schedule, 0, len(m.items))
+	for _, it := range m.items {
+		if it.OrgID == orgID && it.Tag == norm {
+			all = append(all, it)
+		}
+	}
+	m.mu.RUnlock()
+	return pageSchedulesMem(all, limit, cursor)
+}
+
+// UpdateTagByOrg sets the tag of a schedule the org owns. Like the pg store, it
+// leaves UpdatedAt alone.
+func (m *memSchedules) UpdateTagByOrg(id quarrycontracts.ID, orgID string, tag string) error {
+	norm, err := NormalizeTag(tag)
+	if err != nil {
+		return err
+	}
+	if orgID == "" {
+		return ErrNotFound
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok || it.OrgID != orgID {
+		return ErrNotFound
+	}
+	it.Tag = norm
+	m.items[id] = it
+	return nil
 }
 
 func (m *memSchedules) ListDesired(limit int, cursor string) ([]Schedule, string) {
@@ -950,6 +1042,11 @@ func newMemSources() *memSources {
 }
 
 func (m *memSources) Create(s Source) error {
+	tag, err := NormalizeTag(s.Tag)
+	if err != nil {
+		return err
+	}
+	s.Tag = tag
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.items[s.ID]; exists {
@@ -965,6 +1062,11 @@ func (m *memSources) Create(s Source) error {
 // index). A match refreshes updated_at and is returned as-is; no match
 // inserts `s` the same way Create does.
 func (m *memSources) UpsertByOrgAndURL(s Source) (Source, bool, error) {
+	tag, err := NormalizeTag(s.Tag)
+	if err != nil {
+		return Source{}, false, err
+	}
+	s.Tag = tag
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, id := range m.order {
@@ -1018,6 +1120,57 @@ func (m *memSources) ListByOrg(orgID string, limit int, _ string) ([]Source, str
 		out = append(out, s)
 	}
 	return out, ""
+}
+
+// ListByOrgTag is ListByOrg restricted to the org's live sources whose tag is
+// tag, after NormalizeTag. Like ListByOrg it returns no cursor: the in-memory
+// store is the dev store and does not page sources.
+func (m *memSources) ListByOrgTag(orgID, tag string, limit int, _ string) ([]Source, string) {
+	norm, err := NormalizeTag(tag)
+	if err != nil || orgID == "" {
+		return nil, ""
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	out := make([]Source, 0, limit)
+	// Newest-first: walk insertion order in reverse.
+	for i := len(m.order) - 1; i >= 0; i-- {
+		id := m.order[i]
+		if m.deleted[id] {
+			continue
+		}
+		s := m.items[id]
+		if s.OrgID != orgID || s.Tag != norm {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, s)
+	}
+	return out, ""
+}
+
+// UpdateTagByOrg sets the tag of a live source the org owns and bumps updated_at.
+// A cross-tenant or soft-deleted id answers ErrNotFound, as SoftDeleteByOrg does.
+func (m *memSources) UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag string) error {
+	norm, err := NormalizeTag(tag)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.items[id]
+	if !ok || m.deleted[id] || s.OrgID != orgID || orgID == "" {
+		return ErrNotFound
+	}
+	s.Tag = norm
+	s.UpdatedAt = time.Now().UnixMilli()
+	m.items[id] = s
+	return nil
 }
 
 func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error {
@@ -1904,4 +2057,267 @@ func (l *memEventLog) FindByIdempotencyKey(key string) (quarrycontracts.Event, b
 		}
 	}
 	return quarrycontracts.Event{}, false
+}
+
+// ---- schedule requests (WS15.S3, migration 026) ----------------------------
+
+// Schedule request actions and states. A trigger or backfill is recorded as a
+// row that the orchestrator claims (pull model, X-9 / D14 option 2): control
+// holds no Temporal client, so a request is durable before anything runs and an
+// orchestrator restart between request and claim loses nothing.
+const (
+	ScheduleRequestTrigger  = "trigger"
+	ScheduleRequestBackfill = "backfill"
+
+	ScheduleRequestPending  = "pending"
+	ScheduleRequestClaimed  = "claimed"
+	ScheduleRequestDone     = "done"
+	ScheduleRequestFailed   = "failed"
+	ScheduleRequestRejected = "rejected"
+)
+
+// ScheduleRequest is one trigger or backfill of a schedule. Times are unix
+// milliseconds. Params is {start_at, end_at, overlap_policy} for a backfill and
+// empty for a trigger; Result is what the orchestrator reported (the workflow
+// or schedule id). The row holds no page content.
+type ScheduleRequest struct {
+	ID             quarrycontracts.ID `json:"id"`
+	ScheduleID     quarrycontracts.ID `json:"schedule_id"`
+	OrgID          string             `json:"org_id"`
+	Action         string             `json:"action"`
+	Params         map[string]any     `json:"params,omitempty"`
+	Status         string             `json:"status"`
+	ClaimedBy      string             `json:"claimed_by,omitempty"`
+	LeaseUntil     int64              `json:"lease_until,omitempty"`
+	Attempts       int                `json:"attempts"`
+	Result         map[string]any     `json:"result,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	RequestedBy    string             `json:"requested_by,omitempty"`
+	IdempotencyKey string             `json:"-"`
+	CreatedAt      int64              `json:"created_at"`
+	FinishedAt     *int64             `json:"finished_at,omitempty"`
+}
+
+// ScheduleRequestTerminal reports whether status ends a request.
+func ScheduleRequestTerminal(status string) bool {
+	switch status {
+	case ScheduleRequestDone, ScheduleRequestFailed, ScheduleRequestRejected:
+		return true
+	}
+	return false
+}
+
+// ScheduleRequestsStore is the request table. Create refuses a second open
+// (pending or claimed) request of the same schedule and a repeated
+// (org, idempotency key) with ErrConflict. Claim hands each claimable row to one
+// worker: a pending row, or a claimed row whose lease ran out (the worker died).
+// Complete, Fail and Release act only on a row the named worker still holds;
+// anything else is ErrConflict, an unknown id ErrNotFound.
+type ScheduleRequestsStore interface {
+	Create(req ScheduleRequest) error
+	// GetByOrg is the tenant read: a request of another org is not found.
+	GetByOrg(id quarrycontracts.ID, orgID string) (ScheduleRequest, bool)
+	// HasPending reports an open request of the schedule. action "" matches any.
+	HasPending(scheduleID quarrycontracts.ID, action string) bool
+	Claim(worker string, limit int, lease time.Duration, now time.Time) ([]ScheduleRequest, error)
+	Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error
+	// Fail ends a held request as failed or rejected with a short reason.
+	Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error
+	// Release gives a held request back to the queue (a transient error); the
+	// attempt stays counted and the reason is kept as the last error.
+	Release(id quarrycontracts.ID, worker, reason string) error
+}
+
+// ScheduleRequestsProvider is implemented by a DB that has the request table.
+// It is optional, like RequestQueueReader, so a DB without it answers 501
+// instead of failing to compile; both backends here implement it.
+type ScheduleRequestsProvider interface {
+	ScheduleRequests() ScheduleRequestsStore
+}
+
+// ScheduleRequestReasonMax bounds the stored error text.
+const ScheduleRequestReasonMax = 256
+
+// ClipScheduleRequestReason trims a reason to ScheduleRequestReasonMax bytes.
+func ClipScheduleRequestReason(s string) string {
+	if len(s) > ScheduleRequestReasonMax {
+		return s[:ScheduleRequestReasonMax]
+	}
+	return s
+}
+
+type memScheduleRequests struct {
+	mu    sync.Mutex
+	items map[quarrycontracts.ID]ScheduleRequest
+	order []quarrycontracts.ID
+}
+
+func newMemScheduleRequests() *memScheduleRequests {
+	return &memScheduleRequests{items: map[quarrycontracts.ID]ScheduleRequest{}}
+}
+
+func (d *memDB) ScheduleRequests() ScheduleRequestsStore { return d.schedReqs }
+
+func copyAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneScheduleRequest(r ScheduleRequest) ScheduleRequest {
+	r.Params = copyAnyMap(r.Params)
+	r.Result = copyAnyMap(r.Result)
+	if r.FinishedAt != nil {
+		v := *r.FinishedAt
+		r.FinishedAt = &v
+	}
+	return r
+}
+
+func (m *memScheduleRequests) Create(req ScheduleRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, dup := m.items[req.ID]; dup {
+		return ErrConflict
+	}
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.ScheduleID == req.ScheduleID && !ScheduleRequestTerminal(it.Status) {
+			return ErrConflict
+		}
+		if req.IdempotencyKey != "" && it.OrgID == req.OrgID && it.IdempotencyKey == req.IdempotencyKey {
+			return ErrConflict
+		}
+	}
+	if req.Status == "" {
+		req.Status = ScheduleRequestPending
+	}
+	m.items[req.ID] = cloneScheduleRequest(req)
+	m.order = append(m.order, req.ID)
+	return nil
+}
+
+func (m *memScheduleRequests) GetByOrg(id quarrycontracts.ID, orgID string) (ScheduleRequest, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, ok := m.items[id]
+	if !ok || orgID == "" || it.OrgID != orgID {
+		return ScheduleRequest{}, false
+	}
+	return cloneScheduleRequest(it), true
+}
+
+func (m *memScheduleRequests) HasPending(scheduleID quarrycontracts.ID, action string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		it := m.items[id]
+		if it.ScheduleID != scheduleID || ScheduleRequestTerminal(it.Status) {
+			continue
+		}
+		if action == "" || it.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *memScheduleRequests) Claim(worker string, limit int, lease time.Duration, now time.Time) ([]ScheduleRequest, error) {
+	if worker == "" {
+		return nil, fmt.Errorf("claim: worker required")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	nowMs := now.UnixMilli()
+	var out []ScheduleRequest
+	// Oldest first: order is insertion order, which is created_at order.
+	for _, id := range m.order {
+		if len(out) >= limit {
+			break
+		}
+		it := m.items[id]
+		claimable := it.Status == ScheduleRequestPending ||
+			(it.Status == ScheduleRequestClaimed && it.LeaseUntil < nowMs)
+		if !claimable {
+			continue
+		}
+		it.Status = ScheduleRequestClaimed
+		it.ClaimedBy = worker
+		it.LeaseUntil = now.Add(lease).UnixMilli()
+		it.Attempts++
+		m.items[id] = it
+		out = append(out, cloneScheduleRequest(it))
+	}
+	return out, nil
+}
+
+// held returns the row when worker still holds it.
+func (m *memScheduleRequests) held(id quarrycontracts.ID, worker string) (ScheduleRequest, error) {
+	it, ok := m.items[id]
+	if !ok {
+		return ScheduleRequest{}, ErrNotFound
+	}
+	if it.Status != ScheduleRequestClaimed || it.ClaimedBy != worker {
+		return ScheduleRequest{}, ErrConflict
+	}
+	return it, nil
+}
+
+func (m *memScheduleRequests) Complete(id quarrycontracts.ID, worker string, result map[string]any, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	fin := now.UnixMilli()
+	it.Status = ScheduleRequestDone
+	it.Result = copyAnyMap(result)
+	it.Error = ""
+	it.LeaseUntil = 0
+	it.FinishedAt = &fin
+	m.items[id] = it
+	return nil
+}
+
+func (m *memScheduleRequests) Fail(id quarrycontracts.ID, worker, status, reason string, now time.Time) error {
+	if status != ScheduleRequestFailed && status != ScheduleRequestRejected {
+		return fmt.Errorf("fail: status must be failed or rejected")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	fin := now.UnixMilli()
+	it.Status = status
+	it.Error = ClipScheduleRequestReason(reason)
+	it.LeaseUntil = 0
+	it.FinishedAt = &fin
+	m.items[id] = it
+	return nil
+}
+
+func (m *memScheduleRequests) Release(id quarrycontracts.ID, worker, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	it, err := m.held(id, worker)
+	if err != nil {
+		return err
+	}
+	it.Status = ScheduleRequestPending
+	it.ClaimedBy = ""
+	it.LeaseUntil = 0
+	it.Error = ClipScheduleRequestReason(reason)
+	m.items[id] = it
+	return nil
 }

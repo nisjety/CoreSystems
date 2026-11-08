@@ -8,16 +8,22 @@
 #[must_use]
 pub fn tool_data_category(tool: &str) -> &'static str {
     match tool {
-        "web_search" | "fetch_url" | "web_fetch" | "news" | "traffic" | "yr_weather"
+        "web_search" | "fetch_url" | "web_fetch" | "read_page" | "find_in_page" | "news" | "traffic"
+        | "yr_weather"
         | "company_lookup" | "track_shipment" => "public_non_personal",
         // The org's own ingested documents, the user's own durable memory, and
         // the user's own conversation. All three are customer content, and a
         // read of them is exactly as reportable as a read of a document —
         // recording any of them as `unclassified` understates what the ledger
         // says was accessed.
-        "knowledge_search" | "knowledge_list_documents" | "recall_memory" | "reattach_context" => {
-            "customer_private"
-        }
+        "knowledge_search"
+        | "knowledge_list_documents"
+        | "recall_memory"
+        | "reattach_context"
+        | "recall_conversations"
+        | "thread_outline"
+        | "thread_search"
+        | "thread_read" => "customer_private",
         // A connected account's records are the user's own personal data.
         "list_provider_actions" | "read_provider_action" | "execute_provider_action" => "personal",
         _ => "unclassified",
@@ -56,6 +62,10 @@ mod tests {
         for tool in [
             "recall_memory",
             "reattach_context",
+            "recall_conversations",
+            "thread_outline",
+            "thread_search",
+            "thread_read",
             "knowledge_search",
             "knowledge_list_documents",
         ] {

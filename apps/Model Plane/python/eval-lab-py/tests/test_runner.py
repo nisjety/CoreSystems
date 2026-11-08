@@ -28,10 +28,10 @@ from eval_lab.types import (
 
 def test_baseline_suite_loads_and_validates() -> None:
     cases = load_cases(CASES_DIR)
-    assert len(cases) == 17, (
-        f"suite must hold 17 cases (12 baseline + 2 compaction + 3 run-context), got {len(cases)}"
+    assert len(cases) == 20, (
+        f"suite must hold 20 cases (14 baseline + 2 compaction + 4 run-context), got {len(cases)}"
     )
-    assert len({case.id for case in cases}) == 17
+    assert len({case.id for case in cases}) == 20
 
 
 def test_deployed_agent_cases_request_the_agentic_feature() -> None:
@@ -93,6 +93,10 @@ def test_run_context_cases_drive_an_agentic_run_after_a_short_thread() -> None:
     # can exercise is the deployment's: the case names the fixture it needs and
     # skips honestly when the stack does not have it.
     assert "authored-instruction-fixture" in instruction.requires
+    # EP-8-S3: the tone case is a Do run too, and it names its own fixture so it skips until one exists.
+    tone = cases["18-do-run-follows-a-tone-preset"]
+    assert "agentic" in tone.features
+    assert "tone-preset-fixture" in tone.requires
 
 
 # ── multi-turn (compaction eval) runner mechanism ───────────────────────────

@@ -1,8 +1,12 @@
 import { cleanup, render, screen } from '@solidjs/testing-library'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-const spacesClient = vi.hoisted(() => ({ getSpaceActivity: vi.fn() }))
-vi.mock('@/shared/api/spaces-client', () => spacesClient)
+const spacesClient = vi.hoisted(() => ({
+  searchSpaceMessages: vi.fn(() => new Promise(() => {})), getSpaceActivity: vi.fn() }))
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  ...spacesClient,
+}))
 
 const { SpaceActivityPanel } = await import('./SpaceActivityPanel')
 
@@ -182,6 +186,36 @@ describe('SpaceActivityPanel', () => {
     expect(await screen.findByText('Opprettet sak')).toBeTruthy()
     expect(screen.getByText(/andre medlemmer har kjørt/)).toBeTruthy()
     expect(screen.queryByText(/not authorized/)).toBeNull()
+  })
+
+  // WS03-S7: a typed denial says why; its words win over the section's code switch.
+  it('shows the denial copy when a gap carries a typed reason, over its code', async () => {
+    spacesClient.getSpaceActivity.mockResolvedValue(
+      answer({
+        unavailable: [{
+          section: 'runs',
+          code: 'runs_read_not_authorized',
+          reason: 'Reading this Space’s shared work is not authorized.',
+          details: { reason: 'space_policy_not_provisioned', resolvable_by: 'org_admin' },
+        }],
+      }),
+    )
+    renderPanel()
+
+    expect(await screen.findByText(/Organisasjonen din har ikke satt opp rom ennå/)).toBeTruthy()
+    expect(screen.getByText(/Be en administrator i organisasjonen om å endre dette\./)).toBeTruthy()
+    expect(screen.queryByText(/andre medlemmer har kjørt/)).toBeNull()
+  })
+
+  it('keeps the code switch for a gap without details', async () => {
+    spacesClient.getSpaceActivity.mockResolvedValue(
+      answer({
+        unavailable: [{ section: 'runs', code: 'runs_read_not_authorized', reason: 'x' }],
+      }),
+    )
+    renderPanel()
+
+    expect(await screen.findByText(/andre medlemmer har kjørt/)).toBeTruthy()
   })
 
   it('falls back to the server sentence for an unrecognised code', async () => {

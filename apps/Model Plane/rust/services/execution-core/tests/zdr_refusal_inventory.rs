@@ -22,6 +22,7 @@ const NAMED_SITES: &[(&str, &str)] = &[
     ("auth.rs", "delegated browser bearer"),
     ("auth.rs", "delegated Data Plane bearer"),
     ("auth.rs", "delegated sandbox bearer"),
+    ("sandbox_lease.rs", "thread workspace zdr guard"),
 ];
 
 fn source_files(directory: &Path, found: &mut Vec<PathBuf>) {
@@ -81,6 +82,31 @@ fn the_named_sites_are_typed_where_they_are_declared() {
         assert!(
             source.contains("zdr_refusal::Refusal"),
             "{file} ({site}) must build its ZDR refusal from mp_contracts::zdr_refusal::Refusal"
+        );
+    }
+}
+
+/// Sandbox egress (EP-9 E3) is held at off for a zero-retention or waived run rather than
+/// refused: the tier is never asked for in a tool input, so there is no request to refuse, and
+/// the call runs with no network. That hold is the ZDR boundary for this egress, so it is pinned
+/// here beside the refusals: the run's ceiling reads both facts, and the run loop supplies both.
+#[test]
+fn sandbox_egress_is_held_off_for_zero_retention_and_waived_runs() {
+    let proxy = std::fs::read_to_string(src_path("egress_proxy.rs")).expect("egress_proxy.rs");
+    assert!(
+        proxy.contains("if facts.zdr || facts.waived"),
+        "egress_proxy::run_ceiling must hold a ZDR or waived run at off"
+    );
+    let agent =
+        std::fs::read_to_string(src_path("runtime_loop/agent.rs")).expect("runtime_loop/agent.rs");
+    for needle in [
+        "crate::egress_proxy::run_ceiling(",
+        "zdr,",
+        "waived: ctx.route.is_waived(),",
+    ] {
+        assert!(
+            agent.contains(needle),
+            "the run loop must set the egress ceiling from the run's ZDR and waiver facts: {needle}"
         );
     }
 }

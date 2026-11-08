@@ -38,11 +38,23 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         // have to know that to see why `system` is not swallowed as a run id.
         .route("/api/v1/agents/runs/system", get(list_system_runs))
         .route("/api/v1/agents/runs/{run_id}", get(get_run))
+        // EP-14 S5: the run's durable, content-free timing (owner only; the Model Plane checks).
+        .route("/api/v1/agents/runs/{run_id}/timing", get(get_run_timing))
+        // EP-14 S7: one model call's request snapshot (owner only, D3-filtered; the Model Plane checks).
+        .route(
+            "/api/v1/agents/runs/{run_id}/requests/{call_seq}",
+            get(get_run_request),
+        )
         // Approving a plan IS the autonomy grant — the browser names the rung
         // and the reason, and the Model Plane validates both.
         .route(
             "/api/v1/agents/runs/{run_id}/plan-approval",
             post(approve_plan),
+        )
+        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts.
+        .route(
+            "/api/v1/agents/wide-research/estimate",
+            post(wide_research_estimate),
         )
         // Per-org/user rate limiting, ordered like `orchestration.rs`:
         // `require_session` (written last → outer) runs first and inserts
@@ -210,6 +222,68 @@ async fn get_run(
     (status, body).into_response()
 }
 
+/// `GET /api/v1/agents/runs/{run_id}/timing` — the run's timing records and its tool calls' times
+/// (EP-14 S5), passed through as model-gateway answers them. Model-gateway refuses a zero-retention
+/// caller with the typed `run_inspection` refusal and answers 404 for a run the caller does not own,
+/// so this layer adds no rule of its own.
+async fn get_run_timing(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!(
+        "{}/v1/runs/{}/timing",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id)
+    );
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+/// `GET /api/v1/agents/runs/{run_id}/requests/{call_seq}` — what one model call of the run was sent and
+/// offered (EP-14 S7), passed through as model-gateway answers it. Session Core applies decision D3
+/// (platform prompt sections carry no text) and the owner-only check; model-gateway refuses a
+/// zero-retention caller and answers 404 while its inspector switch is off. Filtering here instead would
+/// leave platform text on the wire, so this layer adds no rule of its own.
+async fn get_run_request(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((run_id, call_seq)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!(
+        "{}/v1/runs/{}/requests/{}",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id),
+        urlencoding::encode(&call_seq)
+    );
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
 /// Grant a planning run the authority to execute, at a named rung and with a
 /// stated reason.
 ///
@@ -243,4 +317,73 @@ pub(crate) async fn approve_plan(
     )
     .await;
     (status, body).into_response()
+}
+
+/// The fields of a wide-research estimate the SPA may send. Anything else in the body is dropped
+/// here, so the browser cannot name an org, a cap or a price source.
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct WideResearchEstimateBody {
+    item_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    subscription_connection_id: Option<String>,
+}
+
+/// `POST /api/v1/agents/wide-research/estimate` — what a wide-research run of `item_count` items
+/// would look like before it starts (Wave 3 EP-2 S8), passed through as model-gateway answers it.
+/// Model-gateway reads the org's item cap from its own policy registry, refuses a zero-retention
+/// caller with the typed `agentic` refusal and answers 404 while its switch is off, so this layer
+/// adds no rule of its own beyond the closed body.
+async fn wide_research_estimate(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<WideResearchEstimateBody>,
+) -> impl IntoResponse {
+    let token = model_token(&state, &user, &headers).await;
+    let session_token = session_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/research/wide/estimate", state.model_gateway_url);
+    let (status, body) = proxy_model_json_with_session(
+        &state,
+        Method::POST,
+        &url,
+        serde_json::to_value(&body).ok(),
+        token.as_deref(),
+        session_token.as_deref(),
+        &user,
+    )
+    .await;
+    (status, body).into_response()
+}
+
+#[cfg(test)]
+mod wide_research_tests {
+    use super::*;
+
+    #[test]
+    fn the_estimate_body_keeps_only_its_own_fields() {
+        let body: WideResearchEstimateBody = serde_json::from_value(serde_json::json!({
+            "item_count": 10,
+            "model": "verevon-balance",
+            "org_id": "someone-else",
+            "cap": 100,
+        }))
+        .expect("unknown fields are dropped, not refused");
+        let forwarded = serde_json::to_value(&body).expect("serialisable");
+        assert_eq!(
+            forwarded,
+            serde_json::json!({"item_count": 10, "model": "verevon-balance"})
+        );
+    }
+
+    #[test]
+    fn the_estimate_body_needs_a_count() {
+        assert!(serde_json::from_value::<WideResearchEstimateBody>(serde_json::json!({
+            "model": "verevon-balance"
+        }))
+        .is_err());
+    }
 }

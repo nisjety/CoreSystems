@@ -613,6 +613,10 @@ impl ExecutionService {
                 self.cas_client.as_ref(),
                 &self.sandbox_tokens,
                 self.process_host.as_deref(),
+                // A scheduled run is always Space-scoped (`validate_scheduled_step_bindings` requires
+                // its Space) and carries no retrieval decision, so its knowledge search is withheld
+                // rather than run organisation-wide (WS18-S5; WS20 owns a decision for these runs).
+                crate::knowledge_tools::SpaceRetrieval::Withheld,
                 None,
                 Some(runtime_loop::scheduled_agent::loop_scope(&contract)),
             ),
@@ -825,6 +829,7 @@ fn scheduled_inference_request(
     goal: &str,
 ) -> pb::InferRequest {
     pb::InferRequest {
+        purpose: pb::InferPurpose::ScheduledRound as i32,
         // Keep provider correlation in the same tenant/run/step namespace as
         // the Session receipt. A bare step id can collide across runs or
         // tenants, which makes an ambiguous provider response impossible to
@@ -1010,6 +1015,9 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
     if !enabled {
         return Err(Status::failed_precondition("continue_disabled"));
     }
+    if resume_names_question(resume) {
+        return enforce_question_resume(resume, runtime_loop::resume::ask_resume_enabled());
+    }
     if !matches!(resume.mode.as_str(), "segment" | "loop" | "park") {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
@@ -1025,6 +1033,35 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
         return Ok(());
     }
     if resume.approval_id.is_empty() || resume.claim_token.is_empty() {
+        return Err(Status::invalid_argument("resume_incomplete"));
+    }
+    Ok(())
+}
+
+/// Whether a continuation names a run question rather than an approval (build plan WS14 S5). Such a
+/// continuation carries a question id or an answer, and nothing an approval stage reads.
+fn resume_names_question(resume: &pb::AgentResume) -> bool {
+    !resume.question_id.is_empty() || !resume.answer_json.is_empty()
+}
+
+/// A question continuation (build plan WS14 S5), judged after the continue switch: refused while
+/// `AGENT_ASK_USER_RESUME_ENABLED` and its prerequisites are not all on, and refused unless it names
+/// one question with its answer and a claim. It never names an approval, a step, a tool or a brief.
+fn enforce_question_resume(resume: &pb::AgentResume, question_resume_on: bool) -> Result<(), Status> {
+    if !question_resume_on {
+        return Err(Status::failed_precondition("continue_disabled"));
+    }
+    let names_an_approval = !resume.approval_id.is_empty()
+        || !resume.step_id.is_empty()
+        || !resume.tool_name.is_empty()
+        || !resume.action_fingerprint.is_empty()
+        || !resume.brief.is_empty();
+    if names_an_approval
+        || !matches!(resume.mode.as_str(), "segment" | "loop")
+        || resume.question_id.is_empty()
+        || resume.answer_json.is_empty()
+        || resume.claim_token.is_empty()
+    {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
     Ok(())
@@ -1143,6 +1180,30 @@ fn judge_run_attachments(
     Ok(())
 }
 
+/// E3.3-f: queue the steer text a pause or resume carries, before the run's state moves. Empty
+/// text is nothing to do. While `QUARRY_BROWSER_AGENT_STEER` is off the text is refused, not
+/// dropped: the person must not watch their words vanish. The ZDR refusal is the caller's
+/// (`enforce_persistence_free_execution` already ran for every run control).
+#[allow(clippy::result_large_err)]
+fn queue_steer_text(state: &StateStore, run_id: &str, text: &str) -> Result<(), Status> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    if !crate::browser_agent::steer_enabled() {
+        return Err(Status::failed_precondition("browser_steer_disabled"));
+    }
+    match state.enqueue_steer(run_id, text) {
+        crate::state::SteerOutcome::Queued { .. } => Ok(()),
+        crate::state::SteerOutcome::Empty => Ok(()),
+        crate::state::SteerOutcome::TooLong { .. } => {
+            Err(Status::invalid_argument("steer_text_too_long"))
+        }
+        crate::state::SteerOutcome::Full { .. } => {
+            Err(Status::resource_exhausted("steer_queue_full"))
+        }
+    }
+}
+
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
@@ -1155,6 +1216,27 @@ fn enforce_persistence_free_execution(
         );
     }
     Ok(())
+}
+
+/// The thread a step's `code_interpreter` workspace is kept in, when the step takes the thread path
+/// (WS22-S2). Only such a step demands the user-bound sandbox bearer, so with the switch off no step
+/// does, and each request is handled as it was before the switch existed.
+fn thread_workspace_thread<'a>(
+    switched_on: bool,
+    tool_name: &str,
+    space_id: &str,
+    thread_id: &'a str,
+    persistence_free: bool,
+) -> Option<&'a str> {
+    if tool_name != "code_interpreter" {
+        return None;
+    }
+    crate::sandbox_lease::workspace_sync::thread_for_step(
+        switched_on,
+        persistence_free,
+        space_id,
+        thread_id,
+    )
 }
 
 #[allow(clippy::result_large_err)]
@@ -1330,8 +1412,65 @@ fn authorize_scheduled_step_service(
     Ok(())
 }
 
+fn validate_restricted_browser_step(req: &pb::ExecuteStepRequest) -> Result<(), Status> {
+    if req.tool_name != "browser_agent" {
+        return Err(Status::invalid_argument("restricted browser dispatch requires browser_agent"));
+    }
+    let input: serde_json::Value = serde_json::from_str(&req.tool_input)
+        .map_err(|_| Status::invalid_argument("invalid restricted browser input"))?;
+    let has_attach = input.get("attach_session_id").and_then(serde_json::Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    let ask: crate::quarry_agent::WireRequestAsk = input.get("policy").cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| Status::invalid_argument("restricted attachment requires a policy"))?;
+    if !has_attach || ask.is_empty() {
+        return Err(Status::invalid_argument("restricted attachment requires a non-empty policy"));
+    }
+    if !["browser.act.upload", "browser.act.download"].iter().all(|required| ask.disable.iter().any(|capability| capability == required)) {
+        return Err(Status::invalid_argument("restricted attachment must disable file transfers"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod restricted_browser_dispatch_tests {
+    use super::*;
+    #[test]
+    fn restricted_rpc_refuses_missing_policy_or_attachment() {
+        let mut req = pb::ExecuteStepRequest { tool_name: "browser_agent".into(), ..Default::default() };
+        for input in ["{}", r#"{"attach_session_id":"s","policy":{}}"#, r#"{"policy":{"disable":["browser.act.input"]}}"#] {
+            req.tool_input = input.into();
+            assert!(validate_restricted_browser_step(&req).is_err());
+        }
+        req.tool_input = r#"{"attach_session_id":"s","policy":{"disable":["browser.act.input"]}}"#.into();
+        assert!(validate_restricted_browser_step(&req).is_err());
+        req.tool_input = r#"{"attach_session_id":"s","policy":{"disable":["browser.act.upload","browser.act.download"]}}"#.into();
+        assert!(validate_restricted_browser_step(&req).is_ok());
+        req.tool_name = "echo".into();
+        assert!(validate_restricted_browser_step(&req).is_err());
+    }
+}
+
 #[tonic::async_trait]
 impl ExecutionCore for ExecutionService {
+    async fn browser_agent_capabilities(
+        &self,
+        request: Request<pb::BrowserAgentCapabilitiesRequest>,
+    ) -> Result<Response<pb::BrowserAgentCapabilitiesResponse>, Status> {
+        let caller = self.auth.authenticate(&request).await?;
+        caller.authorize(&request.get_ref().org_id, None)?;
+        Ok(Response::new(pb::BrowserAgentCapabilitiesResponse { attached_policy_protocol: 1 }))
+    }
+
+    async fn execute_restricted_browser_step(
+        &self,
+        request: Request<pb::ExecuteStepRequest>,
+    ) -> Result<Response<pb::ExecuteStepResponse>, Status> {
+        validate_restricted_browser_step(request.get_ref())?;
+        // The existing method authenticates all delegated credentials and
+        // run ownership before validating the broker grant or starting Quarry.
+        self.execute_step(request).await
+    }
     // single-step RPC: gate → execute → HITL → persist is one linear flow
     #[allow(clippy::too_many_lines)]
     async fn execute_step(
@@ -1354,7 +1493,7 @@ impl ExecutionCore for ExecutionService {
         // live leased context and `browser.act` can cause external effects.
         let browser_bearer = if matches!(
             request.get_ref().tool_name.as_str(),
-            "browser_agent" | "browser.observe" | "browser.act"
+            "browser_agent" | "browser.observe" | "browser.act" | "browser.console"
         ) {
             Some(
                 self.auth
@@ -1364,15 +1503,28 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
-        // Demanded only for a Space-scoped code_interpreter or workspace read (WS24-S3) step —
+        // Demanded only for a Space-scoped code_interpreter, shell (WS06-S9) or workspace read (WS24-S3) step —
         // every other step, and a non-Space one, is unaffected.
         // sandbox-manager's own AcquireLease binds a Space capability
         // decision to the CALLING principal, so a service-level credential
         // could never pass it; this is the one delegated bearer that must be
         // user-bound (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 B.2).
-        let sandbox_bearer = if (request.get_ref().tool_name == "code_interpreter"
+        // A thread-scope code_interpreter (WS22-S2) demands the same user-bound bearer, for its
+        // thread's own lease. Only with the switch on, and only for a step that is neither
+        // Space-scoped nor persistence-free, does that path apply.
+        let thread_scope_id = thread_workspace_thread(
+            crate::sandbox_lease::workspace_sync::switched_on(),
+            &request.get_ref().tool_name,
+            &request.get_ref().space_id,
+            &request.get_ref().thread_id,
+            request.get_ref().zdr || caller.zdr || caller.zdr_waiver.is_some(),
+        )
+        .map(str::to_owned);
+        let sandbox_bearer = if ((request.get_ref().tool_name == "code_interpreter"
+            || request.get_ref().tool_name == "shell"
             || crate::workspace_tools::is_workspace_tool(&request.get_ref().tool_name))
-            && !request.get_ref().space_id.is_empty()
+            && !request.get_ref().space_id.is_empty())
+            || thread_scope_id.is_some()
         {
             Some(
                 self.auth
@@ -1437,9 +1589,15 @@ impl ExecutionCore for ExecutionService {
             self.session_channel.clone(),
             Some(self.state.clone()),
         )
-        .with_verified_bearer(session_bearer.as_str());
+        .with_verified_bearer(session_bearer.as_str())
+        .with_receipt_persistence_confirmed(
+            !req.zdr && !caller.zdr && caller.org_zdr == Some(false) && caller.zdr_waiver.is_none(),
+        );
 
-        let sandbox = sandbox_bearer.as_ref().map(|sandbox_bearer| {
+        let sandbox = sandbox_bearer
+            .as_ref()
+            .filter(|_| !req.space_id.is_empty())
+            .map(|sandbox_bearer| {
             crate::sandbox_lease::SandboxLeaseContext {
                 space_id: &req.space_id,
                 sandbox_bearer: sandbox_bearer.as_str(),
@@ -1452,6 +1610,20 @@ impl ExecutionCore for ExecutionService {
             }
         });
 
+        // The thread a code_interpreter call keeps its files in (WS22-S2). Present only for a step that
+        // took the thread path: a Space step never does, so `sandbox` stays its only context.
+        let thread = match (thread_scope_id.as_deref(), sandbox_bearer.as_ref()) {
+            (Some(thread_id), Some(bearer)) if req.space_id.is_empty() => {
+                Some(crate::sandbox_lease::workspace_sync::ThreadScope {
+                    thread_id,
+                    bearer: bearer.as_str(),
+                    backend_id: &self.backend_id,
+                    sandbox_manager_client: &self.sandbox_manager_client,
+                    cas_client: self.cas_client.as_ref(),
+                })
+            }
+            _ => None,
+        };
         let outcome = runtime_loop::execute_step_with_browser_grant(
             &req.tool_name,
             &req.tool_input,
@@ -1485,6 +1657,7 @@ impl ExecutionCore for ExecutionService {
             self.capability_policy.as_ref(),
             browser_grant.as_ref(),
             sandbox.as_ref(),
+            thread.as_ref(),
         )
         .await;
 
@@ -1512,12 +1685,22 @@ impl ExecutionCore for ExecutionService {
                     // (org_id, idempotency_key) ON CONFLICT guard.
                     idempotency_key: format!("{run_id}:{step_id}"),
                     continuation_descriptor_json: String::new(),
+                    tool_key: String::new(),
+                    action_digest: String::new(),
+                    turn_origin: String::new(),
+                    grant_use_token: String::new(),
+                    context_json: crate::space_gate::card_context_json(
+                        &req.tool_name,
+                        &req.tool_input,
+                        crate::space_gate::RESUME_NONE,
+                    ),
                     cause: Some(approval_cause::for_call(
                         outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
                         &run_id,
                         &req.tool_name,
                         &req.tool_input,
                     )),
+                    ..Default::default()
                 },
                 session_bearer.as_str(),
             )
@@ -1624,6 +1807,7 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        queue_steer_text(&self.state, &req.run_id, &req.steer_text)?;
         let resumed_step = if req.approval_id.trim().is_empty() {
             self.state.resume_paused(&req.run_id)
         } else {
@@ -1633,6 +1817,7 @@ impl ExecutionCore for ExecutionService {
                     pb::GetApprovalRequest {
                         approval_id: req.approval_id.clone(),
                         org_id: req.org_id.clone(),
+                        ..Default::default()
                     },
                     session_bearer.as_str(),
                 )?)
@@ -1727,6 +1912,7 @@ impl ExecutionCore for ExecutionService {
         caller.authorize(&req.org_id, None)?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
+        queue_steer_text(&self.state, &req.run_id, &req.steer_text)?;
         let paused = self.state.pause(&req.run_id);
         info!(run_id = %req.run_id, "pause_run: run state set to Paused");
 
@@ -1766,7 +1952,17 @@ impl ExecutionCore for ExecutionService {
         // on a per-tool basis. Mirrors the mandatory data-plane/inference
         // bearers above, which every ExecuteStep call already requires
         // unconditionally for the identical reason.
-        let sandbox_bearer = if request.get_ref().space_id.is_empty() {
+        // A run whose thread keeps a workspace (WS22-S2) demands the same user-bound bearer, which its
+        // code_interpreter calls use for the thread's own lease. With the switch off, or for a run that
+        // is persistence-free, nothing changes.
+        let thread_workspace = crate::sandbox_lease::workspace_sync::thread_for_step(
+            crate::sandbox_lease::workspace_sync::switched_on(),
+            request.get_ref().zdr || caller.zdr || caller.zdr_waiver.is_some(),
+            &request.get_ref().space_id,
+            &request.get_ref().thread_id,
+        )
+        .is_some();
+        let sandbox_bearer = if request.get_ref().space_id.is_empty() && !thread_workspace {
             None
         } else {
             Some(
@@ -1783,6 +1979,13 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
+        // The Space retrieval the gateway authorised for this run's knowledge search (WS18-S5). It is
+        // read before the request is consumed, and a header that is not valid text is withheld, not
+        // ignored: a decision nobody can read must not turn into an organisation-wide search.
+        let space_retrieval_header = request
+            .metadata()
+            .get(crate::knowledge_tools::SPACE_RETRIEVAL_HEADER)
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
         let mut req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1797,6 +2000,12 @@ impl ExecutionCore for ExecutionService {
         // on a zero-retention run, is refused with the closed token only.
         enforce_run_context(&req)?;
         enforce_resume(&req, mp_contracts::loop_fold::continue_after_approval_enabled())?;
+        // A question continuation is judged above, but its apply on resume is not built yet (the
+        // executor's input pause and its answer step). It is refused here, before anything is
+        // consumed, rather than read as an approval.
+        if req.resume.as_ref().is_some_and(resume_names_question) {
+            return Err(Status::failed_precondition("question_resume_unavailable"));
+        }
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
@@ -1835,6 +2044,7 @@ impl ExecutionCore for ExecutionService {
             self.cas_client.as_ref(),
             &self.sandbox_tokens,
             self.process_host.as_deref(),
+            crate::knowledge_tools::SpaceRetrieval::from_header(space_retrieval_header.as_deref()),
         )
         .await?;
         Ok(Response::new(response))
@@ -1894,6 +2104,10 @@ pub async fn serve(
     auth: JwtVerifier,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9093").await?;
+    info!(
+        thread_workspace = crate::sandbox_lease::workspace_sync::switched_on(),
+        "execution-core thread workspace switch read at startup"
+    );
     let session_url = std::env::var("SESSION_CORE_URL")
         .or_else(|_| std::env::var("SESSION_CORE_ADDR"))
         .unwrap_or_else(|_| "http://localhost:9091".to_owned());
@@ -2872,6 +3086,61 @@ mod run_context_boundary_tests {
         }
     }
 
+    fn question_resume(mode: &str) -> pb::AgentResume {
+        pb::AgentResume {
+            mode: mode.to_owned(),
+            question_id: "q_1".to_owned(),
+            answer_json: "{}".to_owned(),
+            claim_token: "claim".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A question continuation is refused while its switch is off, and it names exactly one question,
+    /// its answer and its claim. It never names an approval, a step, a tool or a brief.
+    #[test]
+    fn enforce_question_resume_needs_the_switch_and_exactly_the_question_shape() {
+        for mode in ["segment", "loop"] {
+            assert!(enforce_question_resume(&question_resume(mode), true).is_ok(), "{mode}");
+            let off = enforce_question_resume(&question_resume(mode), false).expect_err("switch off");
+            assert_eq!(off.message(), "continue_disabled");
+        }
+        let incomplete = [
+            pb::AgentResume { mode: "park".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { approval_id: "appr_1".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { tool_name: "delete_records".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { brief: "recorded results".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { question_id: String::new(), ..question_resume("segment") },
+            pb::AgentResume { answer_json: String::new(), ..question_resume("segment") },
+            pb::AgentResume { claim_token: String::new(), ..question_resume("segment") },
+            pb::AgentResume { mode: "PARK".to_owned(), ..question_resume("segment") },
+        ];
+        for shape in incomplete {
+            let e = enforce_question_resume(&shape, true).expect_err("an incomplete question shape");
+            assert_eq!(e.message(), "resume_incomplete");
+        }
+    }
+
+    /// Only a continuation that carries a question or an answer takes the question check, so an
+    /// approval continuation keeps its own.
+    #[test]
+    fn resume_names_a_question_only_when_it_carries_one() {
+        assert!(resume_names_question(&question_resume("segment")));
+        let answer_only = pb::AgentResume { answer_json: "{}".to_owned(), ..Default::default() };
+        assert!(resume_names_question(&answer_only));
+        assert!(!resume_names_question(&resume("segment")));
+        let park = pb::AgentResume { mode: "park".to_owned(), claim_token: "c".to_owned(), ..Default::default() };
+        assert!(!resume_names_question(&park));
+    }
+
+    /// With the continue switch off a question continuation is refused for that reason first.
+    #[test]
+    fn enforce_resume_refuses_a_question_continuation_while_the_continue_switch_is_off() {
+        let refused = enforce_resume(&with_resume(Some(question_resume("segment"))), false)
+            .expect_err("switch off");
+        assert_eq!(refused.message(), "continue_disabled");
+    }
+
     /// A park resume (WS03 S8-6): the `park` mode with a claim token and nothing an approval
     /// names. The switch is judged first, as for every resume; a park that names an approval, a
     /// step, a tool, a fingerprint or a brief, or carries no token, is incomplete. The committed
@@ -3135,5 +3404,71 @@ mod run_attachment_tests {
             assert_eq!(refused.code(), tonic::Code::InvalidArgument, "{token}");
             assert_eq!(refused.message(), token);
         }
+    }
+
+    #[test]
+    fn thread_scope_demands_the_sandbox_bearer_only_when_enabled() {
+        // With the switch off no step takes the thread path, so none demands the bearer, and each
+        // request is handled as it was before the switch existed.
+        assert_eq!(
+            super::thread_workspace_thread(false, "code_interpreter", "", "thread_01", false),
+            None
+        );
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "", "thread_01", false),
+            Some("thread_01")
+        );
+        // Only the code interpreter takes the thread path, and only a step that names a thread.
+        assert_eq!(
+            super::thread_workspace_thread(true, "web_search", "", "thread_01", false),
+            None
+        );
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "", "", false),
+            None
+        );
+    }
+
+    #[test]
+    fn space_scope_never_takes_the_thread_path() {
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "space_01", "thread_01", false),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn thread_workspace_refused_under_zdr() {
+        // A zero-retention or waived step never takes the thread path, whatever the switch says.
+        assert_eq!(
+            super::thread_workspace_thread(true, "code_interpreter", "", "thread_01", true),
+            None
+        );
+        // The lease guard refuses it with the typed token before any RPC. The endpoint is
+        // unroutable, so reaching the wire would fail with a different status.
+        let state = crate::state::StateStore::new();
+        let client = crate::sandbox_manager_client::SandboxManagerClient::new(
+            tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                .expect("valid endpoint")
+                .connect_lazy(),
+        );
+        let status = crate::sandbox_lease::ensure_thread_lease(
+            &client,
+            "bearer",
+            &state,
+            "run_01",
+            "org_01",
+            "thread_01",
+            true,
+        )
+        .await
+        .expect_err("a zero-retention thread lease is refused");
+        let refusal = mp_contracts::zdr_refusal::Refusal::from_status(&status)
+            .expect("the refusal carries its catalogue kind");
+        assert_eq!(
+            refusal.code(),
+            mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED
+        );
+        assert_eq!(refusal.feature(), Some("sandbox_workspace"));
     }
 }

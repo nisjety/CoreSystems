@@ -7,6 +7,7 @@
 //!     final LLM call, with memory results injected as system context.
 
 use chrono::Utc;
+use mp_contracts::model_plane::v1::InferPurpose;
 use mp_contracts::model_plane::v1::{
     model_gateway_server::{ModelGateway, ModelGatewayServer},
     AppendThreadMessageRequest, AppendThreadMessageResponse, ApproveApprovalRequest,
@@ -14,7 +15,7 @@ use mp_contracts::model_plane::v1::{
     CreateTaskRequest, CreateTaskResponse, DenyApprovalRequest, DenyApprovalResponse,
     EnterPlanModeRequest, EnterPlanModeResponse, ExecuteCommandRequest, ExecuteCommandResponse,
     ExitPlanModeRequest, ExitPlanModeResponse, ExportTrajectoriesRequest,
-    ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, FetchRequest,
+    ExportTrajectoriesResponse, ExtractStructuredRequest, ExtractStructuredResponse, ExtractStructuredResult, FetchRequest,
     FetchResponse, GetAnalyticsRequest, GetAnalyticsResponse, GetPolicyRequest, GetPolicyResponse,
     GetSkillRequest, GetSkillResponse, HealthRequest, HealthResponse, InferChunk, InferRequest,
     InferResponse, InvokeChunk, InvokeRequest, InvokeResponse, IsPlanModeRequest,
@@ -40,6 +41,10 @@ use mp_contracts::model_plane::v1::{
 };
 use mp_contracts::model_plane::v1::{
     Command, EvaluatePolicyRequest, OrgPolicy, Plugin, TaskRecord,
+};
+use mp_contracts::model_plane::v1::{
+    mcp_elicitation_service_server::{McpElicitationService, McpElicitationServiceServer},
+    AnswerMcpElicitationRequest, AnswerMcpElicitationResponse,
 };
 use mp_events::{envelope::Envelope, publisher::EventPublisher, subjects};
 use mp_ids::new_ulid;
@@ -120,6 +125,7 @@ direct_tenant_requests!(
     FetchRequest,
     ExtractStructuredRequest,
     ScreenContentRequest,
+    AnswerMcpElicitationRequest,
 );
 
 impl TenantScopedRequest for RecordTrajectoryRequest {
@@ -387,12 +393,6 @@ async fn read_run_detail(
     }
 }
 
-/// Maximum page content (markdown chars) forwarded to inference-core
-/// for `ExtractStructured`. Tuned to stay well below the 128k context
-/// floor every in-use model shares, leaving headroom for the schema +
-/// system prompt + caller instructions.
-const MAX_EXTRACT_CONTENT_CHARS: usize = 80_000;
-
 pub(crate) struct GatewayService {
     state: AppState,
 }
@@ -618,6 +618,7 @@ fn build_infer_request(
         ))
     })?;
     Ok(InferRequest {
+        purpose: InferPurpose::Answer as i32,
         // Extended thinking is not exposed on the legacy gRPC `InvokeRequest`
         // surface, so this path never asks for a reasoning budget. Pinned
         // explicitly rather than left to `Default` so the zero reads as a
@@ -670,6 +671,7 @@ async fn publish_ingress_accepted(
             "transport": "grpc",
         }),
         zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -694,6 +696,36 @@ async fn publish_usage_envelope(
     min_privacy_tier: i32,
     cost_basis: crate::pricing::CostBasis,
 ) {
+    publish_usage_envelope_via(
+        state,
+        request_id,
+        org_id,
+        infer,
+        latency_ms,
+        user_id,
+        zdr,
+        min_privacy_tier,
+        cost_basis,
+        "grpc",
+    )
+    .await;
+}
+
+/// [`publish_usage_envelope`] naming the transport the call came in on (`grpc`, or `tool_loop` for a
+/// call the gateway made on a chat turn's behalf, WS16.S8).
+#[allow(clippy::too_many_arguments)] // provenance and cost basis ride beside the usage counters
+pub(crate) async fn publish_usage_envelope_via(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    infer: &InferResponse,
+    latency_ms: u64,
+    user_id: &str,
+    zdr: bool,
+    min_privacy_tier: i32,
+    cost_basis: crate::pricing::CostBasis,
+    transport: &str,
+) {
     if zdr {
         return;
     }
@@ -717,7 +749,7 @@ async fn publish_usage_envelope(
             "input_tokens": infer.input_tokens,
             "output_tokens": infer.output_tokens,
             "latency_ms": latency_ms,
-            "transport": "grpc",
+            "transport": transport,
             // Phase-4 provenance receipt inputs, matching the HTTP envelopes:
             // which deployment processed the content and under what
             // residency / requested privacy floor.
@@ -734,6 +766,7 @@ async fn publish_usage_envelope(
             "cost_basis": cost_basis.as_str(),
         }),
         zdr,
+        ..Default::default()
     };
 
     if let Err(error) = state
@@ -741,7 +774,7 @@ async fn publish_usage_envelope(
         .publish(&subjects::usage_subject(org_id), &usage_envelope)
         .await
     {
-        warn!(%error, "failed to publish grpc USAGE_ENVELOPE");
+        warn!(%error, transport, "failed to publish USAGE_ENVELOPE");
     }
 }
 
@@ -2040,6 +2073,8 @@ impl ModelGateway for GatewayService {
                         org_id: req.org_id.clone(),
                         enabled_only: true,
                         for_user_id: String::new(),
+                        kinds: Vec::new(),
+                        thread_id: String::new(),
                     },
                 )?)
                 .await
@@ -2873,131 +2908,51 @@ impl ModelGateway for GatewayService {
         if !self.state.quarry.available() {
             return Err(Status::unimplemented("quarry edge not configured"));
         }
-        if req.url.trim().is_empty() {
-            return Err(Status::invalid_argument("url is required"));
+
+        // The work (scrape, prompt, call, validation, one repair, verbatim checks, fan-out over
+        // `urls`, the usage envelope) is `web_extraction`'s, shared with the chat tool (WS16.S8).
+        let request_id = request_id_or_new(&req.request_id);
+        let single = req.urls.is_empty();
+        let mut spec = crate::web_extraction::ExtractSpec::from_request(
+            &req,
+            req.zdr,
+            identity.inference_bearer().unwrap_or_default(),
+            request_id.clone(),
+        )
+        .map_err(Status::invalid_argument)?;
+        if spec.inference_bearer.is_empty() {
+            return Err(Status::unauthenticated(
+                "verified inference-core credential required",
+            ));
         }
-        if req.schema_json.trim().is_empty() {
-            return Err(Status::invalid_argument("schema_json is required"));
-        }
+        spec.user_id = identity.user_id().unwrap_or_default().to_owned();
 
-        // 1. Fetch via Quarry.
-        let render = render_hints_from_proto(req.render.as_ref());
-        let scrape = self
-            .state
-            .quarry
-            .scrape(&req.url, &req.org_id, render.as_ref(), false, req.zdr)
-            .await
-            .map_err(quarry_err_to_status)?;
-
-        // Prefer markdown; fall back to plain text.
-        let mut content = if scrape.markdown.is_empty() {
-            scrape.text.clone()
-        } else {
-            scrape.markdown.clone()
-        };
-        if content.is_empty() {
-            // Fetch succeeded but the page had no extractable text.
-            // Return OK with an error_message so the caller sees a
-            // structured failure, not a gRPC error.
-            return Ok(Response::new(ExtractStructuredResponse {
-                request_id: req.request_id,
-                url: req.url.clone(),
-                final_url: scrape.final_url,
-                title: scrape.title,
-                source_fingerprint: scrape.fingerprint,
-                error_message: "no extractable content from page".to_owned(),
-                ..Default::default()
-            }));
-        }
-        if content.len() > MAX_EXTRACT_CONTENT_CHARS {
-            content.truncate(safe_char_boundary(&content, MAX_EXTRACT_CONTENT_CHARS));
-        }
-
-        // 2. Build the inference call. Single user message embeds the
-        // page content + caller instructions; structured_output_schema
-        // makes the provider enforce the shape end-to-end.
-        let mut system_prompt = String::from(
-            "You extract structured data from web pages. \
-             Read the supplied page content carefully. \
-             For any field where the page does not contain a clear answer, \
-             omit the field — do not invent values. \
-             Return only a JSON object matching the schema.",
-        );
-        if !req.instructions.is_empty() {
-            system_prompt.push_str("\n\nAdditional caller instructions:\n");
-            system_prompt.push_str(&req.instructions);
-        }
-
-        let title_header = if scrape.title.is_empty() {
-            String::new()
-        } else {
-            format!("# {}\n\n", scrape.title)
-        };
-        let user_prompt = format!(
-            "URL: {}\n\n--- PAGE CONTENT ---\n{}{}\n--- END PAGE CONTENT ---\n\n\
-             Extract the requested fields per the JSON schema.",
-            req.url, title_header, content,
-        );
-
-        let infer_req = InferRequest {
-            thinking_budget_tokens: 0,
-            request_id: req.request_id.clone(),
-            org_id: req.org_id.clone(),
-            model: req.model.clone(),
-            provider_hint: req.provider.clone(),
-            messages: vec![
-                ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "system".to_owned(),
-                    content: system_prompt,
-                    name: String::new(),
-                },
-                ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "user".to_owned(),
-                    content: user_prompt,
-                    name: String::new(),
-                },
-            ],
-            temperature: 0.0,
-            max_tokens: 2048,
-            structured_output_schema: req.schema_json.clone(),
-            zdr: req.zdr,
-            ..Default::default()
-        };
-
-        let mut client = self.state.inference_client.clone();
-        match client.infer(identity.inference_request(infer_req)?).await {
-            Ok(resp) => {
-                let infer = resp.into_inner();
-                Ok(Response::new(ExtractStructuredResponse {
-                    request_id: req.request_id,
-                    url: req.url.clone(),
-                    final_url: scrape.final_url,
-                    title: scrape.title,
-                    source_fingerprint: scrape.fingerprint,
-                    extracted_json: infer.content,
-                    model_used: infer.model_used,
-                    input_tokens: infer.input_tokens,
-                    output_tokens: infer.output_tokens,
-                    error_message: String::new(),
-                }))
-            }
-            Err(err) => {
-                // LLM failure. OK + structured error so the caller
-                // still sees the fingerprint and can decide whether to
-                // retry against the same page later.
-                Ok(Response::new(ExtractStructuredResponse {
-                    request_id: req.request_id,
-                    url: req.url.clone(),
-                    final_url: scrape.final_url,
-                    title: scrape.title,
-                    source_fingerprint: scrape.fingerprint,
-                    error_message: format!("inference failed: {err}"),
-                    ..Default::default()
-                }))
+        let mut outcomes = crate::web_extraction::extract(&self.state, &spec).await;
+        if single {
+            // One page, as before: a page the edge could not read is the edge's status.
+            if let Some(error) = outcomes.first_mut().and_then(|o| o.fetch_error.take()) {
+                return Err(quarry_err_to_status(error));
             }
         }
+        let results: Vec<ExtractStructuredResult> = outcomes
+            .iter()
+            .map(|outcome| ExtractStructuredResult::from(&outcome.result))
+            .collect();
+        // The scalar fields mirror the first page, so a caller written before `results` still works.
+        let first = results.first().cloned().unwrap_or_default();
+        Ok(Response::new(ExtractStructuredResponse {
+            request_id,
+            url: first.url,
+            final_url: first.final_url,
+            title: first.title,
+            source_fingerprint: first.source_fingerprint,
+            extracted_json: first.extracted_json,
+            model_used: first.model_used,
+            input_tokens: first.input_tokens,
+            output_tokens: first.output_tokens,
+            error_message: first.error_message,
+            results,
+        }))
     }
 }
 
@@ -3056,18 +3011,81 @@ fn quarry_err_to_status(err: QuarryError) -> Status {
     }
 }
 
-/// Truncate a UTF-8 string to at most `max` bytes without splitting a
-/// codepoint. Falls back to 0 if no valid boundary exists (impossible
-/// for non-empty strings).
-fn safe_char_boundary(s: &str, max: usize) -> usize {
-    if max >= s.len() {
-        return s.len();
+fn elicitation_error(error_message: String) -> AnswerMcpElicitationResponse {
+    AnswerMcpElicitationResponse {
+        output_json: String::new(),
+        error_message,
+        elicitation: None,
     }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+}
+
+/// EP-4 S4: answers to the forms of MCP calls this replica holds. Its own
+/// service so ModelGateway and its doubles stay unchanged; the same verifier
+/// guards it.
+#[tonic::async_trait]
+impl McpElicitationService for GatewayService {
+    async fn answer_mcp_elicitation(
+        &self,
+        request: Request<AnswerMcpElicitationRequest>,
+    ) -> Result<Response<AnswerMcpElicitationResponse>, Status> {
+        // The same gate as ProxyMcpTool, which created the held call: the
+        // governed execution service only, never under ZDR.
+        let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        require_explicit_zdr_contract(&identity, "mcp_execution")?;
+        if !identity.is_service() {
+            return Err(Status::permission_denied(
+                "MCP elicitation answers are restricted to the governed execution service",
+            ));
+        }
+        let req = request.into_inner();
+        if req.elicitation_id.trim().is_empty() {
+            return Err(Status::invalid_argument("elicitation_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        let expired = || {
+            elicitation_error(format!(
+                "{}: the form is no longer waiting for an answer",
+                crate::mcp_elicitation::MCP_ELICITATION_EXPIRED
+            ))
+        };
+        // With the switch off no call is ever held, so nothing can be answered.
+        if !crate::mcp_elicitation::enabled() {
+            return Ok(Response::new(expired()));
+        }
+        let answers = crate::mcp_elicitation::answers_from_proto(&req.answers);
+        match crate::mcp_elicitation::ElicitationRegistry::global()
+            .answer(
+                &req.elicitation_id,
+                identity.org_id(),
+                &req.user_id,
+                &req.action,
+                &answers,
+            )
+            .await
+        {
+            Ok(settled) => {
+                let (output_json, error_message, elicitation) =
+                    runtime_registries::settled_parts(settled);
+                Ok(Response::new(AnswerMcpElicitationResponse {
+                    output_json,
+                    error_message,
+                    elicitation,
+                }))
+            }
+            Err(crate::mcp_elicitation::AnswerError::Expired) => Ok(Response::new(expired())),
+            Err(crate::mcp_elicitation::AnswerError::InvalidAction) => Err(
+                Status::invalid_argument("action must be accept, decline or cancel"),
+            ),
+            Err(crate::mcp_elicitation::AnswerError::InvalidAnswer(problem)) => {
+                Ok(Response::new(elicitation_error(format!(
+                    "{}: {problem}",
+                    crate::mcp_elicitation::MCP_ELICITATION_INVALID_ANSWER
+                ))))
+            }
+        }
     }
-    end
 }
 
 /// Start the additive, authenticated gRPC compatibility listener on `:9090`.
@@ -3103,6 +3121,12 @@ pub async fn serve_with_readiness(
     let result = tonic::transport::Server::builder()
         .add_service(health_service)
         .add_service(ModelGatewayServer::with_interceptor(
+            GatewayService {
+                state: state.clone(),
+            },
+            verifier.clone(),
+        ))
+        .add_service(McpElicitationServiceServer::with_interceptor(
             GatewayService { state },
             verifier,
         ))
@@ -3388,6 +3412,7 @@ mod tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
+                route_note: None,
             }))
         }
 
@@ -3412,6 +3437,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
+                    route_note: None,
                 }),
                 Ok(InferChunk {
                     compaction_summary: String::new(),
@@ -3429,6 +3455,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
+                    route_note: None,
                 }),
             ]))))
         }
@@ -3474,6 +3501,8 @@ mod tests {
                     privacy_tier: 0,
                     residency: String::new(),
                     effort_levels: Vec::new(),
+                    // EP-13 S2's record fields (ModelInfo 9-11); unknown for the mock.
+                    ..Default::default()
                 }],
                 access: None,
             }))
@@ -3967,6 +3996,27 @@ mod tests {
             _: Request<mp_contracts::model_plane::v1::ResetMemoryRequest>,
         ) -> Result<Response<mp_contracts::model_plane::v1::ResetMemoryResponse>, Status> {
             Err(Status::unimplemented("reset_memory not needed in test"))
+        }
+
+        async fn get_user_profile(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetUserProfileRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status> {
+            Err(Status::unimplemented("get_user_profile not needed in test"))
+        }
+
+        async fn set_user_profile(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::SetUserProfileRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status> {
+            Err(Status::unimplemented("set_user_profile not needed in test"))
+        }
+
+        async fn rebuild_user_profile(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RebuildUserProfileRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::UserProfileResponse>, Status> {
+            Err(Status::unimplemented("rebuild_user_profile not needed in test"))
         }
     }
 
@@ -4468,6 +4518,14 @@ mod tests {
 
     #[tonic::async_trait]
     impl RunService for MockRunService {
+        // Main's RPCs (merged 2026-11-02); this double does not serve them.
+        async fn resolve_approval_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::ResolveApprovalAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::ResolveApprovalAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("resolve_approval_authority is not served by this double"))
+        }
+
         async fn get_run(
             &self,
             request: Request<mp_contracts::model_plane::v1::GetRunRequest>,
@@ -4589,6 +4647,20 @@ mod tests {
             Err(Status::unimplemented(
                 "scheduled step authority not needed in gateway test",
             ))
+        }
+
+        async fn authorize_room_run_attach(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::AuthorizeRoomRunAttachResponse>, Status> {
+            Err(Status::unimplemented("room run attach not needed in this test"))
+        }
+
+        async fn cancel_run_as_room_manager(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CancelRunAsRoomManagerRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CancelRunAsRoomManagerResponse>, Status> {
+            Err(Status::unimplemented("room run stop not needed in this test"))
         }
     }
 
@@ -4787,6 +4859,69 @@ mod tests {
 
     fn authenticated<T>(value: T) -> Request<T> {
         authenticated_as(value, "org_test", "user_test")
+    }
+
+    /// WS16.S8: the gRPC method delegates to `web_extraction`. A single URL keeps its shape (the scalar
+    /// fields mirror `results[0]`), the answer is validated against the schema (the mock core answers
+    /// "hello", which is not a JSON object even after the one repair), and bad input is refused
+    /// before anything is fetched.
+    #[tokio::test]
+    async fn extract_structured_validates_the_answer_and_keeps_the_single_url_shape() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "formats": {"markdown": "Price 5"}}
+            })))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let (mut service, _, _) = test_service_with_lifecycle(MockInferenceOk).await;
+        service.state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: quarry.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        let request = |url: &str, urls: Vec<String>, schema: &str| ExtractStructuredRequest {
+            request_id: "req-extract".to_owned(),
+            org_id: "org_test".to_owned(),
+            url: url.to_owned(),
+            urls,
+            schema_json: schema.to_owned(),
+            ..Default::default()
+        };
+
+        let schema = r#"{"type":"object","required":["price"]}"#;
+        let reply = service
+            .extract_structured(authenticated(request("https://a.example", Vec::new(), schema)))
+            .await
+            .expect("an unreadable answer is a structured failure, not a gRPC error")
+            .into_inner();
+        assert_eq!(reply.request_id, "req-extract");
+        assert_eq!(reply.url, "https://a.example");
+        assert_eq!(reply.extracted_json, "", "no data that failed the schema");
+        assert_eq!(reply.error_message, "the model did not return a JSON object");
+        assert_eq!(reply.results.len(), 1);
+        assert_eq!(reply.results[0].error_message, reply.error_message);
+        assert_eq!(reply.results[0].url, "https://a.example");
+        assert!(!reply.results[0].schema_valid);
+
+        for (bad, why) in [
+            (request("https://a.example", Vec::new(), ""), "schema_json is required"),
+            (request("", Vec::new(), schema), "url is required"),
+            (request("https://a.example", Vec::new(), "[1]"), "must be a JSON object"),
+            (
+                request("", (0..6).map(|n| format!("https://e.example/{n}")).collect(), schema),
+                "at most 5 urls",
+            ),
+        ] {
+            let status = service
+                .extract_structured(authenticated(bad))
+                .await
+                .expect_err("bad input is refused");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{why}");
+            assert!(status.message().contains(why), "{why}: {}", status.message());
+        }
     }
 
     fn authenticated_as<T>(value: T, org_id: &str, user_id: &str) -> Request<T> {

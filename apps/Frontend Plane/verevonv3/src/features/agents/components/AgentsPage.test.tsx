@@ -9,6 +9,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import AgentsPage from '@/features/agents/components/AgentsPage'
 import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 
+// The landing's summary reads the org's installations. The role tests have no org and no network,
+// so the read is answered here and the other exports of the module stay real.
+const spacesClient = vi.hoisted(() => ({
+  getAgentInstallations: vi.fn(async () => []),
+}))
+
+vi.mock('@/shared/api/spaces-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/shared/api/spaces-client')>()),
+  getAgentInstallations: spacesClient.getAgentInstallations,
+}))
+
 function renderWithProviders(component: () => JSX.Element, path = '/agents') {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -148,5 +159,32 @@ describe('AgentsPage honesty sweep (Phase 4)', () => {
     expect(screen.getAllByText('Designforhåndsvisning').length).toBeGreaterThan(0)
     const disabledButtons = screen.getAllByRole('button').filter((button) => (button as HTMLButtonElement).disabled)
     expect(disabledButtons.length).toBeGreaterThan(1)
+  })
+})
+
+// EP-6-S5: the landing opens on what the person has. The role blueprints sit under a Templates
+// heading that keeps the Blueprint label, and a blueprint's activation stays disabled in its workspace.
+describe('AgentsPage landing (EP-6-S5)', () => {
+  it('opens on the agents and automations summary, with the blueprints under Templates (preview)', () => {
+    renderWithProviders(() => <AgentsPage />)
+
+    const summary = screen.getByRole('heading', { name: /dine agenter og automatiseringer/i })
+    const templates = screen.getByRole('heading', { name: /maler \(forhåndsvisning\)/i })
+    expect(summary.compareDocumentPosition(templates) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getAllByText('Blueprint').length).toBeGreaterThan(0)
+    expect(screen.getByRole('button', { name: /service agent/i })).toBeTruthy()
+  })
+
+  it('links nowhere in the fleet console from the landing', () => {
+    const { container } = renderWithProviders(() => <AgentsPage />)
+
+    expect(container.querySelector('a[href^="/agents/fleets"]')).toBeNull()
+  })
+
+  it('keeps a blueprint activation disabled in its workspace', () => {
+    renderWithProviders(() => <AgentsPage />, '/agents?agent=service')
+
+    expect(screen.getAllByText('Blueprint').length).toBeGreaterThan(0)
+    expect((screen.getByRole('button', { name: 'Activate service agent' }) as HTMLButtonElement).disabled).toBe(true)
   })
 })

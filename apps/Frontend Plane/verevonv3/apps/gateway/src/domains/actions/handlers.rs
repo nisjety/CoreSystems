@@ -31,9 +31,13 @@ use super::dispatchers::{
     dispatch_inbox_release_draft_lease, dispatch_inbox_remove_tag, dispatch_inbox_review_ai_action,
     dispatch_inbox_save_draft, dispatch_inbox_send_reply, dispatch_inbox_set_assignment,
     dispatch_inbox_set_status, dispatch_inbox_submit_feedback, dispatch_inbox_workspace_set_pinned,
-    dispatch_inbox_workspace_set_read, dispatch_ingestions_create_run,
+    dispatch_inbox_workspace_set_read, dispatch_ingestions_cancel_run,
+    dispatch_ingestions_change_schedule_state, dispatch_ingestions_create_run,
+    dispatch_ingestions_job_control, dispatch_ingestions_start_agent_run,
     dispatch_ingestions_create_schedule, dispatch_ingestions_create_source,
-    dispatch_ingestions_delete_source, dispatch_ingestions_run_schedule_action,
+    dispatch_ingestions_delete_source, dispatch_ingestions_get_run_status,
+    dispatch_ingestions_pause_run, dispatch_ingestions_pause_schedule,
+    dispatch_ingestions_resume_run,
     dispatch_integrations_disconnect, dispatch_integrations_disconnect_chatgpt_subscription,
     dispatch_integrations_extend_inbox_history, dispatch_integrations_start_chatgpt_subscription,
     dispatch_integrations_start_connect_session, dispatch_integrations_trigger_inbox_sync,
@@ -41,12 +45,15 @@ use super::dispatchers::{
     dispatch_knowledge_extract_products, dispatch_knowledge_register_sharepoint_source,
     dispatch_knowledge_summarize_products,
     dispatch_leads_create_list, dispatch_leads_delete_list,
-    dispatch_learning_accept_skill, dispatch_learning_reject_skill, dispatch_learning_undo,
+    dispatch_learning_accept_skill, dispatch_learning_learn_from_thread,
+    dispatch_learning_reject_skill, dispatch_learning_undo,
     dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
     dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
-    dispatch_memory_set_state, dispatch_monitoring_check_now, dispatch_navbar_create_calendar_event,
+    dispatch_memory_set_state, dispatch_monitoring_check_now,
+    dispatch_monitoring_create_monitor, dispatch_monitoring_delete_monitor,
+    dispatch_navbar_create_calendar_event,
     dispatch_navbar_create_calendar_note, dispatch_navbar_mark_notification_read,
     dispatch_navbar_save_theme, dispatch_navbar_submit_support_request,
     dispatch_notification_delete, dispatch_notification_mark_all_read,
@@ -61,7 +68,9 @@ use super::dispatchers::{
     dispatch_organization_switch_active, dispatch_ownership_revoke_document_share,
     dispatch_ownership_share_document, dispatch_privacy_erase_my_account,
     dispatch_router_policy_update, dispatch_settings_create_api_key,
-    dispatch_settings_delete_api_key, dispatch_settings_update_me,
+    dispatch_settings_delete_api_key, dispatch_settings_set_tone_preset,
+    dispatch_settings_complete_personal_setup, dispatch_settings_skip_personal_setup,
+    dispatch_settings_update_me,
     dispatch_settings_update_preferences, dispatch_settings_update_setting,
     dispatch_social_create_campaign, dispatch_social_create_draft_from_inbox,
     dispatch_social_decide_approval, dispatch_space_add_member, dispatch_space_bind_agent,
@@ -73,6 +82,34 @@ use super::dispatchers::{
     dispatch_space_update_thread_presentation,
     dispatch_studio_create_project, dispatch_studio_export_social_draft,
     dispatch_studio_save_project,
+};
+use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
+use super::dispatchers_spaces::ws04::{
+    dispatch_spaces_change_member_role, dispatch_spaces_join_room, dispatch_spaces_leave_room,
+    dispatch_spaces_update_room_details, dispatch_spaces_update_room_settings,
+};
+use super::dispatchers_spaces::ws08::dispatch_spaces_set_agent_wake_policy;
+use super::dispatchers_spaces::ws09::dispatch_spaces_stop_run;
+use super::dispatchers_spaces::ws10::{
+    dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
+};
+use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
+use super::dispatchers_spaces::ws11::{
+    dispatch_spaces_mark_all_read, dispatch_spaces_mark_unread, dispatch_spaces_set_attention_item_state,
+    dispatch_spaces_set_notify_level, dispatch_spaces_set_status, dispatch_spaces_set_thread_follow,
+    dispatch_spaces_cancel_reminder, dispatch_spaces_create_reminder,
+};
+use super::dispatchers_spaces::ws12::{
+    dispatch_spaces_delete_message, dispatch_spaces_edit_message, dispatch_spaces_hide_space,
+    dispatch_spaces_open_dm, dispatch_spaces_toggle_reaction,
+};
+use super::dispatchers_spaces::ws14::{
+    dispatch_space_files_attach, dispatch_space_files_delete, dispatch_space_files_list,
+    dispatch_space_files_read_text,
+};
+use super::dispatchers_spaces::ws16::dispatch_spaces_update_sidebar;
+use super::dispatchers_spaces::ws03::{
+    dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
 use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_conversation_csat_preference,
@@ -106,13 +143,89 @@ pub(super) struct ExecuteActionRequest {
     input: Value,
 }
 
+/// `VEREVON_GATEWAY_AGENT_WEB_TOOLSET` (E3.7.10, R1 user-session path): turns on the
+/// gateway arms of the Model-facing agent web toolset. Off unless it is exactly `true`.
+/// Read per request, and only when the action id is one of the four `web.*` ids.
+pub(super) const AGENT_WEB_TOOLSET_FLAG: &str = "VEREVON_GATEWAY_AGENT_WEB_TOOLSET";
+
+fn agent_web_toolset_enabled() -> bool {
+    agent_web_toolset_from(std::env::var(AGENT_WEB_TOOLSET_FLAG).ok().as_deref())
+}
+
+/// Exactly the word `true`, like the other gateway feature switches; anything else,
+/// including an unset variable, is off.
+fn agent_web_toolset_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The agent web toolset (E3.7.10): each Model-facing id runs the existing user-session
+/// dispatcher of the action it names, so it carries exactly that action's authority and
+/// checks and nothing more. `web.crawl_site` is `knowledge.crawl_site`, so the E3.7.9
+/// approval above the page threshold (enforced on the crawl dispatch path) applies to it
+/// unchanged; the job verbs are the WS15.L5 run-control dispatchers (the caller's own org,
+/// crawl jobs only). There is deliberately no resume arm: the toolset names status, pause
+/// and cancel.
+fn agent_web_tool_target(action_id: &str) -> Option<&'static str> {
+    match action_id {
+        "web.crawl_site" => Some("knowledge.crawl_site"),
+        "web.job_status" => Some("ingestions.get_run_status"),
+        "web.pause_job" => Some("ingestions.pause_run"),
+        "web.cancel_job" => Some("ingestions.cancel_run"),
+        _ => None,
+    }
+}
+
+/// The page count above which a Model-started crawl needs the person's E3.7.9 approval.
+pub(super) const AGENT_CRAWL_APPROVAL_PAGES: u64 = 50;
+
+/// Whether a `web.crawl_site` call must stop for the E3.7.9 approval. The approval prompt and
+/// its record (E3.7.9a/b) are not built yet, so until they are the toolset fails closed: a call
+/// that names no page bound (the edge would apply its own default) or a bound above
+/// [`AGENT_CRAWL_APPROVAL_PAGES`] is refused, and only a crawl the run budget covers runs.
+fn agent_crawl_needs_approval(input: &Value) -> bool {
+    match input
+        .get("max_pages")
+        .or_else(|| input.get("maxPages"))
+        .and_then(Value::as_u64)
+    {
+        Some(pages) => pages > AGENT_CRAWL_APPROVAL_PAGES,
+        None => true,
+    }
+}
+
+/// The id `execute_action` dispatches on. With the toolset off a `web.*` id stays as it is
+/// and falls through to the 501 of an unknown action, exactly as before the switch existed.
+fn resolve_action_id(action_id: &str, toolset_enabled: bool) -> &str {
+    match agent_web_tool_target(action_id) {
+        Some(target) if toolset_enabled => target,
+        _ => action_id,
+    }
+}
+
 pub(super) async fn execute_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(body): Json<ExecuteActionRequest>,
 ) -> Response {
-    match body.action_id.as_str() {
+    let toolset_enabled =
+        agent_web_tool_target(&body.action_id).is_some() && agent_web_toolset_enabled();
+    if toolset_enabled
+        && body.action_id == "web.crawl_site"
+        && agent_crawl_needs_approval(&body.input)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "crawl_approval_required",
+                format!(
+                    "a crawl started by the agent above {AGENT_CRAWL_APPROVAL_PAGES} pages, or without a page bound, needs the person's approval"
+                ),
+            )),
+        )
+            .into_response();
+    }
+    match resolve_action_id(&body.action_id, toolset_enabled) {
         "knowledge.recrawl_source" => dispatch_recrawl(&state, &user, &headers, &body.input).await,
         "knowledge.scrape_url" => dispatch_scrape_url(&state, &user, &headers, &body.input).await,
         "knowledge.crawl_site" => dispatch_crawl_site(&state, &user, &headers, &body.input).await,
@@ -221,10 +334,10 @@ pub(super) async fn execute_action(
             dispatch_navbar_submit_support_request(&state, &user, &body.input).await
         }
         "ownership.share_document" => {
-            dispatch_ownership_share_document(&state, &user, &body.input).await
+            dispatch_ownership_share_document(&state, &user, &headers, &body.input).await
         }
         "ownership.revoke_document_share" => {
-            dispatch_ownership_revoke_document_share(&state, &user, &body.input).await
+            dispatch_ownership_revoke_document_share(&state, &user, &headers, &body.input).await
         }
         "memory.delete" => dispatch_memory_delete(&state, &user, &headers, &body.input).await,
         "memory.set_state" => {
@@ -239,6 +352,9 @@ pub(super) async fn execute_action(
             dispatch_learning_reject_skill(&state, &user, &headers, &body.input).await
         }
         "learning.undo" => dispatch_learning_undo(&state, &user, &headers, &body.input).await,
+        "learning.learn_from_thread" => {
+            dispatch_learning_learn_from_thread(&state, &user, &headers, &body.input).await
+        }
         "settings.update_me" => dispatch_settings_update_me(&state, &user, &body.input).await,
         "settings.update_preferences" => {
             dispatch_settings_update_preferences(&state, &user, &body.input).await
@@ -246,6 +362,13 @@ pub(super) async fn execute_action(
         "settings.update_setting" => {
             dispatch_settings_update_setting(&state, &user, &body.input).await
         }
+        "settings.set_tone_preset" => {
+            dispatch_settings_set_tone_preset(&state, &user, &body.input).await
+        }
+        "settings.complete_personal_setup" => {
+            dispatch_settings_complete_personal_setup(&state, &user, &body.input).await
+        }
+        "settings.skip_personal_setup" => dispatch_settings_skip_personal_setup(&state, &user).await,
         "settings.create_api_key" => {
             dispatch_settings_create_api_key(&state, &user, &headers, &body.input).await
         }
@@ -256,8 +379,20 @@ pub(super) async fn execute_action(
             dispatch_mcp_delete_server(&state, &user, &headers, &body.input).await
         }
         "mcp.share_server" => dispatch_mcp_share_server(&state, &user, &headers, &body.input).await,
+        "ingestions.job_control" => {
+            dispatch_ingestions_job_control(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.start_agent_run" => {
+            dispatch_ingestions_start_agent_run(&state, &user, &headers, &body.input).await
+        }
         "monitoring.check_now" => {
             dispatch_monitoring_check_now(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.create_monitor" => {
+            dispatch_monitoring_create_monitor(&state, &user, &headers, &body.input).await
+        }
+        "monitoring.delete_monitor" => {
+            dispatch_monitoring_delete_monitor(&state, &user, &headers, &body.input).await
         }
         "privacy.erase_my_account" => {
             dispatch_privacy_erase_my_account(&state, &user, &body.input).await
@@ -278,8 +413,23 @@ pub(super) async fn execute_action(
         "ingestions.create_schedule" => {
             dispatch_ingestions_create_schedule(&state, &user, &headers, &body.input).await
         }
-        "ingestions.run_schedule_action" => {
-            dispatch_ingestions_run_schedule_action(&state, &user, &headers, &body.input).await
+        "ingestions.pause_schedule" => {
+            dispatch_ingestions_pause_schedule(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.change_schedule_state" => {
+            dispatch_ingestions_change_schedule_state(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.get_run_status" => {
+            dispatch_ingestions_get_run_status(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.pause_run" => {
+            dispatch_ingestions_pause_run(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.resume_run" => {
+            dispatch_ingestions_resume_run(&state, &user, &headers, &body.input).await
+        }
+        "ingestions.cancel_run" => {
+            dispatch_ingestions_cancel_run(&state, &user, &headers, &body.input).await
         }
         "ingestions.create_source" => {
             dispatch_ingestions_create_source(&state, &user, &headers, &body.input).await
@@ -545,6 +695,102 @@ pub(super) async fn execute_action(
         "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
         "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
         "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,
+        "spaces.create_post" => {
+            dispatch_spaces_create_post(&state, &user, &headers, &body.input).await
+        }
+        "spaces.reply_in_thread" => {
+            dispatch_spaces_reply_in_thread(&state, &user, &headers, &body.input).await
+        }
+        "spaces.change_member_role" => {
+            dispatch_spaces_change_member_role(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.leave_room" => dispatch_spaces_leave_room(&state, &user, &body.input).await,
+        "spaces.open_dm" => {
+            dispatch_spaces_open_dm(&state, &user, &headers, &body.input).await
+        }
+        "spaces.hide_space" => dispatch_spaces_hide_space(&state, &user, &body.input).await,
+        "spaces.edit_message" => {
+            dispatch_spaces_edit_message(&state, &user, &headers, &body.input).await
+        }
+        "spaces.delete_message" => {
+            dispatch_spaces_delete_message(&state, &user, &headers, &body.input).await
+        }
+        "spaces.toggle_reaction" => {
+            dispatch_spaces_toggle_reaction(&state, &user, &headers, &body.input).await
+        }
+        "spaces.update_sidebar" => {
+            dispatch_spaces_update_sidebar(&state, &user, &headers, &body.input).await
+        }
+        "spaces.set_agent_wake_policy" => {
+            dispatch_spaces_set_agent_wake_policy(&state, &user, &body.input).await
+        }
+        "spaces.decide_approval" => {
+            dispatch_spaces_decide_approval(&state, &user, &headers, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.revoke_approval_grant" => {
+            dispatch_spaces_revoke_approval_grant(&state, &user, &body.input).await
+        }
+        "spaces.set_tool_policy" => {
+            dispatch_spaces_set_tool_policy(&state, &user, &body.input).await
+        }
+        "spaces.set_attention_item_state" => {
+            dispatch_spaces_set_attention_item_state(&state, &user, &body.input).await
+        }
+        "spaces.stop_run" => {
+            dispatch_spaces_stop_run(&state, &user, &headers, &body.input).await
+        }
+        "spaces.set_thread_follow" => {
+            dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input).await
+        }
+        "spaces.mark_all_read" => dispatch_spaces_mark_all_read(&state, &user, &body.input).await,
+        "spaces.mark_unread" => dispatch_spaces_mark_unread(&state, &user, &body.input).await,
+        "spaces.set_notify_level" => {
+            dispatch_spaces_set_notify_level(&state, &user, &body.input).await
+        }
+        "spaces.set_status" => {
+            dispatch_spaces_set_status(&state, &user, &headers, &body.input).await
+        }
+        "spaces.create_reminder" => {
+            dispatch_spaces_create_reminder(&state, &user, &headers, &body.input).await
+        }
+        "spaces.cancel_reminder" => {
+            dispatch_spaces_cancel_reminder(&state, &user, &body.input).await
+        }
+        "spaces.update_room_details" => {
+            dispatch_spaces_update_room_details(&state, &user, &body.input).await
+        }
+        "spaces.join_room" => {
+            dispatch_spaces_join_room(&state, &user, &body.input, &body.idempotency_key).await
+        }
+        "spaces.update_room_settings" => {
+            dispatch_spaces_update_room_settings(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "spaces.set_effect_entitlements" => {
+            dispatch_spaces_set_effect_entitlements(
+                &state,
+                &user,
+                &body.input,
+                &body.idempotency_key,
+            )
+            .await
+        }
+        "spaces.apply_effect_preset" => {
+            dispatch_spaces_apply_effect_preset(&state, &user, &body.input, &body.idempotency_key)
+                .await
+        }
+        "space.files.attach" => dispatch_space_files_attach().await,
+        "space.files.list" => {
+            dispatch_space_files_list(&state, &user, &headers, &body.input).await
+        }
+        "space.files.read_text" => {
+            dispatch_space_files_read_text(&state, &user, &headers, &body.input).await
+        }
+        "space.files.delete" => {
+            dispatch_space_files_delete(&state, &user, &headers, &body.input).await
+        }
         // Social actions -> social-core via the dedicated dispatchers (real
         // ApprovalState is enforced by social-core before publish/schedule).
         "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,
@@ -588,4 +834,111 @@ pub(super) async fn reconcile_ticket_create(
     Path(idempotency_key): Path<String>,
 ) -> Response {
     reconcile_ticket_create_dispatch(&state, &user, &idempotency_key).await
+}
+
+#[cfg(test)]
+mod ingestions_dispatch_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn caller() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    async fn run(action_id: &str, input: Value) -> StatusCode {
+        execute_action(
+            State(crate::tests::test_state(false)),
+            Extension(caller()),
+            HeaderMap::new(),
+            Json(ExecuteActionRequest {
+                action_id: action_id.to_owned(),
+                idempotency_key: String::new(),
+                input,
+            }),
+        )
+        .await
+        .status()
+    }
+
+    /// The registry (WS15.L5) split `run_schedule_action` into two actions and added
+    /// four run-control ones. Each new id has a live dispatch (an empty input is a
+    /// 400 from its own validation, not the 501 of an unknown id); the old id has none.
+    #[tokio::test]
+    async fn the_new_ids_dispatch_and_the_removed_id_does_not() {
+        for id in [
+            "ingestions.get_run_status",
+            "ingestions.pause_run",
+            "ingestions.resume_run",
+            "ingestions.cancel_run",
+            "ingestions.pause_schedule",
+            "ingestions.change_schedule_state",
+        ] {
+            assert_eq!(run(id, json!({})).await, StatusCode::BAD_REQUEST, "{id}");
+        }
+        assert_eq!(
+            run("ingestions.run_schedule_action", json!({ "action": "delete_schedule", "scheduleId": "sch_1" })).await,
+            StatusCode::NOT_IMPLEMENTED
+        );
+    }
+
+    const AGENT_WEB_TOOL_IDS: [&str; 4] =
+        ["web.crawl_site", "web.job_status", "web.pause_job", "web.cancel_job"];
+
+    /// E3.7.10: the switch is the exact word `true`; every other spelling is off.
+    #[test]
+    fn the_agent_web_toolset_switch_is_off_unless_exactly_true() {
+        assert!(agent_web_toolset_from(Some("true")));
+        for value in [None, Some(""), Some("1"), Some("TRUE"), Some("yes"), Some(" true")] {
+            assert!(!agent_web_toolset_from(value), "{value:?}");
+        }
+    }
+
+    /// Each toolset id names one existing action, and crawl_site is the crawl action
+    /// itself, so the E3.7.9 page-threshold approval cannot be bypassed through it.
+    #[test]
+    fn each_agent_web_tool_runs_an_existing_action_and_crawl_site_keeps_its_approval_path() {
+        assert_eq!(resolve_action_id("web.crawl_site", true), "knowledge.crawl_site");
+        assert_eq!(resolve_action_id("web.job_status", true), "ingestions.get_run_status");
+        assert_eq!(resolve_action_id("web.pause_job", true), "ingestions.pause_run");
+        assert_eq!(resolve_action_id("web.cancel_job", true), "ingestions.cancel_run");
+        // No resume, no map or batch, and no other prefix is aliased.
+        for id in ["web.resume_job", "web.map_site", "web.batch_scrape", "knowledge.crawl_site"] {
+            assert_eq!(agent_web_tool_target(id), None, "{id}");
+            assert_eq!(resolve_action_id(id, true), id, "{id}");
+        }
+    }
+
+    /// Until the E3.7.9 approval exists, the agent's crawl runs only under an explicit page
+    /// bound at or below the threshold; no bound, or a larger one, needs the approval.
+    #[test]
+    fn an_agent_crawl_above_the_threshold_or_without_a_bound_needs_the_approval() {
+        assert!(!agent_crawl_needs_approval(&json!({ "url": "https://example.com", "max_pages": 50 })));
+        assert!(!agent_crawl_needs_approval(&json!({ "url": "https://example.com", "maxPages": 1 })));
+        assert!(agent_crawl_needs_approval(&json!({ "url": "https://example.com", "max_pages": 51 })));
+        assert!(agent_crawl_needs_approval(&json!({ "url": "https://example.com" })));
+        assert!(agent_crawl_needs_approval(&json!({ "url": "https://example.com", "max_pages": "10" })));
+    }
+
+    /// Off (the default), a toolset id is not resolved and the request gets the 501 of an
+    /// unknown action, before any input is read.
+    #[tokio::test]
+    async fn the_agent_web_tool_ids_are_unknown_actions_while_the_switch_is_off() {
+        if agent_web_toolset_enabled() {
+            // The surrounding environment switched it on; the off path is not observable here.
+            return;
+        }
+        for id in AGENT_WEB_TOOL_IDS {
+            assert_eq!(resolve_action_id(id, false), id, "{id}");
+            assert_eq!(run(id, json!({})).await, StatusCode::NOT_IMPLEMENTED, "{id}");
+        }
+    }
 }

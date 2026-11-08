@@ -49,15 +49,20 @@
 //!    execution therefore launches with [`SandboxEnv::Only`] — `--clearenv` plus
 //!    an explicit `--setenv` allowlist — and the spawn site clears the
 //!    passthrough environment too, so a host without bubblewrap is not a hole.
-//!    Only `shell`, which runs operator-authored commands, still inherits.
+//!    `shell` is cleared too (WS06-S9): it launches with `PATH` alone.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
+use crate::policy::{LimitsConfig, LimitsMode, MpNetworkPolicy, MpSandboxPolicy, ResourceLimits};
 
 /// The bubblewrap binary used for filesystem/namespace isolation on Linux.
 pub const BWRAP_BIN: &str = "bwrap";
+
+/// The util-linux `prlimit` binary that applies per-spawn resource limits
+/// (WS06-S8). It `exec`s its command, so the limits are inherited by `bwrap`
+/// and everything under it.
+pub const PRLIMIT_BIN: &str = "prlimit";
 
 /// A concrete, ready-to-spawn command: program + args, plus whether it was
 /// actually wrapped in a sandbox.
@@ -68,6 +73,9 @@ pub struct SandboxedCommand {
     /// `true` if wrapped in bubblewrap; `false` for a direct passthrough
     /// (`DangerFullAccess`, `External` delegation, or sandbox unavailable).
     pub sandboxed: bool,
+    /// `true` if the command is prefixed with `prlimit` (WS06-S8), so the
+    /// per-spawn limits it was asked for are in force.
+    pub limits_applied: bool,
 }
 
 /// How the sandboxed process's environment is derived from execution-core's.
@@ -110,6 +118,46 @@ pub struct LaunchOptions<'a> {
     /// existing writable-root/read-only-root relationship below). Empty by
     /// default — every existing caller is unaffected.
     pub extra_ro_binds: &'a [(PathBuf, PathBuf)],
+    /// Per-spawn `prlimit` ceilings (WS06-S8). `None` means "do not apply
+    /// limits" (limits switched off, or a caller that has none). When `Some`
+    /// and `prlimit` works here the command is wrapped as
+    /// `prlimit <flags> -- bwrap ...`; when `Some` and `prlimit` is unusable the
+    /// command comes back with `limits_applied == false` and the spawn site
+    /// refuses it (fail closed).
+    pub limits: Option<&'a ResourceLimits>,
+    /// The per-call egress boundary (EP-9 E3). `None` (every existing caller)
+    /// leaves the argv exactly as before. `Some` always unshares the network
+    /// namespace, whatever the policy's network says, and runs the program
+    /// under the bridge so its only way out is this call's proxy socket.
+    pub egress: Option<EgressBridge<'a>>,
+}
+
+/// The sandbox half of a tiered call's egress boundary (EP-9 D-E1): the host
+/// paths the argv needs to give the sandbox exactly one proxy socket.
+#[derive(Debug, Clone, Copy)]
+pub struct EgressBridge<'a> {
+    /// The host directory every call's proxy socket lives under. It is covered
+    /// by an empty tmpfs inside the sandbox, because a path-named Unix socket
+    /// is reachable from any network namespace: without the cover, a program
+    /// could connect to another call's proxy, and so to another Space's list.
+    pub socket_root: &'a Path,
+    /// This call's socket on the host, bound into the sandbox at
+    /// [`EgressBridge::sandbox_socket`].
+    pub socket: &'a Path,
+    /// The bridge binary run inside the sandbox (`mp-netbridge`).
+    pub bridge_program: &'a str,
+}
+
+/// The file name the call's socket takes inside the sandbox.
+pub const SANDBOX_SOCKET_NAME: &str = "egress.sock";
+
+impl EgressBridge<'_> {
+    /// Where the program's bridge finds the proxy inside the sandbox: inside
+    /// the covered root, so it is the one socket there.
+    #[must_use]
+    pub fn sandbox_socket(&self) -> PathBuf {
+        self.socket_root.join(SANDBOX_SOCKET_NAME)
+    }
 }
 
 /// Build the bubblewrap argument vector for `policy`, wrapping `program args`.
@@ -219,8 +267,21 @@ fn assemble_argv(
     // process gets unrestricted egress, silently defeating the allowlist. This
     // pure builder stays env-free by design; the check belongs at the spawn
     // site. Tracked in capability-ownership-matrix §G1.
-    if matches!(network, MpNetworkPolicy::Disabled) {
+    //
+    // EP-9 E3: a call with an egress boundary is the exception that makes
+    // `AllowDomains` enforceable. Its namespace is unshared like `Disabled`, so
+    // it has loopback and no route out, and the one path out is its own proxy
+    // socket, bound in after the socket root is covered (later mounts win).
+    if matches!(network, MpNetworkPolicy::Disabled) || options.egress.is_some() {
         argv.push("--unshare-net".into());
+    }
+    if let Some(egress) = &options.egress {
+        let root = egress.socket_root.to_string_lossy().into_owned();
+        argv.push("--tmpfs".into());
+        argv.push(root);
+        argv.push("--bind".into());
+        argv.push(egress.socket.to_string_lossy().into_owned());
+        argv.push(egress.sandbox_socket().to_string_lossy().into_owned());
     }
 
     // Placed after the binds so the directory it names is already mounted in the
@@ -231,6 +292,13 @@ fn assemble_argv(
     }
 
     argv.push("--".into());
+    // The bridge runs the program as its child, so the program and its
+    // arguments reach it unchanged after the bridge's own separator.
+    if let Some(egress) = &options.egress {
+        argv.push(egress.bridge_program.to_owned());
+        argv.push(egress.sandbox_socket().to_string_lossy().into_owned());
+        argv.push("--".into());
+    }
     argv.push(program.to_owned());
     argv.extend(cmd_args.iter().cloned());
     argv
@@ -266,7 +334,39 @@ pub fn log_support() {
              are refused rather than downgraded to host execution"
         );
     }
+    // WS06-S8: the per-spawn limits state is on the record at every start too.
+    if LimitsConfig::current().mode == LimitsMode::Off {
+        tracing::warn!(
+            limits = "off",
+            "EXECUTION_SANDBOX_LIMITS=off: sandboxed tool processes run WITHOUT per-spawn \
+             CPU, memory, file-size and descriptor limits"
+        );
+    } else if is_supported() && !limits_enforceable() {
+        tracing::warn!(
+            limits = "unavailable",
+            "prlimit is unavailable or unusable here: sandboxed tool processes are refused \
+             because per-spawn limits are enforced"
+        );
+    } else {
+        tracing::info!(limits = "enforce", "per-spawn resource limits are enforced");
+    }
 }
+
+/// Whether per-spawn limits can actually be applied on this host, decided
+/// once per process like [`is_supported`]: a real `prlimit -- true` probe, not
+/// a `PATH` lookup. When limits are `enforce` and this is false, restricted
+/// spawns are refused (fail closed, as for a missing bwrap).
+#[must_use]
+pub fn limits_enforceable() -> bool {
+    static ENFORCEABLE: OnceLock<bool> = OnceLock::new();
+    *ENFORCEABLE.get_or_init(probe_prlimit)
+}
+
+/// The state the capability profile advertises: `enforced` only when limits
+/// are on AND the sandbox and `prlimit` both work here.
+pub const LIMITS_ENFORCED: &str = "enforced";
+/// Limits are switched off or cannot be applied on this host.
+pub const LIMITS_UNLIMITED: &str = "unlimited";
 
 /// A small, runtime-measured profile for callers that must decide whether a
 /// Space can use this execution substrate. It deliberately reports what the
@@ -291,6 +391,9 @@ pub struct SandboxCapabilityProfile {
     pub egress: &'static str,
     /// The executor never forwards service credentials to model-authored code.
     pub credential_mode: &'static str,
+    /// `enforced` when sandboxed spawns carry per-spawn `prlimit` ceilings,
+    /// `unlimited` otherwise (WS06-S8). Changes the profile digest by design.
+    pub limits: &'static str,
 }
 
 /// A canonical, order-stable digest of the measured profile, bound into the
@@ -363,8 +466,40 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
             PROCESSES_BOUNDED_ONESHOT
         },
         backup: false,
-        egress: "disabled_by_default",
+        egress: mp_contracts::egress_tiers::claim(enforceable_egress_tier(
+            crate::egress_proxy::switch_tier(),
+            local_isolation_available,
+            crate::egress_proxy::bridge_available(),
+        )),
         credential_mode: "credential_free",
+        limits: if local_isolation_available
+            && LimitsConfig::current().mode == LimitsMode::Enforce
+            && limits_enforceable()
+        {
+            LIMITS_ENFORCED
+        } else {
+            LIMITS_UNLIMITED
+        },
+    }
+}
+
+/// The highest egress tier this host can enforce, which is what it claims to
+/// Control (EP-9 E3). The deployment switch is the ceiling, and it only counts
+/// where bubblewrap can unshare the namespace and the bridge binary is in the
+/// image: a claim this host cannot keep would be signed by Control and then
+/// refused, or worse, honoured without a boundary. With the switch off the
+/// claim is the legacy `disabled_by_default`, so the profile and its digest are
+/// unchanged.
+#[must_use]
+pub fn enforceable_egress_tier(
+    switch: mp_contracts::sandbox_report::NetworkTier,
+    local_isolation_available: bool,
+    bridge_available: bool,
+) -> mp_contracts::sandbox_report::NetworkTier {
+    if local_isolation_available && bridge_available {
+        switch
+    } else {
+        mp_contracts::sandbox_report::NetworkTier::Off
     }
 }
 
@@ -375,6 +510,7 @@ fn probe_bwrap() -> bool {
     // success means bwrap can genuinely build the sandbox here, not merely that
     // the binary exists.
     match std::process::Command::new(BWRAP_BIN)
+        .env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY")
         .args(["--ro-bind", "/", "/", "--unshare-pid", "--", "true"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -389,6 +525,43 @@ fn probe_bwrap() -> bool {
 #[cfg(not(target_os = "linux"))]
 fn probe_bwrap() -> bool {
     false
+}
+
+#[cfg(target_os = "linux")]
+fn probe_prlimit() -> bool {
+    // The same shape the real wrapper uses (`prlimit <flags> -- <command>`),
+    // with the cheapest flag and command.
+    match std::process::Command::new(PRLIMIT_BIN)
+        .env_remove("BROWSER_ATTACH_COMPAT_HMAC_KEY")
+        .args(["--core=0", "--", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn probe_prlimit() -> bool {
+    false
+}
+
+/// Prefix `inner_program inner_args` with `prlimit <limits> --`. Pure, so the
+/// argv is testable on any OS.
+#[must_use]
+pub fn prlimit_wrap(
+    limits: &ResourceLimits,
+    inner_program: &str,
+    inner_args: &[String],
+) -> (String, Vec<String>) {
+    let mut args = limits.prlimit_args();
+    args.push("--".into());
+    args.push(inner_program.to_owned());
+    args.extend(inner_args.iter().cloned());
+    (PRLIMIT_BIN.to_owned(), args)
 }
 
 /// Translate a policy into a concrete command to spawn.
@@ -418,10 +591,25 @@ pub fn wrap_command_with(
 ) -> SandboxedCommand {
     if is_supported() {
         if let Some(argv) = build_bwrap_argv_with(policy, program, args, options) {
+            // WS06-S8: limits ride in FRONT of bwrap so every process under it
+            // inherits them. Requested but `prlimit` unusable => the plain bwrap
+            // command with `limits_applied == false`; the spawn site refuses it.
+            if let Some(limits) = options.limits {
+                if limits_enforceable() {
+                    let (program, args) = prlimit_wrap(limits, BWRAP_BIN, &argv);
+                    return SandboxedCommand {
+                        program,
+                        args,
+                        sandboxed: true,
+                        limits_applied: true,
+                    };
+                }
+            }
             return SandboxedCommand {
                 program: BWRAP_BIN.to_owned(),
                 args: argv,
                 sandboxed: true,
+                limits_applied: false,
             };
         }
     }
@@ -429,6 +617,7 @@ pub fn wrap_command_with(
         program: program.to_owned(),
         args: args.to_vec(),
         sandboxed: false,
+        limits_applied: false,
     }
 }
 
@@ -447,7 +636,19 @@ mod tests {
         assert_eq!(profile.local_isolation_available, is_supported());
         assert_eq!(profile.persistence, "ephemeral");
         assert!(!profile.backup);
-        assert_eq!(profile.egress, "disabled_by_default");
+        // EP-9 E3: the claim is the switch's tier only where it can be enforced,
+        // and the legacy word otherwise (always, with the switch off).
+        assert_eq!(
+            profile.egress,
+            mp_contracts::egress_tiers::claim(enforceable_egress_tier(
+                crate::egress_proxy::switch_tier(),
+                is_supported(),
+                crate::egress_proxy::bridge_available(),
+            ))
+        );
+        if crate::egress_proxy::switch_tier() == mp_contracts::sandbox_report::NetworkTier::Off {
+            assert_eq!(profile.egress, "disabled_by_default");
+        }
         assert_eq!(profile.credential_mode, "credential_free");
         // `processes` is the one field an operator can change, so this asserts
         // the RELATIONSHIP rather than a constant: it may report the stronger
@@ -787,6 +988,138 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--unshare-net"));
     }
 
+    // -- EP-9 E3 egress boundary ------------------------------------------
+
+    fn bridge<'a>(root: &'a Path, socket: &'a Path) -> EgressBridge<'a> {
+        EgressBridge {
+            socket_root: root,
+            socket,
+            bridge_program: "/usr/local/bin/mp-netbridge",
+        }
+    }
+
+    /// A tiered call keeps no host network, whatever its policy's network says:
+    /// the namespace is unshared and the one way out is the bound socket.
+    #[test]
+    fn an_egress_call_always_unshares_the_network() {
+        let root = PathBuf::from("/tmp/verevon-egress");
+        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
+        for network in [
+            MpNetworkPolicy::Disabled,
+            MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+            MpNetworkPolicy::AllowAll,
+        ] {
+            let p = MpSandboxPolicy::WorkspaceWrite {
+                writable_roots: vec![PathBuf::from("/work")],
+                network,
+            };
+            let argv = build_bwrap_argv_with(
+                &p,
+                "python3",
+                &args(&["main.py"]),
+                LaunchOptions {
+                    egress: Some(bridge(&root, &socket)),
+                    ..LaunchOptions::default()
+                },
+            )
+            .expect("wrapped");
+            assert_eq!(
+                argv.iter().filter(|a| *a == "--unshare-net").count(),
+                1,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// Every call's socket root is covered, so a program cannot reach another
+    /// call's proxy through the shared host path; its own socket is bound back in
+    /// after the cover, and the program runs under the bridge.
+    #[test]
+    fn an_egress_call_covers_the_socket_root_and_runs_under_the_bridge() {
+        let root = PathBuf::from("/tmp/verevon-egress");
+        let socket = PathBuf::from("/tmp/verevon-egress/call-1/egress.sock");
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network: MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        };
+        let argv = build_bwrap_argv_with(
+            &p,
+            "python3",
+            &args(&["main.py"]),
+            LaunchOptions {
+                egress: Some(bridge(&root, &socket)),
+                ..LaunchOptions::default()
+            },
+        )
+        .expect("wrapped");
+        let ro_root = argv.iter().position(|a| a == "/").expect("read-only root");
+        let cover = argv
+            .iter()
+            .position(|a| a == "/tmp/verevon-egress")
+            .expect("socket root covered");
+        assert_eq!(argv[cover - 1], "--tmpfs");
+        assert!(cover > ro_root, "the cover must follow the read-only root: {argv:?}");
+        assert!(windowed(
+            &argv,
+            &[
+                "--bind",
+                "/tmp/verevon-egress/call-1/egress.sock",
+                "/tmp/verevon-egress/egress.sock"
+            ]
+        ));
+        let own_socket = argv
+            .iter()
+            .position(|a| a == "/tmp/verevon-egress/call-1/egress.sock")
+            .expect("own socket bound");
+        assert!(own_socket > cover, "the own socket must be bound after the cover");
+        assert!(windowed(
+            &argv,
+            &[
+                "--",
+                "/usr/local/bin/mp-netbridge",
+                "/tmp/verevon-egress/egress.sock",
+                "--",
+                "python3",
+                "main.py"
+            ]
+        ));
+    }
+
+    /// Without a boundary the argv is exactly what it was before E3.
+    #[test]
+    fn no_egress_bridge_leaves_the_argv_unchanged() {
+        let p = MpSandboxPolicy::ReadOnly {
+            network: MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        };
+        let argv = build_bwrap_argv(&p, "curl", &args(&["x"])).expect("wrapped");
+        assert!(!argv.iter().any(|a| a == "--unshare-net"));
+        assert!(windowed(&argv, &["--", "curl", "x"]));
+        assert!(!argv.iter().any(|a| a.contains("mp-netbridge")));
+    }
+
+    #[test]
+    fn the_egress_claim_needs_isolation_and_the_bridge() {
+        use mp_contracts::sandbox_report::NetworkTier;
+        for tier in [NetworkTier::Registries, NetworkTier::Allowlist] {
+            assert_eq!(enforceable_egress_tier(tier, true, true), tier);
+            assert_eq!(enforceable_egress_tier(tier, false, true), NetworkTier::Off);
+            assert_eq!(enforceable_egress_tier(tier, true, false), NetworkTier::Off);
+        }
+        assert_eq!(
+            enforceable_egress_tier(NetworkTier::Off, true, true),
+            NetworkTier::Off
+        );
+        assert_eq!(
+            mp_contracts::egress_tiers::claim(enforceable_egress_tier(
+                NetworkTier::Off,
+                true,
+                true
+            )),
+            "disabled_by_default",
+            "switch off keeps the legacy claim, so the profile digest is unchanged"
+        );
+    }
+
     #[test]
     fn danger_full_access_and_external_are_passthrough() {
         assert!(build_bwrap_argv(&MpSandboxPolicy::DangerFullAccess, "sh", &[]).is_none());
@@ -820,5 +1153,76 @@ mod tests {
         haystack
             .windows(needle.len())
             .any(|w| w.iter().zip(needle).all(|(a, b)| a == b))
+    }
+
+    // -- WS06-S8 postponed tests -------------------------------------------
+
+    #[test]
+    fn prlimit_wrap_puts_the_limits_in_front_of_the_inner_command() {
+        let limits = ResourceLimits {
+            cpu_secs: 5,
+            address_space_bytes: 1 << 30,
+            file_size_bytes: 1 << 20,
+            open_files: 256,
+        };
+        let inner = args(&["--ro-bind", "/", "/", "--", "ls"]);
+        let (program, argv) = prlimit_wrap(&limits, "bwrap", &inner);
+        assert_eq!(program, PRLIMIT_BIN);
+        let flags = limits.prlimit_args();
+        assert_eq!(&argv[..flags.len()], flags.as_slice());
+        assert_eq!(argv[flags.len()], "--");
+        assert_eq!(argv[flags.len() + 1], "bwrap");
+        assert_eq!(&argv[flags.len() + 2..], inner.as_slice());
+    }
+
+    #[test]
+    fn a_passthrough_command_never_claims_limits_were_applied() {
+        let command = wrap_command_with(
+            &MpSandboxPolicy::DangerFullAccess,
+            "echo",
+            &args(&["hi"]),
+            LaunchOptions::default(),
+        );
+        assert!(!command.sandboxed);
+        assert!(!command.limits_applied);
+        assert_eq!(command.program, "echo");
+    }
+
+    #[test]
+    fn the_capability_profile_carries_limits_and_its_digest_differs_from_the_old_shape() {
+        let profile = capability_profile();
+        assert!(matches!(profile.limits, LIMITS_ENFORCED | LIMITS_UNLIMITED));
+        if !profile.local_isolation_available {
+            assert_eq!(profile.limits, LIMITS_UNLIMITED);
+        }
+        let new_digest = capability_profile_digest(&profile);
+        let mut old_shape = serde_json::to_value(&profile).unwrap();
+        assert!(old_shape
+            .as_object_mut()
+            .unwrap()
+            .remove("limits")
+            .is_some());
+        let old_digest = {
+            use sha2::{Digest, Sha256};
+            format!(
+                "sha256:{:x}",
+                Sha256::digest(serde_json::to_vec(&old_shape).unwrap())
+            )
+        };
+        assert_ne!(
+            new_digest, old_digest,
+            "the limits field must change the digest by design"
+        );
+
+        // And the two states differ from each other.
+        let flipped = SandboxCapabilityProfile {
+            limits: if profile.limits == LIMITS_ENFORCED {
+                LIMITS_UNLIMITED
+            } else {
+                LIMITS_ENFORCED
+            },
+            ..profile
+        };
+        assert_ne!(capability_profile_digest(&flipped), new_digest);
     }
 }

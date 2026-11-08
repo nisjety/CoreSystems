@@ -264,6 +264,11 @@ check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS
 check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS execution-core user-core spaces:agent-action:view
 check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS conversation-core user-core spaces:agent-action:current-authority
 check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS conversation-core user-core spaces:agent-action:reservation
+# WS14-S2: documents-api is the one registered owner service of documents. It
+# writes owner-asserted grants (authz:write, user-delegated) and room-file
+# grants (spaces:file-grant:write, decision-proved); no other principal holds them.
+check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS documents-api user-core authz:write
+check_principal_scope control-user "$control_user" USER_CORE_SERVICE_CREDENTIALS documents-api user-core spaces:file-grant:write
 check_principal_scope control-auth "$control_auth" PLANE_SERVICE_PRINCIPALS_JSON execution-core capability-core capability:health:global:write
 check_principal_scope control-auth "$control_auth" PLANE_SERVICE_PRINCIPALS_JSON conversation-core capability-core capability:read
 check_principal_scope control-auth "$control_auth" PLANE_SERVICE_PRINCIPALS_JSON conversation-core capability-core capability:owner-action:health:write

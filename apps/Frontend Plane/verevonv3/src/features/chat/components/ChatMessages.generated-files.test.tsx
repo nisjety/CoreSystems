@@ -145,3 +145,30 @@ describe('what a message does with the files code_interpreter produced', () => {
     expect(nodes.some((node) => node.kind === 'files')).toBe(true)
   })
 })
+
+describe('GeneratedFiles check chip (WS19-S3)', () => {
+  const check = (level: 'passed' | 'warnings' | 'failed' | 'skipped') => ({ level, checks: [] })
+  const chipOf = (card: HTMLElement) => card.querySelector<HTMLElement>('.verevon-chat-generated-file__check')
+
+  it('labels each verdict and never claims Office opens the file', () => {
+    const files = [
+      file({ name: 'a.docx', mime: DOCX, check: check('passed') }),
+      file({ name: 'b.docx', mime: DOCX, check: check('warnings') }),
+      file({ name: 'c.docx', mime: DOCX, check: check('failed') }),
+    ]
+    const { container } = render(() => <GeneratedFiles files={files} />)
+    const chips = cards(container).map((card) => chipOf(card)!)
+    expect(chips.map((chip) => chip.textContent)).toEqual(['Kontrollert', 'Advarsler', 'Feil funnet'])
+    for (const chip of chips) {
+      expect(chip.getAttribute('title')).toMatch(/Office/)
+      expect(chip.textContent).not.toMatch(/Office/)
+    }
+    expect(chips[0]!.getAttribute('title')).toContain('Det betyr ikke at Office åpner filen')
+  })
+
+  it('shows no chip for a skipped check or a file without one', () => {
+    const files = [file({ name: 'a.docx', mime: DOCX, check: check('skipped') }), file({ name: 'b.docx', mime: DOCX })]
+    const { container } = render(() => <GeneratedFiles files={files} />)
+    for (const card of cards(container)) expect(chipOf(card)).toBeNull()
+  })
+})

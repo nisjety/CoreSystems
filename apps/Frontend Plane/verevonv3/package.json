@@ -14,7 +14,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "preview:studio-demo": "vite preview --config vite.studio-demo.config.ts --host 127.0.0.1 --port 5174 --strictPort",
-    "test": "node --test apps/gateway/scripts/security-coverage-gate.test.mjs apps/gateway/scripts/action-surface-contract.test.mjs apps/gateway/scripts/product-truth-contract.test.mjs apps/gateway/scripts/zdr-seed-test-org.test.mjs && vitest run",
+    "test": "node --test apps/gateway/scripts/security-coverage-gate.test.mjs apps/gateway/scripts/action-surface-contract.test.mjs apps/gateway/scripts/product-truth-contract.test.mjs apps/gateway/scripts/zdr-seed-test-org.test.mjs apps/gateway/scripts/client-contract-parity.test.mjs scripts/nginx-headers.test.mjs && vitest run",
     "test:scripts": "node --test scripts/frontend-build-contract.test.mjs scripts/run-frontend-plane.test.mjs",
     "test:watch": "vitest",
     "test:e2e": "playwright test",

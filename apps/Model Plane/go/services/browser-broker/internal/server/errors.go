@@ -36,9 +36,15 @@ func mapErr(err error) error {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	case errors.Is(err, grant.ErrDeriveWidensParent), errors.Is(err, grant.ErrDeriveWidensBudget):
 		return status.Error(codes.PermissionDenied, err.Error())
-	case errors.Is(err, grant.ErrInvalidBudget):
+	case errors.Is(err, grant.ErrInvalidBudget), errors.Is(err, grant.ErrConsentScopeInvalid),
+		errors.Is(err, grant.ErrConsentScopeZdr), errors.Is(err, grant.ErrWildcardRefused),
+		errors.Is(err, grant.ErrExtensionNothingNew):
 		return status.Error(codes.InvalidArgument, err.Error())
-	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrApprovalParentInvalid),
+	case errors.Is(err, grant.ErrExtensionDenied):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, grant.ErrExtensionHostCap):
+		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, grant.ErrExtensionParentInvalid), errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrApprovalParentInvalid),
 		errors.Is(err, grant.ErrZdrPostureChanged), errors.Is(err, grant.ErrAbsoluteCapReached),
 		errors.Is(err, grant.ErrRenewNotAllowed), errors.Is(err, grant.ErrAttachZdrRefused):
 		return status.Error(codes.FailedPrecondition, err.Error())
@@ -82,6 +88,15 @@ func grantOutcome(err error) string {
 		return "derive_widens_budget"
 	case errors.Is(err, grant.ErrInvalidBudget):
 		return "invalid_budget"
+	case errors.Is(err, grant.ErrConsentScopeInvalid), errors.Is(err, grant.ErrConsentScopeZdr),
+		errors.Is(err, grant.ErrWildcardRefused), errors.Is(err, grant.ErrExtensionNothingNew):
+		return "invalid_consent"
+	case errors.Is(err, grant.ErrExtensionDenied):
+		return "extension_denied"
+	case errors.Is(err, grant.ErrExtensionHostCap):
+		return "extension_host_cap"
+	case errors.Is(err, grant.ErrExtensionParentInvalid):
+		return "extension_parent_invalid"
 	case errors.Is(err, grant.ErrDeriveNeedsExplicitDomains):
 		return "derive_needs_explicit_domains"
 	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrApprovalParentInvalid):

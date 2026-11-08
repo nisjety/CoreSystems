@@ -81,3 +81,26 @@ scrape_configs:
     static_configs:
       - targets: ['verevon-gateway-rs:3185']
         labels: { service: gateway, plane: frontend }
+
+  # Quarry edge (Ingestion Plane, WS6.I / U48, R-13 PR 2). The edge serves /metrics
+  # on a SEPARATE internal listener (:9092, exposed on the compose networks, never
+  # published) and only when QUARRY_EDGE_METRICS_ENABLED=1, which defaults to 0:
+  # until the owner flips it the target reads as down and no quarry_* series exist
+  # (rules/quarry.rules.yml is built to stay quiet in that state). When it is on, the
+  # listener requires a bearer token equal to QUARRY_EDGE_METRICS_TOKEN (>= 32 chars
+  # in production). That value is read here from a mounted FILE, never inlined:
+  #   * the file is mounted at /etc/prometheus/secrets/quarry_metrics_token (compose:
+  #     QUARRY_METRICS_TOKEN_FILE; the default is an empty tracked placeholder, because
+  #     Prometheus refuses its whole configuration when a credentials file is missing);
+  #   * scripts/run-control-plane.sh mints QUARRY_EDGE_METRICS_TOKEN once into the
+  #     persisted secrets store and writes the file; MIRROR the same value into
+  #     Ingestion's .env.generated-secrets before turning the flag on.
+  # The edge sits on inter-plane-bus, which Prometheus joins, as container `quarry-edge`.
+  - job_name: quarry-edge
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/quarry_metrics_token
+    static_configs:
+      - targets: ['quarry-edge:9092']
+        labels: { service: quarry-edge, plane: ingestion }

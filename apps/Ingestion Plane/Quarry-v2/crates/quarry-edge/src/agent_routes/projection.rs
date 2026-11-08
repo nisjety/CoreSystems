@@ -11,7 +11,11 @@ pub(super) fn safe_display_url(raw: &str) -> String {
     parsed.to_string()
 }
 
-pub(super) fn browser_session_tab(tab: BrowserTab, opened_by: Option<TabOrigin>) -> BrowserSessionTab {
+fn browser_session_tab(
+    tab: BrowserTab,
+    opened_by: Option<TabOrigin>,
+    meta: Option<TabMeta>,
+) -> BrowserSessionTab {
     BrowserSessionTab {
         opened_by,
         tab_id: tab.tab_id,
@@ -22,6 +26,8 @@ pub(super) fn browser_session_tab(tab: BrowserTab, opened_by: Option<TabOrigin>)
             .map(safe_display_url)
             .filter(|value| !value.is_empty()),
         active: tab.active,
+        tab_epoch: meta.as_ref().map_or(0, |tab| tab.epoch),
+        holder: meta.map_or(BrowserTabHolder::Human, |tab| tab.holder),
     }
 }
 
@@ -34,6 +40,7 @@ pub(super) fn active_browser_tab_id(tabs: &[BrowserTab]) -> Option<String> {
 pub(super) fn live_browser_session_projection(
     entry: &RunEntry,
     tabs: Vec<BrowserTab>,
+    live: Option<&RunLive>,
 ) -> BrowserSessionProjectionData {
     BrowserSessionProjectionData {
         run_id: entry.run_id.to_string(),
@@ -58,7 +65,8 @@ pub(super) fn live_browser_session_projection(
             .into_iter()
             .map(|tab| {
                 let opened_by = entry.tab_origins.get(&tab.tab_id).cloned();
-                browser_session_tab(tab, opened_by)
+                let meta = live.and_then(|live| live.tabs().get(&tab.tab_id).cloned());
+                browser_session_tab(tab, opened_by, meta)
             })
             .collect(),
         profile_restore: entry
@@ -119,7 +127,7 @@ mod grant_kind_tests {
         if open_web {
             entry.nav_policy = super::super::human_browse::RunNavPolicy::OpenWeb { denied: Vec::new() };
         }
-        serde_json::to_value(live_browser_session_projection(&entry, Vec::new())).unwrap()
+        serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None)).unwrap()
     }
 
     /// D2-030: a person's open-web session says so, which is what the gateway reads to
@@ -235,17 +243,16 @@ pub async fn browser_session(
         status_err(StatusCode::BAD_REQUEST, &request_id, "invalid agent run id")
     })?;
 
-    let entry_arc = {
+    let handle = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| {
+        map.get(&run_id).cloned().inspect(|handle| {
             if handle.live.owned_by(&claims) {
                 handle.live.touch();
             }
-            handle.entry.clone()
         })
     };
-    if let Some(entry_arc) = entry_arc {
-        let mut entry = entry_arc.lock().await;
+    if let Some(handle) = handle {
+        let mut entry = handle.entry.lock().await;
         if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
                 StatusCode::NOT_FOUND,
@@ -261,7 +268,7 @@ pub async fn browser_session(
         prune_tab_openers(&mut entry, &tabs);
         return Ok(Json(Envelope::ok(
             request_id,
-            live_browser_session_projection(&entry, tabs),
+            live_browser_session_projection(&entry, tabs, Some(&handle.live)),
         )));
     }
 

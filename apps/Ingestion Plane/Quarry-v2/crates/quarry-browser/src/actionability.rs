@@ -827,6 +827,22 @@ pub(crate) async fn prepare_select(page: &Page, object_id: &RemoteObjectId) -> Q
     settle(page, object_id, Intent::Select).await.map(|_| ())
 }
 
+/// Move Chromium's real pointer without pressing a button. This is used only
+/// after the attached agent action has passed the same policy as its click.
+pub(crate) async fn dispatch_pointer_move(page: &Page, x: f64, y: f64) -> QuarryResult<()> {
+    let moved = DispatchMouseEventParams::builder()
+        .x(x).y(y)
+        .r#type(DispatchMouseEventType::MouseMoved)
+        .buttons(0)
+        .pointer_type(DispatchMouseEventPointerType::Mouse)
+        .build()
+        .map_err(|_| QuarryError::new(ErrorCode::DriverFailed, "pointer move could not be built"))?;
+    with_deadline(Op::Input, async {
+        page.execute(moved).await.map_err(|_| QuarryError::new(ErrorCode::DriverFailed, "pointer move failed"))
+    }).await?;
+    Ok(())
+}
+
 /// The three mouse events of a left click at `(x, y)`: move, press, release.
 /// Chromium treats them as real input (`isTrusted`). Shared by the
 /// `click_point` trait method and the ref pipeline.
@@ -1067,6 +1083,524 @@ pub(crate) async fn run(
             ErrorCode::Internal,
             "wait_for does not use the actionability pipeline",
         )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// E3.1-c: one-time-code fill preconditions (Chromium lane C1).
+//
+// `fill_otp_ref` puts a code read from the user's mailbox into a page. The
+// executor does that only when the page looks like exactly one thing: a
+// one-time-code step on the origin the approval names. Every check below fails
+// closed with 403 `FORBIDDEN` and a `details.reason` from the closed list
+// `otp_reason`; nothing from the page (no URL, text, value or attribute) is put
+// in an error or a log line, and the code never is.
+//
+// 1. the top document is https (loopback http only in this crate's own tests);
+// 2. the target is in the top frame, and the frame's security origin equals the
+//    top URL's origin and the approval's grant origin;
+// 3. the target is a visible, required, non-password text `<input>` and the only
+//    visible text field of the document;
+// 4. no options: no `list` (datalist) on the target, no visible select, radio or
+//    listbox (a "send the code another way" choice), and no visible QR code
+//    (an image, canvas or svg named or labelled as a QR code);
+// 5. the insert is trusted input: the actionability pipeline (visible, enabled,
+//    editable, not covered, holding still), then `DOM.focus`, select all and
+//    `Input.insertText`. A field that would need the in-page value setter is
+//    refused, never set from script.
+//
+// The credential-delivered mark (keyed on the frame's loader id) lives in the
+// driver (`chromiumoxide.rs`). Flag: `QUARRY_EDGE__FILL_OTP`, default off.
+// ---------------------------------------------------------------------------
+
+/// The flag that turns one-time-code fills on (same name and parse as the edge
+/// and `quarry_runtime::otp_source`).
+pub(crate) const FILL_OTP_FLAG: &str = "QUARRY_EDGE__FILL_OTP";
+
+/// `QUARRY_EDGE__FILL_OTP`: `1`, `true`, `yes` or `on` (any case, trimmed) turn it
+/// on; anything else, empty or unset leaves it off.
+pub(crate) fn parse_fill_otp(raw: Option<&str>) -> bool {
+    raw.map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+    .unwrap_or(false)
+}
+
+/// The closed vocabulary of `details.reason` on a refused one-time-code fill.
+pub(crate) mod otp_reason {
+    pub(crate) const FLAG_OFF: &str = "otp_fill_disabled";
+    pub(crate) const NOT_HTTPS: &str = "otp_not_https";
+    pub(crate) const NOT_TOP_FRAME: &str = "otp_not_top_frame";
+    pub(crate) const FRAME_ORIGIN_MISMATCH: &str = "otp_frame_origin_mismatch";
+    pub(crate) const GRANT_ORIGIN_MISMATCH: &str = "otp_grant_origin_mismatch";
+    pub(crate) const TARGET_NOT_ATTACHED: &str = "otp_target_not_attached";
+    pub(crate) const TARGET_NOT_INPUT: &str = "otp_target_not_text_input";
+    pub(crate) const TARGET_IS_PASSWORD: &str = "otp_target_is_password";
+    pub(crate) const TARGET_NOT_REQUIRED: &str = "otp_target_not_required";
+    pub(crate) const TARGET_NOT_VISIBLE: &str = "otp_target_not_visible";
+    pub(crate) const TARGET_NOT_SOLE_INPUT: &str = "otp_target_not_sole_input";
+    pub(crate) const OPTIONS_PRESENT: &str = "otp_options_present";
+    pub(crate) const QR_PRESENT: &str = "otp_qr_present";
+    pub(crate) const NOT_TRUSTED_INSERT: &str = "otp_not_trusted_insert";
+    pub(crate) const LOADER_CHANGED: &str = "otp_loader_changed";
+
+    #[cfg(test)]
+    pub(crate) const ALL: [&str; 15] = [
+        FLAG_OFF,
+        NOT_HTTPS,
+        NOT_TOP_FRAME,
+        FRAME_ORIGIN_MISMATCH,
+        GRANT_ORIGIN_MISMATCH,
+        TARGET_NOT_ATTACHED,
+        TARGET_NOT_INPUT,
+        TARGET_IS_PASSWORD,
+        TARGET_NOT_REQUIRED,
+        TARGET_NOT_VISIBLE,
+        TARGET_NOT_SOLE_INPUT,
+        OPTIONS_PRESENT,
+        QR_PRESENT,
+        NOT_TRUSTED_INSERT,
+        LOADER_CHANGED,
+    ];
+}
+
+/// A refused one-time-code fill: 403 `FORBIDDEN`, a fixed sentence and
+/// `details.reason` only. The flag-off refusal is `UNSUPPORTED`, like the edge's
+/// and the runtime helper's.
+pub(crate) fn otp_refused(reason: &'static str) -> QuarryError {
+    if reason == otp_reason::FLAG_OFF {
+        return QuarryError::new(
+            ErrorCode::Unsupported,
+            "fill_otp is not enabled on this deployment (QUARRY_EDGE__FILL_OTP is off)",
+        )
+        .with_details(json!({ "reason": reason }));
+    }
+    QuarryError::new(
+        ErrorCode::Forbidden,
+        "one-time-code fill refused: the page does not meet the fill preconditions",
+    )
+    .with_details(json!({ "reason": reason }))
+}
+
+fn is_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// The origin of `raw` as `scheme://host[:port]`, or `None` for an opaque or
+/// unparsable one.
+fn tuple_origin(raw: &str) -> Option<url::Url> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let origin = parsed.origin();
+    if !origin.is_tuple() {
+        return None;
+    }
+    url::Url::parse(&origin.ascii_serialization()).ok()
+}
+
+fn https_or_test_loopback(url: &url::Url, allow_loopback_http: bool) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => allow_loopback_http && is_loopback_host(url),
+        _ => false,
+    }
+}
+
+/// Preconditions 1 and 2 (origins), pure. `top_url` is the top frame's URL,
+/// `frame_security_origin` the target frame's security origin (both from
+/// `Page.getFrameTree`), `grant_origin` the origin the approval names. Returns
+/// the shared origin (`https://host[:port]`). `allow_loopback_http` is for this
+/// crate's live tests against the loopback fixture only; the driver passes
+/// `cfg!(test)`.
+pub(crate) fn check_otp_origins(
+    top_url: &str,
+    frame_security_origin: &str,
+    grant_origin: &str,
+    allow_loopback_http: bool,
+) -> Result<String, &'static str> {
+    let top = tuple_origin(top_url).ok_or(otp_reason::NOT_HTTPS)?;
+    if !https_or_test_loopback(&top, allow_loopback_http) {
+        return Err(otp_reason::NOT_HTTPS);
+    }
+    let frame = tuple_origin(frame_security_origin).ok_or(otp_reason::FRAME_ORIGIN_MISMATCH)?;
+    if frame.origin() != top.origin() {
+        return Err(otp_reason::FRAME_ORIGIN_MISMATCH);
+    }
+    let grant = tuple_origin(grant_origin).ok_or(otp_reason::GRANT_ORIGIN_MISMATCH)?;
+    if !https_or_test_loopback(&grant, allow_loopback_http) || grant.origin() != top.origin() {
+        return Err(otp_reason::GRANT_ORIGIN_MISMATCH);
+    }
+    Ok(top.origin().ascii_serialization())
+}
+
+/// One `Runtime.callFunctionOn` on the resolved target, `this` = the element.
+/// It reads the target and its document and returns booleans and one count:
+/// never text, a value, a URL or an attribute's content. The attribute reads
+/// for the QR test only feed a boolean.
+pub(crate) const OTP_PRECONDITION_PROBE_JS: &str = r#"function() {
+    const out = {
+        attached: false, top_frame: false, text_input: false, password: false,
+        required: false, visible: false, text_fields: 0, sole: false,
+        options: false, qr: false
+    };
+    const el = this;
+    if (!(el instanceof Element) || !el.isConnected) return out;
+    out.attached = true;
+    const doc = el.ownerDocument;
+    const win = doc.defaultView;
+    out.top_frame = !!win && win === win.top;
+    const shown = (node) => {
+        if (!node || !node.isConnected || node.getClientRects().length === 0) return false;
+        let visibility = 'visible';
+        try { visibility = win.getComputedStyle(node).visibility; } catch (_) {}
+        return visibility === 'visible';
+    };
+    const textual = ['text', 'search', 'url', 'tel', 'email', 'number', ''];
+    const kindOf = (node) => String(node.type || 'text').toLowerCase();
+    if (el instanceof HTMLInputElement) {
+        const kind = kindOf(el);
+        out.password = kind === 'password';
+        out.text_input = textual.includes(kind);
+        out.required = el.required || el.getAttribute('aria-required') === 'true';
+        if (el.hasAttribute('list')) out.options = true;
+    }
+    out.visible = shown(el);
+    let fields = 0;
+    for (const node of doc.querySelectorAll('input, textarea, [contenteditable]')) {
+        if (!shown(node)) continue;
+        if (node instanceof HTMLInputElement) {
+            if (!textual.includes(kindOf(node))) continue;
+        } else if (!(node instanceof HTMLTextAreaElement) && !node.isContentEditable) {
+            continue;
+        }
+        fields += 1;
+    }
+    out.text_fields = fields;
+    out.sole = fields === 1 && out.visible && out.text_input && !out.password;
+    const choices = 'select, input[type="radio"], [role="radio"], [role="radiogroup"], [role="listbox"], [role="option"]';
+    for (const node of doc.querySelectorAll(choices)) {
+        if (shown(node)) { out.options = true; break; }
+    }
+    const qrName = /(^|[^a-z])qr([^a-z]|$)|qrcode|qr-code|qr_code/i;
+    for (const node of doc.querySelectorAll('img, canvas, svg, object, picture')) {
+        if (!shown(node)) continue;
+        const names = ['id', 'class', 'alt', 'title', 'aria-label', 'src', 'data-testid'];
+        if (names.some((name) => qrName.test(String(node.getAttribute(name) || '')))) {
+            out.qr = true;
+            break;
+        }
+    }
+    return out;
+}"#;
+
+/// What `OTP_PRECONDITION_PROBE_JS` returned.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub(crate) struct OtpProbe {
+    #[serde(default)]
+    pub(crate) attached: bool,
+    #[serde(default)]
+    pub(crate) top_frame: bool,
+    #[serde(default)]
+    pub(crate) text_input: bool,
+    #[serde(default)]
+    pub(crate) password: bool,
+    #[serde(default)]
+    pub(crate) required: bool,
+    #[serde(default)]
+    pub(crate) visible: bool,
+    #[serde(default)]
+    pub(crate) text_fields: u32,
+    #[serde(default)]
+    pub(crate) sole: bool,
+    #[serde(default)]
+    pub(crate) options: bool,
+    #[serde(default)]
+    pub(crate) qr: bool,
+}
+
+/// Preconditions 2 (top frame, as the page sees it), 3 and 4, pure. The first
+/// failing check is the reason; the order is the order a person would look.
+pub(crate) fn decide_otp(probe: &OtpProbe) -> Result<(), &'static str> {
+    if !probe.attached {
+        return Err(otp_reason::TARGET_NOT_ATTACHED);
+    }
+    if !probe.top_frame {
+        return Err(otp_reason::NOT_TOP_FRAME);
+    }
+    if probe.password {
+        return Err(otp_reason::TARGET_IS_PASSWORD);
+    }
+    if !probe.text_input {
+        return Err(otp_reason::TARGET_NOT_INPUT);
+    }
+    if !probe.visible {
+        return Err(otp_reason::TARGET_NOT_VISIBLE);
+    }
+    if !probe.required {
+        return Err(otp_reason::TARGET_NOT_REQUIRED);
+    }
+    if !probe.sole || probe.text_fields != 1 {
+        return Err(otp_reason::TARGET_NOT_SOLE_INPUT);
+    }
+    if probe.options {
+        return Err(otp_reason::OPTIONS_PRESENT);
+    }
+    if probe.qr {
+        return Err(otp_reason::QR_PRESENT);
+    }
+    Ok(())
+}
+
+/// Run `OTP_PRECONDITION_PROBE_JS` on the resolved target. A protocol failure is
+/// `DRIVER_FAILED` with the error class only; a node that is gone is the
+/// `otp_target_not_attached` refusal.
+pub(crate) async fn probe_otp(page: &Page, object_id: &RemoteObjectId) -> QuarryResult<OtpProbe> {
+    let call = CallFunctionOnParams::builder()
+        .function_declaration(OTP_PRECONDITION_PROBE_JS)
+        .object_id(object_id.clone())
+        .return_by_value(true)
+        .build()
+        .map_err(|error| build_error("build one-time-code probe failed", error))?;
+    let result = with_deadline(Op::Actionability, async {
+        match page.execute(call).await {
+            Ok(result) => Ok(Some(result)),
+            Err(error) if node_is_gone(&error.to_string()) => Ok(None),
+            Err(error) => Err(cdp_failed("one-time-code probe failed", &error)),
+        }
+    })
+    .await?;
+    let Some(result) = result else {
+        return Err(otp_refused(otp_reason::TARGET_NOT_ATTACHED));
+    };
+    if result.exception_details.is_some() {
+        return Err(
+            QuarryError::new(ErrorCode::DriverFailed, "one-time-code probe raised an exception")
+                .with_details(json!({ "class": "page_exception" })),
+        );
+    }
+    let value = result
+        .result
+        .result
+        .value
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::from_value::<OtpProbe>(value).map_err(|_| {
+        QuarryError::new(
+            ErrorCode::DriverFailed,
+            "one-time-code probe returned an unreadable result",
+        )
+        .with_details(json!({ "class": "decode" }))
+    })
+}
+
+/// Precondition 5: put `code` into the field as trusted input. The field must
+/// pass the actionability pipeline for typing and take `Input.insertText`; a
+/// control that would need the in-page value setter is refused. Errors carry no
+/// part of the code.
+pub(crate) async fn insert_otp(
+    page: &Page,
+    object_id: &RemoteObjectId,
+    code: &str,
+) -> QuarryResult<()> {
+    match prepare_type(page, object_id).await? {
+        TypeRoute::InsertText => {}
+        TypeRoute::SetValue => return Err(otp_refused(otp_reason::NOT_TRUSTED_INSERT)),
+    }
+    if code.is_empty() {
+        // An empty insert would clear the field: not a fill.
+        return Err(otp_refused(otp_reason::NOT_TRUSTED_INSERT));
+    }
+    insert_text(page, object_id, code).await
+}
+
+#[cfg(test)]
+mod otp_tests {
+    use super::*;
+
+    fn ready() -> OtpProbe {
+        OtpProbe {
+            attached: true,
+            top_frame: true,
+            text_input: true,
+            password: false,
+            required: true,
+            visible: true,
+            text_fields: 1,
+            sole: true,
+            options: false,
+            qr: false,
+        }
+    }
+
+    #[test]
+    fn the_fill_otp_flag_is_off_unless_switched_on() {
+        assert_eq!(FILL_OTP_FLAG, "QUARRY_EDGE__FILL_OTP");
+        assert!(!parse_fill_otp(None));
+        assert!(!parse_fill_otp(Some("")));
+        assert!(!parse_fill_otp(Some("off")));
+        assert!(!parse_fill_otp(Some("0")));
+        assert!(!parse_fill_otp(Some("enabled")));
+        for on in ["1", "true", "TRUE", " yes ", "on", "On"] {
+            assert!(parse_fill_otp(Some(on)), "{on:?}");
+        }
+    }
+
+    #[test]
+    fn origins_must_be_https_and_equal_across_top_frame_and_grant() {
+        let ok = check_otp_origins(
+            "https://login.example.test/verify?step=2",
+            "https://login.example.test",
+            "https://login.example.test/",
+            false,
+        );
+        assert_eq!(ok, Ok("https://login.example.test".to_owned()));
+        // Default ports normalise.
+        assert!(check_otp_origins(
+            "https://login.example.test:443/v",
+            "https://login.example.test",
+            "https://login.example.test",
+            false
+        )
+        .is_ok());
+        // Plain http is refused, loopback too unless the test allowance is on.
+        assert_eq!(
+            check_otp_origins("http://login.example.test/v", "http://login.example.test", "http://login.example.test", false),
+            Err(otp_reason::NOT_HTTPS)
+        );
+        assert_eq!(
+            check_otp_origins("http://127.0.0.1:8080/otp-login", "http://127.0.0.1:8080", "http://127.0.0.1:8080", false),
+            Err(otp_reason::NOT_HTTPS)
+        );
+        assert!(check_otp_origins(
+            "http://127.0.0.1:8080/otp-login",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:8080",
+            true
+        )
+        .is_ok());
+        // The allowance never admits a non-loopback http host.
+        assert_eq!(
+            check_otp_origins("http://login.example.test/v", "http://login.example.test", "http://login.example.test", true),
+            Err(otp_reason::NOT_HTTPS)
+        );
+        // Opaque and non-web documents.
+        for top in ["about:blank", "data:text/html,<p>", "file:///tmp/x.html", "not a url"] {
+            assert_eq!(
+                check_otp_origins(top, "https://a.test", "https://a.test", false),
+                Err(otp_reason::NOT_HTTPS),
+                "{top}"
+            );
+        }
+        // Frame origin differs from the top (another host, port or scheme).
+        for frame in ["https://evil.test", "https://login.example.test:8443", "null", ""] {
+            assert_eq!(
+                check_otp_origins("https://login.example.test/v", frame, "https://login.example.test", false),
+                Err(otp_reason::FRAME_ORIGIN_MISMATCH),
+                "{frame}"
+            );
+        }
+        // Grant origin differs from the page, or is not https.
+        for grant in [
+            "https://example.test",
+            "https://sub.login.example.test",
+            "http://login.example.test",
+            "",
+            "login.example.test",
+        ] {
+            assert_eq!(
+                check_otp_origins("https://login.example.test/v", "https://login.example.test", grant, false),
+                Err(otp_reason::GRANT_ORIGIN_MISMATCH),
+                "{grant}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_otp_accepts_exactly_one_required_visible_code_field() {
+        assert_eq!(decide_otp(&ready()), Ok(()));
+        let cases: [(fn(&mut OtpProbe), &str); 10] = [
+            (|p| p.attached = false, otp_reason::TARGET_NOT_ATTACHED),
+            (|p| p.top_frame = false, otp_reason::NOT_TOP_FRAME),
+            (|p| p.password = true, otp_reason::TARGET_IS_PASSWORD),
+            (|p| p.text_input = false, otp_reason::TARGET_NOT_INPUT),
+            (|p| p.visible = false, otp_reason::TARGET_NOT_VISIBLE),
+            (|p| p.required = false, otp_reason::TARGET_NOT_REQUIRED),
+            (
+                |p| {
+                    p.text_fields = 2;
+                    p.sole = false;
+                },
+                otp_reason::TARGET_NOT_SOLE_INPUT,
+            ),
+            // `sole` alone is not trusted against the count.
+            (|p| p.text_fields = 0, otp_reason::TARGET_NOT_SOLE_INPUT),
+            (|p| p.options = true, otp_reason::OPTIONS_PRESENT),
+            (|p| p.qr = true, otp_reason::QR_PRESENT),
+        ];
+        for (break_it, reason) in cases {
+            let mut probe = ready();
+            break_it(&mut probe);
+            assert_eq!(decide_otp(&probe), Err(reason));
+        }
+        // A default (unparsed) probe never passes.
+        assert_eq!(decide_otp(&OtpProbe::default()), Err(otp_reason::TARGET_NOT_ATTACHED));
+    }
+
+    #[test]
+    fn a_refusal_is_403_with_the_reason_only() {
+        for reason in otp_reason::ALL {
+            let error = otp_refused(reason);
+            assert_eq!(error.details.clone().unwrap(), json!({ "reason": reason }));
+            if reason == otp_reason::FLAG_OFF {
+                assert_eq!(error.code, ErrorCode::Unsupported);
+            } else {
+                assert_eq!(error.code, ErrorCode::Forbidden);
+                assert_eq!(error.code.http_status(), 403);
+            }
+            assert!(!error.message.contains("http"), "{}", error.message);
+            assert!(reason.starts_with("otp_"), "{reason}");
+        }
+        let mut sorted = otp_reason::ALL.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), otp_reason::ALL.len(), "reasons are distinct");
+    }
+
+    #[test]
+    fn the_otp_probe_reads_no_page_text_or_values() {
+        for forbidden in [
+            "textContent",
+            "innerText",
+            "innerHTML",
+            "outerHTML",
+            ".value",
+            "location",
+            ".href",
+        ] {
+            assert!(
+                !OTP_PRECONDITION_PROBE_JS.contains(forbidden),
+                "probe mentions {forbidden}"
+            );
+        }
+        assert!(OTP_PRECONDITION_PROBE_JS.starts_with("function()"));
+        // The probe's result has only the typed fields: an extra key is ignored,
+        // and nothing in OtpProbe can hold text.
+        let parsed: OtpProbe = serde_json::from_value(json!({
+            "attached": true, "top_frame": true, "text_input": true, "password": false,
+            "required": true, "visible": true, "text_fields": 1, "sole": true,
+            "options": false, "qr": false, "smuggled": "482915"
+        }))
+        .unwrap();
+        assert_eq!(parsed, ready());
     }
 }
 

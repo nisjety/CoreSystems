@@ -10,6 +10,7 @@ from uuid import UUID
 
 import httpx
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from app.config import get_settings
 from app.connectors import import_from_source
@@ -18,6 +19,7 @@ from app.events import event_publisher
 from app.models import ImportJob, ImportJobItem
 from app.progress import progress_hub
 from app.schemas import ImportDocument, ProgressEvent, SpaceImportIntent
+from app.space_upload import SPACE_UPLOAD_SOURCE_TYPE, item_error_code
 
 
 logger = logging.getLogger(__name__)
@@ -311,6 +313,58 @@ class ImportService:
             
             return job.id
 
+    async def find_space_upload_job(
+        self, org_id: str, user_id: str, space_ref: str, idempotency_key: str
+    ) -> UUID | None:
+        """The room upload this uploader already made under this Idempotency-Key."""
+        async with SessionLocal() as session:
+            result = await session.execute(
+                select(ImportJob.id).where(
+                    ImportJob.org_id == org_id,
+                    ImportJob.user_id == user_id,
+                    ImportJob.source_type == SPACE_UPLOAD_SOURCE_TYPE,
+                    ImportJob.space_import_intent["space_ref"].astext == space_ref,
+                    ImportJob.space_import_intent["idempotency_key"].astext == idempotency_key,
+                )
+            )
+            return result.scalars().first()
+
+    async def create_space_upload_job(
+        self,
+        org_id: str,
+        user_id: str,
+        documents: list[ImportDocument],
+        metadata: dict[str, Any],
+        space_import_intent: SpaceImportIntent,
+    ) -> tuple[UUID, bool]:
+        """Idempotent create_job for room uploads: (job id, created).
+
+        The unique index uq_import_jobs_space_upload_idem decides a race; the
+        loser gets the winner's job back and must not dispatch it again.
+        """
+        existing = await self.find_space_upload_job(
+            org_id, user_id, space_import_intent.space_ref, space_import_intent.idempotency_key
+        )
+        if existing is not None:
+            return existing, False
+        try:
+            job_id = await self.create_job(
+                org_id=org_id,
+                user_id=user_id,
+                source_type=SPACE_UPLOAD_SOURCE_TYPE,
+                documents=documents,
+                metadata=metadata,
+                space_import_intent=space_import_intent,
+            )
+            return job_id, True
+        except IntegrityError:
+            winner = await self.find_space_upload_job(
+                org_id, user_id, space_import_intent.space_ref, space_import_intent.idempotency_key
+            )
+            if winner is None:
+                raise
+            return winner, False
+
     async def _publish_progress(
         self,
         job: ImportJob,
@@ -430,12 +484,19 @@ class ImportService:
                             async with counter_lock:
                                 await session.commit()
 
-                        await self._store_document(job, document, item.id if item else None)
+                        document_id = await self._store_document(
+                            job, document, item.id if item else None
+                        )
 
                         async with counter_lock:
                             if item:
                                 item.status = "completed"
                                 item.completed_at = datetime.now(timezone.utc)
+                                if document_id and job.source_type == SPACE_UPLOAD_SOURCE_TYPE:
+                                    item.metadata_json = {
+                                        **(item.metadata_json or {}),
+                                        "document_id": document_id,
+                                    }
                             job.processed_items += 1
                             job.lease_expires_at = datetime.now(timezone.utc) + _JOB_LEASE
                             if item:
@@ -458,8 +519,17 @@ class ImportService:
                         async with counter_lock:
                             if item:
                                 item.status = "failed"
-                                item.error_message = str(exc)
                                 item.completed_at = datetime.now(timezone.utc)
+                                if job.source_type == SPACE_UPLOAD_SOURCE_TYPE:
+                                    # A room file reports a stable code, never raw error text.
+                                    code = self._space_upload_error_code(exc)
+                                    item.error_message = code
+                                    item.metadata_json = {
+                                        **(item.metadata_json or {}),
+                                        "error_code": code,
+                                    }
+                                else:
+                                    item.error_message = str(exc)
                             job.failed_items += 1
                             job.lease_expires_at = datetime.now(timezone.utc) + _JOB_LEASE
                             await session.commit()
@@ -501,9 +571,21 @@ class ImportService:
                         },
                     )
 
+    @staticmethod
+    def _space_upload_error_code(exc: Exception) -> str:
+        if isinstance(exc, SpaceImportAuthorityUnavailable):
+            return "space_files_not_authorized"
+        if isinstance(exc, httpx.HTTPStatusError):
+            try:
+                body = exc.response.json()
+            except ValueError:
+                body = None
+            return item_error_code(exc.response.status_code, body)
+        return "room_file_store_failed"
+
     async def _store_document(
         self, job: ImportJob, document: ImportDocument, item_id: UUID | None = None
-    ) -> None:
+    ) -> str | None:
         url = (
             f"{self._settings.document_service_url.rstrip('/')}/"
             f"{self._settings.document_service_import_path.lstrip('/')}"
@@ -535,6 +617,8 @@ class ImportService:
             "idempotency_key": idempotency_key,
             "ingest_policy": {"zdr_mode": "off", "ephemeral_only": False},
         }
+        if job.source_type == SPACE_UPLOAD_SOURCE_TYPE:
+            payload["metadata"]["upload_id"] = str(job.id)
         space_decision = await self._fresh_space_import_decision(job)
         token = await self._data_plane_token(job.org_id)
         headers = {
@@ -549,6 +633,14 @@ class ImportService:
             raise SpaceImportAuthorityUnavailable(
                 "Data Plane did not attest Space import authority enforcement"
             )
+        if job.source_type != SPACE_UPLOAD_SOURCE_TYPE:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        document_id = body.get("document_id") if isinstance(body, dict) else None
+        return document_id if isinstance(document_id, str) and document_id else None
 
     async def get_job(self, job_id: UUID, org_id: str | None = None) -> ImportJob | None:
         job_id = UUID(str(job_id))

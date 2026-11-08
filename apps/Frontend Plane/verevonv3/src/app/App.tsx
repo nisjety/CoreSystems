@@ -24,7 +24,15 @@ const FleetRunConsole = FLEET_CONSOLE_ENABLED
   ? lazy(() => import('@/features/agents/components/FleetRunConsole'))
   : undefined
 const AgentInstallationsPage = lazy(() => import('@/features/agents/components/AgentInstallationsPage'))
+// The agent builder (EP-6-S8) talks to BFF routes that exist only with AGENT_DEFINITION_VERSIONS on, so
+// its route is off unless VITE_AGENT_BUILDER=true. With the flag unset the build emits no chunk.
+const AGENT_BUILDER_ENABLED = import.meta.env.VITE_AGENT_BUILDER === 'true'
+const AgentBuilderPage = AGENT_BUILDER_ENABLED
+  ? lazy(() => import('@/features/agents/components/AgentBuilderPage'))
+  : undefined
+const AutomationsHubPage = lazy(() => import('@/features/automations/components/AutomationsHubPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
+const CustomizeHubPage = lazy(() => import('@/features/customize/CustomizeHub'))
 const CostDashboardPage = lazy(() => import('@/features/cost/components/CostDashboardPage'))
 const OpsQualityPage = lazy(() => import('@/features/quality/components/OpsQualityPage'))
 const SocialCalendarPage = lazy(() => import('@/features/social/components/SocialCalendarPage'))
@@ -35,6 +43,9 @@ const KnowledgePage = lazy(() => import('@/features/knowledge/components/Knowled
 const SharedWithMePage = lazy(() => import('@/features/knowledge/components/SharedWithMePage'))
 const SpacePage = lazy(() => import('@/features/spaces/components/SpacePage'))
 const SpacesIndexPage = lazy(() => import('@/features/spaces/components/SpacesIndexPage'))
+const SpacesDirectoryPage = lazy(() => import('@/features/spaces/components/SpacesDirectoryPage'))
+const SpaceEntryRedirect = lazy(() => import('@/features/spaces/components/SpaceEntryRedirect'))
+const AttentionPage = lazy(() => import('@/features/attention/components/AttentionPage'))
 const LeadsPage = lazy(() => import('@/features/leads/components/LeadsPage'))
 const AnbudPage = lazy(() => import('@/features/anbud/components/AnbudPage'))
 const VerevonIngestionsPage = lazy(() => import('@/features/ingestions/components/VerevonIngestionsPage'))
@@ -194,8 +205,11 @@ export const Router = createRouter({
         { path: '/chat/findings', component: () => <ChatUtilityPage section="findings" /> },
         { path: '/chat/reports', component: () => <ChatUtilityPage section="reports" /> },
         { path: '/chat/routines', component: () => <ChatUtilityPage section="routines" /> },
+        { path: '/attention', component: AttentionPage },
         { path: '/spaces', component: SpacesIndexPage },
+        { path: '/spaces/directory', component: SpacesDirectoryPage },
         { path: '/spaces/:spaceId', component: SpacePage },
+        { path: '/spaces/:spaceId/m/:messageId', component: SpaceEntryRedirect },
         { path: '/studio', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/canvas', component: () => <StudioPage section="canvas" /> },
         { path: '/studio/campaigns', component: () => <StudioPage section="campaigns" /> },
@@ -236,13 +250,18 @@ export const Router = createRouter({
         { path: '/insights/experiments', component: () => <InsightsPage section="experiments" /> },
         { path: '/agents', component: AgentsPage },
         { path: '/agents/installations', component: AgentInstallationsPage },
+        { path: '/agents/automations', component: AutomationsHubPage },
         { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
         ...(FleetRunConsole
           ? [{ path: '/agents/fleets/:fleetId', component: () => <FleetRunConsole fleetId={window.location.pathname.split('/').pop()!} /> }]
           : []),
+        ...(AgentBuilderPage
+          ? [{ path: '/agents/:agentId/edit', component: AgentBuilderPage }]
+          : []),
         { path: '/agents/cost', component: CostDashboardPage },
         { path: '/agents/quality', component: OpsQualityPage },
+        { path: '/agents/customize', component: CustomizeHubPage },
         { path: '/ingestions', component: VerevonIngestionsPage },
         { path: '/knowledge', component: KnowledgePage },
         { path: '/knowledge/shared', component: SharedWithMePage },

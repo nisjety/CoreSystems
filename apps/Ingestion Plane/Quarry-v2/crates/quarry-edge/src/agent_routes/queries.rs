@@ -7,6 +7,9 @@ use super::*;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FrameQuery {
+    /// An owner-authorized, read-only view of this session's specific tab.
+    #[serde(default)]
+    pub tab_id: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_query_u8")]

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './http'
 import {
   answerQuestion,
+  approvalEditRefusalOf,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueParkFailureOf,
@@ -14,6 +15,7 @@ import {
   continueParkedRun,
   continueRun,
   decideApproval,
+  getApprovalPreview,
   listApprovals,
   listRunQuestions,
   normalizePlan,
@@ -188,6 +190,89 @@ describe('decideApproval', () => {
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '' })
     expect(result?.status).toBe('GRANTED')
+  })
+
+  const edit = { patch: { subject: 'Revised', to: ['a@example.com'] }, baseFingerprint: 'f'.repeat(64) }
+
+  it('sends an edit as {patch, baseFingerprint} with a once approval and nothing else (EP-10-S6)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ approval: { id: 'appr_1', run_id: 'run_1', state: 'APPROVAL_STATE_GRANTED' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, edit)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '', edit })
+  })
+
+  it('refuses an edit with a reject, a standing scope, Always or a broken limit before sending', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    const refusals = [
+      decideApproval('appr_1', 'reject', undefined, undefined, 'once', false, edit),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'thread', false, edit),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'thread', true, edit),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, {
+        ...edit,
+        patch: { subject: 'a\r\nBcc: x@example.com' },
+      }),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, { ...edit, baseFingerprint: 'abc' }),
+      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, { ...edit, patch: {} }),
+    ]
+    for (const refusal of refusals) {
+      await expect(refusal).rejects.toMatchObject({ status: 400, code: 'invalid_approval_decision' })
+    }
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a changed draft and a refused patch as typed edit refusals', async () => {
+    for (const [status, code] of [
+      [409, 'approval_changed'],
+      [422, 'invalid_recipient'],
+      [403, 'approval_edit_disabled'],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ error: { code, message: code, details: {} } }), {
+            status,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      )
+      const error = await decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, edit).catch(
+        (failure: unknown) => failure,
+      )
+      expect(error).toBeInstanceOf(ApiError)
+      expect(approvalEditRefusalOf(error)).toBe(code)
+    }
+    expect(approvalEditRefusalOf(new ApiError('x', 500, 'internal'))).toBeNull()
+    expect(approvalEditRefusalOf(new Error('x'))).toBeNull()
+  })
+})
+
+describe('getApprovalPreview can_edit (EP-10-S6)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads can_edit only as the literal true', async () => {
+    for (const [value, expected] of [
+      [true, true],
+      [false, false],
+      ['true', false],
+      [undefined, false],
+    ] as const) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse({ preview: { kind: 'mail_send', to: ['a@example.com'], can_edit: value } }),
+        ),
+      )
+      expect((await getApprovalPreview('appr_1'))?.canEdit).toBe(expected)
+    }
   })
 })
 
@@ -821,13 +906,85 @@ describe('run questions', () => {
     expect(runQuestionErrorCodeOf(refused)).toBeNull()
   })
 
-  it('has no caller yet: nothing under src but the client and its tests names the question calls', () => {
+  it('has one caller: only the client and the chat controller (WS14-S4) name the question calls', () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const src = join(here, '..', '..')
     const naming = sourceFiles(src)
       .filter(([, text]) => /\b(listRunQuestions|answerQuestion)\b/.test(text))
       .map(([path]) => path.slice(src.length + 1).replaceAll('\\', '/'))
       .filter((path) => !path.endsWith('.test.ts'))
-    expect(naming).toEqual(['shared/api/orchestration-client.ts'])
+    expect(naming.sort()).toEqual(['features/chat/components/use-chat-controller.ts', 'shared/api/orchestration-client.ts'])
+  })
+})
+
+describe('getApprovalPreview (EP-10-S1)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const errorResponse = (status: number, code: string) =>
+    new Response(JSON.stringify({ error: { code, message: code, details: {} } }), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+  it('reads the shaped draft from the preview route, every recipient and the full body', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        preview: {
+          kind: 'mail_send',
+          provider: 'google',
+          operation: 'gmail.send',
+          connection_id: 'conn-1',
+          to: ['a@example.com', 'b@example.com', 7],
+          subject: 'Status',
+          body_text: 'Hei,\n\nthe whole body',
+          has_html: true,
+          is_reply: true,
+          raw_only: false,
+          editable_fields: ['to', 'subject', 'body_text'],
+          action_fingerprint: 'f'.repeat(64),
+          revision: 0,
+          format: 'plain_text',
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const preview = await getApprovalPreview('appr 1')
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/orchestration/approvals/appr%201/preview')
+    expect(preview).toEqual({
+      kind: 'mail_send',
+      provider: 'google',
+      operation: 'gmail.send',
+      connectionId: 'conn-1',
+      to: ['a@example.com', 'b@example.com'],
+      subject: 'Status',
+      bodyText: 'Hei,\n\nthe whole body',
+      hasHtml: true,
+      isReply: true,
+      rawOnly: false,
+      editableFields: ['to', 'subject', 'body_text'],
+      actionFingerprint: 'f'.repeat(64),
+      revision: 0,
+      canEdit: false,
+    })
+  })
+
+  it('answers null for every 404 (not the owner, decided, switched off) and for an unknown kind', async () => {
+    for (const code of ['approval_not_found', 'preview_unavailable']) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(404, code)))
+      await expect(getApprovalPreview('appr_1')).resolves.toBeNull()
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ preview: { kind: 'calendar_event' } })))
+    await expect(getApprovalPreview('appr_1')).resolves.toBeNull()
+  })
+
+  it('throws a zero-retention refusal typed, so the card can say why', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(errorResponse(412, 'zdr_durable_mutation_forbidden')))
+    const refused = await getApprovalPreview('appr_1').catch((error: unknown) => error)
+    expect(refused).toBeInstanceOf(ApiError)
+    expect((refused as ApiError).code).toBe('zdr_durable_mutation_forbidden')
   })
 })

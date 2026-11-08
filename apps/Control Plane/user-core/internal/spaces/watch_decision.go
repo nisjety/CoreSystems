@@ -220,7 +220,7 @@ func validateWatchAuthority(evidence PersonalThreadDecisionEvidence, verb string
 		return fmt.Errorf("cannot %s a watch: %w", verb, err)
 	}
 	if evidence.Privacy.ZeroDataRetention {
-		return fmt.Errorf("zero data retention forbids a durable watch")
+		return zdrForbidsDenial("watch", "zero data retention forbids a durable watch")
 	}
 	return nil
 }

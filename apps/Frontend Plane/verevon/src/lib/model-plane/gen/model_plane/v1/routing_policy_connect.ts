@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { GetRoutingPolicyRequest, RoutingPolicyMessage, SetRoutingPolicyRequest } from "./routing_policy_pbjs";
+import { GetRoutingPolicyRequest, ListCandidatesRequest, ListCandidatesResponse, PromoteCandidateRequest, PromoteCandidateResponse, ProposeCandidateRequest, ProposeCandidateResponse, RecordCandidateEvaluationRequest, RecordCandidateEvaluationResponse, RoutingPolicyMessage, SetRoutingPolicyRequest } from "./routing_policy_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -12,17 +12,25 @@ import { MethodKind } from "@bufbuild/protobuf";
  * verevon-budget / verevon-balance / verevon-genius modes to a concrete model
  * from request complexity + budget posture; this service makes that policy
  * editable at runtime instead of compile-time constants.
- *
+ * 
  * session-core owns the durable store (a JSONB singleton row). The full policy
  * travels as an opaque JSON string in `config_json` — the canonical schema is
  * owned by inference-core's RoutingPolicy struct (snake_case). An empty/`{}`
  * config means "use the built-in defaults" (the values hard-coded today), so a
  * fresh deployment behaves identically until an admin edits the policy.
- *
+ * 
  * Read path: inference-core polls GetPolicy on a refresh tick (fail-soft to
  * defaults). Write path: the Verevon BFF gateway calls SetPolicy on an admin
  * PUT. The gateway's read for the admin UI hits inference-core's effective-view
  * endpoint, not this service, so the UI shows what routing is actually using.
+ * 
+ * Candidate path (EP-14 S10): a change can be proposed as a candidate instead
+ * of written to the live row. A candidate carries the proposed config, the
+ * offline routing diff, the reviewer's decision and an optional live
+ * evaluation. It goes live only through PromoteCandidate, which writes the live
+ * row only while the live version is still the one the candidate was proposed
+ * against. The candidate RPCs are refused unless
+ * SESSION_CORE_ROUTING_CANDIDATES_ENABLED is on.
  *
  * @generated from service model_plane.v1.RoutingPolicy
  */
@@ -52,6 +60,56 @@ export const RoutingPolicy = {
       name: "SetPolicy",
       I: SetRoutingPolicyRequest,
       O: RoutingPolicyMessage,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Record a proposed policy as a candidate against the live version. Nothing
+     * goes live. inference-core computes the offline diff and passes it in.
+     *
+     * @generated from rpc model_plane.v1.RoutingPolicy.ProposeCandidate
+     */
+    proposeCandidate: {
+      name: "ProposeCandidate",
+      I: ProposeCandidateRequest,
+      O: ProposeCandidateResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Record the reviewer's decision on the offline diff, and the live evaluation
+     * of the candidate. An accepted diff makes the candidate `evaluated`; a
+     * refused one makes it `rejected`. Only a `proposed` candidate takes a review.
+     *
+     * @generated from rpc model_plane.v1.RoutingPolicy.RecordCandidateEvaluation
+     */
+    recordCandidateEvaluation: {
+      name: "RecordCandidateEvaluation",
+      I: RecordCandidateEvaluationRequest,
+      O: RecordCandidateEvaluationResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Make an evaluated candidate the live policy. Refused unless the candidate
+     * carries a passing live evaluation or a waiver reason. When the live version
+     * has moved on since the candidate was proposed, the candidate becomes
+     * `superseded` and the call answers ABORTED.
+     *
+     * @generated from rpc model_plane.v1.RoutingPolicy.PromoteCandidate
+     */
+    promoteCandidate: {
+      name: "PromoteCandidate",
+      I: PromoteCandidateRequest,
+      O: PromoteCandidateResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * List candidates, newest first.
+     *
+     * @generated from rpc model_plane.v1.RoutingPolicy.ListCandidates
+     */
+    listCandidates: {
+      name: "ListCandidates",
+      I: ListCandidatesRequest,
+      O: ListCandidatesResponse,
       kind: MethodKind.Unary,
     },
   }

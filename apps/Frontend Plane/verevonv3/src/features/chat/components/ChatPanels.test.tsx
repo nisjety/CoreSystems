@@ -3,7 +3,8 @@
 import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flush, createSignal } from 'solid-js'
-import { ChatTabs, ContextWindowPanel, RunPlanPanel, SourcesPanel, StepsPanel } from './ChatPanels'
+import { ChatTabs, ContextWindowPanel, RunPlanPanel, SourcesPanel, StepsPanel, TracePanel } from './ChatPanels'
+import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import * as orchestration from '@/shared/api/orchestration-client'
 import * as memoryClient from '@/shared/api/memory-client'
 import {
@@ -88,6 +89,42 @@ describe('StepsPanel terminal status', () => {
     ]} onStopTask={() => {}} />)
     expect(container.querySelector('.verevon-chat-steps-header p')?.textContent).toBe('Stoppet')
     expect(container.querySelector<HTMLButtonElement>('.verevon-chat-steps-header button')?.disabled).toBe(true)
+    unmount()
+  })
+})
+
+// VITE_CHAT_RUN_LEDGER is unset here, so these pin what the Trace and the Steps tab
+// show with the run ledger off: the flat list, the cap notice and no Inspect action.
+describe('the Trace and the tool cards with the run ledger off', () => {
+  it('keeps the flat list, one row per event, and no ledger', () => {
+    const events: VerevonUiEvent[] = [
+      { type: 'run.connected', at: '2026-11-03T10:00:00.000Z', runId: 'run-1' },
+      { type: 'tool.call', at: '2026-11-03T10:00:01.000Z', id: 'c1', name: 'web_search' },
+    ]
+    const { container, unmount } = render(() => <TracePanel events={events} runId={null} />)
+    expect(container.querySelectorAll('.verevon-chat-trace-log > ol > li')).toHaveLength(2)
+    expect(container.querySelector('.verevon-chat-ledger')).toBeNull()
+    expect(container.querySelector('.verevon-chat-trace-log > header > span')?.textContent).toBe('2 hendelser')
+    unmount()
+  })
+
+  it('keeps the cap notice on the flat list', () => {
+    const { container, unmount } = render(() => <TracePanel events={[]} replayTruncated runId={null} />)
+    expect(container.querySelector('.verevon-chat-trace-log__notice')).not.toBeNull()
+    unmount()
+  })
+
+  it('offers no Inspect action on a tool card', () => {
+    const { container, unmount } = render(() => (
+      <StepsPanel
+        steps={[{ id: 'search', title: 'Search the web', detail: '', status: 'done', createdAt: '2026-11-03T10:00:00Z' }]}
+        toolCalls={[{ id: 'c1', name: 'web_search', status: 'completed', output: '3 results' }]}
+        onStopTask={() => {}}
+        onInspectCall={() => {}}
+      />
+    ))
+    expect(container.querySelector('.verevon-chat-tool-call')).not.toBeNull()
+    expect(container.querySelector('.verevon-chat-tool-call__inspect')).toBeNull()
     unmount()
   })
 })
@@ -237,6 +274,20 @@ describe('ContextWindowPanel', () => {
     it('shows nothing for an ordinary (auto) turn', () => {
       const { container, unmount } = render(() => (
         <ContextWindowPanel context={context()} loading={false} failed={false} />
+      ))
+      open(container)
+      expect(container.textContent).not.toContain('ekskludert')
+      unmount()
+    })
+
+    it("shows no filter note for a Space's auto receipt, which excludes no source", () => {
+      const { container, unmount } = render(() => (
+        <ContextWindowPanel
+          context={context()}
+          loading={false}
+          failed={false}
+          scopeApplied={{ scope: 'auto', excludedTools: [], knowledge: { mode: 'retrieval', sources: 2 } }}
+        />
       ))
       open(container)
       expect(container.textContent).not.toContain('ekskludert')
@@ -1338,6 +1389,117 @@ describe('SourcesPanel read/unread grouping', () => {
       turn([unread({ url })]),
     ])
     expect(partitionEvidenceSources(collected).read).toHaveLength(1)
+  })
+})
+
+describe('SourcesPanel cited passages (EP-2-S4)', () => {
+  /** A knowledge citation as the gateway streams it with the cited-passage switch on. */
+  const withPassage = () => read({
+    id: 'doc-1',
+    url: 'notion',
+    origin: 'knowledge',
+    quote: 'Refusjon gis innen 30 dager etter levering.',
+    locator: { document_id: 'doc-1', chunk_index: 2 },
+  } as Partial<Citation>)
+
+  it('shows the passage on the row and opens the viewer beside the card, never inside its link', () => {
+    const { container, getByText, unmount } = render(() => <SourcesPanel sources={[withPassage()]} />)
+    expect(container.querySelector('.verevon-chat-source-card__quote')?.textContent).toBe(
+      'Refusjon gis innen 30 dager etter levering.',
+    )
+    const button = getByText('Vis passasjen')
+    expect(button.closest('a')).toBeNull()
+    fireEvent.click(button)
+    flush()
+    expect(container.querySelector('.verevon-chat-cited-passage')).not.toBeNull()
+    expect(container.textContent).toContain('Vis mer')
+    unmount()
+  })
+
+  it('renders the row exactly as before when the server sent no passage', () => {
+    const { container, unmount } = render(() => <SourcesPanel sources={[read()]} />)
+    expect(container.querySelector('.verevon-chat-source-card__quote')).toBeNull()
+    expect(container.querySelector('.verevon-chat-source-card__passage')).toBeNull()
+    expect(container.querySelector('.verevon-chat-source-card-passage')).toBeNull()
+    unmount()
+  })
+})
+
+describe('SourcesPanel knowledge and connector research sources (EP-2-S7)', () => {
+  it('labels a knowledge row by its provider, not by a host', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'dr-1', number: 1, url: 'sharepoint', origin: 'knowledge', sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'SharePoint' }),
+          read({ id: 'dr-2', number: 2, url: 'https://example.com/a' }),
+        ]}
+      />
+    ))
+    const labels = Array.from(container.querySelectorAll('.verevon-chat-source-card__meta em')).map((node) => node.textContent)
+    expect(labels).toContain('SharePoint')
+    expect(labels).toContain('example.com')
+    unmount()
+  })
+
+  it('shows the number a research report cites a connected-app item by', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'dr-3', number: 3, url: 'https://outlook.office.com/mail/1', origin: 'connector', sourceGroupId: 'connector:microsoft', sourceGroupLabel: 'Microsoft 365', snippet: 'Kari · 2026-11-01' }),
+        ]}
+      />
+    ))
+    const card = container.querySelector('.verevon-chat-source-group--connector .verevon-chat-source-card')
+    expect(card?.textContent).toContain('[3]')
+    unmount()
+  })
+
+  it('shows no number on an Ask-loop connected-app item, which has none', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'conn-1', url: 'https://outlook.office.com/mail/1', origin: 'connector', sourceGroupId: 'connector:microsoft', sourceGroupLabel: 'Microsoft 365' }),
+        ]}
+      />
+    ))
+    const card = container.querySelector('.verevon-chat-source-group--connector .verevon-chat-source-card')
+    expect(card?.textContent).not.toMatch(/\[\d+\]/)
+    unmount()
+  })
+})
+
+describe('SourcesPanel research passes (EP-2-S6)', () => {
+  const numbered = () => [
+    read({ id: 'dr-1', number: 1, url: 'https://one.no/a' }),
+    read({ id: 'dr-2', number: 2, url: 'https://two.no/a' }),
+    read({ id: 'dr-3', number: 3, url: 'https://three.no/a' }),
+    unread(),
+  ]
+
+  it('groups the read sources by the pass that read them, keeping the leads apart', () => {
+    const { container, unmount } = render(() => <SourcesPanel sources={numbered()} secondPassNumbers={[3]} />)
+    const passes = Array.from(container.querySelectorAll('.verevon-chat-source-pass'))
+    expect(passes.map((section) => section.getAttribute('data-pass'))).toEqual(['1', '2'])
+    expect(passes[0]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(2)
+    expect(passes[1]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(1)
+    expect(passes[1]?.textContent).toContain('Andre runde')
+    expect(passes[1]?.textContent).toContain('three.no')
+    // The running index carries on across the passes, and the unread lead stays in its own group.
+    expect(passes[1]?.querySelector('.verevon-chat-source-card__meta span')?.textContent).toBe('3')
+    expect(container.querySelectorAll('.verevon-chat-source-group--unread .verevon-chat-source-card')).toHaveLength(1)
+    unmount()
+  })
+
+  it('renders the flat list as before without a second pass', () => {
+    for (const secondPassNumbers of [undefined, [], [9]]) {
+      const { container, unmount } = render(() => (
+        <SourcesPanel sources={numbered()} secondPassNumbers={secondPassNumbers} />
+      ))
+      expect(container.querySelector('.verevon-chat-source-pass')).toBeNull()
+      expect(container.textContent).not.toContain('Første runde')
+      expect(container.querySelectorAll('.verevon-chat-source-card')).toHaveLength(4)
+      unmount()
+    }
   })
 })
 

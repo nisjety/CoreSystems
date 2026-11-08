@@ -27,6 +27,8 @@ use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
+use crate::artifact_store::{sink_pii_error, sink_redaction_required, SinkPiiRefusal};
+
 /// Direct S3/MinIO client for the page-image CAS bucket.
 #[derive(Clone)]
 pub struct CasStore {
@@ -64,8 +66,32 @@ impl CasStore {
         format!("org={org}/doc={doc}/pages/")
     }
 
+    /// E3.6-4b: whether a page image may be stored for `org`. A page PNG is a
+    /// picture of the page, so text redaction cannot reach the personal data
+    /// in it: for an org whose content must be redacted (the org default, see
+    /// [`sink_redaction_required`]) and for a run that asked for redaction
+    /// (`redacting_run`), it is refused with the typed `pii_redaction_failed`
+    /// failure. A caller can ask before it renders, to skip the render.
+    pub fn ensure_page_image_allowed(org: &str, redacting_run: bool) -> QuarryResult<()> {
+        if redacting_run || sink_redaction_required(org) {
+            tracing::warn!(
+                cause = SinkPiiRefusal::CaptureNotRedactable.label(),
+                "cas write refused: a page image cannot be redacted for personal data"
+            );
+            return Err(sink_pii_error(
+                SinkPiiRefusal::CaptureNotRedactable,
+                "cas",
+                "page_png",
+            ));
+        }
+        Ok(())
+    }
+
     /// Write one page PNG. Returns the CAS key. `content_type` is set to
     /// `image/png` so the serve route / consumer see a correct MIME.
+    ///
+    /// E3.6-4b: refused before anything is written for an org whose content
+    /// must be redacted (see [`Self::ensure_page_image_allowed`]).
     pub async fn put_page_png(
         &self,
         org: &str,
@@ -74,6 +100,7 @@ impl CasStore {
         content_hash: &str,
         png: Vec<u8>,
     ) -> QuarryResult<String> {
+        Self::ensure_page_image_allowed(org, false)?;
         let key = Self::page_object_key(org, doc, page_no, content_hash);
         self.client
             .put_object()
@@ -178,6 +205,37 @@ mod tests {
         assert!(p9.contains("/0009-"));
         assert!(p10.contains("/0010-"));
         assert!(p9 < p10, "zero-padding keeps lexical order == page order");
+    }
+
+    /// E3.6-4b: a page image is refused for an org whose content must be
+    /// redacted and for a redacting run, and allowed otherwise.
+    #[test]
+    fn page_image_is_refused_when_redaction_applies() {
+        use crate::artifact_store::SinkPiiTestOverride;
+        use crate::pipeline::{PiiRedactionSettings, PII_REDACTION_FAILED};
+
+        {
+            let _o = SinkPiiTestOverride::install(PiiRedactionSettings::default());
+            assert!(CasStore::ensure_page_image_allowed("org_a", false).is_ok());
+            // A run that asked is refused even with the flag off here: the
+            // caller already decided the run redacts.
+            assert!(CasStore::ensure_page_image_allowed("org_a", true).is_err());
+        }
+        {
+            let _o = SinkPiiTestOverride::install(PiiRedactionSettings::parse(
+                Some("on"),
+                Some("org_a"),
+            ));
+            let err = CasStore::ensure_page_image_allowed("org_a", false).unwrap_err();
+            assert_eq!(err.code, ErrorCode::Forbidden);
+            let details = err.details.as_ref().expect("typed details");
+            assert_eq!(details["reason"], PII_REDACTION_FAILED);
+            assert_eq!(details["cause"], "capture_not_redactable");
+            assert_eq!(details["sink"], "cas");
+            assert_eq!(details["field"], "page_png");
+            // An org the default does not cover is not gated.
+            assert!(CasStore::ensure_page_image_allowed("org_b", false).is_ok());
+        }
     }
 
     #[test]

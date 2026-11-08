@@ -51,11 +51,12 @@
 //!   retention, and the edge's search cache (org-keyed, skipped under ZDR)
 //!   decides caching, neither of which this channel changes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
@@ -104,6 +105,12 @@ pub fn mark_model_hop(mut error: QuarryError) -> QuarryError {
     }
     error
 }
+
+/// A per-request gate on the URLs the pipeline may fetch (D2-055). Returns `true` when the URL
+/// may be fetched. The edge builds it from the request's web-policy decision; a denied URL is
+/// skipped with [`FetchFailure::PolicyDenied`] and no fetch, no snippet stand-in and no corpus
+/// write-back happen for it.
+pub type UrlGate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnswerRequest {
@@ -158,6 +165,9 @@ pub enum FetchFailure {
     /// shell, and rejecting it on prose length alone discards the answer with
     /// the markup. See [`has_answerable_fact`].
     TooShort,
+    /// The caller's URL gate refused this result URL (D2-055): it was never fetched. The web
+    /// policy of the request decided; nothing about the host or the rule is carried here.
+    PolicyDenied,
 }
 
 impl std::fmt::Display for FetchFailure {
@@ -171,6 +181,7 @@ impl std::fmt::Display for FetchFailure {
             FetchFailure::Transport => f.write_str("connection failed"),
             FetchFailure::Empty => f.write_str("page had no extractable content"),
             FetchFailure::TooShort => f.write_str("extracted content too short to be the page"),
+            FetchFailure::PolicyDenied => f.write_str("denied by web policy"),
         }
     }
 }
@@ -367,6 +378,53 @@ pub struct PreparedAnswer {
     pub sources_skipped: usize,
     /// See [`AnswerResult::sources_snippet_fallback`].
     pub sources_snippet_fallback: usize,
+    /// Result URLs this step fetched itself. A page read from [`PrefetchedPages`] is not
+    /// counted here: its fetch was made, and is metered, by the step that made it.
+    pub pages_fetched: usize,
+    /// Result URLs answered from a [`PrefetchedPages`] entry, with no fetch in this step.
+    pub pages_reused: usize,
+}
+
+/// A result page the caller already fetched for this request (E3.7.7a: the edge's search scrape
+/// block hydrates the results before an answer reads them). The answer reads the same page
+/// instead of fetching it again. Keyed by the exact result URL in [`PrefetchedPages`].
+///
+/// Under ZDR the text is used inline only: the corpus hook refuses it, and nothing in the prepare
+/// step caches or logs it.
+#[derive(Debug, Clone)]
+pub struct PrefetchedPage {
+    /// What the earlier fetch produced. A refusal the earlier step made (web policy or preflight)
+    /// is [`FetchFailure::PolicyDenied`], so a URL that was refused is not fetched by the answer.
+    pub outcome: Result<SourceExtraction, FetchFailure>,
+    /// True when `outcome` holds the whole extraction. A capped copy still feeds synthesis, but
+    /// it is never written to the local corpus: the corpus must not keep half of a document.
+    pub complete: bool,
+    /// When the earlier fetch ran. The corpus keeps this time, not the time of the answer.
+    pub fetched_at: DateTime<Utc>,
+}
+
+/// The pages a request already fetched, keyed by result URL. Empty means nothing was prefetched,
+/// and the prepare step does exactly what it did before this type existed.
+pub type PrefetchedPages = HashMap<String, PrefetchedPage>;
+
+/// What the prepare step does with one search result: refuse it, read a prefetched page, or fetch
+/// it. Decided in that order, so a denied URL never reads a prefetched page and a prefetched page
+/// is never fetched again.
+enum FetchStep<'a> {
+    Denied,
+    Reused(&'a PrefetchedPage),
+    Fetch,
+}
+
+impl FetchStep<'_> {
+    /// Whether the text this step yields is the whole page, so it may enter the local corpus.
+    fn whole_page(&self) -> bool {
+        match self {
+            FetchStep::Denied => false,
+            FetchStep::Reused(page) => page.complete,
+            FetchStep::Fetch => true,
+        }
+    }
 }
 
 impl AnswerPipeline {
@@ -411,6 +469,31 @@ impl AnswerPipeline {
     /// verified `org_id` flows through so private-corpus providers filter to the
     /// tenant; public-web providers ignore it.
     pub async fn prepare(&self, req: &AnswerRequest) -> QuarryResult<PreparedAnswer> {
+        self.prepare_gated(req, None).await
+    }
+
+    /// [`AnswerPipeline::prepare`] with a URL gate: every result URL is checked BEFORE its fetch.
+    /// A denied URL is never fetched and is reported as a failed source with
+    /// [`FetchFailure::PolicyDenied`]; the search snippet does not stand in for it.
+    pub async fn prepare_gated(
+        &self,
+        req: &AnswerRequest,
+        gate: Option<&UrlGate>,
+    ) -> QuarryResult<PreparedAnswer> {
+        self.prepare_with_pages(req, gate, &PrefetchedPages::new()).await
+    }
+
+    /// [`AnswerPipeline::prepare_gated`] for a request whose result pages the caller already
+    /// fetched (E3.7.7b). The gate runs first, so a denied URL is refused even when `pages` holds
+    /// a copy of it. A result found in `pages` is answered from that copy and not fetched again;
+    /// every other result is fetched as before. `pages_fetched` and `pages_reused` in the result
+    /// say which of the two happened, so each fetch is metered once, by the step that made it.
+    pub async fn prepare_with_pages(
+        &self,
+        req: &AnswerRequest,
+        gate: Option<&UrlGate>,
+        pages: &PrefetchedPages,
+    ) -> QuarryResult<PreparedAnswer> {
         if req.query.trim().is_empty() {
             return Err(QuarryError::new(
                 ErrorCode::BadRequest,
@@ -452,14 +535,45 @@ impl AnswerPipeline {
                 sources_used: 0,
                 sources_skipped: 0,
                 sources_snippet_fallback: 0,
+                pages_fetched: 0,
+                pages_reused: 0,
             });
         }
 
-        // Concurrent fetch of top-K sources.
-        let fetch_futures = results.iter().map(|r| {
-            let url = r.url.clone();
+        // One step per result, decided before any fetch starts. A denied URL is refused, a result
+        // the caller already fetched is read, and the rest are fetched.
+        let steps: Vec<FetchStep<'_>> = results
+            .iter()
+            .map(|r| {
+                if !gate.map_or(true, |gate| gate(&r.url)) {
+                    FetchStep::Denied
+                } else if let Some(page) = pages.get(&r.url) {
+                    FetchStep::Reused(page)
+                } else {
+                    FetchStep::Fetch
+                }
+            })
+            .collect();
+        let pages_fetched = steps
+            .iter()
+            .filter(|step| matches!(step, FetchStep::Fetch))
+            .count();
+        let pages_reused = steps
+            .iter()
+            .filter(|step| matches!(step, FetchStep::Reused(_)))
+            .count();
+
+        // Concurrent fetch of top-K sources. A reused page is read, never fetched again.
+        let fetch_futures = steps.iter().zip(results.iter()).map(|(step, result)| {
+            let url = result.url.clone();
             let fetcher = self.fetcher.clone();
-            async move { fetcher.fetch_extraction(&url, zdr).await }
+            async move {
+                match step {
+                    FetchStep::Denied => Err(FetchFailure::PolicyDenied),
+                    FetchStep::Reused(page) => page.outcome.clone(),
+                    FetchStep::Fetch => fetcher.fetch_extraction(&url, zdr).await,
+                }
+            }
         });
         let fetched = futures::future::join_all(fetch_futures).await;
 
@@ -482,7 +596,12 @@ impl AnswerPipeline {
         let writeback_enabled = writeback.is_enabled();
         let fetched_at = Utc::now();
 
-        for (i, (result, fetched)) in results.iter().zip(fetched.iter()).enumerate() {
+        for (i, ((result, fetched), step)) in results
+            .iter()
+            .zip(fetched.iter())
+            .zip(steps.iter())
+            .enumerate()
+        {
             // Index the body we already paid to fetch — including one the
             // character budget below will drop from synthesis, since the fetch
             // cost is sunk either way. Only the `Ok` arm: a snippet is two
@@ -500,7 +619,13 @@ impl AnswerPipeline {
                 // clear the *fetch* on structured facts instead: this corpus
                 // is a full-text prose index, so a page with a key figure and
                 // a nav shell is still not a document anyone can retrieve.
-                if writeback_enabled && md.trim().chars().count() >= MIN_USEFUL_EXTRACTION_CHARS {
+                // A reused page enters the corpus only when it is the whole page, and under the
+                // time it was fetched. Under ZDR `writeback_enabled` is false, so nothing reaches
+                // the index whatever the page is.
+                if writeback_enabled
+                    && step.whole_page()
+                    && md.trim().chars().count() >= MIN_USEFUL_EXTRACTION_CHARS
+                {
                     writeback.submit(IndexedPage {
                         // The requested URL, not the post-redirect one: a
                         // `MarkdownFetcher` returns a body and nothing else, so
@@ -511,7 +636,10 @@ impl AnswerPipeline {
                         title: result.title.clone(),
                         markdown: md.clone(),
                         fingerprint: content_fingerprint(md.as_bytes()).0,
-                        fetched_at,
+                        fetched_at: match step {
+                            FetchStep::Reused(page) => page.fetched_at,
+                            _ => fetched_at,
+                        },
                         org_id: req.org_id.clone(),
                     });
                 }
@@ -532,6 +660,14 @@ impl AnswerPipeline {
             // and callers were previously given no way to notice.
             let (source_text, mut outcome): (Option<String>, SourceOutcome) = match fetched {
                 Ok(extraction) => (Some(extraction.markdown.clone()), SourceOutcome::Fetched),
+                // A policy-denied URL is skipped outright: the snippet is the page's own text as
+                // the provider saw it, so it must not stand in for a page the policy refused.
+                Err(FetchFailure::PolicyDenied) => (
+                    None,
+                    SourceOutcome::Failed {
+                        reason: FetchFailure::PolicyDenied,
+                    },
+                ),
                 Err(reason) => match result.snippet.clone().filter(|s| !s.trim().is_empty()) {
                     Some(snippet) => (
                         Some(snippet),
@@ -621,12 +757,35 @@ impl AnswerPipeline {
             sources_used,
             sources_skipped,
             sources_snippet_fallback,
+            pages_fetched,
+            pages_reused,
         })
     }
 
     pub async fn answer(&self, req: AnswerRequest) -> QuarryResult<AnswerResult> {
+        self.answer_gated(req, None).await
+    }
+
+    /// [`AnswerPipeline::answer`] with a URL gate (see [`AnswerPipeline::prepare_gated`]).
+    pub async fn answer_gated(
+        &self,
+        req: AnswerRequest,
+        gate: Option<&UrlGate>,
+    ) -> QuarryResult<AnswerResult> {
+        self.answer_with_pages(req, gate, &PrefetchedPages::new()).await
+    }
+
+    /// [`AnswerPipeline::answer_gated`] for a request whose result pages the caller already
+    /// fetched (see [`AnswerPipeline::prepare_with_pages`]). Synthesis is unchanged: it reads the
+    /// same context, whichever step supplied each page.
+    pub async fn answer_with_pages(
+        &self,
+        req: AnswerRequest,
+        gate: Option<&UrlGate>,
+        pages: &PrefetchedPages,
+    ) -> QuarryResult<AnswerResult> {
         let started = Instant::now();
-        let prepared = self.prepare(&req).await?;
+        let prepared = self.prepare_with_pages(&req, gate, pages).await?;
         if prepared.sources_used == 0 {
             // No source contributed text — citations-only empty answer.
             return Ok(AnswerResult {
@@ -2033,5 +2192,384 @@ mod tests {
             0,
             "an under-floor extraction is not the document"
         );
+    }
+
+    // --- prefetched pages (E3.7.7b) -------------------------------------------
+
+    /// Two results. The first carries a snippet, so a prefetched failure on it has the same
+    /// stand-in a fresh failure would have.
+    fn two_result_search() -> Arc<MockSearch> {
+        Arc::new(MockSearch {
+            results: vec![
+                SearchResult {
+                    url: "https://a.example/page".into(),
+                    title: Some("A".into()),
+                    snippet: Some("A two-sentence provider excerpt.".into()),
+                    rank: 1,
+                    provider: "mock".into(),
+                    ..Default::default()
+                },
+                SearchResult {
+                    url: "https://b.example/page".into(),
+                    title: Some("B".into()),
+                    snippet: None,
+                    rank: 2,
+                    provider: "mock".into(),
+                    ..Default::default()
+                },
+            ],
+        })
+    }
+
+    /// A fetcher that answers both URLs of [`two_result_search`] with `body` and records every
+    /// URL it is asked for, so a test can assert which pages were fetched at all.
+    fn counting_fetcher(body: &str) -> (Arc<dyn MarkdownFetcher>, Arc<Mutex<Vec<String>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let responses = std::collections::HashMap::from([
+            ("https://a.example/page".to_string(), Some(body.to_string())),
+            ("https://b.example/page".to_string(), Some(body.to_string())),
+        ]);
+        let fetcher: Arc<dyn MarkdownFetcher> = Arc::new(MockFetcher {
+            responses,
+            calls: calls.clone(),
+        });
+        (fetcher, calls)
+    }
+
+    fn pipeline_over(
+        server: &MockServer,
+        search: Arc<MockSearch>,
+        fetcher: Arc<dyn MarkdownFetcher>,
+    ) -> AnswerPipeline {
+        let client = Arc::new(ModelPlaneClient::new(server.uri()).unwrap());
+        AnswerPipeline::new(search, fetcher, AiFormatRunner::new(client))
+    }
+
+    fn extracted(body: String) -> Result<SourceExtraction, FetchFailure> {
+        Ok(SourceExtraction::prose(body))
+    }
+
+    fn prefetched(
+        outcome: Result<SourceExtraction, FetchFailure>,
+        complete: bool,
+    ) -> PrefetchedPage {
+        PrefetchedPage {
+            outcome,
+            complete,
+            fetched_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetched_pages_are_read_without_a_second_fetch() {
+        let server = MockServer::start().await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://a.example/page".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+        pages.insert(
+            "https://b.example/page".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(None, false), None, &pages)
+            .await
+            .unwrap();
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "both pages were already in hand, so neither is fetched again"
+        );
+        assert_eq!((prepared.pages_fetched, prepared.pages_reused), (0, 2));
+        assert_eq!(prepared.sources_used, 2);
+        assert!(prepared
+            .combined
+            .contains("[Source 1 — https://a.example/page]"));
+        assert!(prepared
+            .citations
+            .iter()
+            .all(|c| c.outcome == Some(SourceOutcome::Fetched)));
+    }
+
+    #[tokio::test]
+    async fn results_without_a_prefetched_page_are_still_fetched() {
+        let server = MockServer::start().await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://a.example/page".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(None, false), None, &pages)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["https://b.example/page".to_string()],
+            "only the result the caller did not hand over is fetched"
+        );
+        assert_eq!((prepared.pages_fetched, prepared.pages_reused), (1, 1));
+        assert_eq!(prepared.sources_used, 2);
+    }
+
+    #[tokio::test]
+    async fn an_earlier_refusal_or_failure_is_not_retried() {
+        let server = MockServer::start().await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://a.example/page".into(),
+            prefetched(Err(FetchFailure::PolicyDenied), true),
+        );
+        pages.insert(
+            "https://b.example/page".into(),
+            prefetched(Err(FetchFailure::HttpStatus(404)), true),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(None, false), None, &pages)
+            .await
+            .unwrap();
+
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "a refused or failed page is not fetched again"
+        );
+        // An earlier refusal keeps its own outcome: it never falls back to the snippet.
+        assert_eq!(
+            prepared.citations[0].outcome,
+            Some(SourceOutcome::Failed {
+                reason: FetchFailure::PolicyDenied
+            })
+        );
+        assert_eq!(
+            prepared.citations[1].outcome,
+            Some(SourceOutcome::Failed {
+                reason: FetchFailure::HttpStatus(404)
+            })
+        );
+        assert_eq!((prepared.sources_used, prepared.sources_skipped), (0, 2));
+        assert_eq!((prepared.pages_fetched, prepared.pages_reused), (0, 2));
+    }
+
+    #[tokio::test]
+    async fn a_failed_prefetch_falls_back_to_the_snippet_without_a_fetch() {
+        let server = MockServer::start().await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://a.example/page".into(),
+            prefetched(Err(FetchFailure::Timeout), true),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(None, false), None, &pages)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["https://b.example/page".to_string()]
+        );
+        assert_eq!(
+            prepared.citations[0].outcome,
+            Some(SourceOutcome::SnippetFallback {
+                reason: FetchFailure::Timeout
+            })
+        );
+        assert_eq!(prepared.sources_snippet_fallback, 1);
+        assert!(prepared.combined.contains("SEARCH SNIPPET ONLY"));
+    }
+
+    #[tokio::test]
+    async fn the_url_gate_still_refuses_a_prefetched_url() {
+        let server = MockServer::start().await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://a.example/page".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+        let gate: UrlGate = Arc::new(|url: &str| !url.starts_with("https://a.example"));
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(None, false), Some(&gate), &pages)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["https://b.example/page".to_string()],
+            "a denied URL is neither fetched nor read from the prefetched copy"
+        );
+        assert_eq!(
+            prepared.citations[0].outcome,
+            Some(SourceOutcome::Failed {
+                reason: FetchFailure::PolicyDenied
+            })
+        );
+        assert_eq!((prepared.pages_fetched, prepared.pages_reused), (1, 0));
+        assert_eq!(prepared.sources_used, 1);
+    }
+
+    #[tokio::test]
+    async fn a_whole_prefetched_page_reaches_the_corpus_for_its_tenant() {
+        let server = MockServer::start().await;
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = corpus_pipeline(&server, &idx, one_result_search(None), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://example.com/tokio".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(Some("org_a"), false), None, &pages)
+            .await
+            .unwrap();
+        assert_eq!(prepared.sources_used, 1);
+        assert!(calls.lock().unwrap().is_empty());
+
+        await_indexed(&idx, 1).await;
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 1, "kept, as a fetched page is");
+        let hits = idx
+            .search(
+                "work-stealing scheduler",
+                &SearchOptions {
+                    org_id: Some("org_a".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "it comes back for its own tenant");
+    }
+
+    #[tokio::test]
+    async fn a_capped_prefetched_page_answers_but_is_not_kept() {
+        let server = MockServer::start().await;
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = corpus_pipeline(&server, &idx, one_result_search(None), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://example.com/tokio".into(),
+            prefetched(extracted(indexable_body()), false),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(Some("org_a"), false), None, &pages)
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.sources_used, 1,
+            "the capped text still feeds synthesis"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+
+        settle().await;
+        assert_eq!(idx.pending_writes(), 0);
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 0, "half of a document is not kept");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_prefetched_page_is_used_inline_and_persists_nothing() {
+        let server = MockServer::start().await;
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = corpus_pipeline(&server, &idx, one_result_search(None), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://example.com/tokio".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+
+        let prepared = pipeline
+            .prepare_with_pages(&corpus_request(Some("org_a"), true), None, &pages)
+            .await
+            .unwrap();
+        assert_eq!(
+            prepared.sources_used, 1,
+            "ZDR still answers from the page it was handed"
+        );
+        assert!(calls.lock().unwrap().is_empty());
+
+        settle().await;
+        assert_eq!(idx.pending_writes(), 0);
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 0, "a ZDR tenant's page leaves no durable trace");
+    }
+
+    #[tokio::test]
+    async fn answer_with_pages_synthesizes_from_the_prefetched_pages() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/invoke"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(mp_response("Tokio drives the futures.")),
+            )
+            .mount(&server)
+            .await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+        let mut pages = PrefetchedPages::new();
+        pages.insert(
+            "https://a.example/page".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+        pages.insert(
+            "https://b.example/page".into(),
+            prefetched(extracted(indexable_body()), true),
+        );
+
+        let result = pipeline
+            .answer_with_pages(
+                AnswerRequest {
+                    query: "tokio runtime".into(),
+                    top_k: Some(2),
+                    country: None,
+                    language: None,
+                    zdr: None,
+                    org_id: None,
+                },
+                None,
+                &pages,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.answer.contains("Tokio"));
+        assert_eq!(result.sources_used, 2);
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "synthesis read the pages already in hand"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_prefetched_pages_every_result_is_fetched_as_before() {
+        let server = MockServer::start().await;
+        let (fetcher, calls) = counting_fetcher(&indexable_body());
+        let pipeline = pipeline_over(&server, two_result_search(), fetcher);
+
+        let prepared = pipeline.prepare(&corpus_request(None, false)).await.unwrap();
+
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        assert_eq!((prepared.pages_fetched, prepared.pages_reused), (2, 0));
+        assert_eq!(prepared.sources_used, 2);
     }
 }

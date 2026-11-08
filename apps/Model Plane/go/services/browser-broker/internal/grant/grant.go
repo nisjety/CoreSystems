@@ -56,6 +56,10 @@ var (
 	ErrDeriveConflict = errors.New("run grant already derived with a different policy")
 )
 
+// DefaultMaxActivePerKey bounds the live grants one API key holds (INNH-10,
+// BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY).
+const DefaultMaxActivePerKey = 2
+
 // DefaultMaxRunDomains bounds the hosts one run grant may hold, and how many
 // it may inherit implicitly (BROWSER_BROKER_MAX_RUN_DOMAINS).
 const DefaultMaxRunDomains = 8
@@ -93,6 +97,11 @@ var approvalParents = map[Kind]struct{}{
 }
 
 const maxAllowedDomains = 32
+
+// AssistantTaskScopeURL is set by the broker on the cloud session it mints
+// for a submitted task. It is stored with the session and inherited by run
+// grants, so the exact host fence survives derivation and process restarts.
+const AssistantTaskScopeURL = "browser://cloud/assistant-task"
 const maxSensitiveScopeValues = 32
 const maxRevokeReasonBytes = 128
 
@@ -135,6 +144,14 @@ type Grant struct {
 	OwnerID    string
 	SessionKey string
 	ScopeURL   string
+	// KeyID is the API key a key grant was issued for (INNH-10); empty for
+	// every other grant. A key grant is an allow-list session grant that is
+	// never renewed, derived from or used as an approval parent, and its owner
+	// is the key's owning user.
+	KeyID string
+	// ConsentScope is the scope of an origin_extension grant (E3.2-e1:
+	// "turn", "conversation" or "always"); empty for every other kind.
+	ConsentScope string
 	// Zdr marks a Zero Data Retention grant. It can be raised, never lowered,
 	// and a derived or approval grant inherits it.
 	Zdr bool
@@ -189,6 +206,51 @@ type CreateSessionParams struct {
 	// owner already holds that many active ordinary grants. The check and the
 	// insert are one atomic step.
 	MaxActivePerOwner int
+	// KeyID stamps a key grant (INNH-10) with the API key it is for; empty
+	// for every other session grant. It must be a bounded printable id.
+	KeyID string
+	// MaxActivePerKey caps the key's live grants (checked atomically with the
+	// insert, beside the owner cap); zero or negative uses
+	// DefaultMaxActivePerKey. Ignored when KeyID is empty.
+	MaxActivePerKey int
+}
+
+// ErrInvalidKeyID means a key grant names a key id that is empty, longer than
+// 128 bytes or not printable ASCII.
+var ErrInvalidKeyID = errors.New("api key id must be 1 to 128 printable bytes")
+
+// maxKeyIDBytes bounds a key id (Auth Core's Better Auth key id).
+const maxKeyIDBytes = 128
+
+// ValidKeyID reports a bounded, printable (0x21-0x7e) key id.
+func ValidKeyID(id string) bool {
+	if id == "" || len(id) > maxKeyIDBytes {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x21 || id[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// KeyRevokedReason is the revoke reason of every grant revoked because its API
+// key was revoked.
+const KeyRevokedReason = "key_revoked"
+
+// KeyRevoker revokes every live grant issued for one API key (INNH-10 CP-3
+// consumer), in every store a grant of it can live in. It returns how many
+// grants it revoked.
+type KeyRevoker interface {
+	RevokeByKey(ctx context.Context, keyID, reason string) (int64, error)
+}
+
+func maxPerKey(n int) int {
+	if n <= 0 {
+		return DefaultMaxActivePerKey
+	}
+	return n
 }
 
 // ApprovalParams describes a one-time sensitive approval.
@@ -250,6 +312,9 @@ type Repository interface {
 	// absolute expiry (WS8.C).
 	Renew(ctx context.Context, p RenewParams) (*Grant, error)
 	GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error)
+	// CreateOriginExtension issues a parent-bound grant that adds consented
+	// hosts to a live session or run grant (E3.2-e1, OD13).
+	CreateOriginExtension(ctx context.Context, p ExtensionParams) (*Grant, error)
 	// RevokeScoped revokes the grant and every grant derived from it.
 	RevokeScoped(ctx context.Context, id, orgID, ownerID, reason string) error
 }
@@ -269,6 +334,7 @@ type MemoryRepository struct {
 var (
 	_ Repository = (*MemoryRepository)(nil)
 	_ Purger     = (*MemoryRepository)(nil)
+	_ KeyRevoker = (*MemoryRepository)(nil)
 )
 
 // NewMemoryRepository constructs an empty MemoryRepository.
@@ -282,6 +348,9 @@ func NewMemoryRepository() *MemoryRepository {
 // callers have already validated it, so an empty or malformed policy cannot
 // become unrestricted stored authority.
 func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParams) (*Grant, error) {
+	if p.KeyID != "" && !ValidKeyID(p.KeyID) {
+		return nil, ErrInvalidKeyID
+	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
 		return nil, err
@@ -304,6 +373,7 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 		OwnerID:        p.OwnerID,
 		SessionKey:     p.SessionKey,
 		ScopeURL:       p.ScopeURL,
+		KeyID:          p.KeyID,
 		Zdr:            p.Zdr,
 		ReadOnly:       p.ReadOnly,
 		Budget:         budget,
@@ -315,6 +385,9 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p.MaxActivePerOwner > 0 && s.activeLocked(p.OrgID, p.OwnerID) >= p.MaxActivePerOwner {
+		return nil, ErrTooManyGrants
+	}
+	if p.KeyID != "" && s.activeKeyLocked(p.OrgID, p.KeyID) >= maxPerKey(p.MaxActivePerKey) {
 		return nil, ErrTooManyGrants
 	}
 	s.grants[id] = clone(g)
@@ -336,7 +409,10 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 	}
 	// A read-only parent carries no act authority, so an approval under it
 	// would widen the grant it came from.
-	if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 || parent.ReadOnly {
+	// A key grant (INNH-10) never takes a sensitive approval: no person stands
+	// behind the key to approve one.
+	if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 ||
+		parent.ReadOnly || parent.KeyID != "" {
 		return nil, ErrApprovalParentInvalid
 	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
@@ -344,7 +420,7 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		return nil, err
 	}
 	for _, host := range domains {
-		if !hostWithin(host, parent.AllowedDomains) {
+		if !hostWithinGrant(host, parent) {
 			return nil, ErrDeriveWidensParent
 		}
 	}
@@ -505,14 +581,13 @@ func (s *MemoryRepository) derivedLocked(kind Kind, parentID, orgID, sessionKey 
 // deriveDomains computes a run grant's hosts. An empty request inherits the
 // parent's hosts unless the parent kind requires an explicit list or the
 // parent holds more hosts than one run may inherit. An explicit list must be
-// canonical, at most maxRun hosts, and each host must equal or be a subdomain
-// of a parent host.
-func deriveDomains(parent, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
+// canonical, at most maxRun hosts, and within the parent's host fence.
+func deriveDomains(parent *Grant, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
 	if len(requested) == 0 {
-		if explicitRequired || len(parent) > maxRun {
+		if explicitRequired || len(parent.AllowedDomains) > maxRun {
 			return nil, ErrDeriveNeedsExplicitDomains
 		}
-		return append([]string(nil), parent...), nil
+		return append([]string(nil), parent.AllowedDomains...), nil
 	}
 	domains, err := NormalizeAllowedDomains(requested)
 	if err != nil {
@@ -522,7 +597,7 @@ func deriveDomains(parent, requested []string, maxRun int, explicitRequired bool
 		return nil, ErrInvalidDomainPolicy
 	}
 	for _, host := range domains {
-		if !hostWithin(host, parent) {
+		if !hostWithinGrant(host, parent) {
 			return nil, ErrDeriveWidensParent
 		}
 	}
@@ -539,6 +614,18 @@ func hostWithin(host string, policy []string) bool {
 		}
 	}
 	return false
+}
+
+func hostWithinGrant(host string, parent *Grant) bool {
+	if parent.ScopeURL == AssistantTaskScopeURL {
+		for _, allowed := range parent.AllowedDomains {
+			if allowed == host {
+				return true
+			}
+		}
+		return false
+	}
+	return hostWithin(host, parent.AllowedDomains)
 }
 
 func equalStrings(a, b []string) bool {
@@ -645,11 +732,60 @@ func (s *MemoryRepository) activeLocked(orgID, ownerID string) int {
 	active := 0
 	for _, g := range s.grants {
 		if g.OrgID == orgID && g.OwnerID == ownerID && g.Kind != KindSensitiveApproval && g.Kind != KindRun &&
-			g.Kind != KindAttach && !g.Revoked && !now.After(g.ExpiresAt) {
+			g.Kind != KindAttach && g.Kind != KindOriginExtension && !g.Revoked && !now.After(g.ExpiresAt) {
 			active++
 		}
 	}
 	return active
+}
+
+// activeKeyLocked counts the live grants issued for one API key.
+func (s *MemoryRepository) activeKeyLocked(orgID, keyID string) int {
+	now := s.now()
+	active := 0
+	for _, g := range s.grants {
+		if g.OrgID == orgID && g.KeyID == keyID && !g.Revoked && !now.After(g.ExpiresAt) {
+			active++
+		}
+	}
+	return active
+}
+
+// RevokeByKey revokes every grant issued for keyID that is not yet revoked, in
+// every org, and every grant derived from one (none should exist: a key grant
+// is never a parent). An invalid key id revokes nothing.
+func (s *MemoryRepository) RevokeByKey(_ context.Context, keyID, reason string) (int64, error) {
+	if !ValidKeyID(keyID) {
+		return 0, ErrInvalidKeyID
+	}
+	reason = truncateReason(reason)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	revoked := map[string]struct{}{}
+	for id, g := range s.grants {
+		if g.KeyID == keyID && !g.Revoked {
+			revoked[id] = struct{}{}
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for id, g := range s.grants {
+			if _, done := revoked[id]; done || g.ParentGrantID == "" || g.Revoked {
+				continue
+			}
+			if _, parentRevoked := revoked[g.ParentGrantID]; parentRevoked {
+				revoked[id] = struct{}{}
+				changed = true
+			}
+		}
+	}
+	for id := range revoked {
+		next := clone(s.grants[id])
+		next.Revoked = true
+		next.RevokedReason = reason
+		s.grants[id] = next
+	}
+	return int64(len(revoked)), nil
 }
 
 // activeChildrenLocked counts the live grants of one kind (run or attach)

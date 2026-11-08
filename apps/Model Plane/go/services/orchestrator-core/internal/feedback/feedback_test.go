@@ -229,6 +229,46 @@ func mustRecord(t *testing.T, s Store, r Rating) {
 	}
 }
 
+// EP-11 S3: a gateway with skill pins on names the version (`id@version`); the
+// reference splits, and only a numeric suffix is a version.
+func TestSplitSkillRef(t *testing.T) {
+	cases := []struct {
+		ref     string
+		id      string
+		version int
+	}{
+		{"skill.x@4", "skill.x", 4},
+		{"skill.x", "skill.x", 0},
+		{"team@home", "team@home", 0},
+		{"@4", "@4", 0},
+		{"skill.x@", "skill.x@", 0},
+		{"builtin:office/pdf", "builtin:office/pdf", 0},
+	}
+	for _, c := range cases {
+		id, version := SplitSkillRef(c.ref)
+		if id != c.id || version != c.version {
+			t.Fatalf("SplitSkillRef(%q) = (%q, %d), want (%q, %d)", c.ref, id, version, c.id, c.version)
+		}
+	}
+}
+
+// A pinned rating attaches to the same skill as an unpinned one, so quarantine
+// and promotion keep keying on the skill id whichever gateway sent it.
+func TestPinnedRatingCountsTowardTheSkill(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	mustRecord(t, s, rating("org-1", "run-1", "user-1", "skill.x@3", RatingGood))
+	mustRecord(t, s, rating("org-1", "run-2", "user-2", "skill.x", RatingGood))
+
+	got, err := s.Candidates(ctx, 1, 0.0)
+	if err != nil {
+		t.Fatalf("candidates: %v", err)
+	}
+	if len(got) != 1 || got[0].SkillID != "skill.x" || got[0].Total != 2 {
+		t.Fatalf("a pinned rating must count toward the bare skill id: %+v", got)
+	}
+}
+
 func itoa(i int) string {
 	if i == 0 {
 		return "0"

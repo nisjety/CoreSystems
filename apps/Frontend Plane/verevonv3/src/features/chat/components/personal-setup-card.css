@@ -1,0 +1,122 @@
+/*
+ * The personal first-run card (EP-8-S8): an inline step above the empty chat. One column at phone width, and
+ * two columns for the four answers from 640 px. Every control keeps a 44 px touch target, and nothing pushes
+ * the page sideways at 375 px.
+ */
+
+.verevon-personal-setup {
+  box-sizing: border-box;
+  width: min(100%, 560px);
+  margin: 0 auto 16px;
+  padding: 16px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font-size: 0.875rem;
+  line-height: 1.45;
+}
+
+.verevon-personal-setup__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.verevon-personal-setup__lede {
+  margin: 4px 0 12px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-personal-setup__fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+@media (min-width: 640px) {
+  .verevon-personal-setup__fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.verevon-personal-setup__field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.verevon-personal-setup__field input,
+.verevon-personal-setup__field select {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--verevon-touch-target, 44px);
+  padding: 0 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface-soft, var(--verevon-surface));
+  color: var(--verevon-text);
+  font: inherit;
+}
+
+.verevon-personal-setup__role {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.verevon-personal-setup__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--verevon-touch-target, 44px);
+  cursor: pointer;
+}
+
+.verevon-personal-setup__error {
+  margin: 12px 0 0;
+  color: var(--verevon-coral-deep, var(--verevon-text));
+}
+
+.verevon-personal-setup__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.verevon-personal-setup__notice p {
+  margin: 0 0 12px;
+}
+
+.verevon-personal-setup__button {
+  min-height: var(--verevon-touch-target, 44px);
+  padding: 0 16px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.verevon-personal-setup__button--primary {
+  border-color: var(--verevon-accent);
+  color: var(--verevon-accent);
+}
+
+.verevon-personal-setup__button:disabled,
+.verevon-personal-setup__field input:disabled,
+.verevon-personal-setup__field select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.verevon-personal-setup__button:focus-visible,
+.verevon-personal-setup__field input:focus-visible,
+.verevon-personal-setup__field select:focus-visible,
+.verevon-personal-setup__check input:focus-visible {
+  outline: 2px solid var(--verevon-accent);
+  outline-offset: 2px;
+}

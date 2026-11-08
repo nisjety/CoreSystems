@@ -130,6 +130,39 @@ describe('streamRunEvents dispatch', () => {
     expect(onRunResumed).not.toHaveBeenCalled()
   })
 
+  it('reads a Do-loop tool retry (WS15-S3): ids, counts and a closed reason, nothing else', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('tool_retry_scheduled', {
+          run_id: 'run_1',
+          step_id: 'step_3',
+          tool: 'knowledge_search',
+          attempt: 2,
+          max_attempts: 3,
+          wait_ms: 250,
+          reason: 'timeout',
+          error: 'upstream said something private',
+        }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onToolRetryScheduled = vi.fn()
+    await streamRunEvents('run_1', { onToolRetryScheduled })
+
+    expect(onToolRetryScheduled).toHaveBeenCalledTimes(1)
+    expect(onToolRetryScheduled).toHaveBeenCalledWith({
+      runId: 'run_1',
+      stepId: 'step_3',
+      tool: 'knowledge_search',
+      attempt: 2,
+      maxAttempts: 3,
+      waitMs: 250,
+      reason: 'timeout',
+      at: undefined,
+    })
+  })
+
   it('parses goal_summary/batch_id (wide-research fan-out) into goalSummary/batchId', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([
@@ -207,6 +240,23 @@ describe('streamRunEvents dispatch', () => {
       childRunId: 'run_1.tool_1_fan-1.1',
       status: 'failed',
       at: '2026-09-28T10:00:06Z',
+    })
+  })
+
+  it('exposes only complete bounded browser attachment IDs', async () => {
+    const onBrowserAttachSharedJar = vi.fn()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      sseFrame('browser_attach_shared_jar', {
+        run_id: 'run-42', plan_id: 'plan-1', attach_id: 'att-1', session_run_id: 'qrun-9', tab_id: 'tab-3',
+        url: 'https://private.example/',
+      }),
+      sseFrame('browser_attach_shared_jar', { run_id: 'run-42', plan_id: 'plan-1', attach_id: 'att-1', session_run_id: 'qrun-9' }),
+      sseFrame('browser_attach_shared_jar', { run_id: 'run-42', plan_id: 'plan-1', attach_id: 'att-1', session_run_id: 'qrun-9', tab_id: 'x'.repeat(257) }),
+    ])))
+    await streamRunEvents('run-42', { onBrowserAttachSharedJar })
+    expect(onBrowserAttachSharedJar).toHaveBeenCalledTimes(1)
+    expect(onBrowserAttachSharedJar).toHaveBeenCalledWith({
+      runId: 'run-42', planId: 'plan-1', attachId: 'att-1', sessionRunId: 'qrun-9', tabId: 'tab-3',
     })
   })
 

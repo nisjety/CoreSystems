@@ -64,6 +64,43 @@ async fn resolve_viewer_grants(
     (viewer, granted)
 }
 
+/// `resolve_viewer_grants` for a read made under a verified Space decision
+/// (WS14-S5). The viewer's own explicit grants are unioned with the documents
+/// the owner attached to THIS room that the viewer may see through it now
+/// (Control's `space-visible` join: current member, current audience, the
+/// owner's view grant). The union exists only for this one read, is never
+/// cached, and never applies to an org-admin bypass or a service principal, so
+/// the Space widens nothing outside the room it names.
+async fn resolve_viewer_grants_in_space(
+    pipeline: &AppState,
+    auth: Option<&axum::extract::Extension<crate::authz::AuthContext>>,
+    org_id: &str,
+    scope: Option<&crate::space_scope::ResolvedSpaceRetrievalScope>,
+) -> (Option<String>, Vec<String>) {
+    let (viewer, mut granted) = resolve_viewer_grants(pipeline, auth, org_id).await;
+    let (Some(scope), Some(viewer_id), Some(ctx)) = (scope, viewer.as_deref(), auth) else {
+        return (viewer, granted);
+    };
+    if ctx.principal.is_service() {
+        return (viewer, granted);
+    }
+    let attached = pipeline
+        .visibility
+        .visible_space_documents(
+            org_id,
+            viewer_id,
+            &scope.authority.space_ref,
+            ctx.verified_bearer.as_deref(),
+        )
+        .await;
+    for id in attached {
+        if !granted.contains(&id) {
+            granted.push(id);
+        }
+    }
+    (viewer, granted)
+}
+
 /// The admission guard for every authenticated route.
 ///
 /// The whole decision (bearer verification, identity shape, `X-Org-ID` check,
@@ -496,6 +533,9 @@ fn router_inner(
         // matched. Requires the Space decision — there is no org-wide form of
         // this listing, so nothing here can be asked without Space authority.
         .route("/v1/knowledge/space-sources", post(space_knowledge))
+        // One room file's extracted text, read under the same Space predicate
+        // as the listing above (WS14-S5).
+        .route("/v1/knowledge/space-document", post(space_document))
         // Semantic response cache — Model Plane gateway SemanticCache seam.
         .route("/v1/cache/semantic/search", post(semantic_cache_search))
         .route("/v1/cache/semantic/store", post(semantic_cache_store))
@@ -570,7 +610,7 @@ fn router_inner(
 /// - `sources` and `freshness` narrow the requested ids to that same set;
 /// - `wiki` pins the search to the workspace the binding names, and refuses a
 ///   binding that names none rather than falling back to the caller's ACL;
-/// - `space-sources` exists only under Space authority.
+/// - `space-sources` and `space-document` exist only under Space authority.
 ///
 /// `graph`, `pack`, `timeline`, `contradictions`, `chunks` and `compare` are
 /// deliberately absent: they have no Space predicate yet, so a decision
@@ -588,6 +628,7 @@ fn space_decision_is_enforced_for_path(path: &str) -> bool {
             | "/v1/knowledge/freshness"
             | "/v1/knowledge/wiki"
             | "/v1/knowledge/space-sources"
+            | "/v1/knowledge/space-document"
     )
 }
 
@@ -1615,14 +1656,17 @@ async fn retrieve_sources(
     // Under Space authority this is a lookup inside one room, so an id outside
     // the room is absent exactly like one the viewer cannot see. The predicate
     // goes into the query rather than pre-filtering the ids, so it is exact.
-    let space_ref = resolved_space_scope(&pipeline, auth.as_ref(), &headers)
-        .await?
-        .map(|scope| scope.authority.space_ref);
+    let space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
+    let space_ref = space_scope
+        .as_ref()
+        .map(|scope| scope.authority.space_ref.clone());
     if req.document_ids.is_empty() {
         return Ok(Json(serde_json::json!({"sources": []})));
     }
     // Per-user ownership: only return metadata for docs the viewer may see.
-    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    let (viewer, granted) =
+        resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &req.org_id, space_scope.as_ref())
+            .await;
     // Phase 1 RLS: `pin_request_org` above has already replaced any
     // caller-supplied org with the verified one, so this reads through an
     // org-scoped transaction. The SQL still binds `org_id` itself — the
@@ -1656,13 +1700,33 @@ async fn retrieve_sources(
     Ok(Json(serde_json::json!({"sources": sources})))
 }
 
+// WS14-S5: `$6` narrows by document type (NULL = every type), `$7`/`$8` are the
+// keyset cursor `(updated_at, document_id)` (NULL = first page; `$7` stays text
+// and is cast in SQL so sqlx binds a plain String), and the extra columns are
+// the provenance a file library needs (uploader, creation time, the filename /
+// type / size / hash / extension / text length the upload stamped). The ORDER
+// BY gains the id as a tiebreaker so the cursor is a total order.
 const SPACE_DOCUMENTS_SQL: &str =
-    "SELECT document_id, title, source, type, status, zdr_classification, updated_at::TEXT
+    "SELECT document_id, title, source, type, status, zdr_classification, updated_at::TEXT,
+            owner_id, created_at::TEXT,
+            metadata->>'filename', metadata->>'content_type', metadata->>'size_bytes',
+            metadata->>'sha256', metadata->>'extension', metadata->>'text_chars'
      FROM documents
      WHERE org_id = $1 AND space_ref = $2 AND deleted_at IS NULL
        AND ($3::text IS NULL OR owner_id = $3 OR visibility = 'org' OR document_id = ANY($4))
-     ORDER BY updated_at DESC
+       AND ($6::text[] IS NULL OR type = ANY($6))
+       AND ($7::text IS NULL OR (updated_at, document_id) < ($7::text::timestamptz, $8::text))
+     ORDER BY updated_at DESC, document_id DESC
      LIMIT $5";
+
+// WS14-S5: one document's extracted text under the same Space, viewer and grant
+// predicate as the listing. Absent, deleted, out-of-room and not-visible are the
+// same empty result, so a caller learns nothing about which it was.
+const SPACE_DOCUMENT_SQL: &str =
+    "SELECT document_id, title, type, status, zdr_classification, metadata->>'filename', content
+     FROM documents
+     WHERE org_id = $1 AND space_ref = $2 AND document_id = $3 AND deleted_at IS NULL
+       AND ($4::text IS NULL OR owner_id = $4 OR visibility = 'org' OR document_id = ANY($5))";
 
 const SPACE_WIKI_PAGES_SQL: &str =
     "SELECT page_id, title, path, updated_at::TEXT
@@ -1679,6 +1743,90 @@ const SPACE_KNOWLEDGE_MAX_LIMIT: i64 = 200;
 struct SpaceKnowledgeRequest {
     #[serde(default)]
     limit: Option<i64>,
+    /// Restrict the document listing to these `documents.type` values.
+    #[serde(default)]
+    types: Option<Vec<String>>,
+    /// Opaque cursor from a previous response's `next_cursor`.
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+const SPACE_LISTING_MAX_TYPES: usize = 10;
+const SPACE_LISTING_MAX_TYPE_LEN: usize = 64;
+const SPACE_CURSOR_MAX_LEN: usize = 256;
+
+/// The keyset cursor is `base64url("<updated_at as Postgres text>|<document_id>")`.
+/// It is opaque to callers, and decoding is strict: the timestamp half goes
+/// through a SQL cast, so anything that is not plainly a timestamp is refused
+/// here rather than surfacing as a database error.
+fn encode_space_cursor(updated_at: &str, document_id: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    URL_SAFE_NO_PAD.encode(format!("{updated_at}|{document_id}"))
+}
+
+fn decode_space_cursor(cursor: &str) -> Result<(String, String), AppError> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    let invalid = || AppError::bad_request("invalid cursor");
+    if cursor.is_empty() || cursor.len() > SPACE_CURSOR_MAX_LEN {
+        return Err(invalid());
+    }
+    let raw = URL_SAFE_NO_PAD.decode(cursor).map_err(|_| invalid())?;
+    let raw = String::from_utf8(raw).map_err(|_| invalid())?;
+    let (updated_at, document_id) = raw.split_once('|').ok_or_else(invalid)?;
+    let timestamp_ok = !updated_at.is_empty()
+        && updated_at.len() <= 40
+        && updated_at
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | '.' | ' ' | '+' | 'T' | 'Z'));
+    if !timestamp_ok || document_id.is_empty() || document_id.len() > 128 {
+        return Err(invalid());
+    }
+    Ok((updated_at.to_string(), document_id.to_string()))
+}
+
+type SpaceDocumentRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+/// The upload-stamped metadata subset a file library renders. Only keys that
+/// are present are emitted, and `size_bytes` / `text_chars` are numbers when
+/// they parse as such.
+fn space_document_metadata(row: &SpaceDocumentRow) -> serde_json::Value {
+    let mut meta = serde_json::Map::new();
+    let text = |value: &Option<String>| value.as_ref().map(|v| serde_json::json!(v));
+    let number = |value: &Option<String>| {
+        value.as_ref().map(|v| match v.parse::<i64>() {
+            Ok(n) => serde_json::json!(n),
+            Err(_) => serde_json::json!(v),
+        })
+    };
+    for (key, value) in [
+        ("filename", text(&row.9)),
+        ("content_type", text(&row.10)),
+        ("size_bytes", number(&row.11)),
+        ("sha256", text(&row.12)),
+        ("extension", text(&row.13)),
+        ("text_chars", number(&row.14)),
+    ] {
+        if let Some(value) = value {
+            meta.insert(key.to_string(), value);
+        }
+    }
+    serde_json::Value::Object(meta)
 }
 
 /// Everything this Space's knowledge scope actually contains.
@@ -1721,24 +1869,58 @@ async fn space_knowledge(
         .limit
         .unwrap_or(SPACE_KNOWLEDGE_DEFAULT_LIMIT)
         .clamp(1, SPACE_KNOWLEDGE_MAX_LIMIT);
-    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &org_id).await;
+    let (viewer, granted) =
+        resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &org_id, Some(&scope)).await;
     let mut unavailable: Vec<serde_json::Value> = Vec::new();
+
+    // WS14-S5: optional type filter and keyset cursor. Validated before any read.
+    let types: Option<Vec<String>> = match req.types {
+        Some(types) if !types.is_empty() => {
+            if types.len() > SPACE_LISTING_MAX_TYPES
+                || types
+                    .iter()
+                    .any(|t| t.is_empty() || t.len() > SPACE_LISTING_MAX_TYPE_LEN)
+            {
+                return Err(AppError::bad_request("invalid types filter"));
+            }
+            Some(types)
+        }
+        _ => None,
+    };
+    let (cursor_updated_at, cursor_document_id): (Option<String>, Option<String>) =
+        match req.cursor.as_deref() {
+            Some(cursor) => {
+                let (updated_at, document_id) = decode_space_cursor(cursor)?;
+                (Some(updated_at), Some(document_id))
+            }
+            None => (None, None),
+        };
 
     // Phase 1 RLS: both reads serve exactly one org, taken from the verified
     // decision rather than any request field, so they run inside an org-scoped
     // transaction. The SQL still binds org_id itself as the backstop.
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
-    let document_rows = sqlx::query_as::<
-        _,
-        (String, String, String, String, String, String, String),
-    >(SPACE_DOCUMENTS_SQL)
-    .bind(&org_id)
-    .bind(&scope.authority.space_ref)
-    .bind(&viewer)
-    .bind(&granted)
-    .bind(limit)
-    .fetch_all(&mut *tx)
-    .await?;
+    let mut document_rows = sqlx::query_as::<_, SpaceDocumentRow>(SPACE_DOCUMENTS_SQL)
+        .bind(&org_id)
+        .bind(&scope.authority.space_ref)
+        .bind(&viewer)
+        .bind(&granted)
+        // One extra row tells a full page from a complete room.
+        .bind(limit + 1)
+        .bind(&types)
+        .bind(&cursor_updated_at)
+        .bind(&cursor_document_id)
+        .fetch_all(&mut *tx)
+        .await?;
+    let has_more = document_rows.len() as i64 > limit;
+    document_rows.truncate(limit as usize);
+    let next_cursor = if has_more {
+        document_rows
+            .last()
+            .map(|row| encode_space_cursor(&row.6, &row.0))
+    } else {
+        None
+    };
 
     let wiki_workspace = scope
         .workspace_id
@@ -1766,16 +1948,19 @@ async fn space_knowledge(
     tx.commit().await?;
 
     let documents: Vec<serde_json::Value> = document_rows
-        .into_iter()
-        .map(|(did, title, source, dtype, status, zdr, updated)| {
+        .iter()
+        .map(|row| {
             serde_json::json!({
-                "document_id": did,
-                "title": title,
-                "source": source,
-                "type": dtype,
-                "status": status,
-                "zdr_classification": zdr,
-                "updated_at": updated,
+                "document_id": row.0,
+                "title": row.1,
+                "source": row.2,
+                "type": row.3,
+                "status": row.4,
+                "zdr_classification": row.5,
+                "updated_at": row.6,
+                "uploaded_by": row.7,
+                "created_at": row.8,
+                "metadata": space_document_metadata(row),
             })
         })
         .collect();
@@ -1793,7 +1978,7 @@ async fn space_knowledge(
 
     // The document list is capped, and a caller cannot tell a full page from a
     // complete room. Say which it is rather than letting the reader assume.
-    let documents_truncated = documents.len() as i64 >= limit;
+    let documents_truncated = has_more;
     Ok(Json(serde_json::json!({
         "space_ref": scope.authority.space_ref,
         "decision_ref": scope.authority.decision_ref,
@@ -1804,9 +1989,99 @@ async fn space_knowledge(
         },
         "documents": documents,
         "documents_truncated": documents_truncated,
+        "next_cursor": next_cursor,
         "wiki_pages": wiki_pages,
         "unavailable": unavailable,
     })))
+}
+
+const SPACE_DOCUMENT_DEFAULT_MAX_CHARS: usize = 100_000;
+const SPACE_DOCUMENT_MAX_CHARS: usize = 1_000_000;
+
+#[derive(serde::Deserialize)]
+struct SpaceDocumentRequest {
+    document_id: String,
+    #[serde(default)]
+    max_chars: Option<usize>,
+}
+
+/// One room file's extracted text (WS14-S5).
+///
+/// Requires the Space decision, like the listing, and reads under the identical
+/// predicate: this org, this room, not deleted, and visible to the viewer by
+/// ownership, org visibility or an explicit grant, where the grants include the
+/// room-attached documents the viewer may see through the Space. Anything that
+/// fails the predicate is a 404 that cannot be told apart from a missing id.
+/// Text only: the stored text is returned truncated server-side and the response
+/// is `no-store`, so it is never cached by an intermediary.
+async fn space_document(
+    State(pipeline): State<AppState>,
+    auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
+    Json(req): Json<SpaceDocumentRequest>,
+) -> Result<axum::response::Response, AppError> {
+    let scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers)
+        .await?
+        .ok_or_else(|| {
+            AppError::forbidden("a Space decision is required to read a Space document")
+        })?;
+    let document_id = req.document_id.trim();
+    if document_id.is_empty() || document_id.len() > 128 {
+        return Err(AppError::bad_request("document_id is required"));
+    }
+    let max_chars = req
+        .max_chars
+        .unwrap_or(SPACE_DOCUMENT_DEFAULT_MAX_CHARS)
+        .clamp(1, SPACE_DOCUMENT_MAX_CHARS);
+    let org_id = scope.authority.org_id.clone();
+    let (viewer, granted) =
+        resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &org_id, Some(&scope)).await;
+
+    let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &org_id).await?;
+    let row = sqlx::query_as::<_, (String, String, String, String, String, Option<String>, String)>(
+        SPACE_DOCUMENT_SQL,
+    )
+    .bind(&org_id)
+    .bind(&scope.authority.space_ref)
+    .bind(document_id)
+    .bind(&viewer)
+    .bind(&granted)
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let Some((did, title, dtype, status, zdr, filename, content)) = row else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({"error": "document not found"})),
+        )
+            .into_response());
+    };
+    let total_chars = content.chars().count();
+    let truncated = total_chars > max_chars;
+    let text: String = if truncated {
+        content.chars().take(max_chars).collect()
+    } else {
+        content
+    };
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "space_ref": scope.authority.space_ref,
+            "decision_ref": scope.authority.decision_ref,
+            "document_id": did,
+            "file_name": filename.unwrap_or(title),
+            "type": dtype,
+            "status": status,
+            "zdr_classification": zdr,
+            "text": text,
+            "text_chars": total_chars,
+            "truncated": truncated,
+        })),
+    )
+        .into_response())
 }
 
 // D7: Freshness scoring
@@ -1825,10 +2100,13 @@ async fn retrieve_freshness(
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
     // Same predicate as `retrieve_sources`: freshness is the other half of the
     // same by-id lookup, and the two must not disagree about what is in a room.
-    let space_ref = resolved_space_scope(&pipeline, auth.as_ref(), &headers)
-        .await?
-        .map(|scope| scope.authority.space_ref);
-    let (viewer, granted) = resolve_viewer_grants(&pipeline, auth.as_ref(), &req.org_id).await;
+    let space_scope = resolved_space_scope(&pipeline, auth.as_ref(), &headers).await?;
+    let space_ref = space_scope
+        .as_ref()
+        .map(|scope| scope.authority.space_ref.clone());
+    let (viewer, granted) =
+        resolve_viewer_grants_in_space(&pipeline, auth.as_ref(), &req.org_id, space_scope.as_ref())
+            .await;
     // Phase 1 RLS: single-org read, same rationale as `retrieve_sources` above.
     let mut tx = pg_org_scope::begin_org_scoped(&pipeline.pool, &req.org_id).await?;
     let rows = sqlx::query_as::<_, (String, String, String, String)>(FRESHNESS_SQL)
@@ -2927,6 +3205,7 @@ mod auxiliary_security_tests {
             "/v1/knowledge/freshness",
             "/v1/knowledge/wiki",
             "/v1/knowledge/space-sources",
+            "/v1/knowledge/space-document",
         ] {
             assert!(
                 space_decision_is_enforced_for_path(path),
@@ -3066,5 +3345,335 @@ mod auxiliary_security_tests {
             compared_document_ids(&rows),
             vec!["visible-a".to_string(), "visible-b".to_string()]
         );
+    }
+}
+
+// WS14-S5: the room-file listing, the Space grants union and the keyset cursor.
+// The union tests build the real pipeline wiring from a minimal environment
+// (every backend is a closed local port, nothing is reached) with a recording
+// visibility client, so the rules in `resolve_viewer_grants_in_space` run for
+// real. The SQL predicates are exercised against a database in
+// tests/space_files_listing.rs.
+#[cfg(test)]
+mod space_files_tests {
+    use super::*;
+    use crate::authz::{
+        AuthContext, AuthMethod, EffectiveAcl, NoopPolicyClient, PolicyClient, Principal,
+        VisibilityClient,
+    };
+    use crate::config::Config;
+    use crate::embed::{media::MediaQueryEmbedder, visual::VisualQueryEmbedder, EmbeddingClient};
+    use crate::search::graph_remote::GraphTraverseClient;
+    use crate::search::keyword::MeilisearchQueryClient;
+    use crate::search::sparse::{DynSparseSearchBackend, PostgresSparseBackend};
+    use crate::space_scope::{ResolvedSpaceRetrievalScope, VerifiedSpaceAuthority};
+    use std::sync::{Arc, Mutex};
+
+    const SPACE: &str = "space:org-1:room-7";
+
+    type SpaceCall = (String, String, String, Option<String>);
+
+    struct Recording {
+        grants: Vec<String>,
+        attached: Vec<String>,
+        space_calls: Mutex<Vec<SpaceCall>>,
+    }
+
+    #[async_trait::async_trait]
+    impl VisibilityClient for Recording {
+        async fn visible_documents(
+            &self,
+            _org_id: &str,
+            _user_id: &str,
+            _verified_bearer: Option<&str>,
+        ) -> Vec<String> {
+            self.grants.clone()
+        }
+
+        async fn visible_space_documents(
+            &self,
+            org_id: &str,
+            user_id: &str,
+            space_ref: &str,
+            verified_bearer: Option<&str>,
+        ) -> Vec<String> {
+            self.space_calls.lock().unwrap().push((
+                org_id.to_string(),
+                user_id.to_string(),
+                space_ref.to_string(),
+                verified_bearer.map(str::to_string),
+            ));
+            self.attached.clone()
+        }
+    }
+
+    async fn pipeline_with(visibility: Arc<dyn VisibilityClient>) -> AppState {
+        let config: Config = envy::from_iter(vec![
+            ("DATABASE_URL".to_string(), "postgres://unused:unused@127.0.0.1:1/unused".to_string()),
+            ("QDRANT_URL".to_string(), "http://127.0.0.1:1".to_string()),
+            ("MODEL_PLANE_AI_CORE_GRPC_URL".to_string(), "http://127.0.0.1:1".to_string()),
+            (
+                "MODEL_PLANE_INFERENCE_TOKEN_URL".to_string(),
+                "http://127.0.0.1:1/api/inference-core/internal-token".to_string(),
+            ),
+            ("MODEL_PLANE_INFERENCE_SERVICE_ID".to_string(), "retrieval-engine-space-files-test".to_string()),
+            ("MODEL_PLANE_INFERENCE_SERVICE_API_KEY".to_string(), "space-files-test-dummy-0001".to_string()),
+        ])
+        .expect("minimal environment deserializes with the production field defaults");
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pool configuration");
+        pool.close().await;
+        let qdrant = qdrant_client::Qdrant::from_url(&config.qdrant_url)
+            .skip_compatibility_check()
+            .build()
+            .expect("qdrant client builds without connecting");
+        let embedder = EmbeddingClient::from_config(&config).expect("embedding backend builds without connecting");
+        let sparse_backend: DynSparseSearchBackend = Arc::new(PostgresSparseBackend::new(pool.clone()));
+        let policy: Arc<dyn PolicyClient> = Arc::new(NoopPolicyClient);
+        Arc::new(RetrievalPipeline {
+            pool,
+            qdrant,
+            embedder,
+            reranker: None,
+            cache: None,
+            policy,
+            visibility,
+            nats: None,
+            event_signer: None,
+            sparse_backend,
+            visual_embedder: VisualQueryEmbedder::from_config(&config).expect("visual embedder config is valid"),
+            media_embedder: MediaQueryEmbedder::from_config(&config),
+            colqwen: None,
+            graph_remote: GraphTraverseClient::from_config(&config.graph_index_url, config.graph_remote_timeout_ms),
+            keyword_client: MeilisearchQueryClient::from_config(
+                &config.meilisearch_url,
+                &config.meilisearch_api_key,
+                &config.meilisearch_index_uid,
+            ),
+            config,
+        })
+    }
+
+    fn recording(grants: &[&str], attached: &[&str]) -> Arc<Recording> {
+        Arc::new(Recording {
+            grants: grants.iter().map(|s| s.to_string()).collect(),
+            attached: attached.iter().map(|s| s.to_string()).collect(),
+            space_calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn user(scopes: &[&str]) -> axum::extract::Extension<AuthContext> {
+        axum::extract::Extension(AuthContext {
+            user_id: Some("user-1".to_string()),
+            org_id: "org-1".to_string(),
+            auth_method: AuthMethod::Jwt,
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            zdr: false,
+            sovereign: Some(false),
+            acl: EffectiveAcl::allow_all(),
+            request_id: "space-files-test".to_string(),
+            verified_bearer: Some("verified.jwt.token".to_string()),
+            principal: Principal::User,
+        })
+    }
+
+    fn service() -> axum::extract::Extension<AuthContext> {
+        let mut ctx = user(&[]).0;
+        ctx.user_id = None;
+        ctx.principal = Principal::Service { service_id: "service:quarry".to_string() };
+        axum::extract::Extension(ctx)
+    }
+
+    fn scope() -> ResolvedSpaceRetrievalScope {
+        ResolvedSpaceRetrievalScope {
+            authority: VerifiedSpaceAuthority {
+                authority_revision: 1,
+                decision_ref: "decision-1".to_string(),
+                org_id: "org-1".to_string(),
+                privacy_policy_ref: "privacy:org-1".to_string(),
+                recipient_audience_ref: "audience:user-1".to_string(),
+                resource_authorization_ref: "resource:1".to_string(),
+                space_ref: SPACE.to_string(),
+            },
+            collection_id: None,
+            document_ids: Vec::new(),
+            document_ids_truncated: false,
+            owner_resource_ref: "owner:1".to_string(),
+            workspace_id: Some("ws-1".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn room_files_are_unioned_into_the_grants_only_under_a_verified_space_decision() {
+        let vis = recording(&["granted-1"], &["room-1", "granted-1", "room-2"]);
+        let pipeline = pipeline_with(vis.clone()).await;
+        let auth = user(&[]);
+
+        let (viewer, granted) =
+            resolve_viewer_grants_in_space(&pipeline, Some(&auth), "org-1", Some(&scope())).await;
+        assert_eq!(viewer.as_deref(), Some("user-1"));
+        assert_eq!(granted, vec!["granted-1", "room-1", "room-2"], "own grants first, attached added once");
+        let calls = vis.space_calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![(
+                "org-1".to_string(),
+                "user-1".to_string(),
+                SPACE.to_string(),
+                Some("verified.jwt.token".to_string())
+            )],
+            "the Space comes from the verified decision and the user's own bearer is forwarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_space_decision_means_no_union_and_no_space_lookup() {
+        let vis = recording(&["granted-1"], &["room-1"]);
+        let pipeline = pipeline_with(vis.clone()).await;
+        let auth = user(&[]);
+
+        let (viewer, granted) = resolve_viewer_grants_in_space(&pipeline, Some(&auth), "org-1", None).await;
+        assert_eq!(viewer.as_deref(), Some("user-1"));
+        assert_eq!(granted, vec!["granted-1"]);
+        assert!(vis.space_calls.lock().unwrap().is_empty());
+
+        // Unauthenticated: no viewer, no union, even with a scope in hand.
+        let (viewer, granted) = resolve_viewer_grants_in_space(&pipeline, None, "org-1", Some(&scope())).await;
+        assert!(viewer.is_none() && granted.is_empty());
+        assert!(vis.space_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_service_principal_and_an_org_admin_bypass_get_no_union() {
+        let vis = recording(&["granted-1"], &["room-1"]);
+        let pipeline = pipeline_with(vis.clone()).await;
+
+        let svc = service();
+        let (viewer, granted) = resolve_viewer_grants_in_space(&pipeline, Some(&svc), "org-1", Some(&scope())).await;
+        assert!(viewer.is_none());
+        assert!(granted.is_empty());
+
+        // org:data:read_all makes the predicate a no-op (viewer None); the room
+        // is not consulted because there is no viewer to widen.
+        let admin = user(&["org:data:read_all"]);
+        let (viewer, granted) = resolve_viewer_grants_in_space(&pipeline, Some(&admin), "org-1", Some(&scope())).await;
+        assert!(viewer.is_none() && granted.is_empty());
+        assert!(vis.space_calls.lock().unwrap().is_empty(), "neither caller reaches Control's space-visible");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_member_or_a_failed_lookup_sees_only_their_own_grants() {
+        // Control answers empty for a user who is no longer a member (and the
+        // client fails closed to empty on any error): the union adds nothing.
+        let vis = recording(&["granted-1"], &[]);
+        let pipeline = pipeline_with(vis.clone()).await;
+        let auth = user(&[]);
+        let (viewer, granted) =
+            resolve_viewer_grants_in_space(&pipeline, Some(&auth), "org-1", Some(&scope())).await;
+        assert_eq!(viewer.as_deref(), Some("user-1"));
+        assert_eq!(granted, vec!["granted-1"]);
+        assert_eq!(vis.space_calls.lock().unwrap().len(), 1);
+
+        // Flag off is the trait's default: never a room file.
+        struct Defaults;
+        #[async_trait::async_trait]
+        impl VisibilityClient for Defaults {
+            async fn visible_documents(&self, _: &str, _: &str, _: Option<&str>) -> Vec<String> {
+                vec!["granted-9".to_string()]
+            }
+        }
+        let pipeline = pipeline_with(Arc::new(Defaults)).await;
+        let (_, granted) =
+            resolve_viewer_grants_in_space(&pipeline, Some(&auth), "org-1", Some(&scope())).await;
+        assert_eq!(granted, vec!["granted-9"]);
+    }
+
+    // ── keyset cursor ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_space_cursor_round_trips_and_is_opaque() {
+        let cursor = encode_space_cursor("2026-11-02 06:00:00.123456+00", "doc-42");
+        assert!(!cursor.contains('|') && !cursor.contains("doc-42"), "{cursor}");
+        assert_eq!(
+            decode_space_cursor(&cursor).expect("round trip"),
+            ("2026-11-02 06:00:00.123456+00".to_string(), "doc-42".to_string())
+        );
+        // A document id may itself contain a pipe: only the first splits.
+        let odd = encode_space_cursor("2026-11-02 06:00:00+00", "a|b");
+        assert_eq!(decode_space_cursor(&odd).unwrap().1, "a|b");
+    }
+
+    #[test]
+    fn the_space_cursor_rejects_malformed_input_before_it_reaches_sql() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+        let enc = |s: &str| URL_SAFE_NO_PAD.encode(s);
+        let bad = [
+            String::new(),
+            "x".repeat(257),
+            "not base64!!".to_string(),
+            "@@@@".to_string(),
+            enc("no-separator"),
+            enc("|doc-1"),
+            enc("2026-11-02 06:00:00+00|"),
+            enc("2026-11-02'; DROP TABLE documents;--|doc-1"),
+            enc("yesterday|doc-1"),
+            enc(&format!("{}|doc-1", "1".repeat(41))),
+            enc(&format!("2026-11-02 06:00:00+00|{}", "d".repeat(129))),
+        ];
+        for cursor in bad {
+            let err = decode_space_cursor(&cursor).expect_err(&cursor);
+            assert_eq!(
+                axum::response::IntoResponse::into_response(err).status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{cursor:?}"
+            );
+        }
+        // Invalid UTF-8 inside valid base64.
+        assert!(decode_space_cursor(&URL_SAFE_NO_PAD.encode([0xff, 0xfe, b'|', b'a'])).is_err());
+    }
+
+    #[test]
+    fn the_listing_limits_match_the_documented_contract() {
+        assert_eq!(SPACE_LISTING_MAX_TYPES, 10);
+        assert_eq!(SPACE_LISTING_MAX_TYPE_LEN, 64);
+        assert_eq!(SPACE_CURSOR_MAX_LEN, 256);
+        assert!(SPACE_DOCUMENT_DEFAULT_MAX_CHARS < SPACE_DOCUMENT_MAX_CHARS);
+    }
+
+    // ── provenance metadata ───────────────────────────────────────────────────
+
+    fn row(meta: [Option<&str>; 6]) -> SpaceDocumentRow {
+        let s = |v: &str| v.to_string();
+        let o = |v: Option<&str>| v.map(str::to_string);
+        (
+            s("doc-1"), s("Plan"), s("space-upload"), s("space_upload"), s("ready"), s("internal"),
+            s("2026-11-02 06:00:00+00"), s("user-1"), s("2026-11-01 06:00:00+00"),
+            o(meta[0]), o(meta[1]), o(meta[2]), o(meta[3]), o(meta[4]), o(meta[5]),
+        )
+    }
+
+    #[test]
+    fn provenance_metadata_emits_only_present_keys_and_numbers_where_they_parse() {
+        let full = space_document_metadata(&row([
+            Some("plan.docx"), Some("application/vnd.openxmlformats"), Some("20480"),
+            Some("abc123"), Some("docx"), Some("1523"),
+        ]));
+        assert_eq!(
+            full,
+            serde_json::json!({
+                "filename": "plan.docx", "content_type": "application/vnd.openxmlformats",
+                "size_bytes": 20480, "sha256": "abc123", "extension": "docx", "text_chars": 1523
+            })
+        );
+        let partial = space_document_metadata(&row([Some("a.csv"), None, Some("not-a-number"), None, None, None]));
+        assert_eq!(partial, serde_json::json!({ "filename": "a.csv", "size_bytes": "not-a-number" }));
+        assert_eq!(space_document_metadata(&row([None; 6])), serde_json::json!({}));
+    }
+
+    #[test]
+    fn space_document_is_enforced_only_under_a_space_decision() {
+        assert!(space_decision_is_enforced_for_path("/v1/knowledge/space-document"));
+        assert!(space_decision_is_enforced_for_path("/v1/knowledge/space-sources"));
+        assert!(!space_decision_is_enforced_for_path("/v1/knowledge/space-documents"));
+        assert!(!space_decision_is_enforced_for_path("/v1/knowledge/graph"));
     }
 }

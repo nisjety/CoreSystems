@@ -14,7 +14,7 @@ import (
 )
 
 const authorizationRelationshipsMigration = "0009_action_receipt_authorization_relationships.sql"
-const latestMigration = "0013_model_connection_zdr.sql"
+const latestMigration = "0014_scim_stub_payload_redaction.sql"
 
 func TestApplyMigrationsLocksBeforeCheckingAppliedVersion(t *testing.T) {
 	pool, err := pgxmock.NewPool()

@@ -144,6 +144,7 @@ services:
       # is the environment's default, never a looser mode. Keep the default empty here:
       # a value in this base file would be inherited by the production overlay.
       BROWSER_GRANT_ENFORCEMENT: ${BROWSER_GRANT_ENFORCEMENT:-}
+      BROWSER_HUMAN_BROWSE: ${BROWSER_HUMAN_BROWSE:-false}
       QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
       # Result caching/rate limiting degrades safely to in-process storage when
       # no frontend-owned cache contract is configured.
@@ -155,9 +156,18 @@ services:
       # WS21-S2: mint a browser bearer for a personal, non-ZDR agentic turn and forward it to model-gateway. Off by
       # default; only the literal `true`. execution-core's EXECUTION_DO_BROWSER_ENABLED must be on too.
       BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}
+      BROWSER_SITES_ENABLED: ${BROWSER_SITES_ENABLED:-false}
+      # WS22-S3: mint the sandbox-manager credential for a personal non-ZDR turn; off by default; only the literal true.
+      SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}
       # WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only
       # the literal `true`. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.
       BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}
+      # Allow a verified agent run to attach to the owner-scoped browser session.
+      BROWSER_AI_RUN_ATTACH_SESSION: ${BROWSER_AI_RUN_ATTACH_SESSION:-false}
+      # Use task-scoped, public-site grants. Enable after deploying the matching browser broker.
+      BROWSER_ASSISTANT_TASK_GRANTS: ${BROWSER_ASSISTANT_TASK_GRANTS:-false}
+      # Kill switch for the assistant navigation model call. Off by default; only the literal true.
+      ASSISTANT_NAVIGATION_ENABLED: ${ASSISTANT_NAVIGATION_ENABLED:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
@@ -200,6 +210,9 @@ services:
       # user-core registry entry of the same name (that one is audience user-core).
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY:-}
       MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID:-verevon-gateway}
+      # EP-12 S8: public Agent API ingress (/api/agent/v1/*); exchanges x-api-key at auth-core with the verevon-gateway principal above.
+      GATEWAY_AGENT_API_ENABLED: ${GATEWAY_AGENT_API_ENABLED:-false}
+      GATEWAY_AGENT_API_RPM_PER_KEY: ${GATEWAY_AGENT_API_RPM_PER_KEY:-60}
       # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
       # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
       # Data, which sent the org's target URL and the page's full content to a
@@ -220,6 +233,123 @@ services:
       # WS10-S5: the model entitlement admin routes (policy read, write and explain). Only the literal `true`
       # enables them; do not enable before the matcher and the model-gateway admission are deployed.
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
+      # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
+      CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
+      # WS03-S5: map Control's typed Space denials to the browser envelope. Off restores pass-through.
+      # A rollout control only; it never decides who may do anything.
+      SPACE_DENIALS_TYPED: ${SPACE_DENIALS_TYPED:-true}
+      # WS03-S4: the three org-admin Space policy routes (404 when off). A rollout control only;
+      # Control's role check and its SPACE_POLICY_ADMIN_WRITES switch decide who may change what.
+      SPACE_POLICY_ADMIN_API: ${SPACE_POLICY_ADMIN_API:-true}
+      # WS04-S6: room member add, role change and leave on Control's writer (then the audience
+      # reconcile). Off resumes the legacy Convex path (emergency stop only). Control also needs the
+      # spaces:membership:act scope on this gateway's credential; without it every call is 403.
+      SPACE_MEMBERSHIP_WRITER_API: ${SPACE_MEMBERSHIP_WRITER_API:-true}
+      # WS02-S4: the Space event stream relay (404 space_stream_disabled when off; the SPA then keeps
+      # its 6 s poll). A rollout control only; Control's decision and Session Core's gate decide
+      # who may stream, and an org under Zero Data Retention gets poll_only even when on.
+      SPACE_REALTIME_STREAM: ${SPACE_REALTIME_STREAM:-true}
+      # WS01-S5: human posts in a room (POST .../threads and .../threads/{id}/messages; 404 when off) and
+      # the SPA feature flags the room context reports. Rollout controls only: Control's decision and
+      # Session Core's member gate decide who may post, and a Zero Data Retention org is refused regardless.
+      # SPACE_HUMAN_POSTS_API must match model-gateway's flag of the same name, which gates the same call.
+      SPACE_HUMAN_POSTS_API: ${SPACE_HUMAN_POSTS_API:-true}
+      SPACE_THREAD_PANE_UI: ${SPACE_THREAD_PANE_UI:-true}
+      SPACE_SEND_IDEMPOTENCY_API: ${SPACE_SEND_IDEMPOTENCY_API:-true}
+      SPACE_CONNECTIVITY_BANNER_UI: ${SPACE_CONNECTIVITY_BANNER_UI:-true}
+      # WS04-S2: room name and topic (PATCH /api/v1/spaces/{space_ref}). Rollout control only; the
+      # caller's live Control role (owner or manager) decides who may rename.
+      SPACE_ROOM_DETAILS_UI: ${SPACE_ROOM_DETAILS_UI:-true}
+      # WS04-S3: people search for the member picker (GET /api/v1/directory/people). Rollout control
+      # only; Control's directory read under the signed delegation decides what the caller sees.
+      SPACE_PEOPLE_SEARCH_API: ${SPACE_PEOPLE_SEARCH_API:-true}
+      # WS04-S9: composed people-and-agent directory and POST /api/v1/directory/resolve. Rollout
+      # control only; the answer is presence, never authority.
+      SPACE_DIRECTORY_RESOLVER_API: ${SPACE_DIRECTORY_RESOLVER_API:-true}
+      # WS07-S9: the room artifact aggregate route; a rollout control only (Control's shared-read
+      # decision and Session Core's audience ceiling decide what is listed).
+      SPACE_ROOM_ARTIFACTS_API: ${SPACE_ROOM_ARTIFACTS_API:-true}
+      # WS13-S8: room pins (Convex-backed, editor or above). Rollout control only; Control's live role
+      # decides who may pin and the thread must be readable by the pinner.
+      SPACE_ROOM_PINS_API: ${SPACE_ROOM_PINS_API:-true}
+      # WS14-S7: room files routes and the per-turn attachment / Files tab reports. Rollout controls only;
+      # Control's decisions, Ingestion and Data decide. Off until the upstream WS14 flags are on.
+      # WS15-S7: the windowed room timeline (GET .../timeline, tail window on the transcript route; 404
+      # space_timeline_disabled when off, which the SPA reads as "use the legacy listing"). Rollout
+      # control only. Off by default to match model-gateway's SPACE_TIMELINE_API / session-core's
+      # SPACE_TIMELINE_CORE; with this on and those off the route falls back to the legacy listing.
+      # The four UI flags only change what the SPA offers (composer drafts and markdown, anchored timeline).
+      SPACE_TIMELINE_API: ${SPACE_TIMELINE_API:-false}
+      # WS15-S11: room system rows (membership changes from Control's ledger) in the timeline answer. Needs SPACE_TIMELINE_API. Rollout control only.
+      SPACE_SYSTEM_ENTRIES_API: ${SPACE_SYSTEM_ENTRIES_API:-false}
+      SPACE_TIMELINE_ANCHOR_UI: ${SPACE_TIMELINE_ANCHOR_UI:-true}
+      SPACE_COMPOSER_DRAFTS_UI: ${SPACE_COMPOSER_DRAFTS_UI:-true}
+      SPACE_COMPOSER_MARKDOWN_UI: ${SPACE_COMPOSER_MARKDOWN_UI:-true}
+      SPACE_HUMAN_MARKDOWN_UI: ${SPACE_HUMAN_MARKDOWN_UI:-true}
+      SPACE_ROOM_FILES_API: ${SPACE_ROOM_FILES_API:-false}
+      SPACE_ROOM_FILES_UI: ${SPACE_ROOM_FILES_UI:-false}
+      AGENT_VERSION_PINNING: ${AGENT_VERSION_PINNING:-false}
+      SPACE_TURN_ATTACHMENTS_UI: ${SPACE_TURN_ATTACHMENTS_UI:-false}
+      # WS13-S3: permission-checked message search + entry addresses (relayed to model-gateway, which has
+      # its own SPACE_MESSAGE_SEARCH_API) and the feature report for the search, link, palette and fork UIs.
+      # Rollout controls only; Control's per-request read decision and Session Core's audience predicates decide.
+      SPACE_MESSAGE_SEARCH_API: ${SPACE_MESSAGE_SEARCH_API:-true}
+      SPACE_MESSAGE_SEARCH_UI: ${SPACE_MESSAGE_SEARCH_UI:-true}
+      SPACE_ENTRY_LINKS_UI: ${SPACE_ENTRY_LINKS_UI:-true}
+      SPACE_COMMAND_PALETTE_UI: ${SPACE_COMMAND_PALETTE_UI:-true}
+      SPACE_THREAD_FORK_API: ${SPACE_THREAD_FORK_API:-false}
+      # EP-11 S1: members may author private skills (BFF). Only the literal true enables it; off, the admin-only answer stands.
+      SKILL_MEMBER_AUTHORING: ${SKILL_MEMBER_AUTHORING:-false}
+      # WS11-S7: the attention inbox (/attention) and the thread follow control. Rollout controls only; the
+      # caller's own Application rows, Control's index and its read decisions decide what is shown.
+      SPACE_ATTENTION_API: ${SPACE_ATTENTION_API:-true}
+      SPACE_ATTENTION_UI: ${SPACE_ATTENTION_UI:-true}
+      # WS11-S10: the org-scoped status (GET|PUT /api/v1/spaces/status) and the status / activity chips on the
+      # roster and agent list. Rollout control only; the caller's own Application row is all it reads or writes.
+      SPACE_STATUS_API: ${SPACE_STATUS_API:-true}
+      # WS11-S11: reminders (POST /api/v1/spaces/{ref}/reminders, GET /api/v1/spaces/reminders, DELETE
+      # .../reminders/{id}). Rollout control only; membership and the caller's own rows decide.
+      SPACE_REMINDERS_API: ${SPACE_REMINDERS_API:-true}
+      # WS08-S4: identity-bound mentions on posts and the addressed-wake mode of the chat stream. Rollout
+      # controls only; Control's signed run-wake decision and Session Core's verifier decide. Pair with
+      # model-gateway SPACE_WAKE_API and session-core SPACE_MENTION_RECORDS_CORE / SPACE_WAKE_CORE.
+      SPACE_MENTION_RECORDS_API: ${SPACE_MENTION_RECORDS_API:-true}
+      SPACE_ADDRESSED_WAKE_API: ${SPACE_ADDRESSED_WAKE_API:-true}
+      # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
+      # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
+      ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}
+      # WS05-S8: the public SCIM edge (/api/v1/scim/v2/*). Off by default everywhere; while off it answers the
+      # same 501 SCIM error. The edge secret is the org-core verevon-scim-edge principal credential (equal
+      # to org-core ORG_CORE_SCIM_EDGE_TOKEN); the edge stays off unless it is a secure secret.
+      SCIM_EDGE_ENABLED: ${SCIM_EDGE_ENABLED:-false}
+      ORG_CORE_SCIM_EDGE_TOKEN: ${ORG_CORE_SCIM_EDGE_TOKEN:-}
+      # WS09: agent work in the room. Rollout controls only (never authorization): the owner plane
+      # re-authorizes every steer, attach and stop. OWNER_STEER lets the person who started a run type
+      # into it; LIVE_VIEW, LIVE_TEXT and MANAGER_STOP are read by later WS09 slices. Production: off.
+      SPACE_RUN_OWNER_STEER: ${SPACE_RUN_OWNER_STEER:-true}
+      # WS16-S8: the personal sidebar layout (GET/PUT /api/v1/spaces/sidebar; 404 when off, which the SPA reads
+      # as "use the legacy panel"). A rollout control only; a Zero Data Retention org gets zdr_local / 412 regardless.
+      SPACE_SIDEBAR_API: ${SPACE_SIDEBAR_API:-true}
+      # WS12-S3: direct messages (POST /api/v1/spaces/dm, POST/DELETE .../hide; 404 dm_disabled when off, DM kinds
+      # leave the listing). Rollout control only; Control's dm-eligibility decides, ZDR orgs get the typed 412.
+      # Needs Control SPACE_DM_REGISTRATION + Convex SPACE_DM_OPEN, and WS04-S5 audience registration to work.
+      SPACE_DM_API: ${SPACE_DM_API:-true}
+      # WS12-S7: edit and delete a message (PATCH/DELETE .../threads/{id}/messages/{message_id}; 404
+      # space_message_revise_disabled when off). Rollout control only; Control's model.thread.revise decision
+      # and Session Core decide, ZDR orgs get the typed 412. Needs model-gateway SPACE_MESSAGE_REVISE_API.
+      SPACE_MESSAGE_REVISE_API: ${SPACE_MESSAGE_REVISE_API:-true}
+      # WS12-S8: message reactions (PUT/DELETE .../messages/{message_id}/reactions/{emoji}; 404
+      # space_reactions_disabled when off). Rollout control only; the live room role, Control's read decision
+      # and Session Core's message check decide, ZDR orgs get the typed 412. Needs Convex SPACE_REACTIONS and
+      # model-gateway SPACE_MESSAGE_REVISE_API.
+      SPACE_REACTIONS_API: ${SPACE_REACTIONS_API:-true}
+      # WS04-S8: GET /api/v1/directory/rooms, POST .../join, PATCH .../settings and the actions
+      # spaces.join_room / spaces.update_room_settings (404 feature_disabled when off). Rollout control
+      # only; Control's per-org space_directory_policies row (absent = off) and the room's visibility decide.
+      SPACE_ROOM_DIRECTORY_API: ${SPACE_ROOM_DIRECTORY_API:-true}
+      SPACE_RUN_LIVE_VIEW: ${SPACE_RUN_LIVE_VIEW:-true}
+      SPACE_RUN_LIVE_TEXT: ${SPACE_RUN_LIVE_TEXT:-true}
+      SPACE_RUN_MANAGER_STOP: ${SPACE_RUN_MANAGER_STOP:-true}
     ports:
       - "${VEREVON_BIND_ADDRESS:-127.0.0.1}:3185:3185"
     networks:
@@ -272,9 +402,9 @@ services:
         condition: service_healthy
     volumes:
       # Mount entire app directory for hot reload
-      - .:/app
+      - .:/workspace/verevonv3
       # Exclude node_modules from bind mount to avoid permission issues
-      - /app/node_modules
+      - /workspace/verevonv3/node_modules
       # The workspace packages have their OWN node_modules (pnpm's isolated
       # linker), and the entry above does not cover them. Without these two,
       # every `pnpm install` the container runs (its `pnpm dev` verifies and
@@ -286,12 +416,12 @@ services:
       # Bash (MSYS) reads them fine, which is what makes the breakage look
       # random. Measured 2026-09-08 (frontend log: `pnpm install` at 03:34Z,
       # identical mtime on the unreadable links). Applies on `up -d` recreate.
-      - /app/packages/remote-core/node_modules
-      - /app/apps/remote-dev/node_modules
+      - /workspace/verevonv3/packages/remote-core/node_modules
+      - /workspace/verevonv3/apps/remote-dev/node_modules
       # Exclude .next cache
-      - /app/.next
+      - /workspace/verevonv3/.next
       # Exclude dist build output
-      - /app/dist
+      - /workspace/verevonv3/dist
       # .claude/worktrees holds full extra monorepo checkouts (one per
       # background Claude Code session cut from this branch; 10+ observed in
       # a single long-running session). vite.config.ts already documents that
@@ -304,7 +434,7 @@ services:
       # chokidar/esbuild never see it exist and there is nothing to filter.
       # (A bare `du -sh` against this path from the host took >120s to even
       # finish, which is the same class of cost a cold file-watcher init pays.)
-      - /app/.claude/worktrees
+      - /workspace/verevonv3/.claude/worktrees
       # apps/gateway/target is the gateway's Rust build directory: measured at
       # 6.6 GB, i.e. the same order as all nine worktrees combined (also 6.6 GB),
       # and it churns on every `cargo build`. The frontend container never reads
@@ -313,7 +443,7 @@ services:
       # in place, which is why the dev server stayed slow to settle after a cold
       # start; vite.config.ts's comment records this path defeating an earlier
       # chokidar `ignored` attempt for the same scan-then-filter reason.
-      - /app/apps/gateway/target
+      - /workspace/verevonv3/apps/gateway/target
     environment:
       # Node otherwise derives a ~256 MiB heap from the container cgroup and
       # Vite enters a GC/OOM loop while transforming this large workspace.
@@ -345,6 +475,8 @@ services:
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
       VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}
+      VITE_DEEP_RESEARCH_PLAN_TURN: ${VITE_DEEP_RESEARCH_PLAN_TURN:-false}
+      VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}
       # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
       VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}
     healthcheck:

@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AnalyzeDocumentRequest, AnalyzeDocumentResponse, AnalyzeImageRequest, AnalyzeImageResponse, AnalyzeLanguageRequest, AnalyzeLanguageResponse, BatchTranslateTextRequest, BatchTranslateTextResponse, CreateEmbeddingRequest, CreateEmbeddingResponse, CreateRealtimeSessionRequest, CreateRealtimeSessionResponse, CreateVideoGenerationJobRequest, CreateVideoGenerationJobResponse, DetectTextLanguageRequest, DetectTextLanguageResponse, ExtractImageTextRequest, ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse, InferChunk, InferRequest, InferResponse, ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse, TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse } from "./inference_pbjs";
+import { AnalyzeDocumentRequest, AnalyzeDocumentResponse, AnalyzeImageRequest, AnalyzeImageResponse, AnalyzeLanguageRequest, AnalyzeLanguageResponse, BatchTranslateTextRequest, BatchTranslateTextResponse, CreateEmbeddingRequest, CreateEmbeddingResponse, CreateRealtimeSessionRequest, CreateRealtimeSessionResponse, CreateVideoGenerationJobRequest, CreateVideoGenerationJobResponse, DetectTextLanguageRequest, DetectTextLanguageResponse, ExtractImageTextRequest, ExtractImageTextResponse, GenerateImageRequest, GenerateImageResponse, GetModelAccessRequest, GetModelAccessResponse, GetVideoGenerationJobRequest, GetVideoGenerationJobResponse, InferChunk, InferRequest, InferResponse, ListModelsRequest, ListModelsResponse, ListSpeechVoicesRequest, ListSpeechVoicesResponse, ListTranslationLanguagesRequest, ListTranslationLanguagesResponse, StreamVideoGenerationContentRequest, StreamVideoGenerationContentResponse, SynthesizeSpeechRequest, SynthesizeSpeechResponse, TranscribeSpeechRequest, TranscribeSpeechResponse, TranslateTextRequest, TranslateTextResponse } from "./inference_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -19,6 +19,10 @@ export const InferenceCore = {
   methods: {
     /**
      * Unary inference — returns the complete response.
+     * Optional gRPC metadata `cache-control: no-store` bypasses both reads and
+     * writes of the completed-response cache. The server acknowledges it with
+     * the same response metadata. It does not alter provider prefix caching,
+     * authentication, routing, budget or ZDR/privacy restrictions.
      *
      * @generated from rpc model_plane.v1.InferenceCore.Infer
      */
@@ -237,6 +241,22 @@ export const InferenceCore = {
       I: StreamVideoGenerationContentRequest,
       O: StreamVideoGenerationContentResponse,
       kind: MethodKind.ServerStreaming,
+    },
+    /**
+     * What the caller's organisation allows this caller to use (ADR-0005).
+     * inference-core is the only enforcement point and the only service that
+     * reads the policy, so model-gateway asks here instead of keeping a second
+     * cache. The answer is about chat models; every other modality passes
+     * unfiltered. Under MODEL_ENTITLEMENT_MODE=off nothing is resolved and the
+     * answer says it is not enforced.
+     *
+     * @generated from rpc model_plane.v1.InferenceCore.GetModelAccess
+     */
+    getModelAccess: {
+      name: "GetModelAccess",
+      I: GetModelAccessRequest,
+      O: GetModelAccessResponse,
+      kind: MethodKind.Unary,
     },
   }
 } as const;

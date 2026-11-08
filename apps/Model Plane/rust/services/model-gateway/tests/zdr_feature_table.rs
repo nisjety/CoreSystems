@@ -49,7 +49,9 @@ fn decided(body: &Value) -> Expect {
     );
     match zdr_posture::decide_for(&zdr_token(), &route) {
         Err(refusal) => Some((refusal.code(), refusal.feature())),
-        Ok(_) => zdr_features::refusal(&request)
+        // Every row is decided with the deck-template switch on, the setting in which the field is
+        // read (EP-5 S7); `deck_template_is_refused_only_while_its_switch_is_on` covers it off.
+        Ok(_) => zdr_features::refusal_with(&request, true)
             .map(|refusal: Refusal| (refusal.code(), refusal.feature())),
     }
 }
@@ -90,6 +92,25 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             None,
         ),
         ("space_context", with("space_context", Value::Null), None),
+        // WS08-S3: a wake starts a durable run from a stored post, so a ZDR turn is refused with
+        // the durable-mutation code and no feature.
+        (
+            "wake_context",
+            with(
+                "wake_context",
+                json!({
+                    "space_id": "space-room", "space_decision_ref": "d-1",
+                    "recipient_audience_ref": "a-1", "recipient_audience_revision": 1,
+                    "recipient_audience_hash": "h-1", "privacy_policy_ref": "p-1",
+                    "authority_revision": 1, "resource_authorization_ref": "r-1",
+                    "space_decision_token": "tokentokentoken", "action_schema_hash": "s-1",
+                    "payload_digest": "sha256:x", "idempotency_key": "k-1",
+                    "trigger_message_id": "m-1", "trigger_content_digest": "sha256:y",
+                    "agent_subject_id": "agent-1", "turn_origin": "direct", "client_wake_id": "w-1"
+                }),
+            ),
+            Some((code::DURABLE_MUTATION_FORBIDDEN, None)),
+        ),
         (
             "structured_output_schema",
             with("structured_output_schema", json!("{\"type\":\"object\"}")),
@@ -119,6 +140,27 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("deep_research", json!(true)),
             refused("deep_research"),
         ),
+        // EP-2 S5: the phase and plan fields alone change nothing on a ZDR turn; a plan turn rides on
+        // `deep_research`, which is refused before either phase runs.
+        ("research_phase", with("research_phase", json!("plan")), None),
+        ("research_plan", with("research_plan", json!({"sub_queries": ["a"]})), None),
+        // e_zdr_token_deep_research_plan_turn_refused: the plan turn itself, refused for
+        // `deep_research` before any plan inference.
+        (
+            "research_phase",
+            json!({"content": "hello", "deep_research": true, "research_phase": "plan"}),
+            refused("deep_research"),
+        ),
+        (
+            "research_plan",
+            json!({
+                "content": "hello",
+                "deep_research": true,
+                "research_phase": "run",
+                "research_plan": {"sub_queries": ["a"], "answers": []},
+            }),
+            refused("deep_research"),
+        ),
         (
             "retrieval_scope",
             with("retrieval_scope", json!("web_only")),
@@ -133,6 +175,19 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             "retrieval_scope",
             with("retrieval_scope", json!("auto")),
             None,
+        ),
+        // e_zdr_token_knowledge_only_deep_research_refused (EP-2 S7): refused for `deep_research`
+        // before any retrieval, whatever DEEP_RESEARCH_KNOWLEDGE_SOURCES says.
+        (
+            "retrieval_scope",
+            json!({"content": "hello", "deep_research": true, "retrieval_scope": "knowledge_only"}),
+            refused("deep_research"),
+        ),
+        // e_zdr_token_deep_research_connector_sources_refused (EP-2 S7)
+        (
+            "connector_scope",
+            json!({"content": "hello", "deep_research": true, "connector_scope": ["conn_1"]}),
+            refused("deep_research"),
         ),
         (
             "connector_scope",
@@ -187,6 +242,7 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("deployed_agent"),
         ),
         ("profile", with("profile", json!("chat")), None),
+        ("agent_mode", with("agent_mode", json!("auto")), None),
         ("verbosity", with("verbosity", json!("concise")), None),
         ("effort", with("effort", json!("deep")), None),
         (
@@ -265,6 +321,19 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("agentic"),
         ),
         ("execute_granted", with("execute_granted", json!(false)), None),
+        // WS14-S2: naming an approved plan asks for an execute run, so a ZDR turn refuses it
+        // through `agentic` like `execute_granted`; a blank id names no plan.
+        (
+            "approved_plan_id",
+            with("approved_plan_id", json!("plan-1")),
+            refused("agentic"),
+        ),
+        (
+            "approved_plan_id",
+            with("approvedPlanId", json!("plan-1")),
+            refused("agentic"),
+        ),
+        ("approved_plan_id", with("approved_plan_id", json!("  ")), None),
         (
             "tools",
             with(
@@ -296,13 +365,93 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             with("persona_instructions", json!("Friendly.")),
             None,
         ),
+        // WS16-S6: the viewer's interface language is a request-scoped hint that persists nothing.
+        ("locale", with("locale", json!("nb-NO")), None),
+        (
+            "persona_tone",
+            with("persona_tone", json!("direct")),
+            None,
+        ),
+        (
+            "client_timezone",
+            with("client_timezone", json!("Europe/Oslo")),
+            None,
+        ),
+        (
+            "client_utc_offset_minutes",
+            with("client_utc_offset_minutes", json!(60)),
+            None,
+        ),
+        ("ui_locale", with("ui_locale", json!("no")), None),
+        (
+            "agent_roles",
+            with("agent_roles", json!([{"agent_ref": "a", "version": 1}])),
+            None,
+        ),
+        // EP-2 S8 (e_zdr_token_wide_research_run_refused): a wide-research run is a Do run, so a
+        // ZDR turn asking for one is refused with the `agentic` feature, before any model call.
+        (
+            "wide_research",
+            with("wide_research", json!({"item_cap": 5, "items": ["a", "b"]})),
+            refused("agentic"),
+        ),
+        ("wide_research", with("wide_research", Value::Null), None),
+        // EP-3 S5: a ZDR turn carrying context references is refused before any network call.
+        ("context_refs", with("context_refs", json!([{"kind": "document", "id": "doc-1"}])), refused("context_references")),
+        ("context_refs", with("context_refs", json!([])), None),
+        // EP-7 S1 and S4: a goal is user content in a durable store, and a pump-sent turn continues one.
+        ("goal_id", with("goal_id", json!("goal_1")), refused("thread_goal")),
+        ("goal_id", with("goal_id", Value::Null), None),
+        ("goal_auto", with("goal_auto", json!(true)), refused("thread_goal")),
+        ("goal_auto", with("goal_auto", json!(false)), None),
+        // EP-5 S7 (e_zdr_token_deck_template_refused): picking a template mounts a bundle, refused like
+        // naming a skill.
+        ("deck_template", with("deck_template", json!("skill-brand")), refused("skills")),
+        ("deck_template", with("deck_template", json!("")), None),
+        // EP-6 S9: the pinned agent version only narrows a turn (allowlist, autonomy cap); a ZDR turn
+        // carrying it is not refused.
+        ("agent_ref", with("agent_ref", json!("agent-1")), None),
+        ("agent_version", with("agent_version", json!(1)), None),
+        ("agent_digest", with("agent_digest", json!("sha256:abc")), None),
+        ("agent_tool_capability_ids", with("agent_tool_capability_ids", json!(["web.search"])), None),
+        ("agent_autonomy_cap", with("agent_autonomy_cap", json!("ask_first")), None),
     ]
+}
+
+/// EP-5 S7: with its switch off the gateway does not read `deck_template` at all, so a ZDR turn that
+/// carries one is decided as if the field did not exist; with it on the turn is refused as `skills`.
+#[test]
+fn deck_template_is_refused_only_while_its_switch_is_on() {
+    let request = request(&json!({"content": "hello", "deck_template": "skill-brand"}));
+    assert!(zdr_features::refusal_with(&request, false).is_none());
+    assert_eq!(
+        zdr_features::refusal_with(&request, true).map(|refusal| (refusal.code(), refusal.feature())),
+        refused("skills")
+    );
 }
 
 #[test]
 fn every_field_row_decides_what_its_treatment_says() {
     for (field, body, expect) in cases() {
         assert_eq!(decided(&body), expect, "{field}: {body}");
+    }
+}
+
+/// WS16-S6: the viewer locale is listed in the field table as honored (it persists nothing), is a
+/// field the classifier names, and a ZDR turn that carries it is not refused.
+#[test]
+fn locale_is_listed_as_honored_and_never_refused_under_zdr() {
+    let treatment = FIELD_TREATMENTS
+        .iter()
+        .find(|(name, _)| *name == "locale")
+        .map(|(_, treatment)| treatment)
+        .expect("locale has a field row");
+    assert!(matches!(treatment, Treatment::Honored), "locale must be honored");
+    let named = zdr_features::invoke_field_names(&request(&json!({"content": "hi", "model": "m"})));
+    assert!(named.contains(&"locale"));
+    for locale in ["nb-NO", "en-US", "fr-FR"] {
+        let body = json!({"content": "hi", "model": "m", "locale": locale});
+        assert_eq!(decided(&body), None, "{locale}");
     }
 }
 
@@ -368,6 +517,18 @@ fn every_refusal_the_spec_names_is_a_catalogue_refusal() {
             );
         }
     }
+}
+
+/// `/learn` (EP-11 S7) is a route, not an invoke field: a ZDR caller is refused with the
+/// catalogue's `learn_command` feature before anything is read, and that feature is in the
+/// catalogue, so the refusal reaches the client typed.
+#[test]
+fn the_learn_command_route_refuses_a_zdr_caller_with_its_catalogue_feature() {
+    use model_gateway::http_routes::{learn_command_refusal, LEARN_COMMAND_ZDR_FEATURE};
+    let refusal = learn_command_refusal(&zdr_token()).expect("a ZDR caller is refused");
+    assert_eq!(refusal.code(), code::FEATURE_NOT_SUPPORTED);
+    assert_eq!(refusal.feature(), Some(LEARN_COMMAND_ZDR_FEATURE));
+    assert!(Refusal::new(code::FEATURE_NOT_SUPPORTED, Some(LEARN_COMMAND_ZDR_FEATURE)).is_some());
 }
 
 #[test]
@@ -470,8 +631,90 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source
         .find(signature)
         .unwrap_or_else(|| panic!("{signature} is in sse.rs"));
-    let end = source[start..]
-        .find("\n}\n")
+    // The closing brace at column zero, under either line ending (a CRLF checkout has no "\n}\n").
+    let rest = &source[start..];
+    let end = [rest.find("\n}\n"), rest.find("\n}\r\n")]
+        .into_iter()
+        .flatten()
+        .min()
         .map_or(source.len(), |offset| start + offset);
     &source[start..end]
+}
+
+/// The knowledge receipt (WS18-S3) is built on the ordinary path only: the persistence-free ZDR branch
+/// returns before any Space knowledge is read, so a ZDR turn cannot carry a receipt.
+#[test]
+fn the_knowledge_receipt_is_built_after_the_zdr_branch_returns() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch returns its direct stream");
+    let receipt = sse
+        .find("knowledge_receipt::knowledge_receipt(")
+        .expect("the ordinary path builds the receipt");
+    assert!(
+        zdr_return < receipt,
+        "the knowledge receipt must not be built before the ZDR branch returns"
+    );
+}
+
+/// The page reader is offered only in the tool loop, and only where a fetched page can be parked. A ZDR
+/// turn returns before that loop starts, and a waived turn parks nothing. Read from the source, as the
+/// other turn-ordering checks in this file are.
+#[test]
+fn the_web_reader_is_offered_only_where_a_fetched_page_can_be_parked() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let first_rounds = sse
+        .find("run_tool_rounds_for_model_with_attachments(")
+        .expect("the ordinary path runs the tool rounds");
+    assert!(
+        zdr_return < first_rounds,
+        "a ZDR turn returns before the tool loop can offer the reader"
+    );
+    let tool_loop = include_str!("../src/tool_loop.rs");
+    let offer = tool_loop
+        .split("let reader_offered =")
+        .nth(1)
+        .and_then(|rest| rest.split(';').next())
+        .expect("the tool loop decides whether the reader is offered");
+    assert!(offer.contains("page_reader::enabled()"), "{offer}");
+    assert!(
+        offer.contains("external_parking_allowed(zdr || data_plane_mode.is_some())"),
+        "{offer}"
+    );
+}
+
+/// EP-11 S3 (`zdr_turn_records_no_pins`, closes D2-557): a ZDR turn pins no skill version and
+/// offers no skill bundle file. It returns before skill injection, so it has no pins to stamp, and
+/// the stamp itself is guarded on the turn's posture. Read from the source, as the other
+/// turn-ordering checks in this file are.
+#[test]
+fn zdr_turn_records_no_pins() {
+    let sse = include_str!("../src/sse.rs");
+    let zdr_return = sse
+        .find("return zdr_direct_stream(")
+        .expect("the ZDR branch hands the turn to zdr_direct_stream");
+    let injection = sse
+        .find("pins: skill_pins,")
+        .expect("the ordinary path takes the pins from skill injection");
+    let stamp = sse
+        .find("crate::run_context::record_skill_pins(")
+        .expect("the ordinary path stamps the pins");
+    assert!(
+        zdr_return < injection && zdr_return < stamp,
+        "a ZDR turn returns before skill injection can pin a version"
+    );
+    assert!(
+        sse.contains("!skill_pins.is_empty() && !turn_posture.zdr() && !turn_posture.is_waived()"),
+        "the pin stamp is guarded on the turn's posture"
+    );
+    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
+        let body = function_body(sse, signature);
+        assert!(!body.contains("fetch_skill_context("), "{signature} injects no skill");
+        assert!(!body.contains("record_skill_pins("), "{signature} stamps no pin");
+        assert!(!body.contains("skill_file"), "{signature} offers no skill bundle file");
+    }
 }

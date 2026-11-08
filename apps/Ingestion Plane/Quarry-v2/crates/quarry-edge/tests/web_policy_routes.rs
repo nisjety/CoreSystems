@@ -386,6 +386,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/internal/crawl/sitemap", Gated),
         ("/v1/internal/schedules/preflight", NoUrl),
         ("/v1/internal/orgs/:org/profiles", NoUrl),
+        // W2-U49: user erasure of step receipts; deletes rows and answers counts, fetches nothing.
+        ("/v1/internal/orgs/:org/users/:user/receipts", NoUrl),
         ("/v1/profiles", NoUrl),
         ("/v1/profiles/create", NoUrl),
         ("/v1/profiles/:id", NoUrl),

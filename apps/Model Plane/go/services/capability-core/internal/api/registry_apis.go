@@ -31,8 +31,10 @@ import (
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
+	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
 	"github.com/triodelab/model-plane/services/capability-core/internal/reconcile"
 	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skilllint"
 )
 
 type registryDatabase interface {
@@ -49,11 +51,49 @@ type registryDatabase interface {
 type SkillsHandler struct {
 	pool registryDatabase
 	pub  publisher.EventPublisher
+	// lintMode is SKILL_LINT_MODE (EP-11 S4): off runs no lint and leaves every write and
+	// body as it was.
+	lintMode skilllint.Mode
+	// versionsAPI is SKILL_VERSIONS_API (EP-11 S2): on, skill reads carry version and digest and
+	// the history route is mounted; off, every body and route is as it was.
+	versionsAPI bool
+	// authoredKinds is AUTHORED_KINDS_ENABLED (EP-11 S6): on, the routes read and write
+	// templates and presets beside skills (?kind=, kind and settings in bodies); off, every
+	// statement and body is as it was and a template or preset write answers 422.
+	authoredKinds bool
+	// draftPublish is SKILL_DRAFT_PUBLISH (EP-11 S5): on, an edit of an accepted skill's text
+	// writes its draft, the publish, discard and restore routes are mounted, and reads carry the
+	// draft; off, every statement, route and body is as it was.
+	draftPublish bool
+	// bundleRetention is SKILL_BUNDLE_RETENTION (EP-11 S5): on, a publish also makes the draft's
+	// bundle live and a skill delete removes the skill's bundles; off, neither touches a bundle.
+	bundleRetention bool
+	// importEnabled is SKILL_IMPORT_ENABLED (EP-11 S8, with bundles and drafts): on, the listing says so
+	// and the Skills page offers an import; off, every body is as it was.
+	importEnabled bool
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
-	return &SkillsHandler{pool: pool}
+	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv),
+		authoredKinds: AuthoredKindsFromLookup(os.Getenv), draftPublish: DraftPublishFromLookup(os.Getenv),
+		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv), importEnabled: SkillImportFromLookup(os.Getenv)}
+}
+
+const draftPublishEnv = "SKILL_DRAFT_PUBLISH"
+
+// DraftPublishFromLookup reads SKILL_DRAFT_PUBLISH strictly: only the literal "true" puts edits of
+// accepted skills behind a draft, so a typo or a stray "1" leaves every edit live as before.
+func DraftPublishFromLookup(lookup func(string) string) bool {
+	return lookup(draftPublishEnv) == "true"
+}
+
+const authoredKindsEnv = "AUTHORED_KINDS_ENABLED"
+
+// AuthoredKindsFromLookup reads AUTHORED_KINDS_ENABLED strictly: only the literal "true" lets the
+// routes carry templates and presets, so a typo or a stray "1" leaves them as they were.
+func AuthoredKindsFromLookup(lookup func(string) string) bool {
+	return lookup(authoredKindsEnv) == "true"
 }
 
 // WithPublisher wires reconcile-event emission (matrix §4.3). Optional, nil-safe.
@@ -78,6 +118,16 @@ func (h *SkillsHandler) Register(mux *http.ServeMux) {
 			http.NotFound(w, r)
 		}
 	})
+	// EP-11 S2: off, the path falls to the subtree above and answers 404 as before.
+	if h.versionsAPI {
+		mux.HandleFunc("/api/v1/skills/{id}/versions", h.versions)
+	}
+	// EP-11 S5: off, these paths fall to the subtree above and answer as before.
+	if h.draftPublish {
+		mux.HandleFunc("/api/v1/skills/{id}/publish", h.publish)
+		mux.HandleFunc("/api/v1/skills/{id}/draft", h.discardDraft)
+		mux.HandleFunc("/api/v1/skills/{id}/versions/{version}/restore", h.restore)
+	}
 }
 
 type skillRow struct {
@@ -110,6 +160,98 @@ type skillRow struct {
 	// skill an admin is copying into an org skill. The copy is a new row; the
 	// source is untouched, and the revision log records where it came from.
 	PromotedFrom string `json:"promoted_from,omitempty"`
+	// Version and Digest (EP-11 S2) are the skill's newest immutable version: 0 and "" for a
+	// proposal never accepted. A trigger sets them; a write never does. Read only, and present
+	// only while SKILL_VERSIONS_API is on, so with it off a body is as it was.
+	Version *int32 `json:"version,omitempty"`
+	Digest  string `json:"digest,omitempty"`
+
+	// Kind and Settings (EP-11 S6) are the authored kind ("skill", "template" or "preset") and a
+	// preset's closed settings object. Read and written only while AUTHORED_KINDS_ENABLED is on,
+	// so with it off a body is as it was.
+	Kind     string          `json:"kind,omitempty"`
+	Settings json.RawMessage `json:"settings,omitempty"`
+
+	// Draft, DraftUpdatedAt and DraftBy (EP-11 S5) are the skill's unpublished edit: the same
+	// fields as a version body, when it was last saved and by whom. Read only (a PATCH writes the
+	// draft, never this field), and read only while SKILL_DRAFT_PUBLISH is on, so with it off a
+	// body is as it was. Absent when the skill has no draft.
+	Draft          json.RawMessage `json:"draft,omitempty"`
+	DraftUpdatedAt *time.Time      `json:"draft_updated_at,omitempty"`
+	DraftBy        string          `json:"draft_by,omitempty"`
+}
+
+// skillScanTargets are the destinations of a skill read, in the order of the SELECTs in list and
+// get, with version and digest last while the versions API is on.
+func (h *SkillsHandler) skillScanTargets(s *skillRow) []any {
+	targets := []any{&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
+		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
+		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
+		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt}
+	if h.versionsAPI {
+		s.Version = new(int32)
+		targets = append(targets, s.Version, &s.Digest)
+	}
+	if h.authoredKinds {
+		targets = append(targets, &s.Kind, &s.Settings)
+	}
+	if h.draftPublish {
+		targets = append(targets, &s.Draft, &s.DraftUpdatedAt, &s.DraftBy)
+	}
+	return targets
+}
+
+// skillVersionColumns are the columns a skill read adds while the versions API is on, then
+// kind and settings while authored kinds are on, then the draft while drafts are on (the order
+// of skillScanTargets).
+func (h *SkillsHandler) skillVersionColumns() string {
+	columns := ""
+	if h.versionsAPI {
+		columns += ", version, digest"
+	}
+	if h.authoredKinds {
+		columns += ", kind, settings"
+	}
+	if h.draftPublish {
+		columns += ", draft, draft_updated_at, draft_by"
+	}
+	return columns
+}
+
+// requestedSkillKind is the ?kind= of a read: "skill" when absent. ok is false for a kind
+// outside the contract's list.
+func requestedSkillKind(r *http.Request) (kind string, ok bool) {
+	kind = strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind == "" {
+		return skilllint.KindSkill, true
+	}
+	return kind, skilllint.ValidKind(kind)
+}
+
+// emptySettings reports whether raw carries no settings: absent, JSON null or {}.
+func emptySettings(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed == "" || trimmed == "null" || trimmed == "{}"
+}
+
+// decodeSettings decodes a settings body for the lint; nil when there is none. A body that is
+// not JSON cannot reach here: the request decoder already refused it.
+func decodeSettings(raw json.RawMessage) any {
+	if emptySettings(raw) {
+		return nil
+	}
+	var settings any
+	_ = json.Unmarshal(raw, &settings)
+	return settings
+}
+
+// kindRuleRefusal runs the template and preset rules on a write of kind. They run whatever
+// SKILL_LINT_MODE says, because no stored row predates them; a skill has none.
+func kindRuleRefusal(input skilllint.Input) []skilllint.Finding {
+	if input.Kind == skilllint.KindSkill || input.Kind == "" {
+		return nil
+	}
+	return skilllint.KindRuleFindings(skilllint.Lint(input))
 }
 
 func validSkillScope(value string) bool {
@@ -133,6 +275,97 @@ type skillTxBeginner interface {
 }
 
 var errSkillTransactionUnavailable = errors.New("skill mutations need a transactional database")
+
+// errSkillLintRefused ends a mutation whose text failed the skill lint under enforce, so the
+// transaction rolls back before its statement runs.
+var errSkillLintRefused = errors.New(skilllint.ErrorCode)
+
+// lintSkill runs the shared skill lint (EP-11 S4) under mode and counts what it finds. It
+// returns the findings and whether enforce refuses the write; off runs nothing.
+func lintSkill(ctx context.Context, mode skilllint.Mode, input skilllint.Input) ([]skilllint.Finding, bool) {
+	if mode == skilllint.ModeOff {
+		return nil, false
+	}
+	findings := skilllint.Lint(input)
+	skilllint.Count(ctx, mode, findings)
+	return findings, mode == skilllint.ModeEnforce && skilllint.HasError(findings)
+}
+
+// writeSkillLintRefusal answers a refused write with the typed envelope. The findings name
+// rules and fields, never the text; they sit under a named key because details is an object.
+func writeSkillLintRefusal(w http.ResponseWriter, findings []skilllint.Finding) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code":    skilllint.ErrorCode,
+		"message": "The skill does not pass the skill lint.",
+		"details": map[string]any{"findings": findings},
+	}})
+}
+
+// withLintWarnings adds the findings of a write that went ahead to its body. With no
+// findings, which is always the case while the lint is off, the body is unchanged.
+func withLintWarnings(body map[string]any, findings []skilllint.Finding) map[string]any {
+	if len(findings) > 0 {
+		body["warnings"] = findings
+	}
+	return body
+}
+
+// lintStoredSkill lints the row a PATCH is about to change, with the patch's description
+// and content laid over it the way the UPDATE lays them. A row that is not there passes:
+// the UPDATE then changes nothing and the caller gets 404.
+func lintStoredSkill(ctx context.Context, tx registryDatabase, mode skilllint.Mode, id, orgID, description, content string) ([]skilllint.Finding, bool, error) {
+	var input skilllint.Input
+	err := tx.QueryRow(ctx, `
+		SELECT name, description, content, trigger_keywords, tool_restrictions
+		FROM agent_skills WHERE id=$1 AND org_id=$2
+	`, id, orgID).Scan(&input.Name, &input.Description, &input.Content, &input.TriggerKeywords, &input.ToolRestrictions)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if description != "" {
+		input.Description = description
+	}
+	if content != "" {
+		input.Content = content
+	}
+	findings, refused := lintSkill(ctx, mode, input)
+	return findings, refused, nil
+}
+
+// errSkillSettingsNotAllowed ends a PATCH that sends settings for a row that is not a preset.
+var errSkillSettingsNotAllowed = errors.New("only a preset carries settings")
+
+// kindRulesForPatch runs the template and preset rules (EP-11 S6) on the row a PATCH is about to
+// change, with the patch's content and settings laid over it the way the UPDATE lays them. A row
+// that is not there passes: the UPDATE then changes nothing and the caller gets 404.
+func kindRulesForPatch(ctx context.Context, tx registryDatabase, id, orgID, content string, settings json.RawMessage) ([]skilllint.Finding, error) {
+	var kind, storedContent string
+	var storedSettings json.RawMessage
+	err := tx.QueryRow(ctx, `
+		SELECT kind, content, settings FROM agent_skills WHERE id=$1 AND org_id=$2
+	`, id, orgID).Scan(&kind, &storedContent, &storedSettings)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if settings != nil && kind != skilllint.KindPreset {
+		return nil, errSkillSettingsNotAllowed
+	}
+	if content == "" {
+		content = storedContent
+	}
+	if settings == nil {
+		settings = storedSettings
+	}
+	return kindRuleRefusal(skilllint.Input{Content: content, Kind: kind, Settings: decodeSettings(settings)}), nil
+}
 
 // skillActor is the verified caller as the revision log names it: "user" or
 // "service" and the principal id, never anything the request body claims.
@@ -226,6 +459,11 @@ func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, or
 	if err := rows.Scan(&scope, &ownerUserID); err != nil {
 		return err
 	}
+	// A Space skill (EP-11 S9) is changed by a Space decision, never by an org role or by owning
+	// it; none can be verified yet, so it is refused whatever the caller holds.
+	if scope == spaceSkillScope {
+		return errSpaceSkillDecisionRequired
+	}
 	isOwner := ownerUserID != "" && ownerUserID == callerID
 	if scope == "org" || isAdmin || isOwner {
 		return nil
@@ -239,6 +477,25 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		orgID := verifiedOrganizationID(r)
 		callerID := verifiedActorID(r)
 		isAdmin := verifiedIsAdmin(r)
+		// EP-11 S6: ?kind= picks the authored kind, skills when absent. Off, a skills read is
+		// as it was and any other kind answers an empty list that says why, so the SPA learns
+		// availability from the route rather than from a build flag.
+		kind, validKind := requestedSkillKind(r)
+		if !h.authoredKinds && kind != skilllint.KindSkill {
+			writeJSON(w, map[string]any{"skills": []skillRow{}, "kinds_enabled": false})
+			return
+		}
+		if !validKind {
+			writeTypedError(w, http.StatusUnprocessableEntity, "invalid_kind", "kind must be skill, template or preset")
+			return
+		}
+		kindFilter := ""
+		args := []any{orgID, callerID, isAdmin}
+		if h.authoredKinds {
+			kindFilter = `
+			  AND kind = $4`
+			args = append(args, kind)
+		}
 		// Visibility (SKILL-1): org-scoped skills, the caller's own, ones
 		// explicitly shared with the caller, and — for governance — any
 		// shared (never private) skill an admin didn't create themselves. A
@@ -248,14 +505,14 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			SELECT id, org_id, name, description, content,
 			       trigger_keywords, trigger_file_patterns, tool_restrictions,
 			       enabled, scope, owner_user_id, shared_with,
-			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
+			       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
 			FROM agent_skills
 			WHERE org_id = $1
 			  AND (scope = 'org' OR owner_user_id = $2
 			       OR (review_state = 'accepted' AND (shared_with ? $2
-			           OR ($3 AND jsonb_array_length(shared_with) > 0))))
+			           OR ($3 AND jsonb_array_length(shared_with) > 0))))`+kindFilter+`
 			ORDER BY name
-		`, orgID, callerID, isAdmin)
+		`, args...)
 		if err != nil {
 			slog.Error("list skills failed", "error", err)
 			jsonErr(w, "database unavailable", http.StatusInternalServerError)
@@ -265,17 +522,25 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		var skills []skillRow
 		for rows.Next() {
 			var s skillRow
-			if err := rows.Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
-				&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-				&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
-				&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason,
-				&s.CreatedAt, &s.UpdatedAt); err != nil {
+			if err := rows.Scan(h.skillScanTargets(&s)...); err != nil {
 				jsonErr(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			skills = append(skills, s)
 		}
-		writeJSON(w, map[string]any{"skills": skills})
+		body := map[string]any{"skills": skills}
+		if h.authoredKinds {
+			body["kinds_enabled"] = true
+		}
+		// EP-11 S5: the Skills page offers draft controls only when the listing says drafts are on.
+		if h.draftPublish {
+			body["drafts_enabled"] = true
+		}
+		// EP-11 S8: the Skills page offers an import only when the listing says it is on.
+		if h.importEnabled {
+			body["import_enabled"] = true
+		}
+		writeJSON(w, body)
 	case http.MethodPost:
 		var s skillRow
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
@@ -298,6 +563,11 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		if s.Scope == "" {
 			s.Scope = "org"
 		}
+		// EP-11 S9 (D7): off, "space" stays an invalid scope; on, it needs a Space decision.
+		if s.Scope == spaceSkillScope && skillSpaceScopeEnabled() {
+			writeSpaceSkillDecisionRequired(w)
+			return
+		}
 		if !validSkillScope(s.Scope) {
 			jsonErr(w, "invalid skill scope", http.StatusUnprocessableEntity)
 			return
@@ -314,6 +584,42 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			s.OwnerUserID = ""
 		}
 		s.SharedWith = []string{}
+		// EP-11 S6: a template or preset is written only while authored kinds are on; off, a
+		// body naming one is refused rather than silently stored as a skill.
+		s.Kind = strings.TrimSpace(s.Kind)
+		if s.Kind == "" {
+			s.Kind = skilllint.KindSkill
+		}
+		if !h.authoredKinds && (s.Kind != skilllint.KindSkill || !emptySettings(s.Settings)) {
+			writeTypedError(w, http.StatusUnprocessableEntity, "kind_not_enabled", "templates and presets are not enabled")
+			return
+		}
+		if !skilllint.ValidKind(s.Kind) {
+			writeTypedError(w, http.StatusUnprocessableEntity, "invalid_kind", "kind must be skill, template or preset")
+			return
+		}
+		if s.Kind != skilllint.KindPreset && !emptySettings(s.Settings) {
+			writeTypedError(w, http.StatusUnprocessableEntity, "settings_not_allowed", "only a preset carries settings")
+			return
+		}
+		lintInput := skilllint.Input{
+			Name: s.Name, Description: s.Description, Content: s.Content,
+			TriggerKeywords: s.TriggerKeywords, ToolRestrictions: s.ToolRestrictions,
+			Kind: s.Kind, Settings: decodeSettings(s.Settings),
+		}
+		if findings := kindRuleRefusal(lintInput); len(findings) > 0 {
+			writeSkillLintRefusal(w, findings)
+			return
+		}
+		lintFindings, lintRefused := lintSkill(r.Context(), h.lintMode, lintInput)
+		if lintRefused {
+			writeSkillLintRefusal(w, lintFindings)
+			return
+		}
+		settings := []byte("{}")
+		if !emptySettings(s.Settings) {
+			settings = s.Settings
+		}
 		kw, _ := json.Marshal(s.TriggerKeywords)
 		fp, _ := json.Marshal(s.TriggerFilePatterns)
 		tr, _ := json.Marshal(s.ToolRestrictions)
@@ -346,6 +652,19 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 					return nil
 				}
 			}
+			if h.authoredKinds {
+				// The unique key (session-core 0109) carries the kind, so a template may
+				// share a skill's name.
+				_, err := tx.Exec(r.Context(), `
+					INSERT INTO agent_skills (id, org_id, name, description, content,
+					    trigger_keywords, trigger_file_patterns, tool_restrictions,
+					    enabled, scope, owner_user_id, shared_with, created_at, updated_at,
+					    kind, settings)
+					VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+				`, s.ID, s.OrgID, s.Name, s.Description, s.Content, kw, fp, tr, s.Enabled,
+					s.Scope, s.OwnerUserID, sw, now, now, s.Kind, settings)
+				return err
+			}
 			_, err := tx.Exec(r.Context(), `
 				INSERT INTO agent_skills (id, org_id, name, description, content,
 				    trigger_keywords, trigger_file_patterns, tool_restrictions,
@@ -368,7 +687,7 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("reconcile emit failed", "kind", reconcile.KindSkill, "id", s.ID, "error", eerr)
 		}
 		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"id": s.ID})
+		writeJSON(w, withLintWarnings(map[string]any{"id": s.ID}, lintFindings))
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -378,20 +697,31 @@ func (h *SkillsHandler) get(w http.ResponseWriter, r *http.Request, id string) {
 	callerID := verifiedActorID(r)
 	isAdmin := verifiedIsAdmin(r)
 	var s skillRow
+	// EP-11 S6: a read by id answers only for the ?kind= it names (skills when absent), so a
+	// template or preset never reads as a skill. Off, the statement is as it was.
+	kindFilter := ""
+	args := []any{id, verifiedOrganizationID(r), callerID, isAdmin}
+	if h.authoredKinds {
+		kind, ok := requestedSkillKind(r)
+		if !ok {
+			writeTypedError(w, http.StatusUnprocessableEntity, "invalid_kind", "kind must be skill, template or preset")
+			return
+		}
+		kindFilter = `
+		  AND kind = $5`
+		args = append(args, kind)
+	}
 	err := h.pool.QueryRow(r.Context(), `
 		SELECT id, org_id, name, description, content,
 		       trigger_keywords, trigger_file_patterns, tool_restrictions,
 		       enabled, scope, owner_user_id, shared_with,
-		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at
+		       origin, review_state, source_run_id, proposal_reason, created_at, updated_at`+h.skillVersionColumns()+`
 		FROM agent_skills
 		WHERE id = $1 AND org_id = $2
 		  AND (scope = 'org' OR owner_user_id = $3
 		       OR (review_state = 'accepted' AND (shared_with ? $3
-		           OR ($4 AND jsonb_array_length(shared_with) > 0))))
-	`, id, verifiedOrganizationID(r), callerID, isAdmin).Scan(&s.ID, &s.OrgID, &s.Name, &s.Description, &s.Content,
-		&s.TriggerKeywords, &s.TriggerFilePatterns, &s.ToolRestrictions,
-		&s.Enabled, &s.Scope, &s.OwnerUserID, &s.SharedWith,
-		&s.Origin, &s.ReviewState, &s.SourceRunID, &s.ProposalReason, &s.CreatedAt, &s.UpdatedAt)
+		           OR ($4 AND jsonb_array_length(shared_with) > 0))))`+kindFilter+`
+	`, args...).Scan(h.skillScanTargets(&s)...)
 	if err != nil {
 		jsonErr(w, "not found", http.StatusNotFound)
 		return
@@ -405,12 +735,18 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		Description string    `json:"description"`
 		Content     string    `json:"content"`
 		SharedWith  *[]string `json:"shared_with"`
+		// Settings (EP-11 S6) replaces a preset's settings; read only while authored kinds
+		// are on, so with them off a PATCH is as it was.
+		Settings json.RawMessage `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		jsonErr(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if update.Enabled == nil && update.Description == "" && update.Content == "" && update.SharedWith == nil {
+	if !h.authoredKinds || strings.TrimSpace(string(update.Settings)) == "null" {
+		update.Settings = nil
+	}
+	if update.Enabled == nil && update.Description == "" && update.Content == "" && update.SharedWith == nil && update.Settings == nil {
 		jsonErr(w, "at least one skill field is required", http.StatusBadRequest)
 		return
 	}
@@ -463,20 +799,83 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	// the caller, so its revision carries the actor.
 	var result pgconn.CommandTag
 	proposalUndecided := false
+	// An edit of the text, or switching a skill on, is linted on the row as it will be, so a
+	// person who edits or re-enables learned text is held to the same rules as a new skill.
+	// A sharing change or a switch-off writes no text and is not linted.
+	lintPatch := h.lintMode != skilllint.ModeOff &&
+		(update.Description != "" || update.Content != "" || (update.Enabled != nil && *update.Enabled))
+	var lintFindings []skilllint.Finding
+	drafted := false
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
 		// A user-owned skill changes only for its owner or an admin. The check takes the row
 		// lock before the statement below, so the check and the write see the same skill.
 		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin); err != nil {
 			return err
 		}
+		if lintPatch {
+			findings, refused, err := lintStoredSkill(r.Context(), tx, h.lintMode, id, orgID, update.Description, update.Content)
+			if err != nil {
+				return err
+			}
+			lintFindings = findings
+			if refused {
+				return errSkillLintRefused
+			}
+		}
+		if h.authoredKinds && (update.Content != "" || update.Settings != nil) {
+			findings, err := kindRulesForPatch(r.Context(), tx, id, orgID, update.Content, update.Settings)
+			if err != nil {
+				return err
+			}
+			if len(findings) > 0 {
+				lintFindings = findings
+				return errSkillLintRefused
+			}
+		}
+		// EP-11 S5: an edit of an accepted skill's text goes to its draft while drafts are on, so
+		// turns keep the published version until someone publishes it. enabled and sharing are not
+		// versioned and still apply at once; a proposal is edited live, as before (accepting it is
+		// its publish).
+		if h.draftPublish && (update.Description != "" || update.Content != "" || update.Settings != nil) {
+			var accepted bool
+			if err := tx.QueryRow(r.Context(), acceptedSkillRowSQL, id, orgID).Scan(&accepted); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			if accepted {
+				var settings any
+				if update.Settings != nil {
+					settings = []byte(update.Settings)
+				}
+				var err error
+				result, err = tx.Exec(r.Context(), draftPatchSQL, enabled, update.Description, update.Content,
+					sharedJSON, now, id, orgID, settings, callerID)
+				drafted = err == nil && result.RowsAffected() == 1
+				return err
+			}
+		}
 		var err error
-		result, err = tx.Exec(r.Context(), `
+		if h.authoredKinds {
+			// Settings change only on a preset: kindRulesForPatch refused any other kind.
+			var settings any
+			if update.Settings != nil {
+				settings = []byte(update.Settings)
+			}
+			result, err = tx.Exec(r.Context(), `
+				UPDATE agent_skills
+				SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
+					content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
+					updated_at=$5, settings=COALESCE($8::jsonb, settings)
+				WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
+			`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID, settings)
+		} else {
+			result, err = tx.Exec(r.Context(), `
 			UPDATE agent_skills
 			SET enabled=COALESCE($1, enabled), description=COALESCE(NULLIF($2, ''), description),
 				content=COALESCE(NULLIF($3, ''), content), shared_with=COALESCE($4, shared_with),
 				updated_at=$5
 			WHERE id=$6 AND org_id=$7 AND ($1::boolean IS NOT TRUE OR review_state = 'accepted')
 		`, enabled, update.Description, update.Content, sharedJSON, now, id, orgID)
+		}
 		if err == nil && result.RowsAffected() == 0 && update.Enabled != nil && *update.Enabled {
 			var reviewState string
 			if tx.QueryRow(r.Context(), `
@@ -491,6 +890,18 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 		jsonErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	if errors.Is(err, errSpaceSkillDecisionRequired) {
+		writeSpaceSkillDecisionRequired(w)
+		return
+	}
+	if errors.Is(err, errSkillLintRefused) {
+		writeSkillLintRefusal(w, lintFindings)
+		return
+	}
+	if errors.Is(err, errSkillSettingsNotAllowed) {
+		writeTypedError(w, http.StatusUnprocessableEntity, "settings_not_allowed", err.Error())
+		return
+	}
 	if proposalUndecided {
 		jsonErr(w, "proposal_requires_decision", http.StatusConflict)
 		return
@@ -498,7 +909,11 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}
-	writeJSON(w, map[string]any{"id": id, "updated_at": now})
+	body := map[string]any{"id": id, "updated_at": now}
+	if drafted {
+		body["draft"] = true
+	}
+	writeJSON(w, withLintWarnings(body, lintFindings))
 }
 
 func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string) {
@@ -510,16 +925,494 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
 		}
 		var err error
 		result, err = tx.Exec(r.Context(), `DELETE FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID)
+		// EP-11 S5: with retention on the skill's bundles go with it (live, draft and kept ones),
+		// so a deleted skill leaves no files behind (register D2-382).
+		if err == nil && h.bundleRetention && result.RowsAffected() == 1 {
+			err = skillbundle.DeleteSkillBundles(r.Context(), tx, orgID, id)
+		}
 		return err
 	})
 	if errors.Is(err, errSkillNotCallersToChange) {
 		jsonErr(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	if errors.Is(err, errSpaceSkillDecisionRequired) {
+		writeSpaceSkillDecisionRequired(w)
+		return
+	}
 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Skill drafts  publish, discard, restore (EP-11 S5)
+// ---------------------------------------------------------------------------
+
+// acceptedSkillRowSQL says whether the skill is accepted: only an accepted skill has a draft.
+const acceptedSkillRowSQL = `SELECT review_state = 'accepted' FROM agent_skills WHERE id=$1 AND org_id=$2`
+
+// draftPatchSQL is a PATCH of an accepted skill's text while drafts are on. The text goes into the
+// draft, opened from the live fields (session-core's version body, migrations 0108/0109) when there
+// is none; enabled and sharing apply to the live row. No versioned field changes, so no version is
+// cut. Pinned to session-core's draft test by TestDraftStatementsMatchTheSessionCoreTest.
+const draftPatchSQL = `
+	UPDATE agent_skills
+	SET enabled=COALESCE($1, enabled), shared_with=COALESCE($4, shared_with), updated_at=$5,
+	    draft = COALESCE(draft, agent_skill_version_body(agent_skills))
+	        || CASE WHEN $2 <> '' THEN jsonb_build_object('description', $2::text) ELSE '{}'::jsonb END
+	        || CASE WHEN $3 <> '' THEN jsonb_build_object('content', $3::text) ELSE '{}'::jsonb END
+	        || CASE WHEN $8::jsonb IS NOT NULL THEN jsonb_build_object('settings', $8::jsonb) ELSE '{}'::jsonb END,
+	    draft_updated_at = $5, draft_by = $9
+	WHERE id=$6 AND org_id=$7 AND review_state = 'accepted'
+`
+
+// publishSkillSQL copies the draft into the live fields and clears it in one statement; session-core's
+// trigger then cuts the version (when the digest moved) and the revision log records `edited`. The
+// kind never changes. The bundle digest is copied only with retention on: without it the draft's
+// bundle could not be kept, and the live bundle is the only one there is.
+func publishSkillSQL(withBundle bool) string {
+	bundle := ""
+	if withBundle {
+		bundle = `
+	    bundle_sha256 = COALESCE(draft->>'bundle_sha256', bundle_sha256),`
+	}
+	return `
+	UPDATE agent_skills
+	SET name = COALESCE(draft->>'name', name),
+	    description = COALESCE(draft->>'description', description),
+	    content = COALESCE(draft->>'content', content),
+	    trigger_keywords = COALESCE(draft->'trigger_keywords', trigger_keywords),
+	    trigger_file_patterns = COALESCE(draft->'trigger_file_patterns', trigger_file_patterns),
+	    tool_restrictions = COALESCE(draft->'tool_restrictions', tool_restrictions),
+	    settings = COALESCE(draft->'settings', settings),` + bundle + `
+	    draft = NULL, draft_updated_at = NULL, draft_by = '', updated_at = $3
+	WHERE id = $1 AND org_id = $2 AND review_state = 'accepted' AND draft IS NOT NULL
+	RETURNING version, bundle_sha256
+`
+}
+
+// discardDraftSQL drops the draft; the live row is untouched.
+const discardDraftSQL = `
+	UPDATE agent_skills SET draft = NULL, draft_updated_at = NULL, draft_by = ''
+	WHERE id = $1 AND org_id = $2 AND draft IS NOT NULL
+`
+
+// restoreDraftSQL writes an old version's body ($3) into the draft. Its bundle digest is kept only
+// when $4 says the bundle is still held; otherwise the draft keeps the live one, so publishing a
+// restore never points the skill at files that are gone.
+const restoreDraftSQL = `
+	UPDATE agent_skills
+	SET draft = CASE WHEN $4 THEN $3::jsonb ELSE $3::jsonb || jsonb_build_object('bundle_sha256', bundle_sha256) END,
+	    draft_updated_at = $5, draft_by = $6
+	WHERE id = $1 AND org_id = $2 AND review_state = 'accepted'
+`
+
+// skillDraftBody is a draft or version body as the lint reads it.
+type skillDraftBody struct {
+	Name             string          `json:"name"`
+	Description      string          `json:"description"`
+	Content          string          `json:"content"`
+	TriggerKeywords  []string        `json:"trigger_keywords"`
+	ToolRestrictions []string        `json:"tool_restrictions"`
+	Kind             string          `json:"kind"`
+	Settings         json.RawMessage `json:"settings"`
+	BundleSHA256     string          `json:"bundle_sha256"`
+}
+
+// Draft route refusals; each ends a mutation before its statement and is answered with the typed
+// envelope.
+var (
+	errSkillNotFound        = errors.New("skill_not_found")
+	errSkillNotPublished    = errors.New("skill_not_published")
+	errSkillDraftNotFound   = errors.New("skill_draft_not_found")
+	errSkillVersionNotFound = errors.New("skill_version_not_found")
+	errSkillDraftNameTaken  = errors.New("skill_name_taken")
+	errSkillDraftBundleGone = errors.New("skill_draft_bundle_missing")
+	errSkillDraftUnreadable = errors.New("skill_draft_unreadable")
+)
+
+// writeSkillDraftError answers a draft route's failure with the typed envelope; details is always
+// an object. Each refusal's code is its error text. It reports whether err was answered.
+func writeSkillDraftError(w http.ResponseWriter, err error, findings []skilllint.Finding) bool {
+	refuse := func(status int, refusal error, message string) bool {
+		writeTypedError(w, status, refusal.Error(), message)
+		return true
+	}
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, errSkillNotCallersToChange):
+		writeTypedError(w, http.StatusForbidden, "forbidden", err.Error())
+		return true
+	case errors.Is(err, errSkillLintRefused):
+		writeSkillLintRefusal(w, findings)
+		return true
+	case errors.Is(err, errSkillNotFound):
+		return refuse(http.StatusNotFound, errSkillNotFound, "The skill was not found.")
+	case errors.Is(err, errSkillNotPublished):
+		return refuse(http.StatusConflict, errSkillNotPublished, "Only an accepted skill has a draft; decide on the proposal first.")
+	case errors.Is(err, errSkillDraftNotFound):
+		return refuse(http.StatusNotFound, errSkillDraftNotFound, "The skill has no draft.")
+	case errors.Is(err, errSkillVersionNotFound):
+		return refuse(http.StatusNotFound, errSkillVersionNotFound, "The skill has no such version.")
+	case errors.Is(err, errSkillDraftNameTaken):
+		return refuse(http.StatusConflict, errSkillDraftNameTaken, "Another skill already has the draft's name.")
+	case errors.Is(err, errSkillDraftBundleGone):
+		return refuse(http.StatusConflict, errSkillDraftBundleGone, "The draft names a bundle the skill no longer holds; upload it again or restore another version.")
+	case errors.Is(err, errSkillDraftUnreadable):
+		return refuse(http.StatusInternalServerError, errSkillDraftUnreadable, "The skill's draft could not be read.")
+	}
+	slog.Error("skill draft change failed", "error", err)
+	writeTypedError(w, http.StatusInternalServerError, "database_unavailable", "The skill could not be changed.")
+	return true
+}
+
+// lockAcceptedSkill runs the owner-or-admin check (which takes the row lock) and refuses a skill
+// that is absent or not accepted.
+func lockAcceptedSkill(r *http.Request, tx registryDatabase, id, orgID string) error {
+	if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+		return err
+	}
+	var accepted bool
+	err := tx.QueryRow(r.Context(), acceptedSkillRowSQL, id, orgID).Scan(&accepted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errSkillNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		return errSkillNotPublished
+	}
+	return nil
+}
+
+// publish is POST /api/v1/skills/{id}/publish: the draft becomes the live text, one statement,
+// and session-core's trigger cuts the new version. Owner-or-admin, as a PATCH. The draft is linted
+// as the text it is about to make live. With retention on, the draft's bundle becomes live too.
+func (h *SkillsHandler) publish(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST publishes a skill draft.")
+		return
+	}
+	id := r.PathValue("id")
+	if !mcpIdentifier.MatchString(id) {
+		writeTypedError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
+		return
+	}
+	orgID := verifiedOrganizationID(r)
+	now := time.Now().UTC()
+	var version int32
+	var findings []skilllint.Finding
+	err := h.mutateSkill(r, "", "draft_published", func(tx registryDatabase) error {
+		if err := lockAcceptedSkill(r, tx, id, orgID); err != nil {
+			return err
+		}
+		var raw []byte
+		err := tx.QueryRow(r.Context(), `SELECT draft FROM agent_skills WHERE id=$1 AND org_id=$2`, id, orgID).Scan(&raw)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if len(raw) == 0 {
+			return errSkillDraftNotFound
+		}
+		var draft skillDraftBody
+		if err := json.Unmarshal(raw, &draft); err != nil {
+			return errSkillDraftUnreadable
+		}
+		input := skilllint.Input{
+			Name: draft.Name, Description: draft.Description, Content: draft.Content,
+			TriggerKeywords: draft.TriggerKeywords, ToolRestrictions: draft.ToolRestrictions,
+			Kind: draft.Kind, Settings: decodeSettings(draft.Settings),
+		}
+		if kindFindings := kindRuleRefusal(input); len(kindFindings) > 0 {
+			findings = kindFindings
+			return errSkillLintRefused
+		}
+		lintFindings, refused := lintSkill(r.Context(), h.lintMode, input)
+		findings = lintFindings
+		if refused {
+			return errSkillLintRefused
+		}
+		var bundle string
+		err = tx.QueryRow(r.Context(), publishSkillSQL(h.bundleRetention), id, orgID, now).Scan(&version, &bundle)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return errSkillDraftNameTaken
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errSkillDraftNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if !h.bundleRetention {
+			return nil
+		}
+		_, actorID := skillActor(r)
+		if err := skillbundle.PublishDraftBundle(r.Context(), tx, orgID, id, actorID, bundle); err != nil {
+			if errors.Is(err, skillbundle.ErrDraftBundleMissing) {
+				return errSkillDraftBundleGone
+			}
+			return err
+		}
+		return nil
+	})
+	if writeSkillDraftError(w, err, findings) {
+		return
+	}
+	writeJSON(w, withLintWarnings(map[string]any{"id": id, "version": version, "published": true, "updated_at": now}, findings))
+}
+
+// discardDraft is DELETE /api/v1/skills/{id}/draft: the draft goes and the live text stays.
+// Owner-or-admin, as a PATCH. With retention on, the draft's own bundle upload goes too.
+func (h *SkillsHandler) discardDraft(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only DELETE discards a skill draft.")
+		return
+	}
+	id := r.PathValue("id")
+	if !mcpIdentifier.MatchString(id) {
+		writeTypedError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
+		return
+	}
+	orgID := verifiedOrganizationID(r)
+	err := h.mutateSkill(r, "", "draft_discarded", func(tx registryDatabase) error {
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+			return err
+		}
+		result, err := tx.Exec(r.Context(), discardDraftSQL, id, orgID)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() == 0 {
+			return errSkillDraftNotFound
+		}
+		if h.bundleRetention {
+			return skillbundle.DiscardDraftBundle(r.Context(), tx, orgID, id)
+		}
+		return nil
+	})
+	if writeSkillDraftError(w, err, nil) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// restore is POST /api/v1/skills/{id}/versions/{version}/restore: that version's body becomes the
+// skill's draft. It is never live by itself: publishing it is a second, explicit step that cuts a
+// NEW version (EP-11 D2: nothing re-points to an old version). Owner-or-admin, as a PATCH. The
+// old bundle comes back only with retention on and while the skill still holds it.
+func (h *SkillsHandler) restore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeTypedError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only POST restores a skill version.")
+		return
+	}
+	id := r.PathValue("id")
+	if !mcpIdentifier.MatchString(id) {
+		writeTypedError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
+		return
+	}
+	version, err := strconv.Atoi(r.PathValue("version"))
+	if err != nil || version < 1 {
+		writeTypedError(w, http.StatusBadRequest, "invalid_version", "The version must be a whole number, 1 or more.")
+		return
+	}
+	orgID := verifiedOrganizationID(r)
+	now := time.Now().UTC()
+	bundleRestored := false
+	err = h.mutateSkill(r, "", "draft_restored_from:v"+strconv.Itoa(version), func(tx registryDatabase) error {
+		if err := lockAcceptedSkill(r, tx, id, orgID); err != nil {
+			return err
+		}
+		var body []byte
+		var bundle string
+		err := tx.QueryRow(r.Context(), `
+			SELECT body, bundle_sha256 FROM agent_skill_versions
+			WHERE org_id = $1 AND skill_id = $2 AND version = $3
+		`, orgID, id, version).Scan(&body, &bundle)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errSkillVersionNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if h.bundleRetention {
+			held := bundle == ""
+			if !held {
+				if held, err = skillbundle.HeldManifest(r.Context(), tx, orgID, id, bundle); err != nil {
+					return err
+				}
+			}
+			bundleRestored = held
+		}
+		_, err = tx.Exec(r.Context(), restoreDraftSQL, id, orgID, body, bundleRestored, now, verifiedActorID(r))
+		return err
+	})
+	if writeSkillDraftError(w, err, nil) {
+		return
+	}
+	writeJSON(w, map[string]any{"id": id, "draft": true, "restored_from": version, "bundle_restored": bundleRestored, "updated_at": now})
+}
+
+// ---------------------------------------------------------------------------
+// Skill versions  GET /api/v1/skills/{id}/versions (EP-11 S2)
+// ---------------------------------------------------------------------------
+
+const skillVersionsAPIEnv = "SKILL_VERSIONS_API"
+
+// SkillVersionsAPIFromLookup reads SKILL_VERSIONS_API strictly: only the literal "true" turns the
+// version reads on (the history route, version and digest on skill reads, and the bundle digest
+// stamp), so a typo or a stray "1" leaves everything as it was. session-core reads the same name
+// for its SkillVersionService.
+func SkillVersionsAPIFromLookup(lookup func(string) string) bool {
+	return lookup(skillVersionsAPIEnv) == "true"
+}
+
+// A history page when the caller names none, and the most one page returns.
+const (
+	defaultSkillVersionsPage = 20
+	maxSkillVersionsPage     = 100
+)
+
+// skillVisibleSQL is get's visibility rule as a yes/no: org skills, the caller's own, accepted
+// skills shared with the caller, and for an admin any shared accepted skill. Pinned to get's
+// statement by TestSkillVersionsRouteUsesTheGetVisibility.
+const skillVisibleSQL = `
+	SELECT EXISTS (SELECT 1 FROM agent_skills
+		WHERE id = $1 AND org_id = $2
+		  AND (scope = 'org' OR owner_user_id = $3
+		       OR (review_state = 'accepted' AND (shared_with ? $3
+		           OR ($4 AND jsonb_array_length(shared_with) > 0)))))
+`
+
+// skillVersionBody is the body a version row holds (session-core migration 0108,
+// agent_skill_version_body). kind and settings are not shown until EP-11 S6 gives them meaning.
+type skillVersionBody struct {
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	Content             string   `json:"content"`
+	TriggerKeywords     []string `json:"trigger_keywords"`
+	TriggerFilePatterns []string `json:"trigger_file_patterns"`
+	ToolRestrictions    []string `json:"tool_restrictions"`
+}
+
+type skillVersionView struct {
+	Version             int32     `json:"version"`
+	Digest              string    `json:"digest"`
+	Name                string    `json:"name"`
+	Description         string    `json:"description"`
+	Content             string    `json:"content"`
+	TriggerKeywords     []string  `json:"trigger_keywords"`
+	TriggerFilePatterns []string  `json:"trigger_file_patterns"`
+	ToolRestrictions    []string  `json:"tool_restrictions"`
+	BundleSHA256        string    `json:"bundle_sha256,omitempty"`
+	ActorKind           string    `json:"actor_kind"`
+	ActorID             string    `json:"actor_id,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+// writeSkillVersionsError answers with the typed envelope; details is always an object.
+func writeSkillVersionsError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "message": message, "details": map[string]any{},
+	}})
+}
+
+// versions is GET /api/v1/skills/{id}/versions: the skill's immutable versions, newest first,
+// with their text, for the Skills page's history. Readable by whoever may read the skill (get's
+// rule); a skill the caller cannot see is a 404, as get answers. Versions are written only by
+// session-core's trigger (EP-11 D10), so this route never writes. Query: limit (default 20, at
+// most 100) and before_version (paging; 0 starts at the newest).
+func (h *SkillsHandler) versions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeSkillVersionsError(w, http.StatusMethodNotAllowed, "method_not_allowed", "Only GET reads skill versions.")
+		return
+	}
+	id := r.PathValue("id")
+	if !mcpIdentifier.MatchString(id) {
+		writeSkillVersionsError(w, http.StatusBadRequest, "invalid_skill_id", "The skill id is not valid.")
+		return
+	}
+	limit, before := defaultSkillVersionsPage, 0
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 {
+			writeSkillVersionsError(w, http.StatusBadRequest, "invalid_limit", "limit must be a positive whole number.")
+			return
+		}
+		limit = min(parsed, maxSkillVersionsPage)
+	}
+	if raw := r.URL.Query().Get("before_version"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeSkillVersionsError(w, http.StatusBadRequest, "invalid_before_version", "before_version must be a whole number, 0 or more.")
+			return
+		}
+		before = parsed
+	}
+	orgID := verifiedOrganizationID(r)
+	var visible bool
+	if err := h.pool.QueryRow(r.Context(), skillVisibleSQL, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)).Scan(&visible); err != nil {
+		slog.Error("read skill visibility failed", "error", err)
+		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+		return
+	}
+	if !visible {
+		writeSkillVersionsError(w, http.StatusNotFound, "skill_not_found", "The skill was not found.")
+		return
+	}
+	// One more than the page, to say whether older versions remain.
+	rows, err := h.pool.Query(r.Context(), `
+		SELECT version, digest, body, bundle_sha256, actor_kind, actor_id, created_at
+		FROM agent_skill_versions
+		WHERE org_id = $1 AND skill_id = $2 AND ($3::int = 0 OR version < $3::int)
+		ORDER BY version DESC
+		LIMIT $4
+	`, orgID, id, before, limit+1)
+	if err != nil {
+		slog.Error("list skill versions failed", "error", err)
+		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+		return
+	}
+	defer rows.Close()
+	versions := []skillVersionView{}
+	for rows.Next() {
+		var view skillVersionView
+		var body skillVersionBody
+		if err := rows.Scan(&view.Version, &view.Digest, &body, &view.BundleSHA256,
+			&view.ActorKind, &view.ActorID, &view.CreatedAt); err != nil {
+			slog.Error("scan skill version failed", "error", err)
+			writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+			return
+		}
+		view.Name, view.Description, view.Content = body.Name, body.Description, body.Content
+		view.TriggerKeywords, view.TriggerFilePatterns, view.ToolRestrictions =
+			nonNilStrings(body.TriggerKeywords), nonNilStrings(body.TriggerFilePatterns), nonNilStrings(body.ToolRestrictions)
+		versions = append(versions, view)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("list skill versions failed", "error", err)
+		writeSkillVersionsError(w, http.StatusInternalServerError, "database_unavailable", "Skill versions could not be read.")
+		return
+	}
+	hasMore := len(versions) > limit
+	if hasMore {
+		versions = versions[:limit]
+	}
+	writeJSON(w, map[string]any{"versions": versions, "has_more": hasMore})
+}
+
+// nonNilStrings keeps a list a JSON array, never null.
+func nonNilStrings(values []string) []string {
+	if values == nil {
+		return []string{}
+	}
+	return values
 }
 
 // ---------------------------------------------------------------------------
@@ -545,11 +1438,21 @@ func SkillBundlesAPIFromLookup(lookup func(string) string) bool {
 type SkillBundlesHandler struct {
 	store   *skillbundle.Store
 	enabled bool
+	// db and lintMode check a bundle's SKILL.md name against its skill (EP-11 S4); while the
+	// lint is off the skill is not read.
+	db       skillbundle.DB
+	lintMode skilllint.Mode
 }
 
 // NewSkillBundlesHandler constructs the handler; enabled comes from SkillBundlesAPIFromLookup.
 func NewSkillBundlesHandler(db skillbundle.DB, enabled bool) *SkillBundlesHandler {
-	return &SkillBundlesHandler{store: skillbundle.NewStore(db), enabled: enabled}
+	// EP-11 S2: with the versions API on, an upload or a delete also stamps the skill's bundle
+	// digest, which cuts a new skill version.
+	// EP-11 S5: with retention on a replaced bundle is kept while a version names it, and with
+	// drafts on too an upload to an accepted skill is its draft's bundle.
+	store := skillbundle.NewStore(db).WithSkillVersions(SkillVersionsAPIFromLookup(os.Getenv)).
+		WithRetention(skillbundle.RetentionFromLookup(os.Getenv)).WithDrafts(DraftPublishFromLookup(os.Getenv))
+	return &SkillBundlesHandler{store: store, enabled: enabled, db: db, lintMode: skilllint.ModeFromLookup(os.Getenv)}
 }
 
 // Register mounts the bundle route. Its more specific pattern takes precedence over the
@@ -580,6 +1483,12 @@ type skillBundleSummaryView struct {
 	CreatedBy      string    `json:"created_by"`
 	CreatedAt      time.Time `json:"created_at"`
 	Replaced       bool      `json:"replaced"`
+	// Draft is true when the upload became the skill's draft bundle (EP-11 S5), live once the
+	// draft is published; absent otherwise, so with retention off a body is as it was.
+	Draft bool `json:"draft,omitempty"`
+	// Warnings are the skill lint findings of an upload that went ahead; absent while the
+	// lint is off.
+	Warnings []skilllint.Finding `json:"warnings,omitempty"`
 }
 
 func (h *SkillBundlesHandler) serve(w http.ResponseWriter, r *http.Request) {
@@ -669,6 +1578,10 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 		return
 	}
 	bundle, err := skillbundle.Parse(body)
+	if err == nil && skillbundle.DeckTemplatesFromLookup(os.Getenv) {
+		// EP-5 S6: a deck template's theme, master and logo are checked before anything is stored.
+		err = skillbundle.ValidateDeckTemplate(bundle)
+	}
 	if err != nil {
 		var refusal *skillbundle.RefusalError
 		if errors.As(err, &refusal) {
@@ -676,6 +1589,16 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 			return
 		}
 		jsonErr(w, "invalid skill bundle", http.StatusUnprocessableEntity)
+		return
+	}
+	lintFindings, lintRefused, err := h.lintFrontMatter(r.Context(), principal.OrganizationID, skillID, bundle)
+	if err != nil {
+		slog.Error("read skill for bundle lint failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	if lintRefused {
+		writeSkillLintRefusal(w, lintFindings)
 		return
 	}
 	result, err := h.store.Put(r.Context(), principal.OrganizationID, skillID, principal.ActorID, bundle)
@@ -694,7 +1617,35 @@ func (h *SkillBundlesHandler) put(w http.ResponseWriter, r *http.Request, princi
 	_ = json.NewEncoder(w).Encode(skillBundleSummaryView{
 		SkillID: summary.SkillID, ManifestSHA256: summary.ManifestSHA256, FileCount: summary.FileCount,
 		TotalBytes: summary.TotalBytes, CreatedBy: summary.CreatedBy, CreatedAt: summary.CreatedAt, Replaced: result.Replaced,
+		Draft: result.Draft, Warnings: lintFindings,
 	})
+}
+
+// lintFrontMatter checks that the bundle's SKILL.md names the skill it is uploaded to. Only
+// the front matter rule applies here: the skill's own text was linted when it was written,
+// and an upload must not be refused for a row it does not change. A skill that is not there
+// is not checked.
+func (h *SkillBundlesHandler) lintFrontMatter(ctx context.Context, orgID, skillID string, bundle skillbundle.Bundle) ([]skilllint.Finding, bool, error) {
+	if h.lintMode == skilllint.ModeOff {
+		return nil, false, nil
+	}
+	var name string
+	err := h.db.QueryRow(ctx, `SELECT name FROM agent_skills WHERE id=$1 AND org_id=$2`, skillID, orgID).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	frontMatterName := skillbundle.FrontMatterName(bundle)
+	var findings []skilllint.Finding
+	for _, finding := range skilllint.Lint(skilllint.Input{Name: name, FrontmatterName: &frontMatterName}) {
+		if finding.Code == skilllint.CodeFrontmatterNameMismatch {
+			findings = append(findings, finding)
+		}
+	}
+	skilllint.Count(ctx, h.lintMode, findings)
+	return findings, h.lintMode == skilllint.ModeEnforce && skilllint.HasError(findings), nil
 }
 
 // delete is DELETE /api/v1/skills/{id}/bundle: removes the org's bundle; its files cascade and
@@ -740,6 +1691,10 @@ type MCPHandler struct {
 	// real stored (server_id, org_id) row, so this cannot widen access beyond
 	// servers that genuinely belong to the org it asserts.
 	mcpServiceToken string
+	// orgExtensions is the org's extension rule, read only when orgExtensionsEnforced (WS25-S9). With it off the
+	// listing shows every server the registry holds.
+	orgExtensions         policy.OrgExtensionSource
+	orgExtensionsEnforced bool
 }
 
 type mcpHostResolver interface {
@@ -938,6 +1893,35 @@ func expectedInternalServiceToken(rootSecret, orgID string) string {
 // expectedInternalServiceToken. An unconfigured root secret (or an empty
 // orgID, which internalTokenTarget already rejects) keeps the route closed
 // rather than degrading into "any caller is trusted".
+// WithOrgExtensionPolicy attaches the org's extension rule to the server listing (WS25-S9). It applies only when
+// enabled is true, which main wires from ORG_EXTENSION_ALLOWLIST, so the listing is what it was while that is off.
+func (h *MCPHandler) WithOrgExtensionPolicy(source policy.OrgExtensionSource, enabled bool) *MCPHandler {
+	h.orgExtensions = source
+	h.orgExtensionsEnforced = enabled && source != nil
+	return h
+}
+
+// orgExtensionReader reads an org's extension rule from the agent policy the policy API serves (WS25-S9), through the
+// same loader, so the listing and the signed gate cannot disagree about what the org allows.
+type orgExtensionReader struct {
+	pool registryDatabase
+}
+
+// NewOrgExtensionReader returns the rule source the signed gate and the MCP listing share.
+func NewOrgExtensionReader(pool registryDatabase) policy.OrgExtensionSource {
+	return orgExtensionReader{pool: pool}
+}
+
+// OrgExtensionRule implements policy.OrgExtensionSource.
+func (r orgExtensionReader) OrgExtensionRule(ctx context.Context, orgID string) (policy.OrgExtensionRule, error) {
+	handler := &OrgAgentPolicyHandler{pool: r.pool}
+	row, err := handler.load(ctx, orgID)
+	if err != nil {
+		return policy.OrgExtensionRule{}, err
+	}
+	return policy.OrgExtensionRuleFromSettings(row.Settings), nil
+}
+
 func (h *MCPHandler) authorizedInternalServiceCall(r *http.Request, orgID string) bool {
 	received := r.Header.Get(mcpServiceTokenHeader)
 	if received == "" || h.mcpServiceToken == "" || orgID == "" {
@@ -1636,6 +2620,17 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "authentication required", http.StatusUnauthorized)
 			return
 		}
+		// With the org's extension allow-list on (WS25-S9), a server the org has not approved is not listed.
+		var rule policy.OrgExtensionRule
+		if h.orgExtensionsEnforced {
+			loaded, err := h.orgExtensions.OrgExtensionRule(r.Context(), orgID)
+			if err != nil {
+				slog.Error("load org extension rule failed", "error", err)
+				jsonErr(w, "database unavailable", http.StatusInternalServerError)
+				return
+			}
+			rule = loaded
+		}
 		rows, err := h.pool.Query(r.Context(), `
 			SELECT id, org_id, name, description, endpoint_url, transport, auth_kind,
 			       config_json, scope, enabled, rollout_state, risk_level, created_at, updated_at
@@ -1664,6 +2659,9 @@ func (h *MCPHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 				slog.Error("scan MCP server failed", "error", err)
 				jsonErr(w, "database unavailable", http.StatusInternalServerError)
 				return
+			}
+			if h.orgExtensionsEnforced && !rule.AllowsServer(s.ID) {
+				continue
 			}
 			hydrateMCPServerView(&s)
 			servers = append(servers, s)
@@ -2101,6 +3099,9 @@ func (h *RoutingHandler) delete(w http.ResponseWriter, r *http.Request, id strin
 type SafetyHandler struct {
 	pool registryDatabase
 	pub  publisher.EventPublisher
+	// documentPII turns on the document_pii catalogue key (E3.6-8): creating a
+	// policy of that kind and reading the effective org default. Off by default.
+	documentPII bool
 }
 
 // NewSafetyHandler constructs the handler.
@@ -2114,11 +3115,27 @@ func (h *SafetyHandler) WithPublisher(pub publisher.EventPublisher) *SafetyHandl
 	return h
 }
 
+// WithDocumentPIIPolicy switches the document_pii catalogue key on (E3.6-8,
+// DOCUMENT_PII_POLICY). While it is off a document_pii policy cannot be created
+// and the effective-default route answers 404.
+func (h *SafetyHandler) WithDocumentPIIPolicy(enabled bool) *SafetyHandler {
+	h.documentPII = enabled
+	return h
+}
+
 // Register mounts routes.
 func (h *SafetyHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/safety", h.listOrCreate)
 	mux.HandleFunc("/api/v1/safety/", func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[len("/api/v1/safety/"):]
+		if id == documentPIIEffectiveSuffix {
+			if r.Method != http.MethodGet {
+				http.NotFound(w, r)
+				return
+			}
+			h.documentPIIEffective(w, r)
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			h.get(w, r, id)
@@ -2197,6 +3214,16 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now().UTC()
 		cfgJSON, _ := json.Marshal(p.ConfigJSON)
+		isDocumentPII := isDocumentPIIKind(p.Kind)
+		if isDocumentPII {
+			// The E3.6-8 catalogue key has a closed schema and one row per org.
+			normalized, status, message := h.prepareDocumentPII(&p)
+			if status != 0 {
+				jsonErr(w, message, status)
+				return
+			}
+			cfgJSON = normalized
+		}
 		if p.AppliesTo == nil {
 			p.AppliesTo = []string{}
 		}
@@ -2207,6 +3234,10 @@ func (h *SafetyHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		`, p.ID, p.OrgID, p.Name, p.Description, p.Kind, cfgJSON, p.AppliesTo,
 			p.Priority, p.Enabled, now, now)
 		if err != nil {
+			if isDocumentPII && isUniqueViolation(err) {
+				jsonErr(w, "a document_pii policy already exists for this organization", http.StatusConflict)
+				return
+			}
 			jsonErr(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

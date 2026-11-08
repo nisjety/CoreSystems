@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 )
@@ -146,8 +147,8 @@ type ControlModelActionViewVerifier struct {
 
 func NewControlModelActionViewVerifier(keyID, publicKeyBase64 string) (*ControlModelActionViewVerifier, error) {
 	keyID = strings.TrimSpace(keyID)
-	publicRaw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(publicKeyBase64))
-	if keyID == "" || err != nil || len(publicRaw) != ed25519.PublicKeySize {
+	publicRaw, _, err := decisionkey.DecodePublicKey(publicKeyBase64)
+	if keyID == "" || err != nil {
 		return nil, fmt.Errorf("Control model action view public key is invalid")
 	}
 	return &ControlModelActionViewVerifier{keyID: keyID, public: ed25519.PublicKey(publicRaw)}, nil
@@ -325,6 +326,9 @@ func (v *ControlModelActionViewVerifier) Verify(token, runID, orgID string, now 
 	}
 	keyID, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil || string(keyID) != v.keyID {
+		if err == nil {
+			decisionkey.ReportUnknownKey("model-action-view", string(keyID), v.keyID)
+		}
 		return verifiedModelActionView{}, fmt.Errorf("untrusted Control model action view key")
 	}
 	signature, err := base64.RawURLEncoding.DecodeString(parts[3])

@@ -51,8 +51,10 @@ use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STAN
 use base64::engine::DecodePaddingMode;
 use base64::Engine;
 use mp_contracts::attachments::{validate_name, ATTACHMENTS_DIR};
+use mp_contracts::sandbox_report::{Enforcement, NetworkTier, SandboxReport};
 use sha2::{Digest, Sha256};
 
+use crate::egress_proxy::{CallEgress, EgressCounts, EgressProxy};
 use crate::executor;
 use crate::policy::{MpNetworkPolicy, MpSandboxPolicy};
 use crate::run_inputs::InputSet;
@@ -71,6 +73,10 @@ const WORKSPACE_PREFIX: &str = "verevon-code";
 /// counter+clock name is unique in practice, so a handful of tries is plenty.
 const WORKSPACE_CREATE_ATTEMPTS: u32 = 8;
 
+/// Switch for the per-call enforcement report (EP-9 E1). Only the exact value
+/// `true` turns it on, so a typo leaves every result unchanged.
+const ENFORCEMENT_REPORT_ENV: &str = "CODE_INTERPRETER_ENFORCEMENT_REPORT";
+
 /// The interpreter this tool invokes. Public so the health probe
 /// ([`crate::health_attest`]) measures the SAME binary the tool runs — a probe
 /// against a different interpreter would attest health this tool does not have.
@@ -79,19 +85,19 @@ pub const PYTHON_PROGRAM: &str = "python3";
 /// Workspace subdirectory for the program's temporary files (`TMPDIR`). Inside
 /// the workspace because the sandbox's `/tmp` is read-only; a SUBDIRECTORY so
 /// stray tempfiles are not mistaken for program output.
-const TEMP_SUBDIR: &str = ".tmp";
+pub(crate) const TEMP_SUBDIR: &str = ".tmp";
 
 /// Workspace subdirectory for `matplotlib`'s config + font cache
 /// (`MPLCONFIGDIR`). `matplotlib` refuses to start without a writable config
 /// directory, and its `fontlist-*.json` must not land next to the real output.
-const MPL_CONFIG_SUBDIR: &str = ".mplconfig";
+pub(crate) const MPL_CONFIG_SUBDIR: &str = ".mplconfig";
 
 /// Used only when execution-core itself has no usable `PATH`; without one the
 /// interpreter cannot be found at all.
 const FALLBACK_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Per-file ceiling on returned content (8 `MiB`).
-const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub(crate) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Ceiling on the total content returned by one call (16 `MiB`).
 const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
@@ -144,7 +150,7 @@ impl Language {
     }
 
     /// Name of the generated program file staged in the workspace.
-    const fn program_file(self) -> &'static str {
+    pub(crate) const fn program_file(self) -> &'static str {
         match self {
             Self::Python => "_verevon_main.py",
             Self::Sh => "_verevon_main.sh",
@@ -198,10 +204,87 @@ struct CodeResult {
     /// Office files the verifier did not check, so the model can say so.
     #[serde(skip_serializing_if = "is_zero")]
     verification_unchecked: usize,
+    /// The verifier's rendered copies of checked files, for the viewer only; the delivered
+    /// files stay the sandbox's bytes. Empty unless the render layer ran.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<office_verify::FilePreview>,
+    /// How the program was confined and whether it was stopped for a limit
+    /// (WS06-S8). Additive: callers that do not know it ignore it.
+    execution: ExecutionInfo,
+    /// The per-call enforcement report (EP-9 E1). Absent unless
+    /// `CODE_INTERPRETER_ENFORCEMENT_REPORT` is `true`, so a result is unchanged
+    /// while the switch is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox: Option<SandboxReport>,
+    /// Distinct hosts the call's egress proxy admitted and refused (EP-9 E3).
+    /// Present only for a call that ran at a tier above off, so every other
+    /// result is unchanged. Counts only: no host name or path is returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    egress: Option<EgressCounts>,
+}
+
+/// The `execution` object of a code result: `{sandboxed, limits, limit_hit}`.
+#[derive(Debug, serde::Serialize)]
+struct ExecutionInfo {
+    sandboxed: bool,
+    /// `enforced` | `unlimited`.
+    limits: &'static str,
+    /// Present only when the program was stopped for a resource limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit_hit: Option<executor::LimitHit>,
 }
 
 fn is_zero(count: &usize) -> bool {
     *count == 0
+}
+
+/// Whether this call's result carries the enforcement report. Read per call, as
+/// the Office verifier's switch is.
+fn enforcement_report_requested() -> bool {
+    enforcement_report_requested_in(std::env::var(ENFORCEMENT_REPORT_ENV).ok().as_deref())
+}
+
+/// The strict parse: only the exact value `true` enables the report.
+fn enforcement_report_requested_in(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The enforcement report for one run (EP-9 E1). The network tier is the one the
+/// policy the run was launched with allows, never one a request asked for. Only a
+/// wrapped process with no network counts as fully enforced: `--unshare-net` is
+/// the boundary bwrap applies itself, and it is the only one this tool runs with.
+fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy) -> SandboxReport {
+    let network = match network {
+        MpNetworkPolicy::Disabled => NetworkTier::Off,
+        MpNetworkPolicy::AllowDomains(_) => NetworkTier::Allowlist,
+        MpNetworkPolicy::AllowAll => NetworkTier::All,
+    };
+    let enforcement = match (sandboxed, network) {
+        (false, _) => Enforcement::Unenforced,
+        (true, NetworkTier::Off) => Enforcement::Full,
+        (true, _) => Enforcement::Partial,
+    };
+    SandboxReport {
+        sandboxed,
+        network,
+        enforcement,
+    }
+}
+
+/// The report for a run that went out through its own live proxy (EP-9 E3). The
+/// namespace was unshared and the proxy admitted only the tier's hosts, so the
+/// boundary is one the sandbox applied itself: `full`, named by the tier the
+/// call ran at rather than by the policy's host list.
+fn proxied_enforcement_report(sandboxed: bool, tier: NetworkTier) -> SandboxReport {
+    SandboxReport {
+        sandboxed,
+        network: tier,
+        enforcement: if sandboxed {
+            Enforcement::Full
+        } else {
+            Enforcement::Unenforced
+        },
+    }
 }
 
 /// Parse and validate a `code_interpreter` tool input.
@@ -493,6 +576,12 @@ fn child_env(workspace: &Path) -> Vec<(String, String)> {
     env
 }
 
+/// The ENTIRE environment of a `shell` call (WS06-S9): `PATH` and nothing else, so
+/// no service credential execution-core holds reaches a model-authored command.
+pub(crate) fn shell_env() -> Vec<(String, String)> {
+    vec![("PATH".to_owned(), inherited_or("PATH", FALLBACK_PATH))]
+}
+
 fn path_value(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -543,6 +632,10 @@ pub async fn run(
 /// [`run`] with the turn's skill bundles: `skills`, when present, is the host directory a
 /// `crate::skill_mounts` tree was written to, bound read-only at [`SKILLS_MOUNT`] for the
 /// call. `None` is exactly [`run`].
+///
+/// `lease_id` is the sandbox lease the caller holds for a Space-scoped run
+/// (`workspace_root` is `Some` exactly then); the spawn is refused without it
+/// (WS06-S9 `SpawnAdmission`).
 pub async fn run_with_skills(
     tool_input: &str,
     run_id: &str,
@@ -550,8 +643,43 @@ pub async fn run_with_skills(
     workspace_root: Option<&Path>,
     ro_inputs: Option<Arc<InputSet>>,
     skills: Option<&Path>,
+    lease_id: Option<&str>,
 ) -> Result<String, String> {
-    run_staged_with_skills(
+    run_with_egress(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        lease_id,
+        &CallEgress::off(),
+    )
+    .await
+}
+
+/// [`run_with_skills`] at an egress tier (EP-9 E3). `egress` is built by the
+/// caller with [`CallEgress::resolve`] from the deployment switch, the lease's
+/// recorded tier and the run's ceiling, never from the tool input. At `off`
+/// this is exactly [`run_with_skills`]; above it the call runs behind its own
+/// proxy, and a proxy that cannot start fails the call rather than running it
+/// without one.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_egress(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    lease_id: Option<&str>,
+    egress: &CallEgress,
+) -> Result<String, String> {
+    let admission = executor::SpawnAdmission {
+        space_scoped: workspace_root.is_some(),
+        lease_id,
+    };
+    run_admitted(
         tool_input,
         run_id,
         step_id,
@@ -559,6 +687,8 @@ pub async fn run_with_skills(
         ro_inputs,
         skills,
         executor::code_exec_timeout(),
+        &admission,
+        egress,
     )
     .await
 }
@@ -607,16 +737,44 @@ async fn run_staged_with_skills(
     skills: Option<&Path>,
     timeout: Duration,
 ) -> Result<String, String> {
+    run_admitted(
+        tool_input,
+        run_id,
+        step_id,
+        workspace_root,
+        ro_inputs,
+        skills,
+        timeout,
+        &executor::SpawnAdmission::NOT_SPACE,
+        &CallEgress::off(),
+    )
+    .await
+}
+
+/// [`run_staged_with_skills`] with the Space facts the spawn is admitted on (WS06-S9)
+/// and the call's egress tier (EP-9 E3).
+#[allow(clippy::too_many_arguments)]
+async fn run_admitted(
+    tool_input: &str,
+    run_id: &str,
+    step_id: &str,
+    workspace_root: Option<&Path>,
+    ro_inputs: Option<Arc<InputSet>>,
+    skills: Option<&Path>,
+    timeout: Duration,
+    admission: &executor::SpawnAdmission<'_>,
+    egress: &CallEgress,
+) -> Result<String, String> {
     let mut request = parse_request(tool_input)?;
     request.ro_inputs = ro_inputs;
 
     if let Some(root) = workspace_root {
-        return run_in_root(&request, root, timeout, true, skills).await;
+        return run_in_root(&request, root, timeout, true, skills, admission, egress).await;
     }
 
     let workspace = Workspace::create(run_id, step_id)
         .map_err(|error| format!("code_interpreter could not create its workspace: {error}"))?;
-    run_in_root(&request, workspace.path(), timeout, false, skills).await
+    run_in_root(&request, workspace.path(), timeout, false, skills, admission, egress).await
     // `workspace` drops here — and on every `?` above — removing the directory.
 }
 
@@ -630,12 +788,15 @@ async fn run_staged_with_skills(
 /// already existed, byte-for-byte unchanged, before THIS call started (not
 /// just this call's own staged inputs) — otherwise every call in a run would
 /// re-report every file any earlier call, or hydrate, ever produced.
+#[allow(clippy::too_many_arguments)]
 async fn run_in_root(
     request: &CodeRequest,
     root: &Path,
     timeout: Duration,
     persistent: bool,
     skills: Option<&Path>,
+    admission: &executor::SpawnAdmission<'_>,
+    egress: &CallEgress,
 ) -> Result<String, String> {
     let pre_call_baseline = if persistent {
         snapshot_file_hashes(root)
@@ -699,27 +860,57 @@ async fn run_in_root(
     // `open("out.xlsx","wb")` work while the rest of the container stays
     // untouchable — and the `attachments/` bind then makes that one directory
     // read-only again.
+    //
+    // EP-9 E3: a call at a tier above off runs behind its own proxy, started
+    // here and stopped when the call returns. Its policy names the tier's hosts
+    // so the admission gate sees an allow-list, but the proxy is what enforces
+    // it; with no proxy the call does not run.
+    let proxy = if egress.is_tiered() {
+        Some(EgressProxy::start(egress).map_err(|error| {
+            format!("code_interpreter could not start its egress proxy: {error}")
+        })?)
+    } else {
+        None
+    };
     let policy = MpSandboxPolicy::WorkspaceWrite {
         writable_roots: vec![root.to_path_buf()],
-        network: MpNetworkPolicy::Disabled,
+        network: if proxy.is_some() {
+            MpNetworkPolicy::AllowDomains(egress.admitted_hosts())
+        } else {
+            MpNetworkPolicy::Disabled
+        },
     };
-    let outcome = executor::execute_sandboxed_in_dir_with_ro_binds(
+    let mut env = child_env(root);
+    env.extend(egress.child_env());
+    let outcome = executor::execute_sandboxed_with_egress(
         &policy,
         request.language.program(),
         &[program_file.to_owned()],
         root,
-        &child_env(root),
+        &env,
         &ro_binds,
         timeout,
+        admission,
+        proxy.as_ref(),
     )
     .await
     .map_err(|error| format!("code_interpreter execution failed: {error}"))?;
+    let egress_counts = proxy.map(EgressProxy::finish);
 
     let mut staged: Vec<&str> = Vec::with_capacity(request.files_in.len() + 1);
     staged.push(program_file);
     staged.extend(request.files_in.iter().map(|file| file.name.as_str()));
     let files = collect_output_files(root, &staged, &pre_call_baseline);
     let office = office_verify::verify_outputs(&files).await;
+
+    // Attached only while the switch is on, so the result is byte-identical without it.
+    let sandbox = enforcement_report_requested().then(|| {
+        if egress_counts.is_some() {
+            proxied_enforcement_report(outcome.sandboxed, egress.tier)
+        } else {
+            enforcement_report(outcome.sandboxed, &policy.network())
+        }
+    });
 
     serde_json::to_string(&CodeResult {
         stdout: outcome.stdout,
@@ -728,6 +919,14 @@ async fn run_in_root(
         files,
         verification: office.reports,
         verification_unchecked: office.unchecked,
+        previews: office.previews,
+        execution: ExecutionInfo {
+            sandboxed: outcome.sandboxed,
+            limits: outcome.limits,
+            limit_hit: outcome.limit_hit,
+        },
+        sandbox,
+        egress: egress_counts,
     })
     .map_err(|error| format!("code_interpreter could not encode its result: {error}"))
 }
@@ -1017,10 +1216,237 @@ mod tests {
             ],
             verification: Vec::new(),
             verification_unchecked: 0,
+            previews: Vec::new(),
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
+            sandbox: None,
+            egress: None,
         };
         assert_eq!(
             serde_json::to_string(&result).expect("serializes"),
-            r#"{"stdout":"done\n","stderr":"","exit_code":0,"files":[{"name":"out.csv","mime":"text/csv","bytes":2,"content_b64":"b2s="},{"name":"big.xlsx","mime":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","bytes":9000000,"content_b64":"","truncated":true}]}"#
+            r#"{"stdout":"done\n","stderr":"","exit_code":0,"files":[{"name":"out.csv","mime":"text/csv","bytes":2,"content_b64":"b2s="},{"name":"big.xlsx","mime":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet","bytes":9000000,"content_b64":"","truncated":true}],"execution":{"sandboxed":true,"limits":"enforced"}}"#
+        );
+    }
+
+    /// The report is the last key and only present when attached, so a result
+    /// without it keeps the exact bytes the shape test above pins.
+    #[test]
+    fn the_enforcement_report_is_the_last_key_when_attached() {
+        let result = CodeResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            files: Vec::new(),
+            verification: Vec::new(),
+            verification_unchecked: 0,
+            previews: Vec::new(),
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
+            sandbox: Some(enforcement_report(true, &MpNetworkPolicy::Disabled)),
+            egress: None,
+        };
+        let json = serde_json::to_string(&result).expect("serializes");
+        assert!(
+            json.ends_with(
+                r#""execution":{"sandboxed":true,"limits":"enforced"},"sandbox":{"sandboxed":true,"network":"off","enforcement":"full"}}"#
+            ),
+            "json: {json}"
+        );
+    }
+
+    /// EP-9 E3: a tiered call's report names its tier as fully enforced, and its
+    /// host counts follow the report. Counts only: no host is named.
+    #[test]
+    fn a_proxied_call_reports_its_tier_and_its_host_counts() {
+        let result = CodeResult {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            files: Vec::new(),
+            verification: Vec::new(),
+            verification_unchecked: 0,
+            previews: Vec::new(),
+            execution: ExecutionInfo {
+                sandboxed: true,
+                limits: "enforced",
+                limit_hit: None,
+            },
+            sandbox: Some(proxied_enforcement_report(true, NetworkTier::Registries)),
+            egress: Some(EgressCounts {
+                allowed_hosts: 2,
+                denied_hosts: 1,
+            }),
+        };
+        let json = serde_json::to_string(&result).expect("serializes");
+        assert!(
+            json.ends_with(
+                r#""sandbox":{"sandboxed":true,"network":"registries","enforcement":"full"},"egress":{"allowed_hosts":2,"denied_hosts":1}}"#
+            ),
+            "json: {json}"
+        );
+        assert_eq!(
+            proxied_enforcement_report(false, NetworkTier::Registries).enforcement,
+            Enforcement::Unenforced
+        );
+    }
+
+    /// An untiered call never starts a proxy, never gets proxy variables, and so
+    /// runs exactly as before E3: same policy, same environment, same result keys.
+    #[test]
+    fn an_untiered_call_is_unchanged_by_the_egress_seam() {
+        let off = CallEgress::off();
+        assert!(!off.is_tiered());
+        let ws = Path::new("/tmp/verevon-code-x");
+        let mut env = child_env(ws);
+        env.extend(off.child_env());
+        assert_eq!(env, child_env(ws));
+    }
+
+    /// A tiered call whose proxy cannot start never runs: the program is not
+    /// spawned without its boundary. A host without Unix sockets cannot start one.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_tiered_call_without_a_proxy_does_not_run() {
+        let egress = CallEgress::resolve(
+            NetworkTier::Registries,
+            NetworkTier::Registries,
+            NetworkTier::All,
+            &[],
+        );
+        let error = run_with_egress(
+            r#"{"code":"print(1)"}"#,
+            "run-egress",
+            "step-0",
+            None,
+            None,
+            None,
+            None,
+            &egress,
+        )
+        .await
+        .expect_err("no proxy, no run");
+        assert!(error.contains("egress proxy"), "{error}");
+    }
+
+    /// The boundary for real (Linux with bubblewrap and the bridge installed, as
+    /// in the CI container and the image): a program at the registries tier
+    /// cannot reach a host off the list, through the proxy or around it, and the
+    /// refusal is counted. Skipped where the sandbox or the bridge is missing.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_python_child_cannot_reach_an_unlisted_host() {
+        if !crate::sandbox::is_supported() || !crate::egress_proxy::bridge_available() {
+            return;
+        }
+        let egress = CallEgress::resolve(
+            NetworkTier::Registries,
+            NetworkTier::Registries,
+            NetworkTier::All,
+            &[],
+        );
+        let code = r#"
+import socket, urllib.request
+try:
+    urllib.request.urlopen("https://example.org/", timeout=10)
+    print("proxied:reached")
+except Exception as error:
+    print("proxied:refused")
+try:
+    socket.create_connection(("93.184.215.14", 443), timeout=5)
+    print("direct:reached")
+except OSError:
+    print("direct:refused")
+"#;
+        let input = serde_json::json!({ "code": code }).to_string();
+        let output = run_with_egress(&input, "run-egress", "step-0", None, None, None, None, &egress)
+            .await
+            .expect("the call runs");
+        let result: serde_json::Value = serde_json::from_str(&output).expect("json");
+        let stdout = result["stdout"].as_str().unwrap_or_default();
+        assert!(stdout.contains("proxied:refused"), "{stdout}");
+        assert!(stdout.contains("direct:refused"), "{stdout}");
+        assert_eq!(result["egress"]["denied_hosts"], 1, "{output}");
+        assert_eq!(result["egress"]["allowed_hosts"], 0, "{output}");
+    }
+
+    /// Only the exact value `true` enables the report, so a typo or another
+    /// spelling leaves every result as it was.
+    #[test]
+    fn the_enforcement_switch_accepts_only_the_literal_true() {
+        assert!(enforcement_report_requested_in(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some(" true"),
+            Some("1"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            assert!(
+                !enforcement_report_requested_in(raw),
+                "{raw:?} must not enable the report"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_run_with_no_network_is_fully_enforced() {
+        assert_eq!(
+            enforcement_report(true, &MpNetworkPolicy::Disabled),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::Off,
+                enforcement: Enforcement::Full,
+            }
+        );
+    }
+
+    /// A run that bwrap did not wrap must never read as enforced, whatever its
+    /// policy says.
+    #[test]
+    fn an_unwrapped_run_is_never_reported_as_enforced() {
+        for network in [
+            MpNetworkPolicy::Disabled,
+            MpNetworkPolicy::AllowAll,
+            MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+        ] {
+            assert_eq!(
+                enforcement_report(false, &network).enforcement,
+                Enforcement::Unenforced
+            );
+        }
+    }
+
+    /// A network other than none is named by its tier and is only partly enforced
+    /// today: the allow-list is advisory, and unrestricted egress has no boundary
+    /// for the sandbox to confirm.
+    #[test]
+    fn a_network_other_than_none_is_partial_and_names_its_tier() {
+        assert_eq!(
+            enforcement_report(
+                true,
+                &MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()])
+            ),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::Allowlist,
+                enforcement: Enforcement::Partial,
+            }
+        );
+        assert_eq!(
+            enforcement_report(true, &MpNetworkPolicy::AllowAll),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::All,
+                enforcement: Enforcement::Partial,
+            }
         );
     }
 
@@ -1958,5 +2384,59 @@ mod tests {
             entry.is_dir() && !entry.file_type().is_symlink(),
             "staging must leave a real directory in the root"
         );
+    }
+
+    // -- WS06-S8 / WS06-S9 postponed tests ---------------------------------
+
+    #[test]
+    fn the_execution_object_carries_limit_hit_only_when_a_limit_was_hit() {
+        let hit = ExecutionInfo {
+            sandboxed: true,
+            limits: "enforced",
+            limit_hit: Some(executor::LimitHit::Cpu { limit_secs: 4 }),
+        };
+        assert_eq!(
+            serde_json::to_string(&hit).unwrap(),
+            r#"{"sandboxed":true,"limits":"enforced","limit_hit":{"kind":"cpu","limit_secs":4}}"#
+        );
+        let none = ExecutionInfo {
+            sandboxed: false,
+            limits: "unlimited",
+            limit_hit: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&none).unwrap(),
+            r#"{"sandboxed":false,"limits":"unlimited"}"#
+        );
+    }
+
+    /// A Space-scoped call (`workspace_root` is `Some`) with no lease never
+    /// spawns. Where bwrap is available the refusal is the lease rule; on a host
+    /// without it the isolation check refuses first, which is also a refusal
+    /// before any spawn.
+    #[tokio::test]
+    async fn a_space_scoped_call_without_a_lease_is_refused() {
+        let root = std::env::temp_dir().join(format!("ci-lease-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("workspace root");
+        let result = run_with_skills(
+            r#"{"language":"python","code":"print(1)"}"#,
+            "leaserun",
+            "leasestep",
+            Some(&root),
+            None,
+            None,
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&root);
+        let error = result.expect_err("no lease, no spawn");
+        if crate::sandbox::is_supported() {
+            assert!(error.contains("requires a sandbox lease"), "error: {error}");
+        } else {
+            assert!(
+                error.contains("isolation is unavailable") || error.contains("sandbox"),
+                "error: {error}"
+            );
+        }
     }
 }

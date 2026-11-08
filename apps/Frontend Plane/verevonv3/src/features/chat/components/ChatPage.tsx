@@ -18,7 +18,9 @@ import {
   CalendarClock,
   EyeOff,
   Square,
+  X,
 } from '@/shared/icons'
+import { spaceDisplayName } from '@/features/spaces/lib/space-name'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import {
   DashboardComposer,
@@ -33,11 +35,15 @@ import {
   DateDivider,
   EmptyChatState,
   MessageBlock,
+  lifecycleNoticeSentence,
   rungLabel,
 } from './ChatMessages'
 import {
   ArtifactsPanel,
 } from './ChatArtifactPanel'
+import type { ArtifactSelectionRequest } from './ArtifactSelection'
+import { ThreadWorkspacePanel } from './ThreadWorkspacePanel'
+import { EffectivePolicyPanel } from './EffectivePolicyPanel'
 import {
   ChatHeader,
   ChatTabs,
@@ -50,11 +56,13 @@ import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
 import { ComposerTrays } from './ComposerTrays'
+import { researchPassFacts } from './ArtifactProvenance'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
 import { ScheduleDialog } from './ScheduleDialog'
 import { ScheduledRunsPanel } from './ScheduledRunsPanel'
+import { PersonalSetupCard } from './PersonalSetupCard'
 import {
   partitionEvidenceSources,
   spokenSourceTally,
@@ -72,7 +80,25 @@ import { speechPlayer } from '@/features/voice/speech-playback'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
 import { selectChatThread } from '../lib/chat-thread-history'
+import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjectContext, rememberAudienceConfirmed } from '../lib/chat-projects'
+import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
+import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
+import { BrowserDockControls } from '@/features/browser/dock/BrowserDockControls'
+import { InteractiveBrowserPane } from '@/features/browser/dock/InteractiveBrowserPane'
+import { OpenBrowserButton } from '@/features/browser/dock/OpenBrowserButton'
+import { useDockBrowserSession } from '@/features/browser/dock/dock-session'
+import { createChatThreadByTab, planChatForTabSwitch } from '@/features/browser/dock/chat-per-tab'
+import {
+  browserDockPageClass,
+  browserDockSizeCss,
+  isChatBrowserDockEnabled,
+  nextBrowserDockPosition,
+  type BrowserDockVisiblePosition,
+} from '@/features/browser/dock/browser-dock-state'
+import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
+import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
+import { DensityMenu } from './DensityMenu'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -88,12 +114,15 @@ export default function ChatPage() {
     liveRunId,
     runPanelCollapsed,
     toggleRunPanel,
+    browserDock,
+    setBrowserDockPosition,
     pinnedMessages,
     togglePin,
     title,
     handleScroll,
     scrollToBottom,
     handleApprovalDecision,
+    handleEditedApprovalDecision,
     refreshApprovalsForRun,
     handleComposerSubmit,
     handleStop,
@@ -115,6 +144,8 @@ export default function ChatPage() {
     setActiveTab,
     copiedTurnId,
     uiEvents,
+    ledgerInspect,
+    inspectLedgerCall,
     traceReplayTruncated,
     launchMotion,
     showScrollDown,
@@ -133,6 +164,8 @@ export default function ChatPage() {
     setSourceScope,
     retrievalScope,
     spaceScoped,
+    activeProjectRef,
+    setProjectSpaceRef,
     setRetrievalScope,
     setBrowseWeb,
     temporaryChat,
@@ -146,6 +179,28 @@ export default function ChatPage() {
     hasEarlierTurns,
     loadingEarlierTurns,
     loadEarlier,
+    connectTurn,
+    pendingConnectIntent,
+    resumeConnectIntent,
+    dismissConnectIntent,
+    acceptConnectorSuggestion,
+    pendingQuestion,
+    questionPending,
+    questionError,
+    answerPendingQuestion,
+    skipPendingQuestion,
+    pendingResearchPlan,
+    startResearchPlan,
+    cancelResearchPlan,
+    threadGoal,
+    goalPending,
+    goalError,
+    goalEntryAvailable,
+    saveGoal,
+    setGoalPaused,
+    clearGoal,
+    continueGoal,
+    goalAutoContinue,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -153,10 +208,102 @@ export default function ChatPage() {
   // files locally after it opens.
   const [selectedAttachmentId, setSelectedAttachmentId] = createSignal<string | null>(null)
   const [workPeriod, setWorkPeriod] = createSignal<ChatWorkPeriod>({ kind: 'none' })
-  const submitWithWorkPeriod = (payload: DashboardComposerSubmitPayload) => handleComposerSubmit({
-    ...payload,
-    text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
+
+  // WS18-S4. The project this page writes to, from the controller. With the switch
+  // off it is always null and none of the project state below is ever read.
+  const projectRef = () => (chatProjectsEnabled() ? activeProjectRef() : null)
+  const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
+  // WS25-S11. The org's effective mode cap; the composer lists only the modes at or below it.
+  const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
+  // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
+  // switch off the rules change nothing, so the transcript renders as it did.
+  const transcriptDensity = createTranscriptDensity()
+  const projectName = () => {
+    if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
+    const context = projectContext()
+    return context ? spaceDisplayName(context.space, i18n.tr) : i18n.tr('ikke tilgjengelig', 'unavailable')
+  }
+  const sandboxNoticeVisible = () => Boolean(projectRef()) && sandboxToolsRefusedNotice({
+    kind: projectContext()?.space.kind,
+    doMode: planMode(),
   })
+  const [projectNotice, setProjectNotice] = createSignal('')
+  // The first-send ask for a shared room. The send waits on the answer, and a cancel
+  // is a refused send: the composer clears its draft only after a send it saw succeed.
+  const [audienceAsk, setAudienceAsk] = createSignal<{
+    name: string
+    members: number | null
+    settle: (confirmed: boolean) => void
+  } | null>(null)
+  const projectRefusalMessage = (refusal: ChatProjectRefusal) => {
+    if (refusal === 'temporary') {
+      return i18n.tr('Midlertidig samtale kan ikke brukes i et prosjekt.', 'Temporary chat cannot be used in a project.')
+    }
+    if (refusal === 'role_not_allowed') {
+      return i18n.tr('Du kan lese dette rommet, men ikke starte samtaler i det.', 'You can read this room but cannot start conversations in it.')
+    }
+    return i18n.tr('Prosjektet er ikke tilgjengelig for nye samtaler.', 'This project is not available for new conversations.')
+  }
+  // Re-reads the Space and the caller's role before every project send: the same
+  // question Control answers on the turn itself, asked here so a refusal reads as a
+  // refusal rather than a failed stream. Resolves true when the send may go ahead.
+  const confirmProjectAudience = async (spaceRef: string, temporary: boolean): Promise<boolean> => {
+    const context = await readProjectContext(spaceRef)
+    const refusal = chatProjectRefusal({ temporary, role: context?.role, space: context?.space })
+    if (!context || refusal) throw new Error(projectRefusalMessage(refusal ?? 'not_eligible'))
+    if (!audienceConfirmRequired({ kind: context.space.kind, confirmed: audienceConfirmed(spaceRef) })) return true
+    const members = await readProjectAudience(spaceRef)
+    return new Promise<boolean>((resolve) => {
+      setAudienceAsk({
+        name: spaceDisplayName(context.space, i18n.tr),
+        members,
+        settle: (confirmed) => {
+          setAudienceAsk(null)
+          if (confirmed) rememberAudienceConfirmed(spaceRef)
+          resolve(confirmed)
+        },
+      })
+    })
+  }
+  const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload) => {
+    const submission = {
+      ...payload,
+      text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
+    }
+    const spaceRef = projectRef()
+    if (!spaceRef) return handleComposerSubmit(submission)
+    setProjectNotice('')
+    const confirmed = await confirmProjectAudience(spaceRef, temporaryChat())
+    if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
+    return handleComposerSubmit(submission)
+  }
+  // The Output panel's "Ask for a change" (EP-3 S6) sends one composer turn that names the selected range. The panel has hashed the quote, so the selected text itself is not sent.
+  const askAboutArtifactSelection = (request: ArtifactSelectionRequest) => submitWithWorkPeriod({
+    actions: [],
+    attachments: [],
+    text: request.instruction,
+    tools: [],
+    contextRefs: [{
+      kind: 'artifact_selection',
+      id: request.artifactId,
+      label: i18n.tr(`Utvalg i ${request.title}`, `Selection in ${request.title}`),
+      selection: {
+        artifactId: request.artifactId,
+        version: request.version,
+        start: request.start,
+        end: request.end,
+        quoteSha256: request.quoteSha256,
+      },
+    }],
+  })
+  // Temporary chat writes no thread, so it cannot be turned on for a project.
+  const setTemporaryFromComposer = (value: boolean) => {
+    if (value && projectRef()) {
+      setProjectNotice(projectRefusalMessage('temporary'))
+      return
+    }
+    setTemporaryChat(value)
+  }
 
   // "Planlegg dette" (chat-wave2 "schedule" spec §2.1) — the message-action
   // entry point. `resolveScheduleSeedForTurn` reuses `rerunAsNewTurn`'s own
@@ -192,7 +339,92 @@ export default function ChatPage() {
     return undefined
   }
 
-  useChatShortcuts({ startNewChat })
+  // Browser dock (WS9.G): where the live panel sits beside the transcript. Off unless the build turns
+  // VITE_CHAT_BROWSER_DOCK on, and nothing docks without a live run to show.
+  const dockLayout = createMemo<BrowserDockVisiblePosition | null>(() => {
+    const position = browserDock().position
+    if (!isChatBrowserDockEnabled() || !liveRunId() || position === 'hidden') return null
+    return position
+  })
+
+  // The browser body of the dock (WS9.H): the run watch, or the interactive browser beside the chat. It
+  // is kept for this page only; the layout itself stays in the dock record. Showing the browser needs no
+  // live run, so this body is what opens the dock on a chat without one.
+  const [dockBody, setDockBody] = createSignal<'run' | 'browser'>('run')
+  const browserBodyOpen = () => (
+    isChatBrowserDockEnabled() && dockBody() === 'browser' && browserDock().position !== 'hidden'
+  )
+  // The browser body shows only on the chat tab. A canvas tab owns the rail, as it does for the run watch.
+  const browserBodyShown = () => browserBodyOpen() && activeTab() === 'chat'
+  // Hiding the dock returns the rail to the run watch, so restoring it shows the run again.
+  createEffect(
+    () => browserDock().position === 'hidden',
+    (hidden) => {
+      if (hidden) setDockBody('run')
+    },
+  )
+  const openBrowserBody = () => {
+    if (browserDock().position === 'hidden') toggleRunPanel()
+    setDockBody('browser')
+  }
+  const closeBrowserBody = () => {
+    setDockBody('run')
+    if (!liveRunId()) setBrowserDockPosition('hidden')
+  }
+  const toggleBrowserBody = () => {
+    if (browserBodyOpen()) closeBrowserBody()
+    else openBrowserBody()
+  }
+  // The layout class of the browser body. The run watch's own class still comes from dockLayout.
+  const browserBodyDock = () => (browserBodyOpen() ? browserDockPageClass(browserDock().position) : null) ?? ''
+
+  // One interactive browser session per chat page (WS9.H). Its zero retention follows the thread on
+  // screen and the workspace's retention verdict.
+  const dockSession = useDockBrowserSession({
+    orgId: () => session.activeOrg?.id,
+    threadTemporary: () => isActiveThreadTemporary(),
+    tr: i18n.tr,
+  })
+
+  // Chat per browser tab (WS9.H). The rule comes from the dock record: `keep` unless the record says `new`.
+  // A chat moves only when the browser's active tab changes, and never without a browser session.
+  const chatThreadsByTab = createChatThreadByTab()
+  createEffect(
+    () => dockSession.controller?.preview()?.browserSession?.session.tabs?.find((tab) => tab.active)?.tabId ?? null,
+    (tabKey, previousKey) => {
+      // A temporary chat is never remembered for a tab: the banner promises it is kept in no memory.
+      if (previousKey && state.threadId && !isActiveThreadTemporary()) chatThreadsByTab.remember(previousKey, state.threadId)
+      const plan = planChatForTabSwitch({
+        previousTab: previousKey ?? null,
+        nextTab: tabKey,
+        rule: browserDock().chatPerTab,
+        threadFor: chatThreadsByTab.threadFor,
+      })
+      if (plan.kind === 'new-thread') startNewChat()
+      else if (plan.kind === 'select-thread') selectChatThread(plan.threadId)
+    },
+  )
+
+  // The composer, found the way the focus-composer shortcut finds it.
+  const focusComposer = () => {
+    document.querySelector<HTMLTextAreaElement>('.verevon-dashboard-textarea')?.focus()
+  }
+  // The omnibox's "Ask Verevon" row: the typed text becomes the message and the composer takes focus.
+  const askVerevonFromBrowser = (text: string) => {
+    setInput(text)
+    focusComposer()
+  }
+
+  useChatShortcuts({
+    startNewChat,
+    // The hook acts on these only while the dock is on; here they also need a live run to show.
+    toggleBrowserDock: () => {
+      if (liveRunId()) toggleRunPanel()
+    },
+    cycleBrowserDock: () => {
+      if (liveRunId()) setBrowserDockPosition(nextBrowserDockPosition(browserDock().position))
+    },
+  })
 
   // Knowledge import is an explicit, durable action — separate from sending a
   // chat turn. The composer keeps object URLs alive for the current turn; we
@@ -238,48 +470,96 @@ export default function ChatPage() {
   })
 
   const composer = () => (
-    <DashboardComposer
-      appearance="chat"
-      browseWeb={browseWeb()}
-      sourceScope={sourceScope()}
-      onSourceScopeChange={setSourceScope}
-      sourceScopeLocked={state.turns.length > 0}
-      retrievalScope={retrievalScope()}
-      spaceScoped={spaceScoped()}
-      onRetrievalScopeChange={setRetrievalScope}
-      workPeriod={workPeriod()}
-      onWorkPeriodChange={setWorkPeriod}
-      imageMode={imageMode()}
-      message={input()}
-      onBrowseWebChange={setBrowseWeb}
-      onImageModeChange={setImageMode}
-      onMessageChange={setInput}
-      onPlanModeChange={setPlanMode}
-      onStop={handleStop}
-      onSubmit={submitWithWorkPeriod}
-      onTemporaryChatChange={setTemporaryChat}
-      planMode={planMode()}
-      // WS14 S2a: the third pill, shown only while an approved plan is waiting to
-      // run on this thread. The controller owns whether it is selected.
-      approvedPlan={
-        approvedPlanView()
-          ? { rungLabel: rungLabel(approvedPlanView()!.rung, i18n.tr), selected: approvedPlanView()!.selected }
-          : undefined
-      }
-      onApprovedPlanSelect={selectExecute}
-      showTurnReceipt={false}
-      submitting={isStreaming()}
-      allowMidRunSubmit
-      // ^ chat opts in: a submit during the stream is a MID-RUN message, which
-      // sendContent persists to the thread and queues into the live run
-      // (deliverMidRun). Without it the composer swallowed Enter for the whole
-      // stream and the queued-input arc had no reachable client.
-      temporaryChat={temporaryChat()}
-      temporaryChatLocked={temporaryChatLocked()}
-      disabled={isForeignOriginThread()}
-      onKnowledgeImport={importAttachmentsToKnowledge}
-      voiceReply={voiceReply()}
-    />
+    <>
+      <Show when={projectRef() || projectNotice() || audienceAsk()}>
+        <div class="verevon-chat-project-strip">
+          <Show when={projectRef()}>
+            <p class="verevon-chat-project-chip" role="status">
+              <span>{i18n.tr('Prosjekt', 'Project')}: {projectName()}</span>
+              <Show when={!state.threadId}>
+                <button
+                  type="button"
+                  class="verevon-chat-project-chip__clear"
+                  aria-label={i18n.tr('Fjern prosjektvalget', 'Remove the project choice')}
+                  onClick={() => setProjectSpaceRef(null)}
+                >
+                  <X class="size-3" aria-hidden="true" />
+                </button>
+              </Show>
+            </p>
+          </Show>
+          <Show when={sandboxNoticeVisible()}>
+            <p class="verevon-chat-project-notice" role="note">
+              {i18n.tr(
+                'Sandkasse-verktøy er av i delte prosjektrom, så Utfør-kjøringer her kan ikke bruke dem.',
+                'Sandbox tools are off in shared project rooms, so Do runs here cannot use them.',
+              )}
+            </p>
+          </Show>
+          <Show when={projectNotice()}>
+            <p class="verevon-chat-project-notice" role="status">{projectNotice()}</p>
+          </Show>
+          <Show when={audienceAsk()}>
+            {(ask) => (
+              <div class="verevon-chat-project-ask" role="alertdialog" aria-live="assertive">
+                <p>
+                  {ask().members === null
+                    ? i18n.tr(`Alle som kan lese ${ask().name}, ser denne meldingen.`, `Everyone who can read ${ask().name} will see this message.`)
+                    : i18n.tr(`${ask().members} medlemmer i ${ask().name} ser denne meldingen.`, `${ask().members} members of ${ask().name} will see this message.`)}
+                </p>
+                <div>
+                  <button type="button" onClick={() => ask().settle(true)}>{i18n.tr('Send', 'Send')}</button>
+                  <button type="button" onClick={() => ask().settle(false)}>{i18n.tr('Avbryt', 'Cancel')}</button>
+                </div>
+              </div>
+            )}
+          </Show>
+        </div>
+      </Show>
+      <DashboardComposer
+        appearance="chat"
+        browseWeb={browseWeb()}
+        sourceScope={sourceScope()}
+        onSourceScopeChange={setSourceScope}
+        sourceScopeLocked={state.turns.length > 0}
+        retrievalScope={retrievalScope()}
+        spaceScoped={spaceScoped()}
+        onRetrievalScopeChange={setRetrievalScope}
+        workPeriod={workPeriod()}
+        onWorkPeriodChange={setWorkPeriod}
+        imageMode={imageMode()}
+        message={input()}
+        onBrowseWebChange={setBrowseWeb}
+        onImageModeChange={setImageMode}
+        onMessageChange={setInput}
+        onPlanModeChange={setPlanMode}
+        onStop={handleStop}
+        onSubmit={submitWithWorkPeriod}
+        onTemporaryChatChange={setTemporaryFromComposer}
+        planMode={planMode()}
+        agentModeCap={agentModeCap()}
+        // WS14 S2a: the third pill, shown only while an approved plan is waiting to
+        // run on this thread. The controller owns whether it is selected.
+        approvedPlan={
+          approvedPlanView()
+            ? { rungLabel: rungLabel(approvedPlanView()!.rung, i18n.tr), selected: approvedPlanView()!.selected }
+            : undefined
+        }
+        onApprovedPlanSelect={selectExecute}
+        showTurnReceipt={false}
+        submitting={isStreaming()}
+        allowMidRunSubmit
+        // ^ chat opts in: a submit during the stream is a MID-RUN message, which
+        // sendContent persists to the thread and queues into the live run
+        // (deliverMidRun). Without it the composer swallowed Enter for the whole
+        // stream and the queued-input arc had no reachable client.
+        temporaryChat={temporaryChat()}
+        temporaryChatLocked={temporaryChatLocked()}
+        disabled={isForeignOriginThread()}
+        onKnowledgeImport={importAttachmentsToKnowledge}
+        voiceReply={voiceReply()}
+      />
+    </>
   )
   // ONE composer for the page, created once and moved between the empty
   // state and the thread dock below. With one per layout, the first message
@@ -311,12 +591,14 @@ export default function ChatPage() {
         pending: planApprovalPending() === turnId,
         error: planApprovalError()[turnId],
       }),
+      goal: threadGoal(),
     }),
   )
 
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
+  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
@@ -328,6 +610,7 @@ export default function ChatPage() {
       error: planApprovalError()[turn.id],
     },
     docked: dockedNodesFor(dockedTrays(), turn.id),
+    settledFold: settledFolds()?.get(turn.id),
     version: index === turns.length - 1 ? finalExchangeVersion() : null,
     editLocked: turn.role === 'user' && isEffectfulChatTurn(turns[index + 1]?.effectClass),
   })))
@@ -487,6 +770,14 @@ export default function ChatPage() {
   // copies of the expression is how those drift apart.
   const sourceBadgeTotal = createMemo(() => evidenceSources().length + (latestGrounding() ? 1 : 0))
   const sourceBadgeRead = createMemo(() => readSourceCount() + (latestGrounding() ? 1 : 0))
+  /** The `[n]` the newest research report read in its second pass (EP-2-S6), for the Sources tab's grouping. */
+  const secondPassNumbers = createMemo(() => {
+    for (const item of [...artifactItems()].reverse()) {
+      const facts = researchPassFacts((item.artifact as { provenance?: unknown }).provenance)
+      if (facts) return facts.secondPassNumbers
+    }
+    return [] as number[]
+  })
   const toolCallCount = createMemo(
     () => state.turns.reduce((total, turn) => total + (turn.toolCalls?.length ?? 0), 0),
   )
@@ -631,8 +922,8 @@ export default function ChatPage() {
     const pending = [...state.turns]
       .reverse()
       .find((turn) => turn.role === 'assistant' && turn.status === 'waiting')
-    const activity = deriveStreamActivity(pending?.toolCalls)
-    return activity ? ` ${streamActivityLabel(activity)}.` : ''
+    const activity = deriveStreamActivity(pending?.toolCalls, pending?.lifecycle)
+    return activity ? ` ${streamActivityLabel(activity, i18n)}.` : ''
   }
   createEffect(
     () => {
@@ -674,6 +965,17 @@ export default function ChatPage() {
       // Solid 2 runs a cleanup RETURNED from the effect fn; `onCleanup` inside
       // one is silently dropped.
       return () => clearInterval(heartbeat)
+    },
+  )
+  /**
+   * One polite sentence per lifecycle notice on the turn that is waiting: a retry, a compaction, a context change or
+   * a reduced answer is said once, as it arrives. The heartbeat above keeps the same live region for the rest of the
+   * wait, so it does not repeat a notice. A plain stream has no notice and says nothing here.
+   */
+  createEffect(
+    () => state.turns.findLast((turn) => turn.role === 'assistant' && turn.status === 'waiting')?.lifecycle?.at(-1),
+    (notice) => {
+      if (notice) setStreamAnnouncement(lifecycleNoticeSentence(notice, i18n))
     },
   )
 
@@ -772,7 +1074,7 @@ export default function ChatPage() {
             )}
           </p>
         </Show>
-        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} />
+        <SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} secondPassNumbers={secondPassNumbers()} />
       </Match>
       <Match when={activeTab() === 'artifacts'}>
         <Show
@@ -783,7 +1085,7 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel items={artifactItems()} />
+            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} onAskAboutSelection={askAboutArtifactSelection} />
           </Show>
         </Show>
       </Match>
@@ -794,9 +1096,11 @@ export default function ChatPage() {
           steps={state.taskSteps}
           threadId={state.threadId}
           toolCalls={activeRunTurn()?.toolCalls}
+          meter={activeRunTurn()?.meter}
           screen={latestScreen()}
           events={uiEvents()}
           onStopTask={handleStop}
+          onInspectCall={inspectLedgerCall}
         />
         <ContextWindowPanel
           context={threadContext()}
@@ -806,7 +1110,7 @@ export default function ChatPage() {
         />
       </Match>
       <Match when={activeTab() === 'trace'}>
-        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} />
+        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} />
       </Match>
     </Switch>
   )
@@ -833,7 +1137,20 @@ export default function ChatPage() {
   // the same reason as `liveRailWorkContent`: the rail reads its prop slot, and
   // each read of an inline JSX prop would build a fresh tree with its own
   // event-stream subscription.
-  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} />)
+  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />)
+  // The layout picker for the live panel's header (WS9.G). A memo, as the panel's other slots are, so
+  // the panel reads one element however often it asks. The position is read inside the component.
+  const liveRailDockControls = createMemo(() => (
+    isChatBrowserDockEnabled() && liveRunId()
+      ? <BrowserDockControls position={browserDock().position} onPositionChange={setBrowserDockPosition} />
+      : undefined
+  ))
+  // The browser header control (WS9.H), built once. Absent while the dock is off in this build.
+  const browserHeaderButton = createMemo(() => (
+    isChatBrowserDockEnabled()
+      ? <OpenBrowserButton open={browserBodyOpen} onToggle={toggleBrowserBody} />
+      : undefined
+  ))
 
   /**
    * Arrow keys move between messages (audit item 26 / plan item 14).
@@ -946,6 +1263,7 @@ export default function ChatPage() {
         onApprovalDecision={(approvalId, decision) =>
           void handleApprovalDecision(row().turn.id, approvalId, decision)
         }
+        onApprovalEditedDecision={(approvalId, edit) => handleEditedApprovalDecision(row().turn.id, approvalId, edit)}
         onApprovePlan={(rung, justification, steps) =>
           void approveTurnPlan(row().turn.id, rung, justification, steps)
         }
@@ -955,6 +1273,7 @@ export default function ChatPage() {
         onTogglePin={() => togglePin(row().turn.id)}
         planApproval={row().planApproval}
         docked={row().docked}
+        settledFold={row().settledFold}
         onSelectFollowUp={setInput}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {
@@ -970,6 +1289,15 @@ export default function ChatPage() {
         editLocked={row().editLocked}
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
+        spaceScoped={spaceScoped()}
+        connectorSuggestion={{
+          orgId: session.activeOrg?.id,
+          onUse: (suggestion, connectionId) => void acceptConnectorSuggestion(suggestion, connectionId),
+          connectTurn,
+          pendingConnectIntent,
+          resumeConnectIntent,
+          dismissConnectIntent,
+        }}
       />
     </>
   )
@@ -982,8 +1310,13 @@ export default function ChatPage() {
           'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
           'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
           'verevon-chat-page--canvas': activeTab() !== 'chat',
+          'verevon-chat-page--dock-right': dockLayout() === 'right',
+          'verevon-chat-page--dock-bottom': dockLayout() === 'bottom',
+          'verevon-chat-page--dock-maximised': dockLayout() === 'maximised',
         },
+        browserBodyDock(),
       ]}
+      style={dockLayout() ? { '--browser-dock-size': browserDockSizeCss(browserDock()) } : undefined}
     >
       {/* Streaming is silent to a screen reader: tokens append into the
           transcript, which is not a live region, so nothing is announced and a
@@ -997,6 +1330,7 @@ export default function ChatPage() {
 
       <section
         class="verevon-chat-section"
+        data-transcript-process={transcriptDensity.rules().showProcess ? undefined : 'hidden'}
         aria-label={i18n.tr('Verevon chat-arbeidsflate', 'Verevon chat workspace')}
       >
         <Show when={hasMessages()}>
@@ -1015,13 +1349,22 @@ export default function ChatPage() {
             title={title()}
             traceAvailable={Boolean(liveRunId())}
             onChange={setActiveTab}
+            browserSlot={browserHeaderButton()}
             onNewChat={startNewChat}
             onRegenerate={regenerateLatest}
           />
+          <Show when={transcriptDensityEnabled}>
+            <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
+          </Show>
+        </Show>
+        <Show when={hasMessages() && state.threadId && !isActiveThreadTemporary()}>
+          <ThreadWorkspacePanel threadId={state.threadId ?? ''} />
+          <EffectivePolicyPanel scope={{ kind: 'thread', threadId: state.threadId ?? '' }} />
         </Show>
 
         <Switch>
           <Match when={!hasMessages()}>
+            <PersonalSetupCard threadId={state.threadId} />
             <EmptyChatState
               onSelectPrompt={setInput}
               onResumeThread={(threadId) => selectChatThread(threadId)}
@@ -1184,10 +1527,28 @@ export default function ChatPage() {
                 onApprovalDecision={(turnId, approvalId, decision) =>
                   void handleApprovalDecision(turnId, approvalId, decision)
                 }
+                onApprovalEditedDecision={(turnId, approvalId, edit) => handleEditedApprovalDecision(turnId, approvalId, edit)}
                 onApprovePlan={(turnId, rung, justification, steps) =>
                   void approveTurnPlan(turnId, rung, justification, steps)
                 }
                 onRejectPlan={(turnId, reason) => void rejectTurnPlan(turnId, reason)}
+                question={pendingQuestion() ?? undefined}
+                questionPending={questionPending()}
+                questionError={questionError()}
+                onAnswerQuestion={(answer) => void answerPendingQuestion(answer)}
+                onSkipQuestion={() => void skipPendingQuestion()}
+                researchPlan={pendingResearchPlan()}
+                onStartResearchPlan={(edit) => void startResearchPlan(edit)}
+                onCancelResearchPlan={cancelResearchPlan}
+                goalEntry={goalEntryAvailable()}
+                goalPending={goalPending()}
+                goalError={goalError()}
+                goalBusy={isStreaming()}
+                onSaveGoal={saveGoal}
+                onContinueGoal={() => void continueGoal()}
+                goalAutoContinue={goalAutoContinue}
+                onPauseGoal={(paused) => void setGoalPaused(paused)}
+                onClearGoal={() => void clearGoal()}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">
@@ -1221,17 +1582,36 @@ export default function ChatPage() {
       */}
       <ChatLiveRunPanel
         collapsed={workCanvasActive() ? false : runPanelCollapsed()}
-        hidden={activeTab() !== 'chat' && !workCanvasActive()}
+        hidden={(activeTab() !== 'chat' && !workCanvasActive()) || browserBodyShown()}
         onToggleCollapsed={toggleRunPanel}
         orgId={session.activeOrg?.id}
         runId={liveRunId()}
+        meter={activeRunTurn()?.meter}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
         navigation={liveRailNavigation()}
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}
         wideResearch={liveRailWideResearch()}
+        dockControls={liveRailDockControls()}
       />
+      {/* The interactive browser body (WS9.H) takes the rail while the browser is open beside the chat. */}
+      <Show when={browserBodyOpen() ? dockSession.controller : null}>
+        {(controller) => (
+          <InteractiveBrowserPane
+            controller={controller()}
+            orgId={() => session.activeOrg?.id}
+            zdr={dockSession.zdr}
+            dockPosition={browserDock().position}
+            onDockPositionChange={setBrowserDockPosition}
+            sizeCss={browserDockSizeCss(browserDock())}
+            hidden={activeTab() !== 'chat'}
+            onAskVerevon={askVerevonFromBrowser}
+            onAskAboutPage={focusComposer}
+            onClose={closeBrowserBody}
+          />
+        )}
+      </Show>
       <Show when={scheduleDialogOpen()}>
         <Portal>
           <ScheduleDialog

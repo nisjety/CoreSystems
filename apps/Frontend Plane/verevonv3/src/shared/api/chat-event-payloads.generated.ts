@@ -8,15 +8,19 @@ export type ChatEventPayloads = {
   /** Rust variants: Artifact. */
   artifact: {
     content: string
+    editor?: string
     id: string
     kind: string
+    provenance?: Record<string, unknown>
     title: string
     version: number
   }
   /** Rust variants: Attachment. */
   attachment: {
+    check?: Record<string, unknown>
     id: string
     name: string
+    preview?: Record<string, unknown>
     size: number
     type: string
     url: string
@@ -26,8 +30,10 @@ export type ChatEventPayloads = {
     claim_id?: string
     end?: number
     id: string
+    locator?: Record<string, unknown>
     number?: number
     origin: string
+    quote?: string
     snippet: string
     source_group_id: string
     source_group_label?: string
@@ -43,6 +49,13 @@ export type ChatEventPayloads = {
     pinned_kept?: number
     request_id: string
     scope: string
+  }
+  /** Rust variants: ConnectorSuggestion. */
+  connector_suggestion: {
+    provider: string
+    reason: string
+    request_id: string
+    suggestion_id: string
   }
   /** Rust variants: ContextChange. */
   context_change: {
@@ -70,6 +83,20 @@ export type ChatEventPayloads = {
   follow_ups: {
     request_id: string
     suggestions: unknown[]
+  }
+  /** Rust variants: GoalProgress. */
+  goal_progress: {
+    cost_budget_usd_micros: number | null
+    cost_used_usd_micros: number
+    goal_id: string
+    max_turns: number
+    request_id: string
+    status: string
+    status_reason: string
+    token_budget: number | null
+    tokens_used: number
+    turn_no: number
+    turns_used: number
   }
   /** Rust variants: Grounding. */
   grounding: {
@@ -110,6 +137,13 @@ export type ChatEventPayloads = {
     delta: string
     request_id: string
   }
+  /** Rust variants: ResearchPlan. */
+  research_plan: {
+    caps: Record<string, unknown>
+    questions: unknown[]
+    request_id: string
+    sub_queries: unknown[]
+  }
   /** Rust variants: ResultReceipt. */
   result_receipt: {
     receipt: Record<string, unknown>
@@ -131,9 +165,31 @@ export type ChatEventPayloads = {
     tool: string
     wait_ms: number
   }
+  /** Rust variants: RunParked. */
+  run_parked: {
+    reason: string
+    request_id: string
+    resume_after: string | null
+    run_id: string
+    status: string
+  }
+  /** Rust variants: SandboxState. */
+  sandbox_state: {
+    cause?: string
+    request_id: string
+    scope: string
+    state: string
+  }
+  /** Rust variants: SearchProvenance. */
+  search_provenance: {
+    providers: unknown[]
+    request_id: string
+    route: string
+  }
   /** Rust variants: SourceScopeApplied. */
   source_scope_applied: {
     excluded_tools: unknown[]
+    knowledge?: Record<string, unknown>
     scope: string
   }
   /** Rust variants: StepUpdate. */
@@ -212,8 +268,19 @@ export type ChatEventPayloads = {
     input_tokens: number
     output_tokens: number
     phase: string
+    routing?: string
     unpriced_calls?: number
     warning?: string
+  }
+  /** Rust variants: UserQuestion. */
+  user_question: {
+    delivery: string
+    expires_at: string | null
+    items: unknown[]
+    origin?: string
+    origin_label?: string
+    question_id: string
+    request_id: string
   }
   /** Rust variants: Verification. */
   verification: {

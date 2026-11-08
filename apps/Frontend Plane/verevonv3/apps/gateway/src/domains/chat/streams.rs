@@ -96,9 +96,9 @@ async fn stream_chat(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message).into_response();
     }
-    // Must run before `inject_personal_thread_context`, which is the call
-    // that removes the Space reference fields this one still needs to read.
-    if let Err((status, body)) = crate::domains::spaces::inject_mentioned_space_agent_persona(
+    // EP-6 S8: a builder preview becomes a temporary read-only turn with the draft persona. Must run
+    // before the mention and thread injectors; a no-op unless AGENT_DEFINITION_VERSIONS is `true`.
+    if let Err((status, body)) = crate::domains::agent_actions::inject_agent_draft_preview(
         &state,
         &user,
         &org_id,
@@ -108,6 +108,21 @@ async fn stream_chat(
     {
         return (status, body).into_response();
     }
+    // Must run before `inject_personal_thread_context`, which is the call
+    // that removes the Space reference fields this one still needs to read.
+    // WS08-S4: also yields the wake the body asked for (`wake`), verified against the binding
+    // policy; `None` for every legacy turn.
+    let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(
+        &state,
+        &user,
+        &org_id,
+        &mut outbound_body,
+    )
+    .await
+    {
+        Ok(intent) => intent,
+        Err((status, body)) => return (status, body).into_response(),
+    };
     // ADR-0003 — same ordering requirement as the mention persona above: this
     // only peeks at `space_ref` for the Space layer, so it must run before
     // `inject_personal_thread_context` consumes it.
@@ -128,18 +143,23 @@ async fn stream_chat(
     {
         return (status, body).into_response();
     }
-    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
+    if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
         &state,
         &user,
         &org_id,
         &mut outbound_body,
+        wake_intent.as_ref(),
     )
     .await
     {
         return (status, body).into_response();
     }
-    let mut outbound_body =
+    let outbound_body =
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
+    // The viewer's clock and app language for this turn (EP-8-S1); a value outside its closed form is dropped.
+    let outbound_body = shared::with_locale_context(outbound_body);
+    let mut outbound_body =
+        shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
     // Before the turn goes out, not after: a ZDR turn that fails midway is still
     // a ZDR turn, so the posture has to be settled on the body that is sent.
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -29,6 +30,10 @@ type Server struct {
 	baseURL   string
 	principal func(context.Context) (authctx.Principal, error)
 	options   Options
+	// revokedKeys remembers recently revoked API keys (INNH-10).
+	revokedKeys *revokedKeys
+	// keyGrantsDisabled is set by DisableKeyGrants (INNH-10).
+	keyGrantsDisabled atomic.Bool
 }
 
 // Options is the optional wiring a broker main sets after NewServerWithConfig.
@@ -39,6 +44,9 @@ type Options struct {
 	// mint (WS21-S4). Off makes no call.
 	SitePolicy   sitepolicy.Mode
 	SiteResolver sitepolicy.Resolver
+	// AssistantTaskGrantsEnabled lets a submitted task use the default ask
+	// decision within the organisation's act ceiling, for one exact host.
+	AssistantTaskGrantsEnabled bool
 	// MaxRequestTTL caps a caller's requested grant lifetime
 	// (BROWSER_GRANT_MAX_TTL).
 	MaxRequestTTL time.Duration
@@ -68,7 +76,10 @@ func NewServerWithConfig(grants grant.Repository, cfg Config) *Server {
 			DeniedSuffixes:     cfg.DenySuffixes,
 		}
 	}
-	return &Server{grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal}
+	return &Server{
+		grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal,
+		revokedKeys: newRevokedKeys(nil),
+	}
 }
 
 // AcquireGrant mints a new browser grant using the proto-defined session/mode contract.
@@ -94,10 +105,26 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, err
 	}
-	// grant_kind (WS8.C): "" is the ordinary path below; human_browse is a
-	// different grant with its own rules; anything else is refused.
+	// An API key (INNH-10) has its own path and never reaches the user or
+	// service rules below.
+	if principal.PrincipalType == authz.PrincipalAPIKey {
+		return s.acquireKeyGrant(ctx, req, scopeURL, principal)
+	}
+	// An empty kind uses the ordinary session or sensitive-approval path.
+	if req.GetGrantKind() != grantKindOriginExtension &&
+		(req.GetConsentScope() != "" || len(req.GetConsentDeniedDomains()) != 0) {
+		// A consent field on any other grant would be ignored silently; refuse it.
+		return nil, status.Error(codes.InvalidArgument, "consent_scope and consent_denied_domains are only for an origin_extension grant")
+	}
 	switch req.GetGrantKind() {
 	case "":
+	case grantKindAssistantTask:
+		if err := s.validateAssistantTaskGrant(req, principal, scopeURL); err != nil {
+			return nil, err
+		}
+		scopeURL = grant.AssistantTaskScopeURL
+	case grantKindOriginExtension:
+		return s.acquireOriginExtension(ctx, req, scopeURL, principal)
 	case grantKindHumanBrowse:
 		// The human_browse path has no read level (WS21-S4 narrows only allowlist
 		// grants), so a read-only ask is refused rather than silently widened.
@@ -106,7 +133,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		}
 		return s.acquireHumanBrowse(ctx, req, scopeURL, principal)
 	default:
-		return nil, status.Error(codes.InvalidArgument, "grant_kind must be empty or human_browse")
+		return nil, status.Error(codes.InvalidArgument, "unsupported browser grant kind")
 	}
 	allowedDomains, err := grant.NormalizeAllowedDomains(req.GetAllowedDomains())
 	if err != nil {
@@ -159,7 +186,12 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		if ttlErr != nil {
 			return nil, ttlErr
 		}
-		allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, allowedDomains, readOnly)
+		if scopeURL == grant.AssistantTaskScopeURL {
+			ttl = min(ttl, assistantTaskGrantTTL)
+			err = s.checkAssistantTaskSitePolicy(ctx, principal, allowedDomains)
+		} else {
+			allowedDomains, deniedDomains, err = s.applySitePolicy(ctx, principal, allowedDomains, readOnly)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -218,6 +250,10 @@ func (s *Server) RevokeGrant(ctx context.Context, req *RevokeGrantRequest) (*Rev
 	if req.GetGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
+	if err := s.keyMayRevoke(ctx, principal, req.GetGrantId()); err != nil {
+		telemetry.GrantsRevokedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, mapErr(err)
+	}
 	if err := s.grants.RevokeScoped(
 		ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetReason(),
 	); err != nil {
@@ -240,6 +276,12 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
 	g, err := s.grants.GetScoped(ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	if err == nil {
+		err = s.keyGrantLive(principal, g)
+	}
+	if err == nil {
+		err = s.extensionLive(g)
+	}
 	if err != nil {
 		telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
@@ -269,6 +311,8 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		ResourceId:         g.ResourceID,
 		SessionKey:         g.SessionKey,
 		ReadOnly:           g.ReadOnly,
+		KeyId:              g.KeyID,
+		ConsentScope:       g.ConsentScope,
 	}, nil
 }
 
@@ -287,6 +331,10 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 	principal, err := s.principal(ctx)
 	if err != nil {
 		return nil, err
+	}
+	// A key grant is never derived from (INNH-10), and a key never derives.
+	if principal.PrincipalType == authz.PrincipalAPIKey {
+		return nil, status.Error(codes.PermissionDenied, "an api key cannot derive a run grant")
 	}
 	if req.GetParentGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "parent_grant_id is required")

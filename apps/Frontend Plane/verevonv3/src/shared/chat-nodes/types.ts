@@ -39,9 +39,10 @@ import type {
   GeneratedFile,
   GeneratedImagePreview,
   Citation,
+  LifecycleNotice,
   StreamFailureAction,
 } from '@/features/chat/components/chat-types'
-import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
+import type { Approval, ApprovalDecision, ApprovalEdit } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
 import type { StreamActivity } from '@/features/chat/lib/stream-activity'
 
@@ -115,9 +116,22 @@ export type ConversationNode =
    * the concrete "shown in the receipt" surface. Only ever present when the
    * turn's effective scope was `knowledge_only`/`web_only` — an `auto` turn
    * produces no node, exactly like `memory-recall` above produces none when
-   * nothing was recalled.
+   * nothing was recalled. An `auto` node exists only as a Space's knowledge
+   * receipt (WS18-S3): it carries `knowledge` and filters nothing.
    */
-  | { kind: 'source-scope'; scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
+  | {
+      kind: 'source-scope';
+      scope: 'knowledge_only' | 'web_only' | 'auto';
+      excludedTools: string[];
+      knowledge?: import('@/shared/api/chat-client').ChatKnowledgeReceipt;
+    }
+  /** Which search service answered the turn's web searches (EP-9 W1); absent when the turn searched nothing. */
+  | { kind: 'search-provenance'; provenance: import('@/shared/api/chat-client').ChatSearchProvenanceEvent }
+  /**
+   * What the gateway did to this turn while it ran (retries, compaction, context changes, a reduced answer).
+   * One node per turn, holding every notice in arrival order, so the transcript keys it once.
+   */
+  | { kind: 'lifecycle-notices'; notices: LifecycleNotice[] }
   | { kind: 'truncated'; stopReason: string }
   | { kind: 'tool-chips'; tools: ComposerToolId[] }
   | { kind: 'attachments'; attachments: ComposerAttachment[] }
@@ -173,6 +187,8 @@ export type ConversationNodeContext = {
   /** Open the contextual attachment canvas without replacing the transcript. */
   onViewAttachments?: (attachmentId: string) => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /** Sends an approval with the person's edits (EP-10-S6). Absent: the card offers no edit mode. */
+  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   /**
    * Grant this turn's run the authority to execute its plan. `steps` is the
    * user's (possibly edited) step list, in final order — omitted/undefined

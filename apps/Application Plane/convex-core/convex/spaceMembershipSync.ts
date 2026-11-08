@@ -11,7 +11,7 @@
  * advance the membership revision.
  */
 import { v } from "convex/values";
-import { internalAction } from "./_generated/server";
+import { internalAction, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 
 const ORG_CORE_URL = process.env.ORG_CORE_URL || "";
@@ -21,6 +21,40 @@ const CONTROL_SPACE_MEMBERSHIP_BASE_URL =
 const APPLICATION_SPACE_LIFECYCLE_TOKEN = process.env.APPLICATION_SPACE_LIFECYCLE_TOKEN || "";
 
 const SERVICE_PRINCIPAL = "application-space-lifecycle";
+
+/** Quiet period that coalesces a burst of org-core membership events into one sync. */
+export const ORG_ROOM_SYNC_DEBOUNCE_MS = 5000;
+
+/**
+ * Kill switch `space_org_room_reconcile_sync`, read at handler time (never at
+ * module load) so `convex env set` plus a functions push takes effect without a
+ * code change. It is a rollout switch only: Control still decides who is a
+ * member, and this flag is never an authorization input.
+ */
+export function orgRoomReconcileEnabled(): boolean {
+  const raw = (process.env.SPACE_ORG_ROOM_RECONCILE || "").trim().toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
+type OrgRoomSyncRequestRow = { state: "scheduled" | "running"; dueAt: number } | null;
+
+/**
+ * Debounce decision for `requestOrganizationRoomSync`. A request that is still
+ * waiting for its quiet period absorbs further events; anything else (no row, a
+ * run in flight, or a scheduled run that is overdue because it was lost) gets a
+ * fresh run so no change made after the last org-core read is left behind.
+ */
+export function planOrgRoomSyncRequest(
+  row: OrgRoomSyncRequestRow,
+  now: number,
+): { action: "skip" } | { action: "schedule"; dueAt: number; delayMs: number } {
+  if (row && row.state === "scheduled" && row.dueAt > now) return { action: "skip" };
+  return {
+    action: "schedule",
+    dueAt: now + ORG_ROOM_SYNC_DEBOUNCE_MS,
+    delayMs: ORG_ROOM_SYNC_DEBOUNCE_MS,
+  };
+}
 
 function configurationError(): string | null {
   if (!ORG_CORE_URL.trim()) return "ORG_CORE_URL is not configured";
@@ -64,6 +98,9 @@ export function spaceMembersFromOrgRoster(
 export const syncOrganizationRoom = internalAction({
   args: { spaceRef: v.string(), externalOrgId: v.string() },
   handler: async (ctx, args) => {
+    if (!orgRoomReconcileEnabled()) {
+      return { status: "disabled" as const };
+    }
     const misconfigured = configurationError();
     if (misconfigured) {
       // Deliberately not retried on a schedule: a missing credential is an
@@ -118,7 +155,15 @@ export const syncOrganizationRoom = internalAction({
           // Control's convergence from revoking the room's agents as a side
           // effect of a human roster syncing — they are bound by a different
           // decision that this call knows nothing about.
-          body: JSON.stringify({ members, managed_subject_types: ["user"] }),
+          //
+          // `roster_mode: "org_derived"` declares that org-core owns this
+          // roster (WS04-S4 makes Control record it and refuse manual member
+          // writes to the room). Control ignores the field until then.
+          body: JSON.stringify({
+            members,
+            managed_subject_types: ["user"],
+            roster_mode: "org_derived",
+          }),
         },
       );
     } catch {
@@ -127,6 +172,11 @@ export const syncOrganizationRoom = internalAction({
     if (!applied.ok) {
       return { status: "rejected" as const, httpStatus: applied.status };
     }
+    // WS04-S5: the recipient audience follows the roster. The action is
+    // flag-gated and idempotent, and a failure here is healed by its cron.
+    await ctx.scheduler.runAfter(0, internal.spaceAudienceReconcile.reconcileRoomAudience, {
+      spaceRef: args.spaceRef,
+    });
     return { status: "applied" as const, members: members.length };
   },
 });
@@ -135,6 +185,9 @@ export const syncOrganizationRoom = internalAction({
 export const syncAllOrganizationRooms = internalAction({
   args: {},
   handler: async (ctx) => {
+    if (!orgRoomReconcileEnabled()) {
+      return { status: "disabled" as const, rooms: 0 };
+    }
     const rooms = await ctx.runQuery(internal.spaces.listActiveOrganizationRooms, {});
     for (const room of rooms) {
       await ctx.runAction(internal.spaceMembershipSync.syncOrganizationRoom, {
@@ -142,6 +195,109 @@ export const syncAllOrganizationRooms = internalAction({
         externalOrgId: room.externalOrgId,
       });
     }
-    return { rooms: rooms.length };
+    return { status: "ok" as const, rooms: rooms.length };
+  },
+});
+
+/**
+ * Debounced entry point for the org-core membership event hook. The first event
+ * of a burst schedules one run five seconds out; the rest are absorbed. A lost
+ * event or a lost run is healed by the 10-minute cron in `crons.ts`.
+ */
+export const requestOrganizationRoomSync = internalMutation({
+  args: { externalOrgId: v.string() },
+  handler: async (ctx, args) => {
+    if (!orgRoomReconcileEnabled()) return { status: "disabled" as const };
+    const externalOrgId = args.externalOrgId.trim();
+    if (!externalOrgId) return { status: "ignored" as const };
+    const now = Date.now();
+    const existing = await ctx.db
+      .query("spaceOrgRoomSyncRequests")
+      .withIndex("by_external_org", (q) => q.eq("externalOrgId", externalOrgId))
+      .first();
+    const plan = planOrgRoomSyncRequest(
+      existing ? { state: existing.state, dueAt: existing.dueAt } : null,
+      now,
+    );
+    if (plan.action === "skip") return { status: "coalesced" as const };
+    if (existing) {
+      await ctx.db.patch(existing._id, { dueAt: plan.dueAt, state: "scheduled" });
+    } else {
+      await ctx.db.insert("spaceOrgRoomSyncRequests", {
+        externalOrgId,
+        dueAt: plan.dueAt,
+        state: "scheduled",
+      });
+    }
+    await ctx.scheduler.runAfter(
+      plan.delayMs,
+      internal.spaceMembershipSync.runRequestedOrganizationRoomSync,
+      { externalOrgId },
+    );
+    return { status: "scheduled" as const, dueAt: plan.dueAt };
+  },
+});
+
+/** Marks the org's debounce row as running. A missing row is fine: it only means the cron got there first. */
+export const markOrganizationRoomSyncRunning = internalMutation({
+  args: { externalOrgId: v.string() },
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("spaceOrgRoomSyncRequests")
+      .withIndex("by_external_org", (q) => q.eq("externalOrgId", args.externalOrgId))
+      .first();
+    if (row) await ctx.db.patch(row._id, { state: "running" });
+    return { found: row !== null };
+  },
+});
+
+/**
+ * Deletes the debounce row only if it is still `running`. A request that
+ * arrived during the run set it back to `scheduled` with its own queued run,
+ * and that row must survive.
+ */
+export const clearOrganizationRoomSyncRequest = internalMutation({
+  args: { externalOrgId: v.string() },
+  handler: async (ctx, args) => {
+    const row = await ctx.db
+      .query("spaceOrgRoomSyncRequests")
+      .withIndex("by_external_org", (q) => q.eq("externalOrgId", args.externalOrgId))
+      .first();
+    const cleared = row !== null && row.state === "running";
+    if (row && cleared) await ctx.db.delete(row._id);
+    return { cleared };
+  },
+});
+
+/** Runs the debounced sync for every active organization room of one organization. */
+export const runRequestedOrganizationRoomSync = internalAction({
+  args: { externalOrgId: v.string() },
+  handler: async (ctx, args) => {
+    if (!orgRoomReconcileEnabled()) {
+      await ctx.runMutation(internal.spaceMembershipSync.clearOrganizationRoomSyncRequest, {
+        externalOrgId: args.externalOrgId,
+      });
+      return { status: "disabled" as const };
+    }
+    await ctx.runMutation(internal.spaceMembershipSync.markOrganizationRoomSyncRunning, {
+      externalOrgId: args.externalOrgId,
+    });
+    try {
+      const rooms = await ctx.runQuery(internal.spaces.listActiveOrganizationRooms, {});
+      let synced = 0;
+      for (const room of rooms) {
+        if (room.externalOrgId !== args.externalOrgId) continue;
+        await ctx.runAction(internal.spaceMembershipSync.syncOrganizationRoom, {
+          spaceRef: room.spaceRef,
+          externalOrgId: room.externalOrgId,
+        });
+        synced += 1;
+      }
+      return { status: "ok" as const, rooms: synced };
+    } finally {
+      await ctx.runMutation(internal.spaceMembershipSync.clearOrganizationRoomSyncRequest, {
+        externalOrgId: args.externalOrgId,
+      });
+    }
   },
 });

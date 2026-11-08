@@ -21,17 +21,24 @@
 //! cargo test -p execution-core --test browser_agent_e2e -- --ignored --nocapture
 //! ```
 //!
-//! This file holds two ignored tests. Name one after `--` to run only it
-//! (`browser_agent_drives_real_quarry_loop`, or the E3 Terra spike
-//! `planner_on_terra_returns_valid_action_json`, which has its own run notes).
+//! This test builds its planner directly with `LlmPlanner::from_env`, which keeps
+//! the legacy `QUARRY_BROWSER_AGENT_LLM` gate (deprecated, all orgs). The deployed
+//! tool bridge never reads it: it asks `execution_core::planner_policy`
+//! (`QUARRY_BROWSER_AGENT_PLANNER_MODE`, `QUARRY_BROWSER_AGENT_LLM_ORGS` and the
+//! org's flag) and calls `LlmPlanner::connect`.
+//!
+//! This file holds three ignored tests. Name one after `--` to run only it
+//! (`browser_agent_drives_real_quarry_loop`, the E3 Terra spike
+//! `planner_on_terra_returns_valid_action_json`, or the WS8.G attach scenario
+//! `browser_agent_attaches_to_a_live_person_run`; each has its own run notes).
 
 use execution_core::browser_agent::{
     run_browser_agent_loop, ActionType, BrowserAction, BrowserObservation, BrowserSnapshotTarget,
     ObservationStatus, PlanConfig, PlanStatus,
 };
 use execution_core::llm_planner::{
-    parse_action_content, planner_infer_request, ActionParse, LlmPlanner, ACTION_SCHEMA,
-    ACTION_SCHEMA_STRICT,
+    parse_action_content, planner_infer_request, ActionParse, ActionPlanner, LlmPlanner,
+    ACTION_SCHEMA, ACTION_SCHEMA_STRICT,
 };
 use execution_core::quarry_agent::QuarryAgentClient;
 use mp_contracts::model_plane::v1::inference_core_client::InferenceCoreClient;
@@ -71,9 +78,17 @@ async fn browser_agent_drives_real_quarry_loop() {
         // page loaded, so the first action needs an explicit destination.
         start_url: Some("https://example.com".to_owned()),
         postcondition: String::new(),
+        ..Default::default()
     };
 
-    let result = run_browser_agent_loop(config, Some(&client), planner.as_ref(), None, None).await;
+    let result = run_browser_agent_loop(
+        config,
+        Some(&client),
+        planner.as_ref().map(|planner| planner as &dyn ActionPlanner),
+        None,
+        None,
+    )
+    .await;
 
     eprintln!(
         "E2E result: status={} observations={} summary={}",
@@ -152,6 +167,7 @@ fn probe_config(org_id: &str, goal: &str) -> PlanConfig {
         profile_id: None,
         start_url: None,
         postcondition: String::new(),
+        ..Default::default()
     }
 }
 
@@ -185,9 +201,12 @@ fn observation(
         screenshot_ref: String::new(),
         dom_snapshot_ref: snapshot_id.to_owned(),
         snapshot_generation: Some(generation),
+        rendered_controls: Vec::new(),
         snapshot_targets: targets,
         error_message: String::new(),
         challenge: None,
+        redaction_rule_version: None,
+        quality: Default::default(),
     }
 }
 
@@ -1017,4 +1036,79 @@ async fn a_session_failure_never_carries_a_cookie_a_path_or_an_id() {
     let signed_out = auth_from_session_state(empty.to_str().expect("utf-8 path")).await.err().expect("no cookies");
     let _ = std::fs::remove_file(&empty);
     assert!(signed_out.contains("sign in again"), "{signed_out}");
+}
+
+/// WS8.G attach scenario (live, ignored, NOT run in wave mode). The agent
+/// attaches to a person's live Quarry run instead of leasing its own:
+///
+/// 1. Start a person's run in the UI (or `POST /v1/agent/runs` with a USER
+///    token) and note its Quarry run id.
+/// 2. Derive an attach grant for it with the user's bearer (the gateway does
+///    this behind `MODEL_GATEWAY_BROWSER_ATTACH=on`; `DeriveRunGrant
+///    purpose=attach resource_id=<run id>` on the broker).
+/// 3. quarry-edge must run with `QUARRY_EDGE__ATTACH=on` and a driver that has
+///    background tabs, tab pinning and per-tab egress.
+///
+/// ```bash
+/// QUARRY_BROWSER_AGENT_ENABLED=1 QUARRY_EDGE_URL=... AUTH_CORE_URL=... \
+/// EXECUTION_CORE_SERVICE_API_KEY=<credential> E2E_ORG_ID=<org> \
+/// E2E_ATTACH_SESSION_RUN_ID=<the person's Quarry run id> \
+/// E2E_ATTACH_GRANT_ID=<derived attach grant> \
+/// cargo test -p execution-core --test browser_agent_e2e attach -- --ignored --nocapture
+/// ```
+///
+/// DoD it checks: the run completes on the person's run (no lease of its own),
+/// and the attachment is gone afterwards (the delegate's tab list answers 404).
+/// Receipts showing `initiated_by: agent` + the Model run id are read in the
+/// Quarry UI / `GET .../receipts` with the person's token, by hand. To check
+/// the takeover pause, take the agent tab in the UI during the run and give
+/// it back within 600 s: the run must resume, not fail.
+#[tokio::test]
+#[ignore = "requires a live quarry-edge with QUARRY_EDGE__ATTACH=on, a person's run and a derived attach grant; see the doc comment"]
+async fn browser_agent_attaches_to_a_live_person_run() {
+    let client = QuarryAgentClient::from_env()
+        .expect("Auth Core service-principal configuration must be valid")
+        .expect("set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL to run the E2E test");
+    let session_run_id =
+        std::env::var("E2E_ATTACH_SESSION_RUN_ID").expect("set E2E_ATTACH_SESSION_RUN_ID");
+    let grant_id = std::env::var("E2E_ATTACH_GRANT_ID").expect("set E2E_ATTACH_GRANT_ID");
+    let org_id = std::env::var("E2E_ORG_ID").unwrap_or_else(|_| "org_e2e".to_owned());
+
+    let config = PlanConfig {
+        plan_id: "e2e_attach_plan".to_owned(),
+        grant_id: grant_id.clone(),
+        run_id: "e2e_attach_run".to_owned(),
+        org_id: org_id.clone(),
+        system_prompt: "Open https://example.com and read the page title.".to_owned(),
+        max_steps: 3,
+        max_runtime_s: 900,
+        allowed_domains: vec!["example.com".to_owned()],
+        stop_criteria: "Example Domain".to_owned(),
+        start_url: Some("https://example.com".to_owned()),
+        attach: Some(execution_core::browser_agent::AttachConfig {
+            target_tab: None,
+            session_run_id: session_run_id.clone(),
+        }),
+        ..Default::default()
+    };
+
+    let started = Instant::now();
+    let result = run_browser_agent_loop(config, Some(&client), None, None, None).await;
+    println!(
+        "attach run: status={:?} summary={} observations={} in {:?}",
+        result.status,
+        result.summary,
+        result.observations.len(),
+        started.elapsed()
+    );
+    assert_eq!(result.status, PlanStatus::Completed, "{}", result.summary);
+
+    // Released: the delegate no longer sees any tab of the person's run.
+    let after = client
+        .tab_state(&org_id, &session_run_id, &grant_id, None)
+        .await;
+    assert!(
+        after.is_err(),
+        "the attachment must be released at the end of the run: {after:?}"
+    );
 }

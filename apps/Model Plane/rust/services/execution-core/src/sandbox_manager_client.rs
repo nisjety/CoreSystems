@@ -47,6 +47,8 @@ use mp_contracts::model_plane::v1::{
     ReconcileProcessesRequest, ReconcileProcessesResponse, RedactedCommand, RegisterProcessRequest,
     RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest,
     SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest,
+    ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse,
+    GetThreadWorkspaceRequest, GetThreadWorkspaceResponse, ThreadDeletedPath,
     WorkspaceChangedFile,
 };
 use tonic::{transport::Channel, Request, Status};
@@ -352,6 +354,68 @@ impl SandboxManagerClient {
         let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().release_lease(wire))
             .await
             .map_err(|_| Status::deadline_exceeded("sandbox-manager ReleaseLease timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Reads a thread's workspace through its own lease (WS22-S2). The thread RPCs accept
+    /// the lease's owner, so this takes the user-bound sandbox bearer, never a service token.
+    ///
+    /// # Errors
+    /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
+    /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
+    pub async fn get_thread_workspace(
+        &self,
+        bearer: &str,
+        lease_id: &str,
+        backend_id: &str,
+    ) -> Result<GetThreadWorkspaceResponse, Status> {
+        if lease_id.trim().is_empty() {
+            return Err(Status::invalid_argument("lease_id is required"));
+        }
+        let message = GetThreadWorkspaceRequest {
+            lease_id: lease_id.to_owned(),
+            backend_id: backend_id.to_owned(),
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(RPC_TIMEOUT, self.client().get_thread_workspace(wire))
+            .await
+            .map_err(|_| Status::deadline_exceeded("sandbox-manager GetThreadWorkspace timed out"))?;
+        Ok(outcome?.into_inner())
+    }
+
+    /// Applies a batch of thread changes and deletes through the lease, each compare-and-swapped
+    /// on its base hash (WS22-S2). A conflicting path comes back in the response and is never
+    /// overwritten.
+    ///
+    /// # Errors
+    /// `invalid_argument` when `lease_id` is blank; `deadline_exceeded` past
+    /// [`RPC_TIMEOUT`]; otherwise sandbox-manager's own status.
+    pub async fn apply_thread_workspace_changes(
+        &self,
+        bearer: &str,
+        lease_id: &str,
+        backend_id: &str,
+        changes: Vec<WorkspaceChangedFile>,
+        deleted: Vec<ThreadDeletedPath>,
+    ) -> Result<ApplyThreadWorkspaceChangesResponse, Status> {
+        if lease_id.trim().is_empty() {
+            return Err(Status::invalid_argument("lease_id is required"));
+        }
+        let message = ApplyThreadWorkspaceChangesRequest {
+            lease_id: lease_id.to_owned(),
+            backend_id: backend_id.to_owned(),
+            changes,
+            deleted,
+        };
+        let wire = Self::authorize(bearer, message)?;
+        let outcome = tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.client().apply_thread_workspace_changes(wire),
+        )
+        .await
+        .map_err(|_| {
+            Status::deadline_exceeded("sandbox-manager ApplyThreadWorkspaceChanges timed out")
+        })?;
         Ok(outcome?.into_inner())
     }
 
@@ -849,5 +913,20 @@ mod tests {
             .await
             .expect_err("an unforwardable bearer must fail closed, not panic");
         assert_eq!(error.code(), tonic::Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn thread_workspace_calls_refuse_a_blank_lease_before_the_wire() {
+        let client = test_client();
+        let read = client
+            .get_thread_workspace("bearer", " ", "backend-1")
+            .await
+            .expect_err("a blank lease is refused before any RPC");
+        assert_eq!(read.code(), tonic::Code::InvalidArgument);
+        let applied = client
+            .apply_thread_workspace_changes("bearer", "", "backend-1", Vec::new(), Vec::new())
+            .await
+            .expect_err("a blank lease is refused before any RPC");
+        assert_eq!(applied.code(), tonic::Code::InvalidArgument);
     }
 }

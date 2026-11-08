@@ -199,7 +199,9 @@ async fn capability_profile(
 }
 
 async fn metrics_handler() -> impl IntoResponse {
-    (StatusCode::OK, "# HELP execution_core_steps_total\n")
+    let mut body = String::from("# HELP execution_core_steps_total\n");
+    body.push_str(&crate::executor::limit_hit_metrics());
+    (StatusCode::OK, body)
 }
 
 #[cfg(test)]

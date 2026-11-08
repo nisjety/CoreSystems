@@ -9,8 +9,10 @@ import {
 import {
   type ChatAction,
   type ChatMessage,
+  type CitationLocator,
   getAttachmentPolicy,
   type RecalledMemory,
+  type ResearchProvenance,
 } from '@/shared/api/chat-client'
 import {
   isModelEntitlementCode,
@@ -59,6 +61,8 @@ import {
   type AgentTaskStepEvidence,
   CHAT_BROWSE_WEB_KEY,
   type ChatArtifact,
+  type ChatConnectorSuggestion,
+  CONNECTOR_SUGGESTION_PROVIDERS,
   type ChatKnowledgeGrounding,
   type ChatToolCall,
   type ChatTurn,
@@ -66,6 +70,9 @@ import {
   type ComposerAttachment,
   type ComposerToolId,
   type GeneratedFile,
+  type GeneratedFilePreview,
+  type GeneratedFileCheck,
+  type GeneratedFileCheckLevel,
   type QueuedInput,
   type StreamAttachment,
   type StreamFailureAction,
@@ -82,6 +89,7 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     role: msg.role,
     sourceScope: msg.sourceScope,
     retrievalScope: msg.retrievalScope,
+    contextRefs: msg.contextRefs,
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -832,6 +840,8 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       recalledMemories: turn.recalledMemories?.map(recalledMemoryWithoutText),
       stopReason: turn.stopReason,
       tools: turn.tools,
+      // Kept so a reload shows the suggestion as a note: a provider key and the gateway's scrubbed line.
+      connectorSuggestion: turn.connectorSuggestion,
       // `unsavedContent` is deliberately absent: it is text the server did
       // not save, and a reload must not bring it back.
       // `previewUrl` is a live data URL used by the contextual canvas. It can
@@ -887,7 +897,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     reasoning: turn.reasoning,
     citations: (turn.citations ?? []).filter(isCitation),
     toolCalls: (turn.toolCalls ?? []).filter(isChatToolCall),
-    artifacts: (turn.artifacts ?? []).filter(isChatArtifact),
+    artifacts: (turn.artifacts ?? []).filter(isChatArtifact).map(deckArtifactForDisplay),
     files: (turn.files ?? []).filter(isGeneratedFile),
     grounding: isChatKnowledgeGrounding(turn.grounding) ? turn.grounding : undefined,
     memoryRecallCount: turn.memoryRecallCount,
@@ -896,6 +906,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory).map(recalledMemoryWithoutText),
     stopReason: turn.stopReason,
     tools: (turn.tools ?? []).filter(isComposerToolId),
+    connectorSuggestion: restoredConnectorSuggestion(turn.connectorSuggestion),
     attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
   }
 }
@@ -909,6 +920,35 @@ function transcriptTimingToTurnTiming(value: ChatThreadTranscriptTurn['timing'])
   const { serverMs, providerMs, orchestrationMs } = value
   const valid = [serverMs, providerMs, orchestrationMs].every((ms) => typeof ms === 'number' && Number.isFinite(ms) && ms >= 0)
   return valid ? { serverMs, providerMs, orchestrationMs } : undefined
+}
+
+/** Longest reason a suggestion card shows: the gateway refuses a longer one (mp-contracts `connector_suggest`). */
+export const CONNECTOR_SUGGESTION_MAX_REASON_CHARS = 200
+
+/**
+ * A `connector_suggestion` frame as the card reads it (EP-10 S8), or `null` for a frame it cannot trust: no
+ * id, a provider outside the closed list, or no reason. The frame's keys are read in either spelling, the
+ * wire's or the stream client's. The reason is shown as one line of text and cut to the gateway's bound, so
+ * a frame from a drifted build still renders as the card the gateway means.
+ */
+export function normalizeConnectorSuggestion(event: unknown): ChatConnectorSuggestion | null {
+  const record = objectValue(event)
+  if (!record) return null
+  const suggestionId = stringValue(record.suggestionId ?? record.suggestion_id)?.trim()
+  const provider = CONNECTOR_SUGGESTION_PROVIDERS.find((known) => known === record.provider)
+  const reason = stringValue(record.reason)
+    ?.replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, CONNECTOR_SUGGESTION_MAX_REASON_CHARS)
+  if (!suggestionId || !provider || !reason) return null
+  const requestId = stringValue(record.requestId ?? record.request_id)
+  return { suggestionId, provider, reason, ...(requestId ? { requestId } : {}) }
+}
+
+/** A stored suggestion read back after a reload: checked again, and marked so the card offers nothing. */
+export function restoredConnectorSuggestion(value: unknown): ChatConnectorSuggestion | undefined {
+  const suggestion = normalizeConnectorSuggestion(value)
+  return suggestion ? { ...suggestion, restored: true } : undefined
 }
 
 function visibleTurnContent(role: ChatTurn['role'], content: string): string {
@@ -1037,6 +1077,8 @@ export function mergeServerTurnsWithCachedMetadata(
       memoryRecallCount: serverTurn.memoryRecallCount ?? cachedTurn.memoryRecallCount,
       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
+      // Stream-only too: the server's message never carries the suggestion card.
+      connectorSuggestion: serverTurn.connectorSuggestion ?? restoredConnectorSuggestion(cachedTurn.connectorSuggestion),
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
       attachments: cachedTurn.attachments.length > 0 && serverTurn.attachments.every(a => a.id.startsWith('restored-'))
         ? cachedTurn.attachments : serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
@@ -1259,8 +1301,44 @@ export function isChatArtifact(value: unknown): value is ChatArtifact {
     // `history` rides along in the thread snapshot as untyped JSON; a snapshot
     // written by an older build simply has none.
     (record.history === undefined ||
-      (Array.isArray(record.history) && record.history.every(isChatArtifactVersion)))
+      (Array.isArray(record.history) && record.history.every(isChatArtifactVersion))) &&
+    // A deck's content is its manifest. One that is not a JSON object is
+    // refused rather than shown as a deck.
+    (record.kind !== 'deck' ||
+      (typeof record.content === 'string' && deckManifestVersion(record.content) !== null))
   )
+}
+
+/** The deck manifest version this client reads (EP-5 S2/S3). */
+export const DECK_MANIFEST_VERSION = 1
+
+/**
+ * The `version` a deck manifest states: `null` when the content is not a JSON
+ * object, `undefined` when the object states none. Never throws.
+ */
+export function deckManifestVersion(content: string): number | undefined | null {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const version = (parsed as Record<string, unknown>).version
+  return typeof version === 'number' ? version : undefined
+}
+
+/**
+ * A deck this client cannot read (a manifest version other than
+ * {@link DECK_MANIFEST_VERSION}) is shown as its JSON in a plain code block
+ * rather than handed to a deck view that would misread it. Any other artifact
+ * is returned as it is.
+ */
+export function deckArtifactForDisplay(artifact: ChatArtifact): ChatArtifact {
+  if (artifact.kind !== 'deck' || deckManifestVersion(artifact.content) === DECK_MANIFEST_VERSION) {
+    return artifact
+  }
+  return { ...artifact, kind: 'code' }
 }
 
 export function isGeneratedFile(value: unknown): value is GeneratedFile {
@@ -1611,7 +1689,7 @@ export function createTurnStep(
   }
 }
 
-export function normalizeArtifact(event: { id?: string; kind?: string; title?: string; content?: string; version?: number }): ChatArtifact | null {
+export function normalizeArtifact(event: { id?: string; kind?: string; title?: string; content?: string; version?: number; provenance?: ResearchProvenance }): ChatArtifact | null {
   const content = event.content ?? ''
   // An artifact with no content AND no id carries nothing to show or update —
   // drop it. One WITH an id was genuinely announced by the backend, so it is
@@ -1625,7 +1703,50 @@ export function normalizeArtifact(event: { id?: string; kind?: string; title?: s
     title: event.title ?? artifactTitle(kind),
     content,
     version: event.version ?? 0,
+    ...(event.provenance ? { provenance: event.provenance } : {}),
   }
+}
+
+function isGeneratedFileCheckLevel(value: unknown): value is GeneratedFileCheckLevel {
+  return value === 'passed' || value === 'warnings' || value === 'failed' || value === 'skipped'
+}
+
+/**
+ * The structural check the gateway attached to a generated file, read as the
+ * wire sends it. A malformed check is no check at all: the file still arrives,
+ * and no chip is shown for a verdict the gateway did not give.
+ */
+export function normalizeGeneratedFileCheck(value: unknown): GeneratedFileCheck | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (!isGeneratedFileCheckLevel(record.level) || !Array.isArray(record.checks)) return undefined
+  const checks: GeneratedFileCheck['checks'] = []
+  for (const item of record.checks as unknown[]) {
+    if (!item || typeof item !== 'object') continue
+    const finding = item as Record<string, unknown>
+    if (typeof finding.id === 'string' && typeof finding.message === 'string' && isGeneratedFileCheckLevel(finding.level)) {
+      checks.push({ id: finding.id, level: finding.level, message: finding.message })
+    }
+  }
+  return { level: record.level, checks }
+}
+
+/**
+ * The rendered PDF copy the gateway attached to a generated Office file, read as
+ * the wire sends it. Anything but a PDF `data:` URI with its page facts is no
+ * preview, and only PNG `data:` thumbnails are kept, so the frame never loads a URL.
+ */
+export function normalizeGeneratedFilePreview(value: unknown): GeneratedFilePreview | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  if (record.mime !== 'application/pdf') return undefined
+  if (typeof record.url !== 'string' || !record.url.startsWith('data:application/pdf;base64,')) return undefined
+  if (typeof record.pages !== 'number' || typeof record.fonts_substituted !== 'boolean') return undefined
+  if (!Array.isArray(record.thumbs)) return undefined
+  const thumbs = (record.thumbs as unknown[]).filter(
+    (thumb): thumb is string => typeof thumb === 'string' && thumb.startsWith('data:image/png;base64,'),
+  )
+  return { mime: 'application/pdf', url: record.url, pages: record.pages, fontsSubstituted: record.fonts_substituted, thumbs }
 }
 
 export function normalizeGeneratedFile(event: {
@@ -1635,14 +1756,20 @@ export function normalizeGeneratedFile(event: {
   type?: string
   url?: string
   size?: number
+  check?: unknown
+  preview?: unknown
 }): GeneratedFile | null {
   if (!event.url || !event.name) return null
+  const check = normalizeGeneratedFileCheck(event.check)
+  const preview = normalizeGeneratedFilePreview(event.preview)
   return {
     id: event.id ?? event.url,
     name: event.name,
     mime: event.mime ?? event.type ?? 'application/octet-stream',
     size: event.size ?? 0,
     url: event.url,
+    ...(check ? { check } : {}),
+    ...(preview ? { preview } : {}),
   }
 }
 
@@ -1653,7 +1780,7 @@ function citationOrigin(value: unknown): Citation['origin'] {
   return CITATION_ORIGINS.find((origin) => origin === value)
 }
 
-export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
+export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; number?: number; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string; quote?: string; locator?: CitationLocator }): Citation | null {
   if (!event.url) return null
   const origin = citationOrigin(event.origin)
   return {
@@ -1661,12 +1788,15 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     title: event.title ?? hostname(event.url),
     url: event.url,
     snippet: event.snippet ?? '',
+    ...(event.number !== undefined ? { number: event.number } : {}),
     ...(event.claimId ? { claimId: event.claimId } : {}),
     ...(event.sourceGroupId ? { sourceGroupId: event.sourceGroupId } : {}),
     ...(event.sourceGroupLabel ? { sourceGroupLabel: event.sourceGroupLabel } : {}),
     ...(event.start !== undefined ? { start: event.start } : {}),
     ...(event.end !== undefined ? { end: event.end } : {}),
     ...(origin ? { origin } : {}),
+    ...(event.quote ? { quote: event.quote } : {}),
+    ...(event.locator ? { locator: event.locator } : {}),
   }
 }
 

@@ -111,7 +111,7 @@ required_generated=(
   JWT_SECRET CONVEX_INSTANCE_SECRET CONVEX_INTERNAL_SERVICE_KEY CONVEX_RECONCILIATION_KEY
   CONVERSATION_CORE_INGEST_SERVICE_TOKEN CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN
   CONVERSATION_GATEWAY_SERVICE_TOKEN CONVERSATION_INTEGRATION_SERVICE_API_KEY
-  NOTIFICATION_GATEWAY_SERVICE_TOKEN
+  NOTIFICATION_GATEWAY_SERVICE_TOKEN NOTIFICATION_PUSH_SUBSCRIPTION_KEY NOTIFICATION_SPACE_ATTENTION_SERVICE_TOKEN
   # Ingestion's integration-corev2 publishes to this plane's NATS account with a
   # password Application owns. Ingestion's own run-ingestion-plane.sh reads it
   # back from this plane's .env.generated-secrets rather than keeping its own
@@ -120,6 +120,32 @@ required_generated=(
   APPLICATION_INGESTION_PUBLISHER_NATS_PASSWORD
 )
 for key in "${required_generated[@]}"; do persist_if_missing "$key" "$(random_value)"; done
+
+# Web Push VAPID pair (RFC 8292): an EC P-256 key. The public half is the uncompressed point, base64url without
+# padding; the private half is the 32-byte scalar. Minted once and persisted like the credentials above, so the
+# browsers' subscriptions keep matching this server across bring-ups.
+ensure_vapid_keys() {
+  if lookup_value NOTIFICATION_VAPID_PRIVATE_KEY >/dev/null 2>&1; then return 0; fi
+  local dir pem sec1 spki encoded_private encoded_public
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/application-plane-vapid.XXXXXX")
+  chmod 700 "$dir"
+  pem="$dir/vapid.pem"; sec1="$dir/vapid.sec1.der"; spki="$dir/vapid.spki.der"
+  openssl ecparam -name prime256v1 -genkey -noout -out "$pem"
+  openssl ec -in "$pem" -outform DER -out "$sec1" 2>/dev/null
+  openssl ec -in "$pem" -pubout -outform DER -out "$spki" 2>/dev/null
+  # The SEC1 encoding of a P-256 key starts with SEQUENCE(119) INTEGER(1) OCTET STRING(32); the scalar follows.
+  if [[ "$(head -c 7 "$sec1" | od -An -tx1 | tr -d ' \n')" != "30770201010420" ]]; then
+    rm -rf "$dir"
+    printf 'unexpected VAPID key encoding; refusing to persist a key\n' >&2
+    exit 1
+  fi
+  encoded_private=$(dd if="$sec1" bs=1 skip=7 count=32 2>/dev/null | base64 | tr '+/' '-_' | tr -d '=\n')
+  encoded_public=$(tail -c 65 "$spki" | base64 | tr '+/' '-_' | tr -d '=\n')
+  rm -rf "$dir"
+  printf 'NOTIFICATION_VAPID_PUBLIC_KEY=%s\n' "$encoded_public" >>"$secrets_file"
+  printf 'NOTIFICATION_VAPID_PRIVATE_KEY=%s\n' "$encoded_private" >>"$secrets_file"
+}
+ensure_vapid_keys
 
 compose_env_args=(--env-file "$tmp_env")
 for file in "${env_files[@]}"; do compose_env_args+=(--env-file "$file"); done
@@ -132,6 +158,18 @@ case " ${*:-} " in
         --label com.docker.compose.project=triodelab \
         inter-plane-bus >/dev/null
     fi
+    ;;
+esac
+
+# F10: warn (never fail) when the convex-gateway / convex-subscriber image is older
+# than the files baked into it. Skipped when this invocation builds, since the
+# image is then fresh by construction.
+case " ${*:-} " in
+  *" build "*|*" --build "*) ;;
+  *" up "*|*" start "*|*" restart "*)
+    # shellcheck source=convex-image-staleness.sh
+    source "$root/scripts/convex-image-staleness.sh"
+    warn_if_convex_image_stale "$root" || true
     ;;
 esac
 

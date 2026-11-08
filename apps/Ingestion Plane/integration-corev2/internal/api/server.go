@@ -1211,67 +1211,11 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, fiber.Map{"tokens": tokens})
 	})
 
+	// SCIM provisioning is not implemented in this service (WS05-S2). Minting a
+	// bearer token would imply a working provisioning endpoint, so creation is an
+	// honest 501. Listing and revoking existing tokens stay available.
 	app.Post("/api/v1/scim/tokens", chainHandlers(rateLimited, internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
-		var body scimTokenBody
-		if err := c.BodyParser(&body); err != nil {
-			return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
-		}
-		organizationID, err := organizationIDForSCIMTokenRequest(c, body.OrganizationID)
-		if err != nil {
-			return authAwareError(c, err)
-		}
-		raw, err := oauth.RandomURLToken(32)
-		if err != nil {
-			return apiError(c, fiber.StatusInternalServerError, "scim_token_generate_failed", err.Error())
-		}
-		bearer := "scim_" + raw
-		now := time.Now().UTC()
-		createdBy := userIDForRequest(c)
-		if createdBy == "" {
-			createdBy = "internal-service"
-		}
-		name := strings.TrimSpace(body.Name)
-		if name == "" {
-			name = "SCIM token"
-		}
-		candidate := store.SCIMToken{
-			ID:             "scimtok_" + uuid.NewString(),
-			OrganizationID: organizationID,
-			Name:           name,
-			TokenPrefix:    scimTokenPrefix(bearer),
-			CreatedBy:      createdBy,
-			ExpiresAt:      body.ExpiresAt,
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		}
-		var token store.SCIMToken
-		err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
-			var createErr error
-			token, createErr = tx.CreateSCIMToken(c.UserContext(), candidate, scimTokenHash(bearer))
-			if createErr != nil {
-				return createErr
-			}
-			return persist(store.AuditEvent{
-				ID:             "audit:integration:scim-token-created:" + token.ID,
-				OrganizationID: organizationID,
-				UserID:         createdBy,
-				EventType:      "scim.token.created",
-				ProviderKey:    "scim",
-				Metadata:       map[string]any{"tokenId": token.ID, "tokenPrefix": token.TokenPrefix},
-				CreatedAt:      now,
-			})
-		})
-		if err != nil {
-			return apiError(c, fiber.StatusInternalServerError, "scim_token_create_failed", err.Error())
-		}
-		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-			"success": true,
-			"data": fiber.Map{
-				"token":       token,
-				"bearerToken": bearer,
-			},
-			"meta": responseMeta(c),
-		})
+		return apiError(c, fiber.StatusNotImplemented, "scim_not_implemented", "SCIM provisioning is not available.")
 	})...)
 
 	app.Delete("/api/v1/scim/tokens/:id", chainHandlers(rateLimited, internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
@@ -1303,47 +1247,12 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		return success(c, fiber.Map{"token": revoked})
 	})...)
 
+	// SCIM is not implemented here (WS05-S2). Every method and path answers an
+	// honest 501 with a SCIM error body: no auth decision, no payload parse, no
+	// store write and no event publish, so no provisioning payload is persisted.
 	app.All("/api/v1/scim/v2/*", chainHandlers(rateLimited, func(c *fiber.Ctx) error {
-		headerOrganizationID := firstNonEmpty(c.Get("X-Org-ID"), c.Query("organizationId"))
-		if len(cfg.Config.SCIMBearerTokens) > 0 && headerOrganizationID == "" {
-			return apiError(c, fiber.StatusBadRequest, "organization_required", "X-Org-ID or organizationId is required for SCIM.")
-		}
-		if !scimBearerAuthorized(c, cfg, headerOrganizationID) {
-			return apiError(c, fiber.StatusUnauthorized, "unauthorized", "Invalid SCIM bearer token.")
-		}
-		payload := map[string]any{}
-		if len(c.Body()) > 0 {
-			if err := json.Unmarshal(c.Body(), &payload); err != nil {
-				return scimError(c, fiber.StatusBadRequest, "invalidValue", "SCIM payload must be valid JSON.")
-			}
-		}
-		resourcePath := strings.Trim(c.Params("*"), "/")
-		organizationID := firstNonEmpty(headerOrganizationID, stringFromAny(payload["organizationId"]))
-		eventType := scimEventType(c.Method(), resourcePath)
-		event := store.WebhookEvent{
-			ID:             "scim_" + uuid.NewString(),
-			OrganizationID: organizationID,
-			ProviderKey:    "scim",
-			EventType:      eventType,
-			Payload: map[string]any{
-				"path":    resourcePath,
-				"method":  c.Method(),
-				"payload": payload,
-			},
-			ReceivedAt: time.Now().UTC(),
-		}
-		if err := cfg.Repo.InsertWebhookEvent(c.UserContext(), event); err != nil {
-			return apiError(c, fiber.StatusInternalServerError, "scim_store_failed", err.Error())
-		}
-		if cfg.Events != nil {
-			_ = cfg.Events.Publish(c.UserContext(), events.Event{
-				Type:           "verevon.ingestion.integration.scim_event_received",
-				OrganizationID: organizationID,
-				ProviderKey:    "scim",
-				Data:           map[string]any{"eventType": eventType, "webhookEventId": event.ID},
-			})
-		}
-		return scimResponse(c, event, resourcePath, payload)
+		c.Set(fiber.HeaderContentType, "application/scim+json")
+		return scimError(c, fiber.StatusNotImplemented, "", "SCIM provisioning is not implemented.")
 	})...)
 
 	app.Get("/api/v1/projections/integration-profile", internalOrBearerAuth, func(c *fiber.Ctx) error {
@@ -1613,12 +1522,6 @@ type syncSourceRef struct {
 	Status     string `json:"status"`
 	Title      string `json:"title"`
 	URL        string `json:"url"`
-}
-
-type scimTokenBody struct {
-	OrganizationID string     `json:"organizationId"`
-	Name           string     `json:"name"`
-	ExpiresAt      *time.Time `json:"expiresAt"`
 }
 
 type actionBody struct {
@@ -2806,102 +2709,21 @@ func userIDForRequest(c *fiber.Ctx) string {
 	return ""
 }
 
-func scimBearerAuthorized(c *fiber.Ctx, cfg ServerConfig, organizationID string) bool {
-	authHeader := strings.TrimSpace(c.Get("Authorization"))
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return false
-	}
-	token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
-	if token == "" {
-		return false
-	}
-	if strings.TrimSpace(organizationID) != "" && cfg.Repo != nil {
-		scimToken, err := cfg.Repo.FindActiveSCIMTokenByHash(c.UserContext(), strings.TrimSpace(organizationID), scimTokenHash(token))
-		if err == nil {
-			_ = cfg.Repo.MarkSCIMTokenUsed(c.UserContext(), scimToken.ID, time.Now().UTC())
-			return true
-		}
-	}
-	expected := strings.TrimSpace(cfg.Config.SCIMBearerToken)
-	if len(cfg.Config.SCIMBearerTokens) > 0 {
-		expected = strings.TrimSpace(cfg.Config.SCIMBearerTokens[strings.TrimSpace(organizationID)])
-	}
-	return expected != "" && hmac.Equal([]byte(token), []byte(expected))
-}
-
-func scimTokenHash(token string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	return hex.EncodeToString(sum[:])
-}
-
-func scimTokenPrefix(token string) string {
-	token = strings.TrimSpace(token)
-	if len(token) <= 12 {
-		return token
-	}
-	return token[:12]
-}
-
-func scimEventType(method, resourcePath string) string {
-	resource := strings.ToLower(strings.Trim(resourcePath, "/"))
-	if resource == "" {
-		resource = "root"
-	}
-	resource = strings.ReplaceAll(resource, "/", ".")
-	return "scim." + strings.ToLower(method) + "." + resource
-}
-
-func scimResponse(c *fiber.Ctx, event store.WebhookEvent, resourcePath string, payload map[string]any) error {
-	resourceType := scimResourceType(resourcePath)
-	switch c.Method() {
-	case fiber.MethodGet:
-		return c.JSON(fiber.Map{
-			"schemas":      []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"},
-			"totalResults": 0,
-			"startIndex":   1,
-			"itemsPerPage": 0,
-			"Resources":    []fiber.Map{},
-		})
-	case fiber.MethodDelete:
-		return c.SendStatus(fiber.StatusNoContent)
-	case fiber.MethodPost:
-		return c.Status(fiber.StatusCreated).JSON(scimResource(event, resourceType, payload))
-	default:
-		return c.JSON(scimResource(event, resourceType, payload))
-	}
-}
-
-func scimResource(event store.WebhookEvent, resourceType string, payload map[string]any) fiber.Map {
-	return fiber.Map{
-		"schemas":    []string{"urn:ietf:params:scim:schemas:core:2.0:" + resourceType},
-		"id":         firstNonEmpty(stringFromAny(payload["id"]), stringFromAny(payload["externalId"]), event.ID),
-		"externalId": stringFromAny(payload["externalId"]),
-		"userName":   stringFromAny(payload["userName"]),
-		"active":     payload["active"],
-		"meta": fiber.Map{
-			"resourceType": resourceType,
-			"created":      event.ReceivedAt,
-			"lastModified": event.ReceivedAt,
-		},
-	}
-}
-
-func scimResourceType(resourcePath string) string {
-	switch {
-	case strings.HasPrefix(strings.ToLower(resourcePath), "groups"):
-		return "Group"
-	default:
-		return "User"
-	}
-}
-
 func scimError(c *fiber.Ctx, status int, scimType, detail string) error {
-	return c.Status(status).JSON(fiber.Map{
-		"schemas":  []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
-		"scimType": scimType,
-		"detail":   detail,
-		"status":   status,
-	})
+	body := fiber.Map{
+		"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
+		"detail":  detail,
+		"status":  strconv.Itoa(status),
+	}
+	if scimType != "" {
+		body["scimType"] = scimType
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	c.Set(fiber.HeaderContentType, "application/scim+json")
+	return c.Status(status).Send(payload)
 }
 
 func recordTokenLease(ctx context.Context, cfg ServerConfig, token oauth.AccessTokenResult, consumer string) error {
@@ -3748,6 +3570,9 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 	return "", false
 }
 
+// actionRequiresApproval is the approval allowlist for provider writes. The write-operations
+// golden (EP-10-S2, internal/actions/testdata/provider-write-operations.json) requires every
+// spelling of a write the executor serves to be named here.
 func actionRequiresApproval(providerKey, operation string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(operation))
 	switch providerKey {

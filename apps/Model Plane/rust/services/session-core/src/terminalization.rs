@@ -7,6 +7,7 @@
 
 use crate::continuation_crypto::DescriptorCipher;
 use crate::retention_receipt::{self, RetentionClass, RunRetention};
+use crate::space::mentions::VerifiedWake;
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
 use mp_events::idempotency::derive_idempotency_hash;
@@ -21,6 +22,10 @@ const THREAD_CREATED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.Thread
 const STEP_COMPLETED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.StepCompleted";
 const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
 const RECOVERY_FAILURE_CODE: &str = "outcome_unknown";
+/// The failure a run ends with when its `resume` question lapsed unanswered (build plan WS14 S5).
+/// Written by recovery only, like [`RECOVERY_FAILURE_CODE`]: a caller may not submit it, so it is not
+/// in [`ALLOWED_FAILURE_CODES`], though the column accepts it (migration 0088).
+const QUESTION_EXPIRED_FAILURE_CODE: &str = "question_expired";
 const MANAGED_RECOVERY_LEASE_SECS: i64 = 60;
 pub(crate) const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
 const MANAGED_RECOVERY_BATCH: usize = 32;
@@ -394,9 +399,8 @@ fn validate_managed_start_request(
     }
     if zdr {
         if !request.thread_id.is_empty() {
-            return Err(Status::failed_precondition(
-                "ZDR managed runs require a fresh metadata-only thread",
-            ));
+            return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_run")
+                .grpc_status(tonic::Code::FailedPrecondition));
         }
         return Ok(source);
     }
@@ -462,6 +466,9 @@ struct ExistingManagedStart {
     retention_class: String,
     waiver_ack_id: Option<String>,
     waiver_connection_id: Option<String>,
+    /// WS08-S2: the wake pair the run was started with (both NULL for every other run).
+    trigger_message_id: Option<String>,
+    agent_subject_id: Option<String>,
 }
 
 /// A retry is the same start only if it carries the same receipt. A waiver
@@ -481,7 +488,16 @@ fn existing_start_matches(
     request: &pb::StartManagedRunRequest,
     zdr: bool,
     source: pb::ManagedRunSource,
+    wake: Option<&VerifiedWake>,
 ) -> bool {
+    // A reused start key must name the same wake pair (or none): another post or another agent
+    // under the same key is a different start. ZDR never reaches here with a wake (typed
+    // refusal first), so the pair of a ZDR run is always NULL.
+    if existing.trigger_message_id.as_deref() != wake.map(|w| w.trigger_message_id.as_str())
+        || existing.agent_subject_id.as_deref() != wake.map(|w| w.agent_subject_id.as_str())
+    {
+        return false;
+    }
     if existing.zdr != zdr
         || source_storage_name(source) != Some(existing.configured_source.as_str())
         || canonical_terminal_step(source) != Some(existing.configured_terminal_step_id.as_str())
@@ -557,10 +573,31 @@ async fn insert_managed_run_started(
     persisted: &ManagedStartPersistence,
     source: pb::ManagedRunSource,
     retention: &RunRetention,
+    wake: Option<&VerifiedWake>,
     now: DateTime<Utc>,
 ) -> Result<(), Status> {
     let zdr = retention.class == RetentionClass::Zdr;
     let residency = super::grpc::configured_residency();
+    // EP-12 S1: a child run inherits its parent's origin token behind
+    // SESSION_RUN_ORIGIN_INHERIT. A managed run is not stamped at birth, so a run
+    // with no inherited origin keeps the {} it has always stored.
+    let inherited_origin = crate::run_origin_stamp::inherited_origin(
+        &mut **transaction,
+        &request.org_id,
+        &persisted.parent_run_id,
+        crate::run_origin_stamp::inherit_enabled(
+            std::env::var(crate::run_origin_stamp::INHERIT_ENV)
+                .ok()
+                .as_deref(),
+        ),
+    )
+    .await?;
+    let origin_metadata = match inherited_origin {
+        Some(origin) => {
+            serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })
+        }
+        None => serde_json::json!({}),
+    };
     // The thread was created only after verifying its signed Space decision.
     // Copy that durable, non-secret context here instead of trusting any
     // managed-run caller to restate it. The exact tenant/owner predicate is a
@@ -577,10 +614,11 @@ async fn insert_managed_run_started(
     ) = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
                           space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
-                          retention_class, waiver_ack_id, waiver_connection_id)
+                          retention_class, waiver_ack_id, waiver_connection_id,
+                          turn_origin, trigger_message_id, agent_subject_id, metadata)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
                 t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
-                $11, $12, $13
+                $11, $12, $13, $14, $15, $16, $17
          FROM threads AS t
          WHERE t.id = $2 AND t.org_id = $7 AND t.user_id = $8
          RETURNING space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision",
@@ -598,6 +636,11 @@ async fn insert_managed_run_started(
     .bind(retention.class.as_str())
     .bind(retention.ack_id())
     .bind(retention.connection_id())
+    // WS08-S2: from the verified decision, never from a caller field.
+    .bind(wake.map(|w| w.turn_origin.as_str()))
+    .bind(wake.map(|w| w.trigger_message_id.as_str()))
+    .bind(wake.map(|w| w.agent_subject_id.as_str()))
+    .bind(origin_metadata)
     .fetch_optional(&mut **transaction)
     .await
     .map_err(database_error)?
@@ -726,12 +769,32 @@ pub(crate) async fn start_managed_run_inner(
 /// [`RunRetention::from_caller`]). It is recorded immutably on the run, and a
 /// child run must match its parent's receipt ([`RunRetention::inherit_from`]).
 #[allow(clippy::result_large_err)]
+#[cfg_attr(not(test), allow(dead_code))] // the wake-less entry the tests and older callers use
 pub(crate) async fn start_managed_run_with_retention_inner(
     pool: &PgPool,
     request: pb::StartManagedRunRequest,
     retention: RunRetention,
 ) -> Result<ManagedRunStart, Status> {
+    start_managed_run_with_wake_inner(pool, request, retention, None).await
+}
+
+/// [`start_managed_run_with_retention_inner`] for a wake (WS08-S2): `wake` is the already
+/// verified decision and stored-fact check of `StartManagedRun.wake`. The run row carries its
+/// `turn_origin`, `trigger_message_id` and `agent_subject_id`, and a reused start key must name
+/// the same pair. `None` is every other start, unchanged.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn start_managed_run_with_wake_inner(
+    pool: &PgPool,
+    request: pb::StartManagedRunRequest,
+    retention: RunRetention,
+    wake: Option<&VerifiedWake>,
+) -> Result<ManagedRunStart, Status> {
     let zdr = retention.class == RetentionClass::Zdr;
+    if zdr && wake.is_some() {
+        // Backstop: the gRPC handler refuses first.
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::PermissionDenied));
+    }
     let source = validate_managed_start_request(&request, zdr)?;
     let persisted = managed_start_persistence(&request, zdr);
     let mut transaction = pool.begin().await.map_err(database_error)?;
@@ -754,7 +817,8 @@ pub(crate) async fn start_managed_run_with_retention_inner(
         "SELECT o.run_id, r.thread_id, r.created_at, o.configured_source,
                 o.configured_terminal_step_id, o.zdr, r.parent_run_id,
                 r.agent_id, r.goal, r.mode,
-                r.retention_class, r.waiver_ack_id, r.waiver_connection_id
+                r.retention_class, r.waiver_ack_id, r.waiver_connection_id,
+                r.trigger_message_id, r.agent_subject_id
          FROM managed_run_terminalization_outbox AS o
          JOIN runs AS r ON r.id = o.run_id
          WHERE o.org_id = $1 AND o.user_id = $2 AND o.start_key = $3
@@ -767,7 +831,7 @@ pub(crate) async fn start_managed_run_with_retention_inner(
     .await
     .map_err(database_error)?;
     if let Some(existing) = existing {
-        if !existing_start_matches(&existing, &request, zdr, source)
+        if !existing_start_matches(&existing, &request, zdr, source, wake)
             || !existing_retention_matches(&existing, &retention)
         {
             return Err(Status::already_exists(
@@ -804,6 +868,12 @@ pub(crate) async fn start_managed_run_with_retention_inner(
     } else {
         persisted.thread_id.clone()
     };
+    // One live root run per Space thread (WS09-S1). After the idempotent branch
+    // above, so a replay of the same start key is never refused; skipped for a
+    // child run and for the metadata thread a ZDR start creates.
+    if persisted.parent_run_id.is_empty() && !persisted.create_metadata_thread {
+        crate::run_phase::ensure_thread_idle(&mut transaction, &request.org_id, &thread_id).await?;
+    }
     let run_id = new_ulid();
     insert_managed_run_started(
         &mut transaction,
@@ -813,6 +883,7 @@ pub(crate) async fn start_managed_run_with_retention_inner(
         &persisted,
         source,
         &retention,
+        wake,
         now,
     )
     .await?;
@@ -1658,9 +1729,8 @@ pub(crate) async fn complete_direct_run_with_message_inner(
     // from the user's verified credential, not the service credential's (see
     // `authorize_direct_completion`).
     if completion.zdr {
-        return Err(Status::failed_precondition(
-            "a zero-retention run has no durable assistant message",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     // The answer's memories are mirrored under the run's receipt. A waived run's
     // memories stay local: they never reach the external memory service (Z-17).
@@ -1988,6 +2058,49 @@ async fn has_pending_approval(
     .map_err(database_error)
 }
 
+/// Whether a `resume` question holds the run (build plan WS14 S5): one the owner may still answer, or one
+/// answered whose answer is not yet spent. Like a live approval, it keeps recovery off the run until its
+/// window closes. An unspent answer holds for the resume window of one hour from the answer (DEC-05),
+/// because the spend does not read `expires_at`.
+async fn has_pending_resume_question(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<bool, Status> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM run_questions AS q
+             WHERE q.run_id = $1 AND q.delivery = 'resume'
+               AND ((q.state = 'requested' AND q.expires_at > now())
+                    OR (q.state = 'answered' AND q.consumed_at IS NULL
+                        AND q.answered_at > now() - interval '1 hour'))
+         )",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)
+}
+
+/// Whether a `resume` question of the run lapsed unanswered: its window closed while it was still
+/// requested, or a read has already marked it expired. Such a run ends as question_expired, because
+/// the cause is known, rather than as an unknown outcome.
+async fn expired_resume_question(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<bool, Status> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM run_questions AS q
+             WHERE q.run_id = $1 AND q.delivery = 'resume'
+               AND (q.state = 'expired' OR (q.state = 'requested' AND q.expires_at <= now()))
+         )",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)
+}
+
 async fn release_recovery_for_activity(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2129,6 +2242,13 @@ async fn recover_claimed_terminalization(
         transaction.commit().await.map_err(database_error)?;
         return Ok(false);
     }
+    // A `resume` question the owner may still answer holds the run as an approval does: the person has
+    // the question's whole window, and the run is not ended while it is open (build plan WS14 S5).
+    if has_pending_resume_question(&mut transaction, &claim.row.run_id).await? {
+        release_recovery_for_activity(&mut transaction, &claim.row.run_id, now).await?;
+        transaction.commit().await.map_err(database_error)?;
+        return Ok(false);
+    }
     // A run parked for a continuation (WS03 S8-4) is not an abandoned run: it is spared until
     // its wait runs out, counted from the park save, and then ended through the path below, the
     // same one any lost producer takes. Only a `park` fold is spared; an active, paused or
@@ -2171,13 +2291,22 @@ async fn recover_claimed_terminalization(
             "managed terminalization step mapping is invalid",
         ));
     }
+    // A `resume` question that lapsed unanswered ends its run for a known cause (build plan WS14 S5),
+    // so the run is applied as failed with that cause; only an unknown outcome needs reconciliation
+    // (the outbox CHECK admits `reconciliation_required` with `outcome_unknown` alone).
+    let question_expired = expired_resume_question(&mut transaction, &claim.row.run_id).await?;
+    let failure_code = if question_expired {
+        QUESTION_EXPIRED_FAILURE_CODE
+    } else {
+        RECOVERY_FAILURE_CODE
+    };
     let receipt = apply_managed_terminal_outcome(
         &mut transaction,
         &obligation,
         source,
         step_id,
-        ManagedOutcome::Failed(RECOVERY_FAILURE_CODE),
-        true,
+        ManagedOutcome::Failed(failure_code),
+        !question_expired,
         now,
     )
     .await?;
@@ -2189,7 +2318,8 @@ async fn recover_claimed_terminalization(
     tracing::warn!(
         run_id = %receipt.run_id,
         receipt_id = %receipt.receipt_id,
-        "managed run terminalized as outcome_unknown after producer loss"
+        failure_code = failure_code,
+        "managed run terminalized after producer loss"
     );
     Ok(true)
 }
@@ -2729,6 +2859,77 @@ mod tests {
     }
 
     #[test]
+    fn question_expired_is_written_by_recovery_only() {
+        assert_eq!(super::QUESTION_EXPIRED_FAILURE_CODE, "question_expired");
+        assert!(
+            !super::ALLOWED_FAILURE_CODES.contains(&super::QUESTION_EXPIRED_FAILURE_CODE),
+            "a caller may not submit question_expired"
+        );
+        assert!(
+            validate_terminal_outcome(pb::TerminalOutcome::Failed, "question_expired").is_err(),
+            "question_expired is set by the recovery worker, never submitted"
+        );
+    }
+
+    #[test]
+    fn migration_0088_adds_consumed_at_and_question_expired_and_its_revert_restores_0069() {
+        let up = include_str!("../migrations/0088_run_question_consume.sql");
+        let down = include_str!("../migrations/revert/0088_run_question_consume.down.sql");
+        // The failure-code CHECK is the last one in each file (0088's own consumed_at CHECK comes first).
+        let check = |sql: &'static str| sql.rsplit_once("CHECK (").expect("a failure code CHECK").1;
+        let (up_check, down_check) = (check(up), check(down));
+        let quoted = |code: &str| format!("'{code}'");
+        for code in super::ALLOWED_FAILURE_CODES
+            .iter()
+            .copied()
+            .chain(["outcome_unknown", "question_expired"])
+        {
+            assert!(up_check.contains(&quoted(code)), "0088 must accept {code}");
+        }
+        for code in super::ALLOWED_FAILURE_CODES
+            .iter()
+            .copied()
+            .chain(["outcome_unknown"])
+        {
+            assert!(down_check.contains(&quoted(code)), "the revert must keep {code}");
+        }
+        assert!(
+            !down_check.contains("'question_expired'"),
+            "the revert must drop question_expired"
+        );
+        assert!(up.contains("ADD COLUMN IF NOT EXISTS consumed_at TIMESTAMPTZ"));
+        assert!(up.contains("consumed_at IS NULL OR (state = 'answered' AND delivery = 'resume')"));
+        assert!(down.contains("DROP COLUMN IF EXISTS consumed_at"));
+        for sql in [up, down] {
+            assert!(sql.contains(
+                "DROP CONSTRAINT IF EXISTS managed_run_terminalization_outbox_failure_code_check"
+            ));
+            assert!(sql
+                .contains("ADD CONSTRAINT managed_run_terminalization_outbox_failure_code_check"));
+        }
+    }
+
+    #[test]
+    fn a_resume_question_holds_the_run_after_the_approval_hold_and_before_the_terminal_write() {
+        let source = production_source();
+        let worker = function_text(&source, "async fn recover_claimed_terminalization(")
+            .expect("the recovery worker");
+        let at = |needle: &str| {
+            worker
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is in the recovery worker"))
+        };
+        let approval = at("has_pending_approval(");
+        let hold = at("has_pending_resume_question(");
+        let lapse = at("expired_resume_question(");
+        let terminal = at("apply_managed_terminal_outcome(");
+        assert!(
+            approval < hold && hold < lapse && lapse < terminal,
+            "the resume hold follows the approval hold and the lapse check precedes the terminal write"
+        );
+    }
+
+    #[test]
     fn gateway_dispatch_rejection_is_only_a_failed_dispatch_rejection() {
         assert!(super::source_accepts_outcome(
             pb::ManagedRunSource::ExecutionAgent,
@@ -2750,6 +2951,7 @@ mod tests {
     #[test]
     fn zdr_managed_start_persists_only_metadata_and_never_the_prompt() {
         let request = pb::StartManagedRunRequest {
+            wake: None,
             thread_id: String::new(),
             parent_run_id: "parent-with-content-is-not-accepted".to_owned(),
             agent_id: "agent-name-must-not-persist".to_owned(),
@@ -2933,6 +3135,209 @@ mod tests {
     }
 }
 
+/// Build plan WS14 S5: a `resume` question holds its run from recovery while the owner may still answer,
+/// and a run whose question lapsed ends as question_expired. WRITTEN, NOT RUN by the author: it needs the
+/// disposable-Postgres harness (scripts/tests/session-core-db-tests.sh), which the lead runs. Its path starts
+/// with `terminalization::resume_question_db_tests::`, so the harness filter `terminalization` selects it.
+#[cfg(test)]
+mod resume_question_db_tests {
+    use super::*;
+
+    async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_CONTRACT").is_none() && std::env::var_os("CI").is_none(),
+                "DATABASE_URL must name a scratch Postgres when REQUIRE_CONTRACT or CI is set"
+            );
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "these tests write rows: DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("scratch Postgres is reachable");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("session-core migrations apply in order");
+        Some(pool)
+    }
+
+    /// A persistent managed run with one `resume` question still `requested`, whose window closes `window`
+    /// from now (a negative window has already closed), and whose terminalization obligation is due.
+    async fn run_with_resume_question(pool: &PgPool, tag: &str, window: chrono::Duration) -> String {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("rq-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("rq-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        let run_id = start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                wake: None,
+                thread_id: thread.clone(),
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "resume question goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("rq-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id;
+        sqlx::query(
+            "INSERT INTO run_questions (id, run_id, thread_id, org_id, user_id, delivery, spec, expires_at)
+             VALUES ($1, $2, $3, $4, $5, 'resume', $6, $7)",
+        )
+        .bind(format!("q_{sfx}"))
+        .bind(&run_id)
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .bind(serde_json::json!({"items": []}))
+        .bind(Utc::now() + window)
+        .execute(pool)
+        .await
+        .expect("the resume question is stored");
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 hour'
+             WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+        .expect("age the obligation");
+        run_id
+    }
+
+    /// `claim_due_recovery` looks at every run in the database. Push every other live obligation a day
+    /// out, so the answer is about the run under test only. Scratch database only.
+    async fn isolate(pool: &PgPool, keep_run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() + interval '1 day',
+                 lease_expires_at = CASE WHEN lease_expires_at IS NULL THEN NULL
+                                         ELSE now() + interval '1 day' END
+             WHERE run_id <> $1 AND state IN ('open', 'processing')",
+        )
+        .bind(keep_run_id)
+        .execute(pool)
+        .await
+        .expect("isolate the other obligations");
+    }
+
+    async fn run_status(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("run status")
+    }
+
+    /// `(state, failure_code)` of the run's terminalization obligation.
+    async fn obligation(pool: &PgPool, run_id: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT state, failure_code FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("obligation")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_resume_question_the_owner_may_still_answer_holds_its_run() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let run_id = run_with_resume_question(&pool, "held", chrono::Duration::hours(1)).await;
+        isolate(&pool, &run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            0,
+            "a live question holds its run, so nothing is recovered"
+        );
+        let status = run_status(&pool, &run_id).await;
+        assert!(
+            !matches!(status.as_str(), "completed" | "failed" | "cancelled"),
+            "the run stays open while its question can be answered, got {status}"
+        );
+        assert_eq!(obligation(&pool, &run_id).await.0, "open");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_answered_resume_question_holds_its_run_until_its_window_closes() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let run_id = run_with_resume_question(&pool, "answered", chrono::Duration::hours(1)).await;
+        sqlx::query(
+            "UPDATE run_questions
+                SET state = 'answered', answers = $2, answers_digest = $3, answered_at = now()
+              WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .bind(serde_json::json!([]))
+        .bind(format!("{:0>64}", "answer"))
+        .execute(&pool)
+        .await
+        .expect("answered");
+        isolate(&pool, &run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            0,
+            "an answer not yet spent holds its run, so nothing is recovered"
+        );
+        assert_eq!(obligation(&pool, &run_id).await.0, "open");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_resume_question_that_lapsed_ends_its_run_as_question_expired() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let run_id = run_with_resume_question(&pool, "lapsed", -chrono::Duration::hours(1)).await;
+        isolate(&pool, &run_id).await;
+        assert_eq!(
+            recover_due_terminalizations(&pool).await.expect("pass"),
+            1,
+            "exactly this run is recovered"
+        );
+        assert_eq!(run_status(&pool, &run_id).await, "failed");
+        let (state, failure) = obligation(&pool, &run_id).await;
+        assert_eq!(state, "applied", "a known cause is applied, not left for reconciliation");
+        assert_eq!(failure.as_deref(), Some(QUESTION_EXPIRED_FAILURE_CODE));
+    }
+}
+
 /// Build plan WS03 S7c-A2: the recovery race a spent click would otherwise lose.
 /// WRITTEN, NOT RUN by the author: it needs the disposable-Postgres harness
 /// (scripts/tests/session-core-db-tests.sh), which the lead runs. Its path starts
@@ -3017,6 +3422,7 @@ mod spent_click_db_tests {
         let run_id = start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -3261,6 +3667,7 @@ mod park_recovery_db_tests {
         let run_id = start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -3638,6 +4045,7 @@ mod park_recovery_db_tests {
         start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id: thread,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -4022,6 +4430,7 @@ mod park_recovery_db_tests {
         start_managed_run_with_retention_inner(
             pool,
             pb::StartManagedRunRequest {
+                wake: None,
                 thread_id,
                 parent_run_id: String::new(),
                 agent_id: "general-v1".to_owned(),
@@ -4432,5 +4841,39 @@ mod park_recovery_db_tests {
             .await
             .expect("claimed once the thread is free");
         assert_eq!(won.kind, "park");
+    }
+}
+
+/// WS06-S1: a ZDR managed start that names an existing thread is the typed
+/// `zdr_feature_not_supported` refusal for the `agent_run` feature.
+#[cfg(test)]
+mod zdr_refusal_tests {
+    use super::*;
+    use mp_contracts::zdr_refusal::Refusal;
+
+    fn start(thread_id: &str) -> pb::StartManagedRunRequest {
+        pb::StartManagedRunRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            start_key: "opaque-start-1".to_owned(),
+            terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn zdr_refusal_managed_start_with_a_thread_names_the_agent_run_feature() {
+        let status = validate_managed_start_request(&start("thread-1"), true)
+            .expect_err("a ZDR run needs a fresh metadata-only thread");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let refusal = Refusal::from_status(&status).expect("typed refusal");
+        assert_eq!(refusal.code(), mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED);
+        assert_eq!(refusal.feature(), Some("agent_run"));
+    }
+
+    #[test]
+    fn zdr_refusal_managed_start_without_a_thread_is_accepted() {
+        assert!(validate_managed_start_request(&start(""), true).is_ok());
     }
 }

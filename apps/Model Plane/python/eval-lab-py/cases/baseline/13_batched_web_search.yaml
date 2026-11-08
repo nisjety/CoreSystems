@@ -1,0 +1,20 @@
+id: "13-batched-web-search"
+name: "A two-part question runs one batched web_search and reads a result by its ref"
+# EP-2-S3 and the prompt-tool manifest fix (D3-262). With MODEL_GATEWAY_WEB_SEARCH_BATCH=true the chat
+# loop advertises web_search `queries` (up to 4 distinct searches in one call) and lets fetch_url take
+# the `ref` of a result (w1, w2, ...) instead of retyping its URL; with the switch off the definitions
+# are unchanged. The case skips (does not fail) until a deployment with the switch on exists: set
+# EVAL_CAPABILITIES=web-search-batch for that run. The definitions themselves are pinned by the
+# prompt-tool manifest (builtin_tool_defs_with, advertise_batched_search).
+profile: deployed_agent
+features: [usage, tools, citations, agentic]
+prompt: "Compare in two short bullet points: the current population of Oslo, and the current population of Bergen. Cite a source for each."
+loop:
+  max_tool_calls: 6
+  max_errors: 1
+checks:
+  tools_called: [web_search]
+  regex: ["Oslo", "Bergen"]
+requires: [web-search-batch]
+tags: [web, tools, batched-search, agentic]
+timeout_s: 180.0
