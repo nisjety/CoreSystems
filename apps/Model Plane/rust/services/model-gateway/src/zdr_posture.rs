@@ -762,8 +762,8 @@ pub(crate) mod tests {
             ),
             (
                 "auth.rs",
-                "verify_delegated_api_key_session_bearer",
-                "posture equality between an api key's ingress and session bearers, not a decision",
+                "verify_delegated_api_key_agent_bearer",
+                "posture equality between an api key's ingress and its session and inference bearers, not a decision",
             ),
             (
                 "grpc_auth.rs",
@@ -839,6 +839,7 @@ pub(crate) mod tests {
             ("http_routes.rs", "ai_realtime"),
             ("http_routes.rs", "ai_video_generate"),
             ("review_run_routes.rs", "review_run_with"),
+            ("assistant_navigation.rs", "start_navigation"),
             ("dataplane.rs", "reject_zdr_durable_mutation"),
             ("dataplane.rs", "retrieve"),
             ("finetune_routes.rs", "require_non_zdr_finetune_mutation"),
@@ -1040,6 +1041,11 @@ pub(crate) mod tests {
                 "agent_api_run.rs",
                 "run_ask_turn",
                 "persistent only: a ZDR key is refused in admit before any call (EP-12 D6)",
+            ),
+            (
+                "assistant_navigation.rs",
+                "classify",
+                "the navigation route's posture, decided in start_navigation by zdr_posture (the default chain, no connection)",
             ),
             // The extraction's one inference call (WS16.S8). Its callers decide the posture first:
             // the gRPC method through `zdr_for` on the request's route, the chat tool with the

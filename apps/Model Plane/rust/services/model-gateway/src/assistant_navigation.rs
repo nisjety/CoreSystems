@@ -78,6 +78,7 @@ async fn start_navigation(
     if prompt.is_empty() || prompt.len() > PROMPT_LIMIT {
         return Err(invalid_request("prompt"));
     }
+    let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))?;
     let request_id = new_ulid();
     // Tenant/user identity comes from the verified claims, never the body.
     // A ZDR caller gets a metadata-only thread from Session Core via the
@@ -94,7 +95,7 @@ async fn start_navigation(
         "execute",
         &request_id,
         ManagedRunSource::GatewayDirect,
-        claims.zdr,
+        zdr,
         &session_bearer,
         None,
         None,
@@ -107,7 +108,7 @@ async fn start_navigation(
         internal_error()
     })?;
 
-    match classify(&state, &claims, &run, prompt, &request_id, &inference_bearer).await {
+    match classify(&state, &claims, &run, prompt, &request_id, &inference_bearer, zdr).await {
         Ok(content) => {
             let answer = DirectAnswer {
                 content: &content,
@@ -172,6 +173,7 @@ async fn classify(
     prompt: &str,
     request_id: &str,
     inference_bearer: &VerifiedInferenceBearer,
+    zdr: bool,
 ) -> Result<String, tonic::Status> {
     let messages = vec![
         ChatMessage {
@@ -199,7 +201,7 @@ async fn classify(
                 messages,
                 temperature: 0.0,
                 max_tokens: ANSWER_MAX_TOKENS,
-                zdr: claims.zdr,
+                zdr,
                 ..Default::default()
             },
             inference_bearer,

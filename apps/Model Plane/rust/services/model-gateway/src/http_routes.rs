@@ -774,7 +774,7 @@ async fn deck_templates_listing(
             "no such route",
         ));
     }
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(
@@ -870,7 +870,7 @@ fn app_read_checks<'query>(
     bearer: Option<Extension<VerifiedCapabilityBearer>>,
     query: &'query McpAppResourceQuery,
 ) -> Result<(&'query str, &'query str, VerifiedCapabilityBearer), HttpJsonError> {
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(
@@ -1092,7 +1092,7 @@ async fn mcp_app_tool_call(
             "no such route",
         ));
     }
-    if claims.zdr || claims.zdr_waiver.is_some() {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(
@@ -2759,7 +2759,7 @@ async fn get_run_timing(
     bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
@@ -2857,7 +2857,7 @@ async fn run_request_inspection(
             "no such route",
         ));
     }
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
@@ -8324,7 +8324,7 @@ async fn get_run_process_output(
     Path((run_id, process_id)): Path<(String, String)>,
     Query(query): Query<RunProcessOutputQuery>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(

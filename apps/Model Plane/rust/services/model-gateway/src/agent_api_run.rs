@@ -1118,8 +1118,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_cancel_reaches_only_the_keys_own_live_turn() {
+    #[tokio::test]
+    async fn a_cancel_reaches_only_the_keys_own_live_turn() {
         let state = AppState::new();
         let flag = state
             .cancels
