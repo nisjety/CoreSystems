@@ -2169,6 +2169,9 @@ services:
       CRON_CONTRACT_GUARDS_ENABLED: ${CRON_CONTRACT_GUARDS_ENABLED:-false}
       # EP-6-S2: Run now, a manual schedule fire through the same Control fire authorization. Only the literal `true` enables it.
       CRON_RUN_NOW_ENABLED: ${CRON_RUN_NOW_ENABLED:-false}
+      # EP-7 W4-F T2: the event trigger fire path (webhook_received consumer and fire sweeper). Only the literal true.
+      # The consumer also needs EVENT_TRIGGER_NATS_URL; the sweeper alone decides nothing until a fire is recorded.
+      EVENT_TRIGGER_FIRE_ENABLED: ${EVENT_TRIGGER_FIRE_ENABLED:-false}
       # WS16-S4: RUN_ATTENTION becomes a typed notification. Off by default; turn NOTIFICATION_NATIVE_TYPES_ENABLED on first.
       CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: ${CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED:-false}
       ATTENTION_NOTIFY_COALESCE_SECONDS: ${ATTENTION_NOTIFY_COALESCE_SECONDS:-60}

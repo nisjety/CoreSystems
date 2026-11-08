@@ -137,6 +137,17 @@
       ]
     },
     {
+      "name": "EVENT_TRIGGER_FIRE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 W4-F T2: the event trigger fire path in capability-core (the webhook_received consumer and the fire sweeper). Records and authorises fires only; no run starts until the wake gate lands.",
+      "declarations": [
+        { "service": "capability-core", "env": "EVENT_TRIGGER_FIRE_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_DO_COMPUTER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",

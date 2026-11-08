@@ -4,7 +4,8 @@
 //! connector event type that may wake a budgeted run for that member. This slice stores the record
 //! and nothing fires. A stored trigger is not authority: every later fire is re-authorised by Control
 //! through `FireAuthorizer` (the cron rule, `capability-core/internal/cron/sweeper.go`). The consumer
-//! of `webhook_received`, the wake gate and the clock arm come in later slices.
+//! of `webhook_received` and the fire path are in capability-core (`internal/eventtrigger`, W4-F T2).
+//! The wake gate and the clock arm come in later slices.
 //!
 //! The record is the member's own configuration. Only that member reads or changes it, a service
 //! caller owns none and is refused, and a zero-retention or waived credential is refused on every RPC
