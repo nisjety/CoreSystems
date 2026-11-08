@@ -1,0 +1,104 @@
+{
+ "finalId": "F-t2-026",
+ "tier": "recommended",
+ "rank": 2,
+ "title": "Per-operation browser deadlines, bounded tab attach and retry-once on a destroyed execution context",
+ "summary": "Give every CDP operation in quarry-browser an explicit deadline from one constants table (command, page-ready, capture, accessibility quiet window, tab attach), wrapped by a single helper that returns a typed Timeout with the operation name. Add one retry for lightweight calls that fail with a destroyed execution context (re-resolving the context first), and never replay coordinate actions after state changed. Make the table overridable per run policy.",
+ "whyItMatters": "Hung or flaky browser steps are the first thing users watching the live view and agents will notice, and they waste Model steps on transport errors. The fix is small and has a clear reference design.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (SRC)",
+  "others": [
+   "Firecrawl AbortManager (SRC) and Crawlee handler timeout (DOC) bound whole requests rather than each operation"
+  ],
+  "prevalence": "1 of 4 sources has a per-operation table (Codex); every reference bounds work in some form, so the capability is common even though the table is unique",
+  "mechanism": "A constants table of deadlines wrapped around every CDP call (about 20 s per command, 15 s page-ready, 1.5 s cursor, 5 s capture, 750 ms accessibility quiet cap), with debugger leases cleaned up on timeout. A pending-open map resolves when a tab attaches or rejects after a 15 s handshake with distinct failure causes. DOM operations cache an isolated world per (target, frame, loader); on a context-destroyed error the cache is dropped and the call is retried once. Semantic errors are never retried."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:76-77",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-262",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:685",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2116",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-490"
+  ],
+  "gap": "Only download begin/complete (10 s / 30 s), snapshot capture (5 s) and a few bounded waits carry explicit timeouts. The BrowserConfig builder sets no request or launch timeout, so CDP calls rely on the chromiumoxide library default (not verified). Agent runs are bounded only by step and runtime budgets (max_steps 12, max_runtime_s 120 in the gateway request). No documented retry-once rule exists for destroyed contexts or stale targets, although stale nodes already fail instead of being rebound (chromiumoxide.rs:2116)."
+ },
+ "approach": "Ingestion Plane (quarry-browser): add a deadlines module and a cdp_call(op, fut) helper using tokio::time::timeout, returning ErrorCode::Timeout with details {op, ms}; wrap navigation, evaluate, screenshot, accessibility snapshot, input dispatch and tab/target attach. Add a retry_once_on_context_destroyed helper for DOM evaluation and snapshot calls only. Surface stale targets as TargetRepairRequired where appropriate and count timeouts in metrics. Calibrate values against Verevon's own latency histograms instead of copying Codex's numbers, and make them overridable through the run constraints. Model Plane: add the planner rule 'retry a lightweight call once after a short wait; never replay coordinates after the page changed'.",
+ "effort": "S",
+ "dependencies": [
+  "quarry-browser chromiumoxide driver",
+  "Optional: F-t2-047 typed sub-codes for the timeout detail"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-browser); Model Plane for the planner rule",
+ "risks": "Deadlines that are too tight cause false failures on slow pages, so make them configurable and log which operation timed out.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-04-04"
+ ],
+ "sourceClusters": [
+  "C-t2-04-009"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-026",
+   "status": "partial",
+   "exactGap": "Explicit deadlines exist only for download begin and complete (10 s and 30 s, chromiumoxide.rs:76-77), the 5 s profile-capture wrapper (683-693), caller-bounded waits (1733-1740, 2807) and lease acquisition (lease_pool.rs:124); everything else (navigate, content, evaluate, screenshot, AX snapshot, input, tab open) rides chromiumoxide's library default request_timeout of 30 s because the BrowserConfig builder sets none (226-262; chromiumoxide-0.9.1 handler/mod.rs:34, 681), and failures surface as DriverFailed strings rather than a typed Timeout naming the operation (1988-2004, 2017-2023) while DriverFailed is not retryable (error.rs:38-43). Quarry already fails stale or destroyed-frame ref targets with TargetRepairRequired 'observe again' instead of rebinding (1245-1278, 2100-2140), and the Model Plane already retries transient failures of non-risky tool calls up to three times (runtime_loop/retry.rs:37) but deliberately never retries browser.act or browser_agent (permission/mod.rs:261-271). Agent runs are bounded by max_steps and max_runtime_s only (gateway sets 12 and 120, browser.rs:483-490; agent_routes.rs:446-451).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:76-77",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-262",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:683-693",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1245-1278",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1733-1740",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1988-2023",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2100-2140",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-70",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:118-140",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:135-250",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-490",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:1-80",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:255-275",
+    "cargo registry chromiumoxide-0.9.1/src/handler/mod.rs:34",
+    "cargo registry chromiumoxide-0.9.1/src/handler/mod.rs:660-690",
+    "cargo registry chromiumoxide-0.9.1/src/browser/config.rs:15-155"
+   ],
+   "reuse": [
+    "ErrorCode::Timeout (retryable, HTTP 504) and ErrorCode::TargetRepairRequired already in quarry-core",
+    "BrowserConfig builder request_timeout and launch_timeout setters (library supports them)",
+    "BrowserTelemetry startup_latency_ms and the lease pool metrics for calibrating values",
+    "Existing hydration settle budget and wait_for timeouts in BrowserDriverAdapter",
+    "AgentConstraints (max_runtime_s) as the vehicle for per-run overrides"
+   ],
+   "constraints": "Deadlines are Quarry execution policy: per-run overrides may only tighten or stay under a Quarry-side maximum, the Model must not be able to widen them (Model proposes, Quarry executes). Retrying actions is unsafe by design: the Model Plane gates browser.act and browser_agent as risky and the retry helper is risk-gated for the same reason (retry.rs:1-25), and ref-bound actions already fail closed with TargetRepairRequired. ZDR is unaffected; timeouts must not log URLs or page text into details under ZDR.",
+   "approachAdjustment": "Keep it inside quarry-browser, S in size. Set request_timeout and launch_timeout explicitly on the BrowserConfig builder, add a small deadlines module with one cdp_call(op, fut) wrapper that returns ErrorCode::Timeout with details {op, ms} (and wrap goto, which today maps any failure to DriverFailed), and add retry-once only for idempotent read calls (content, AX snapshot, evaluate) when the error text indicates a destroyed context. Never retry ref or coordinate actions; they keep surfacing TargetRepairRequired. Drop the proposed Model Plane planner rule: Model Plane already retries non-risky transient failures, and browser actions are intentionally excluded. Calibrate deadlines from telemetry rather than copying Codex's numbers. Note the item's evidence line chromiumoxide.rs:685 is the profile-capture timeout, not an accessibility snapshot, and there is no 750 ms AX quiet-window equivalent in Quarry.",
+   "effortRevised": "S",
+   "effortNote": "Unchanged. The Model Plane half of the item disappears, and the library already supplies a 30 s per-command floor.",
+   "verdict": "reword",
+   "verdictReason": "Partial is right and the quick-win size holds, but the Model Plane planner rule conflicts with the risk-gated retry design, the evidence line for the accessibility timeout is wrong, and the item missed that the library already enforces a 30 s per-command timeout and that DriverFailed is non-retryable. Reword to a quarry-browser-only change.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

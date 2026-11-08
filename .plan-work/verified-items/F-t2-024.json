@@ -1,0 +1,139 @@
+{
+ "finalId": "F-t2-024",
+ "tier": "priority",
+ "rank": 24,
+ "title": "Credential handoff where the model never sees secrets: executor-side fill_secret and email OTP via integration-corev2",
+ "summary": "Add a fill_secret action carrying an opaque vault:// reference that Quarry resolves only at execution time through the integration-corev2 token broker, fills in an isolated world after re-checking origin and field type, and then blocks page observation of the filled value; add an IC mail.otp.read action so email one-time codes are delivered by the executor after user approval. Requires a sensitive BrowserBroker grant, capture-time redaction (F-t2-021), trusted input (F-t2-015), takeover (F-t2-013) and a Model Plane elicitation/approval card.",
+ "whyItMatters": "Both browser references keep secrets out of the model (Codex: isolated-world fill, OTP and QR, SRC; Aside: origin-bound vault refs, SRC). Verevon has no secret references; fill_secret exists only as a plan (reconciled plan section 19.1, DOC). The present fallback, human takeover login into a scoped profile, works for attended runs but blocks unattended agents and routines.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (CA036-039, CI103: request validated against the live page, isolated-world delivery, observation gate after delivery, OTP/QR variants)",
+  "others": [
+   "Aside AB061 (password-reference fill without a UI form)",
+   "Codex in-app browser (browserAuth.request with otpHandle, browser_email_otp elicitation, broker-socket credential binding)"
+  ],
+  "prevalence": "2 of 3 sources (Aside, Codex); table-stakes || 1 of 4 sources for the browser-page variant (Codex only); unique. The API-side injection variant is in 2 of 4.",
+  "mechanism": "Agent calls request({origin, fields[{label, selector, autocomplete}], submit}). The runtime validates origin and selector uniqueness/visibility; the UI shows a secure form or vault picker; values travel executor -> CDP isolated world -> input.value plus input events; the agent receives only {status}. The document is marked credential-delivered and AX/DOM/screenshot reads of that loader id are denied until navigation. || Merged items add: Model calls browserAuth.request(otpHandle) on a tab. Runtime proceeds only if: origin is https; frame origin equals top origin; exactly one required non-password input; no options/QR; credential-observation gate on; conversation id bound; otherwise status 'unavailable'. It then raises a user elicitation (kind browser_email_otp, requires user input, not auto-approvable by a guardian) saying the model cannot see the code and the user may type it instead. On approval the host (not the model runtime) fetches the code from the mail connector over a local broker socket (versioned credential binding) and types it through a native input path; the model receives only a status. Note Codex restricts this to non-password fields."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:640-827",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:14",
+   "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:1106-1127 (DOC plan: fill_secret with vault:// secretRef resolved at executor boundary)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:639-720 (AgentAction has Type/TypeRef/FrameTypeRef/TypeSemantic with plaintext text; no secret-reference variant)",
+   "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:32-36 (allowedSensitiveActions is only respond_dialog, upload_ref, download_ref; no secret-fill scope)",
+   "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:62-69 (grant Store is an in-memory map)",
+   "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1315 (internal short-lived token lease route, raw OAuth access token)",
+   "apps/Ingestion Plane/integration-corev2/internal/config/config.go:347 (default token-lease consumer allow-list does not include quarry)",
+   "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:254-256,431-434 (Microsoft mail.read and Gmail gmail.read capabilities exist, so an OTP read is feasible)",
+   "apps/Model Plane/rust/services/execution-core/src/grpc.rs:190-215 and model-gateway/src/browser_run.rs:136-160 (grants are only validated; no non-test caller of AcquireGrant found by grep)"
+  ],
+  "gap": "No secret store with opaque references reachable from Quarry; integration-corev2 vault and Quarry profiles never meet at runtime; planned only in docs (SRC/DOC)."
+ },
+ "approach": "ADR on secret custody across planes first (IC owns secrets; Quarry resolves at execution; Model Plane sees only the reference). Then IC operations, Quarry fill_secret with origin and field preconditions plus redaction, Model Plane elicitation event and frontend approval card. || Source detail: [R-t2-09-04] Ingestion Plane: fill_secret action plus an observation gate and redaction of receipts and live frames (blank or blur credential fields). Frontend: secure credential form outside the live frame. Secret store with opaque references scoped to user/org lives in the owning plane (Control Plane per the comparator; check integration-corev2 credential handling first) and is read through its API only. Model Plane: planner sees only ref ids and status. || [R-t2-10-01] Ingestion Plane owns execution; Model Plane owns the approval. (1) Quarry contracts (quarry-core contracts.rs AgentAction plus the Go pkg/quarrycontracts mirror): add FillSecretRef { snapshot_id, generation, ref_id, secret_ref } and FillOtpRef; secret_ref is an opaque handle such as secret://connection/<id>/mail-otp, never a value. (2) browser-broker: add a fill_secret entry to allowedSensitiveActions and issue it through CreateScopedSensitiveApproval as a single-use child of the run grant, bound to one origin, one frame and one secret_ref with a short TTL, only after a user approval event routed by Model Plane/Conversation. (3) integration-corev2: add a dedicated mail.otp.read action (sender/age/pattern filters, returns the code only, write-attested user context, audited through the existing outbox) so Quarry never holds a mailbox OAuth token; do not just add quarry to INTEGRATION_TOKEN_LEASE_CONSUMERS. Add the Quarry-to-IC row to the cross-plane service-token manifest. (4) Quarry executor: precondition checks (https, frame origin == top origin == grant origin, exactly one visible required non-password input for OTP, no QR/options), fill via CDP Input.insertText, mask the field in screenshots/DOM snapshots, receipts carry a boolean only, nothing persisted under ZDR. (5) Frontend: elicitation card naming origin and connection, stating the model cannot see the value, and offering \"I will type it myself\". Ship OTP first; passwords/vault secrets only after the redaction and prompt-injection defences are proven.",
+ "effort": "L",
+ "dependencies": [
+  "Secret store with opaque references (existence unverified)",
+  "F-t2-013 takeover",
+  "F-t2-015 trusted input",
+  "Production issuance of BrowserBroker grants (AcquireGrant has no non-test caller and the store is in-memory) - likely covered by another category",
+  "Quarry value-level redaction pipeline for observations, receipts and artifacts",
+  "Cross-plane manifest row Quarry -> integration-corev2",
+  "New IC mail.otp.read action for Gmail and Outlook connections",
+  "Model Plane approval/elicitation event and frontend approval card"
+ ],
+ "planeOwner": "Ingestion Plane (Quarry executor + integration-corev2 vault) + Model Plane (elicitation)",
+ "risks": "Live frames and screenshots can leak typed secrets; never log values; secrets scoped per user/org, never per Space; ZDR must hold (no persistence of frames that show credentials). || Secret exfiltration through a phishing page, injected iframe or weak origin matching; OTP requested by a page the agent was lured to; accidental logging in receipts, screenshots or artifacts; ZDR violations if a value persists; prompt-injection that tricks the model into proposing fill_secret on the wrong origin (so approval must show origin and connection and be single-use). Quarry has no prompt-injection defences yet per the comparator.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 16,
+  "DOC": 2,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-10-01] QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 19.1 (fill_secret with vault:// secretRef); no code"
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-09-04",
+  "R-t2-10-01"
+ ],
+ "sourceClusters": [
+  "C-t2-09-034",
+  "C-t2-10-001"
+ ],
+ "sourceCategories": [
+  "AI-browser control",
+  "Integration-plane overlap"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-024",
+   "status": "absent",
+   "exactGap": "No fill_secret or secret-reference action exists: AgentAction (quarry-core contracts.rs:638-700) has only plaintext Type, TypeRef, FrameTypeRef and TypeSemantic, typed text is persisted verbatim in StepReceipt.action for non-ZDR runs (step_receipts.rs:198, agent_routes.rs:2346-2362), and only URL and network redaction exists (chromiumoxide.rs:1049-1060), with no value-level redaction of fields or frames. No secret store with opaque references is reachable from Quarry: integration-corev2 crypto/vault.go is AES-GCM at-rest encryption for provider tokens, /internal/connectors/token leases raw provider tokens to an allow-list that excludes quarry (server.go:1315-1345, config.go:347), IC has mail read operations but no OTP action (actions/mail_read.go), and BrowserBroker sensitive approvals cover only respond_dialog, upload_ref and download_ref (grant.go:32-36).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:636-700",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:185-200",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:196-312",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2222-2290",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2346-2362",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1049-1060",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:20-130",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:25-45",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1190-1210",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1225-1245",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:170-177",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:1315-1345",
+    "apps/Ingestion Plane/integration-corev2/internal/config/config.go:335-350",
+    "apps/Ingestion Plane/integration-corev2/internal/crypto/vault.go:1-40",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go:100-175",
+    "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:254",
+    "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:431"
+   ],
+   "reuse": [
+    "Quarry sensitive-approval machinery (agent_routes.rs:196-312: sensitive_approval_for_action, validate_sensitive_approval, single-use set) as the template for a fill_otp or fill_secret variant",
+    "browser-broker CreateScopedSensitiveApproval with parent grant, frame and artifact scoping (grant.go:96-130)",
+    "Model Plane RiskCategory::Login HITL gate (browser_risk.rs:25-45) and the orchestration approvals surface referenced at browser.rs:1195-1208 for the approval card",
+    "Existing human-takeover login plus persistent profile flow (BrowserChrome control chip) as the attended baseline",
+    "IC Gmail and Microsoft mail read capabilities (catalog.go:254, 431; mail_read.go) as the basis for an executor-only OTP action"
+   ],
+   "constraints": "Ingestion Plane owns execution and secret resolution, and the model only ever sees opaque references (Model proposes, Quarry executes); secrets are scoped to user or org and never widened by Space access. ZDR: no persistence of values or frames showing credentials, yet non-ZDR receipts today store typed text verbatim, so redaction (F-t2-021) must precede any fill action. IC Vault is token-at-rest encryption, not a user-secret store, so a secret-custody ADR is required before password references; IC internal auth is one shared API key (server.go:170-173), so Quarry to IC needs a distinct identity or manifest row, and the OTP action must stay off any Model-callable tool surface and return only the code. Production BrowserBroker grant issuance is unbuilt (shared prerequisite with F-t2-001 and F-t2-013).",
+   "approachAdjustment": "Ship OTP first: add a fill_otp variant beside upload_ref and download_ref in the existing sensitive-approval path (single-use child grant bound to run grant, frame and origin), an executor-only IC mail.otp.read action, and reuse the Login risk gate and orchestration approvals for the approval card instead of a new elicitation channel. Defer password and vault-secret references until the secret-custody ADR, F-t2-021 redaction and F-t2-015 trusted input are in place. Do not add quarry to INTEGRATION_TOKEN_LEASE_CONSUMERS.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged for the OTP-first slice; the full password and secret-store scope would be XL because of the ADR, redaction and grant-issuance prerequisites.",
+   "verdict": "reword",
+   "verdictReason": "Confirmed absent in code, but the item should be reworded to OTP-first on top of the existing sensitive-approval and login-gate machinery, with the vault/secret-store half explicitly deferred behind an ADR and its prerequisites.",
+   "confidence": "medium"
+  },
+  "reference": {
+   "finalId": "F-t2-024",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:14650-14800 (handoff handler: otpHandle guard https/frame origin/one required non-password field/no options/QR; Z = runtime.gaas?.getBrowserAuthBrokerChallenge, throws 'Browser auth broker is unavailable' when absent; email OTP elicitation text)",
+    "browser-service.pretty.js:30916-30940 (runtime.gaas set only when BROWSER_USE_SECURITY_MODE == 'gaas-browser-environment'; broker functions only when BROWSER_AUTH_BROKER_SOCKET_PATH is set)",
+    "browser-service.pretty.js:11134-11145, 15368, 25506 (browserAuth capability; ManualHandoff requires clientInfo.type === 'cdp' with browserAuth)",
+    "scratchpad/tmp/cxas/pretty/main.pretty.js:41138, 40918-40924 (desktop IAB client tab capabilities = [pageAssets] plus webmcp when flagged; browserAuth not advertised)",
+    "main.pretty.js:4222, 4235 (BROWSER_AUTH_BROKER_SOCKET_PATH forwarded to node_repl env only in the Dev build flavor)",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/capabilities/tab/browserAuth.md:1-40,100-106,320-335 (references Cloud Browser; user_took_over = manual control of the cloud browser)",
+    "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/background.js:8227-8255 (Aside.create/fill/resolve/clearPasswordManagerGeneratedPasswordRef schemas)"
+   ],
+   "corrections": "1) Re-attribute: Codex browserAuth (secure sign-in handoff, isolated-world native delivery, credential observation gate, email OTP) is wired to the CDP client in the hosted 'gaas-browser-environment' (Codex Cloud Browser) via a broker socket; the shipped desktop in-app browser (iab client) does not advertise the browserAuth capability and the broker socket env is forwarded only in Dev builds. Say 'Codex Cloud Browser', not 'Codex in-app browser'. 2) Email OTP: the broker challenge reports email_otp_delivery and native delivery; 'the host fetches the code from the mail connector' is inferred from the elicitation text, not from observed connector code - mark INF. 3) Codex 'vault/saved-login picker' rests on UI strings (string-level evidence); the opaque-ref vault fill without a UI form is Aside's (SRC). 4) Prevalence '2 of 3, table-stakes' overstates: Aside (opaque password refs, SRC) and Codex (cloud-only) - call it 2 of 4 sources, differentiator, with Codex's variant cloud-only.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Codex browserAuth is cloud-browser (gaas) only and depends on an OpenAI-hosted broker; not available in the local desktop in-app browser per the shipped client capability list",
+    "Elicitation is not answerable by an automated guardian (codex_guardian_compatible:false) - SRC",
+    "Aside returns generated-password plaintext only to its trusted agent-manager extension (not the model) - SRC",
+    "browser_auth telemetry/gate names suggest server-side gating; exact flags not confirmed (INF)"
+   ],
+   "confidence": "medium"
+  }
+ }
+}

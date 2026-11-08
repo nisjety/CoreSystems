@@ -1,0 +1,103 @@
+{
+ "finalId": "F-t2-033",
+ "tier": "recommended",
+ "rank": 9,
+ "title": "Approval loop UX: keyboard-first approval card with redirect, persisted site rules and attention notifications",
+ "summary": "Extend the existing browser approval gate into a full loop. Model Plane owns the approval schema (risk level, display-friendly params, origin, page URL, persist session|always) and persisted per-user or per-org host rules stored as BrowserBroker policy, never widened through Spaces. The SPA renders a keyboard-first card in chat and in the browser panel (Allow with Mod+Enter, Deny with Esc, and a 'do this instead' text that is delivered to the planner as a redirect, plus 'do not ask again' for non-sensitive categories) and deep-links denials to the setting that caused them. Application Plane emits notifications for approval_requested, question and completed with a link into the run, and suppresses them while the session is visible.",
+ "whyItMatters": "The risk categories and the fail-closed deterministic check are already good; what users feel is a card that only approves or rejects, cannot be answered outside the browser panel, and repeats the same question. Background runs need a reliable way to pull the user back without noise, and 'always' rules cut approval fatigue without widening any ACL.",
+ "referenceBestPractice": {
+  "bestSource": "Codex (approval contract, automation-and-safety-064) for the schema; Aside (aside-agent-control-architecture-076) for the card UX; Aside (aside-agent-control-architecture-059, aside-browser-product-097) for visibility-aware notifications",
+  "others": [
+   "Codex notification routing back to the originating session"
+  ],
+  "prevalence": "Approval prompts: 2 of 3 sources, common. Attention notifications: 2 of 3, common.",
+  "mechanism": "Approval request = {kind, connector, tool, params_display[{name, display_name, value}], riskLevel low|high, persist ['session','always'], origin, page_url}. UI choices: Allow, Deny, free text that rejects with 'user asked to do X instead', and 'always' that writes a site rule; denials carry a deep link to the permission setting. Notifications: the UI reports {surfaceId, focused, visible, engaged, sessionId, sequence} on focus changes plus a heartbeat; the backend keeps per-user attention entries with 30 and 60 second TTLs and skips notifying for visible sessions, disabled settings and ephemeral sessions; blocking asks use requireInteraction and open the session on click."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:159-164 (risk labels: login, checkout, posting_form, destructive, cross_domain_navigation, persistent_cookie_use)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:322,2049 (BrowserApprovalCard approve/reject via the orchestration approvals API)",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:220-240 (require_approval reuses the durable Approval record, not a parallel system)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts:7,23,57-62 (event_type and per-channel preferences exist)",
+   "Light grep of apps/Application Plane found no browser approval or run event types (INF)"
+  ],
+  "gap": "Missing: session/always persistence tied to broker host rules, redirect-with-instruction, keyboard shortcuts, display-friendly params, resolving an approval outside the browser panel, settings deep links, and browser-run notification events with visibility suppression. Also unreachable end to end until grants are issued (R-t2-08-01)."
+ },
+ "approach": "Model Plane: extend the approval record and the planner reply path with params_display, persist and redirect_text; persist 'always' as BrowserBroker policy rules keyed by (user or org, host, category) and keep upload/download/dialog single-use. Frontend Plane: shared approval card used in chat and the browser panel, keyboard shortcuts, settings deep links, and a visibility heartbeat. Application Plane: browser event types on the existing notifications API with cta_href to the run; ZDR or ephemeral sessions send title-only bodies.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001",
+  "F-t2-032"
+ ],
+ "planeOwner": "Model Plane (schema and rules) with Frontend Plane and Application Plane",
+ "risks": "Over-broad 'always' rules (keep sensitive categories single-use); notification bodies must not leak page content under ZDR; the notification half is unverified.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 12,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-06"
+ ],
+ "sourceClusters": [
+  "C-t2-08-022",
+  "C-t2-08-023"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-033",
+   "status": "partial",
+   "exactGap": "Shipped: the Phase 5 per-action HITL gate for the durable browser-agent loop (deterministic classify_action_risk categories, fail-closed require_approval on the durable Approval record, BrowserApprovalCard with Bokmal risk labels, decisions through the orchestration approvals API with an optional decision reason). Confirmed missing: keyboard shortcuts (the card is click-only), redirect-with-instruction (a denial aborts the whole run by design in gate_risky_action and the reason only appears in the abort text), session/always persistence and persisted site rules (broker grants are in-memory and per-grant, and capability-core policy rejects user scope), display-friendly params beyond reason, url and selector, and any approval_requested or question notification or visibility suppression (notification-core authorizes only capability-core's run_completed and run_failed, and insight-core consumes approval events for metrics only). The item also understates duplication and the chat gap: chat has a separate ApprovalRequests deck (approve and reject only), and agent-loop approvals are created by pause_for_approval with a generic reason such as tool 'browser.act' requires approval and no risk category, so the richer card exists only for the browser panel's durable runs.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:159-170,322-395 (risk labels; BrowserApprovalCard click-only approve and reject)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:495,2039-2056 (pending approval surfaced in the AI bubble; evidence drawer list)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx:1889-1935 (separate ApprovalRequests deck: kind, detail, approve, reject)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts:13-25,69-72,90-97 (Approval shape; decideApproval already sends a reason)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:1-30 (existing shortcut hook; Escape and Cmd/Ctrl+K already bound globally)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:870-945 (gate_risky_action: denial or timeout aborts the run by deliberate design)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:129-151,328-432 (decided event, polling wait budget, system:* deciders on the durable record)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4453-4515 (agent-loop approvals: generic reason, kind Destructive or Permission, no risk category or params)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:1-60 (RiskCategory set; uploads and downloads not classified there)",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:39-64 (AllowedDomains per grant; in-memory store; no rule store)",
+    "apps/Model Plane/go/services/capability-core/internal/policy/engine.go:25-60 (allow/deny/ask decisions; capability_scopes; IsSupportedScope accepts only org and global)",
+    "apps/Application Plane/notification-core/internal/http/handlers.go:199-212 (authorized notification types: capability-core run_completed and run_failed only)",
+    "apps/Application Plane/notification-core/migrations/013_register_run_watch_notifications.up.sql:1-15",
+    "apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go:1-50 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/run_watchers.rs:1-60 (opt-in run-finished notifications)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts and DashboardComposer.tsx (no Mod+Enter binding found in the composer; INF)"
+   ],
+   "reuse": [
+    "the durable Approval record and DecideApproval path; the SPA already sends a decision reason, so redirect text can use that field without a proto change",
+    "the .verevon-run-approval* card classes and the two existing cards, to be merged into one shared component",
+    "classify_action_risk and RiskCategory for the labels and sensitive categories",
+    "capability-core policy engine (allow/deny/ask, capability_scopes) as the owner-plane home for org-level persisted rules",
+    "runwatch consumer, notifyclient, notification-core channel configs and CtaHref for approval notifications",
+    "use-chat-shortcuts.ts for shortcut registration and collision handling"
+   ],
+   "constraints": "Persisted 'always' rules cannot live as BrowserBroker policy: broker grants are in-memory and per-grant. The owner-plane home is capability-core's policy engine, which today supports only org and global scope (IsSupportedScope rejects user), so per-user always-allow needs a trusted user binding first and Space membership must never widen a rule. Model proposes, Quarry executes: redirect text is a user-authored instruction and the next proposed action must pass the same deterministic classifier and Quarry grant checks; abort-on-deny is a deliberate fail-closed choice, so changing it is a behavior change needing tests. Sensitive categories (login, checkout, destructive, upload, download, dialog) stay single-use. ZDR: notification bodies title-only, no page text or URL. Notifications originate in the Model Plane (capability-core) and are delivered by Application Plane notification-core, not emitted by Application Plane itself. Escape is already globally bound, so Esc=Deny needs collision review.",
+   "approachAdjustment": "Reorder into independently shippable slices. (1) Frontend only: one shared approval card for chat and the browser panel, keyboard shortcuts through the existing shortcut hook, redirect text sent in the existing decision reason. (2) Model Plane: enrich approval creation on the agent-loop path (pause_for_approval) with params_display and risk category, and let the planner receive redirect text as a user message after a denial instead of aborting. (3) Org-level persisted rules in capability-core policy, not BrowserBroker; per-user only after a user-scope binding exists. (4) An approval_requested notification type added to the capability-core runwatch path and the notification-core allowlist, with visibility suppression via a presence heartbeat as a later step.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged as one item, but it spans SPA, Model Plane, capability-core and notification-core; slice (1) is S to M and slices (3) and (4) are each M.",
+   "verdict": "reword",
+   "verdictReason": "Status and gap are largely right, but the rule store belongs in capability-core policy rather than BrowserBroker, notifications originate in the Model Plane, the chat approval path is weaker than the item says, and the redirect needs a deliberate change to abort-on-deny. Reword and slice.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

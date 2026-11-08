@@ -60,6 +60,24 @@
         "type": "string"
       }
     },
+    "locale": {
+      "description": "E4.4-a: the locale the page emulates, as sent (`nb-NO`). See [`PageEmulation`].",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "location": {
+      "description": "E4.4-a: the geolocation the page reports, as sent.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Location"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "max_age": {
       "description": "INNH-7: serve a stored result no older than this many milliseconds\ninstead of fetching. Absent: no read of the URL result cache. `0`: never\nread it (but still write). Accepted only while `ScrapeLimits::max_age_enabled`.",
       "type": [
@@ -107,6 +125,13 @@
       ],
       "format": "uint64",
       "minimum": 0
+    },
+    "timezone": {
+      "description": "E4.4-a: the timezone the page emulates, as sent (`Europe/Oslo`).",
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "$defs": {
@@ -125,6 +150,32 @@
         "readability",
         "clean_full",
         "raw"
+      ]
+    },
+    "Location": {
+      "description": "A geolocation override, in decimal degrees.",
+      "type": "object",
+      "properties": {
+        "accuracy": {
+          "description": "Metres. Absent in a request means [`DEFAULT_ACCURACY_M`]; a checked location always has one.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "latitude": {
+          "type": "number",
+          "format": "double"
+        },
+        "longitude": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "latitude",
+        "longitude"
       ]
     },
     "PiiRedaction": {

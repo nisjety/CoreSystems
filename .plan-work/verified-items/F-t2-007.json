@@ -1,0 +1,117 @@
+{
+ "finalId": "F-t2-007",
+ "tier": "priority",
+ "rank": 7,
+ "title": "Stop viewport-triggered browser relaunches: per-page emulation, a small Chromium process pool and page hygiene",
+ "summary": "Apply the viewport per page or context with Emulation.setDeviceMetricsOverride instead of closing and relaunching the single shared Chromium whenever a lease's viewport differs (None vs Some counts as different). Then replace the one process with a pool of K Chromium processes with maxOpenPages, retire-after-N-pages and a page semaphore, add a /health probe that really opens a page, and size the lease pool from config instead of the hard-coded 2. In the same page-attach path add Page.setWebLifecycleState(active) and Emulation.setFocusEmulationEnabled(true) and a fixed per-lease viewport so coordinates and screenshots are deterministic.",
+ "whyItMatters": "ensure_browser closes the browser and clears every session's pages, egress receipts, dialogs and telemetry when the viewport changes, so two concurrent in-app browser or agent sessions with different viewport options can destroy each other's live sessions. The in-app browser and AI runs need predictable capacity and crash containment; pages that check focus or visibility (menus, chat widgets, video) also behave unpredictably without focus emulation.",
+ "referenceBestPractice": {
+  "bestSource": "Apify Crawlee BrowserPool (apify-platform-058, DOC); Aside for page hygiene (aside-agent-control-architecture-029, SRC)",
+  "others": [
+   "Firecrawl Playwright service: health probe that really opens a page plus a page semaphore (firecrawl-engine-and-infra-008, SRC)",
+   "Codex: background-throttling exemption only while driven or captured (codexbrowser-automation-and-safety-129, SRC)",
+   "Aside: 1440x900 stable viewport floor (aside-browser-product-085, SRC)"
+  ],
+  "prevalence": "Pool lifecycle: 2 of 4 sources (apify, firecrawl), table-stakes. Page hygiene: 2 of 4 (aside, codex), differentiator.",
+  "mechanism": "Pool of N browser processes; each tracks open pages and pages served. New contexts go to the least-loaded process below maxOpenPages; after retireAfter pages a process stops taking work and closes when idle; pre/post launch and page hooks run in a fixed order; /health opens about:blank in a fresh context with a deadline. Per page on attach: Page.enable, DOM.enable, Network.enable, Page.setWebLifecycleState('active'), Emulation.setFocusEmulationEnabled(true), Target.setAutoAttach(flatten). Rust shape: Vec<BrowserSlot{proc, open, served, retiring}> behind a Mutex plus a tokio Semaphore for pages."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-226 (ensure_browser: if guard.is_some() && active_viewport == viewport return; otherwise close the browser and clear pages, egress_receipts, dialogs, session_telemetry)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1285 (one shared ChromiumoxideDriver for all agent runs) and :337 (RuntimeLeasePool::new(2) hard-coded for scrape; Browserbase pool is 4 at :323)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs (LeasePool: session reuse by affinity key plus TTL and a semaphore, not a multi-process pool)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1447-1451 (viewport is Option, so None vs Some(1280x800) differ)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:813-818 (UI always sends 1280x800)",
+   "grep: no setFocusEmulationEnabled or setWebLifecycleState anywhere in quarry crates"
+  ],
+  "gap": "One shared Chromium per driver; a viewport mismatch tears down every live session on that driver; no retire-after-N, no multi-process pool, no real health probe, pool size is a literal; no focus or lifecycle emulation. Frequency in production is unverified (it needs two concurrent runs whose viewport options differ, for example a UI session at 1280x800 and a Model Plane run with none)."
+ },
+ "approach": "Ingestion Plane, quarry-browser: replace the single `browser` plus `active_viewport` fields with Vec<BrowserSlot>. Apply BrowserLease.viewport per page via Emulation.setDeviceMetricsOverride (this also gives R-t2-03-05 its mobile/locale hooks). Assign each session to a slot with affinity so the per-session pinned egress proxy, devtools collectors, receipts and dialog maps move into per-slot or per-session state rather than driver-global maps; keep --disable-quic when the pinned proxy is on. Read pool size, maxOpenPages and retireAfter from config, add a health probe that opens a page with a deadline, and add the two hygiene CDP calls in the page-attach path. Gateway and SPA need no change. Acceptance test: two concurrent leases with different viewports, neither loses its page.",
+ "effort": "M",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane (quarry-browser, quarry-edge main.rs)",
+ "risks": "More processes raise memory pressure; driver-global state maps (egress receipts, dialogs, telemetry) must be re-keyed per session or slot without breaking receipt ordering; keep per-session proxy binding intact when a session moves between processes.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 1,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-01] apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md Phase 5 (production-grade local browser pools, cleanup, probes, pressure-aware admission); the viewport-relaunch defect itself is not mentioned there"
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-03-01"
+ ],
+ "sourceClusters": [
+  "C-t2-03-007",
+  "C-t2-03-013"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-007",
+   "status": "partial",
+   "exactGap": "ChromiumoxideDriver (quarry-browser/src/chromiumoxide.rs:114-126) keeps one Browser plus one active_viewport; ensure_browser (194-270) runs from acquire (1914-1926), goto (1991) and open_tab_page (378) and, on any viewport mismatch (None vs Some counts), closes Chromium and clears pages, egress receipts, dialogs and telemetry for every session, because the viewport is applied only at launch via builder.viewport (244-246) and no Emulation, focus or lifecycle CDP call exists anywhere in the crate. The agent path acquires directly on that driver with no LeasePool, semaphore, idle reaper or health use (agent_routes.rs:1512-1513); the RuntimeLeasePool::new(2) and new(4) at main.rs:337 and 323 belong to the scrape and Browserbase drivers, and /health is a static ok (routes.rs:309). Model Plane runs send no viewport (None) while gateway sessions always send 1280x800 (browser.rs:481-489), so a concurrent Model Plane run plus a UI session on one edge hits the relaunch (frequency in production unverified).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:100-135",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:185-270",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:366-385",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1851-1860",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1914-1995",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs:1-80",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:323-339",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1278-1292",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1436-1456",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1478-1530",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:300-320",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/lease.rs:8-33",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:455-492",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:817"
+   ],
+   "reuse": [
+    "Per-session isolated CDP browser contexts and the already session-keyed maps in ChromiumoxideDriver (egress receipts, policies, dialogs, telemetry)",
+    "BrowserLease.viewport contract, which only says launch-only drivers should relaunch (lease.rs:19-22) so per-page emulation needs no contract change",
+    "quarry-browser LeasePool semaphore plus affinity TTL (pool.rs) for the scrape path",
+    "Agent run ttl_s (agent_routes.rs:1446) as the basis for an idle reaper"
+   ],
+   "constraints": "Pure Ingestion Plane change; gateway and SPA need none. The per-session pinned egress proxy and CDP Fetch boundary must stay bound to each session if sessions move between processes, and --disable-quic must remain when the pinned proxy is on (chromiumoxide.rs:236-243). ZDR sessions stay non-persistent. Model proposes, Quarry executes is unaffected.",
+   "approachAdjustment": "Split. Part A (S): remove viewport from browser identity, apply Emulation.setDeviceMetricsOverride per page or context at page attach, add the focus and lifecycle CDP calls; this removes the cross-session kill. Part B (M): add an admission cap, idle reaper and health probe for the agent driver path first, because the item phrase about sizing the lease pool from config only touches the scrape driver (the agent path has no pool at all); then optionally a multi-process pool, moving only browser, handler, pages and the single-slot live_frame_cache into per-slot state. Put the page-opening probe behind /ready, not the unauthenticated /health. Acceptance test: a 1280x800 lease and a None-viewport lease concurrent on one driver; note ensure_browser also runs on every goto, so mismatched sessions ping-pong.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged. Part A alone is S; the per-session maps are already keyed by session key, so the pool is M rather than L.",
+   "verdict": "reword",
+   "verdictReason": "The relaunch defect is real and confirmed in code, but the item misplaces the capacity problem: the hard-coded pool of 2 is the scrape driver, whereas the in-app browser and AI runs use a driver with no admission control or reaper.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-007",
+   "verdict": "partial",
+   "checked": [
+    "https://raw.githubusercontent.com/apify/crawlee/master/packages/browser-pool/src/browser-pool.ts (#pickBrowserWithFreeCapacity uses .find() = first browser below maxOpenPagesPerBrowser; retireBrowserAfterPageCount default 100; maxOpenPagesPerBrowser default 20; closeInactiveBrowserAfterSecs 300; hook order pre/postLaunch, pre/postPageCreate, pre/postPageClose)",
+    "C:/dev/firecrawl/apps/playwright-service-ts/api.ts:26-28,160,187-200,353-377 (single chromium.launch; Semaphore MAX_CONCURRENT_PAGES default 10; /health creates context+newPage then closes, no navigation, no explicit deadline)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@3035200-3036900 (Page.enable, setDialogAutoAccept, DOM/Network/Inspector.enable, Page.setWebLifecycleState active, Emulation.setFocusEmulationEnabled, Target.setAutoAttach flatten, guarded by an internal flag); AI_TAB_STABLE_VIEWPORT={width:1440,...}",
+    "scratchpad/tmp/cxas/pretty/main.pretty.js:43527-43532 (xJ: setBackgroundThrottling off when visible, isBrowserUseActive or isBeingCaptured; showInactive)"
+   ],
+   "corrections": "1) Firecrawl does not run a browser process pool: the OSS playwright service launches ONE Chromium and bounds concurrent pages with a semaphore; no retirement, relaunch or placement. Pool lifecycle is 1 of 4 (Apify Crawlee BrowserPool); Firecrawl contributes only the page semaphore and health probe. 2) Crawlee assigns a new page to the FIRST active browser below maxOpenPagesPerBrowser (not the least-loaded); retired browsers close when they have no pages or via the inactivity sweeper (closeInactiveBrowserAfterSecs 300 s). 3) Firecrawl /health creates a fresh context and blank page and closes them; it does not navigate to about:blank and has no explicit deadline. 4) The Rust Vec<BrowserSlot>/Semaphore shape is a Verevon proposal (INF), not a reference mechanism.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Apify BrowserPool evidence is DOC plus public OSS source (not an installed artifact)",
+    "Aside page-hygiene CDP calls are SRC from the daemon SEA blob and conditional on an internal flag",
+    "Codex throttling exemption is for the Electron desktop shell (webContents.setBackgroundThrottling), not a headless pool"
+   ],
+   "confidence": "high"
+  }
+ }
+}

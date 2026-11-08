@@ -587,6 +587,14 @@ pub struct ScrapeRequest {
     /// E3.6-5: the camelCase spelling of `redact_pii`, read the same way.
     #[serde(default, rename = "redactPii")]
     pub redact_pii_camel: Option<serde_json::Value>,
+    /// E4.4-a: the raw `locale`, `timezone` and `location`. The stream route refuses them while
+    /// `QUARRY_EDGE__PER_PAGE_LOCALE` is on; on `/v1/scrape` the contract parse checks them.
+    #[serde(default)]
+    pub locale: Option<serde_json::Value>,
+    #[serde(default)]
+    pub timezone: Option<serde_json::Value>,
+    #[serde(default)]
+    pub location: Option<serde_json::Value>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -702,6 +710,16 @@ fn stream_requests_redaction(req: &ScrapeRequest) -> bool {
         .into_iter()
         .flatten()
         .any(|value| !value.is_null() && value.as_str() != Some("off"))
+}
+
+/// E4.4-a: whether a stream request asks for a locale, timezone or location while the switch is on.
+/// The stream serves no emulation. Off, those keys are unknown and the stream ignores them, as before.
+fn stream_requests_page_emulation(req: &ScrapeRequest, enabled: bool) -> bool {
+    enabled
+        && [req.locale.as_ref(), req.timezone.as_ref(), req.location.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_null())
 }
 
 /// `/v1/scrape` with its settings passed in, so tests can pick strictness.
@@ -1004,6 +1022,17 @@ async fn scrape_with(
             Json(Envelope::<()>::err(&request_id, error)).into_response(),
         ));
     }
+    // E4.4-a: a locale, timezone or location is set by the browser, so it needs one too.
+    if let Some(emulation) = resolved
+        .page_emulation
+        .as_ref()
+        .filter(|_| !state.drivers.has(quarry_core::output::DriverKind::Browser))
+    {
+        return Err(contract_error(
+            &request_id,
+            crate::scrape_actions::page_emulation_unsupported(emulation),
+        ));
+    }
 
     let driver = pick_driver(&state, &plan, req.prefer_http3);
     // E3.8.3: the fetch retries under the scrape config, except in two cases. A browser
@@ -1065,6 +1094,8 @@ async fn scrape_with(
                 &resolved,
                 settings.limits().captures,
             );
+            // E4.4-a: the page's locale, timezone and location, if the request asked for them.
+            crate::scrape_actions::apply_page_emulation(&mut render, &resolved);
             render
         },
         page_renderer: state.page_renderer.clone(),
@@ -2649,6 +2680,20 @@ async fn scrape_stream(
             yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
             return;
         }
+        // E4.4-a: the stream sets no locale, timezone or location. Refused, not dropped, while
+        // the switch is on; off, the keys are unknown and ignored, as they always were.
+        if stream_requests_page_emulation(
+            &req,
+            crate::scrape_contract::ScrapeSettings::current().per_page_emulation_enabled,
+        ) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "locale, timezone and location are not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
         // INNH-1: the stream serves no AI formats. Refused whatever the switch says,
         // before any fetch, so a caller learns it is the route and not the flag.
         if crate::scrape_contract::ai_formats::requests_ai_format(req.formats.as_ref()) {
@@ -3486,6 +3531,41 @@ mod tests {
         let data = &body["data"];
         assert!(data["markdown"].as_str().unwrap().contains("ola.nordmann@example.no"));
         assert_eq!(data["effective_options"]["redact_pii"], "off");
+    }
+
+    #[tokio::test]
+    async fn a_page_emulation_on_an_edge_with_no_browser_is_a_400_naming_each_field() {
+        let settings = crate::scrape_contract::ScrapeSettings {
+            per_page_emulation_enabled: true,
+            ..Default::default()
+        };
+        let response = call_scrape_settings(
+            pii_page_state(),
+            serde_json::json!({ "url": "https://example.com/contact", "locale": "nb-NO", "timezone": "Europe/Oslo" }),
+            &settings,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["path"], "locale");
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "unsupported_option");
+        assert_eq!(body["error"]["details"]["fields"][1]["path"], "timezone");
+        assert_eq!(body["error"]["details"]["fields"][1]["code"], "unsupported_option");
+    }
+
+    #[test]
+    fn the_stream_refuses_page_emulation_only_while_its_switch_is_on() {
+        let asked: ScrapeRequest = serde_json::from_value(
+            serde_json::json!({ "url": "https://example.com/", "timezone": "UTC" }),
+        )
+        .expect("a request");
+        let unset: ScrapeRequest = serde_json::from_value(
+            serde_json::json!({ "url": "https://example.com/", "locale": null }),
+        )
+        .expect("a request");
+        assert!(stream_requests_page_emulation(&asked, true));
+        assert!(!stream_requests_page_emulation(&asked, false));
+        assert!(!stream_requests_page_emulation(&unset, true));
     }
 
     #[tokio::test]

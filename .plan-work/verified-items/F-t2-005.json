@@ -1,0 +1,143 @@
+{
+ "finalId": "F-t2-005",
+ "tier": "priority",
+ "rank": 5,
+ "title": "One strict ScrapeOptions contract: formats[], inline return (the ZDR path) and main-content controls",
+ "summary": "Define ScrapeOptions once in quarry-core (deny_unknown_fields, validate() with field paths, schemars JSON Schema for OpenAPI and the Model Plane tool schema) with formats[] (markdown, html, rawHtml, links, metadata now; json, screenshot and pdf via F-t2-019 and F-t2-023), inline return up to a size cap with artifact-ref fallback, timeout, maxAge, onlyMainContent, include/exclude selectors, extractor choice (readability, clean_full, raw) with a full-HTML fallback, headers and location. Return effectiveOptions and a scrape_id, add GET /v1/scrape/:id (not for ZDR), and embed the struct in crawl, batch, search hydration and schedules.",
+ "whyItMatters": "Every agent web_fetch pays two calls today (scrape, then GET artifact), and a ZDR scrape returns no content because outputs exist only as artifact refs that are never written under ZDR (SRC). Inline return is the natural ZDR path. One validated contract is what lets the Model propose options and Quarry reject bad ones with field-level 400s. docs/OSS_PARITY_BACKLOG.md:22 claims format parity is done; the code contradicts it (no formats field on ScrapeRequest).",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (api-surface fc-001 inline scrape under a per-team semaphore; fc-002 shared zod strictObject)",
+  "others": [
+   "Apify web-fetch / Website Content Crawler (DOC; same format list, run as an Actor)",
+   "Firecrawl (api-surface-038/039 for the formats union and Document metadata; api-surface-047 for attributes/images formats)",
+   "Firecrawl (engine-and-infra-086 streaming Rust transform, api-surface-040 options)"
+  ],
+  "prevalence": "inline scrape: 2 of 4 sources (Firecrawl, Apify), table-stakes; shared strict options contract: 1 of 4 (Firecrawl), differentiator; scrape-by-id: 1 of 4 (Firecrawl) || 1 of 4 sources in this record set (Firecrawl); common for scrape APIs (INF: a per-call output-format choice is the standard shape; Apify, Codex and Aside are not scrape-API shaped) || 2 of 4 sources (Firecrawl, Apify); table-stakes for scrape APIs (the two browser sources have no scrape API)",
+  "mechanism": "Validate the request against a single options schema; take a per-org concurrency permit with a bounded wait (2/3 of the request timeout); run the pipeline in-process; build the Document with only the requested formats (markdown default, rawHtml only on request) and put scrapeId, status code, final URL and queue time in metadata; cross-field rules (waitFor <= timeout/2, action count and total wait caps, one screenshot format); write a per-job access row {scrapeId, orgId, expiresAt} so GET /scrape/:id can re-serve the result, and write none for ZDR. Caution from the reference: it silently defaults skipTlsVerification to true, so echo effective options and never flip a security default silently. || Merged items add: Request: formats: Array<string | {type, ...opts}>; strings are lifted to {type} and validated against a tagged union so each format has its own option schema (serde #[serde(tag=\"type\")] in Rust). Pipeline: fetch once, then run only requested transformers in a fixed order (clean html -> markdown -> links/images/attributes -> LLM formats -> redaction -> diff). Response: one Document with optional fields per format plus metadata {statusCode, sourceURL, url, contentType, cacheState, cachedAt, proxyUsed, creditsUsed, warnings[]}. Exclusive formats (raw base64) are rejected when combined with others. || Parse with a DOM or streaming rewriter (lol_html, kuchikiki). Remove head/meta/style/script/noscript. If includeTags is given keep only matching subtrees; remove excludeTags. If onlyMainContent, remove a fixed list of about 42 chrome selectors unless the node contains a force-include region. Resolve lazy images (data-src, data-srcset, largest srcset) against the base href. Choice of extractor, falling back to full cleaned HTML when readability yields too little text. Firecrawl's optional LLM clean pass is unsupported under ZDR and not worth copying."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:131",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:345-375 (ScrapeRequest: url, prev_fingerprint, cache, zdr, privacy, signals, ingest, org_id, render, prefer_http3; no formats/timeout/maxAge)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:398-530",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:1067-1110",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:504-545 (service scopes already allow /v1/artifacts/:id, so the second call is a latency and ZDR problem, not a permission one)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:112",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:28",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:346-375",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:131-147",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:601-690",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:696-706",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/images.rs:27-121"
+  ],
+  "gap": "ScrapeRequest has url, prev_fingerprint, cache, zdr, privacy, signals, ingest, org_id, render, prefer_http3 and nothing else; each route has ad hoc fields; one hard-coded Readability pass strips nav/aside/images with no toggle, selectors or extractor choice (pipeline.rs:505); no scrape-id lookup (SRC)."
+ },
+ "approach": "Ingestion Plane: quarry-core ScrapeOptions + quarry-transform clean_html stage ahead of readability; quarry-edge scrape handler returns formats inline. Roll out with a lenient period that logs unknown keys because gateway callers send extra fields. Model Plane web_tools switches web_fetch to inline markdown. Never silently flip a security default (Firecrawl defaults TLS verification off; do not copy that). || Source detail: [R-t2-01-01] Ingestion Plane. quarry-core: new ScrapeOptions (serde deny_unknown_fields, validate(), JSON Schema via schemars used for OpenAPI and for the Model Plane tool schema). quarry-edge routes.rs scrape handler: serialize requested formats inline up to a size cap and fall back to FormatRef above it; return scrape_id and effectiveOptions; add a URL+options keyed cache with maxAge that is bypassed for ZDR and never crosses orgs; add GET /v1/scrape/:id resolving to the artifact set (not for ZDR). Embed ScrapeOptions in CrawlRequest, BatchRequest and SearchRequest.scrapeOptions in the other items. Model Plane execution-core web_tools.rs switches web_fetch to inline markdown. Roll out with a lenient period that logs unknown keys because gateway callers send extra fields. Optional follow-on: expose the existing ActionRuntime/ActionScript as a declarative actions[] field (no arbitrary JS). || [R-t2-02-01] Ingestion Plane. quarry-core: add FormatSpec (tagged enum, per-format options) and extend NormalizedOutput with optional inline fields; version the contract in docs/CONTRACTS.md and docs/openapi.yaml, then regenerate sdks/python and sdks/typescript. quarry-runtime pipeline.rs: after the single fetch, dispatch transformers by requested format; keep returning FormatRef artifact ids for large payloads and return text formats inline under a size threshold. For zdr=true return inline only and write nothing (reuse the zdr::guard WriteKind checks). First formats to wire: links (already shipped), images (images.rs), attributes (attributes.rs, selector+attribute pairs), plus a warnings[] block. Frontend Plane gateway (apps/gateway/src/domains/knowledge/quarry.rs and search.rs) stays a thin request builder. || [R-t2-02-03] Ingestion Plane quarry-transform: add clean_html(opts) before readability with the chrome selector list, force-include logic and include/exclude selectors, and let the pipeline choose the extractor per request (readability, clean_full, raw). Options live on the FormatSpec/request contract from R-t2-02-01. Keep a flag to preserve images as markdown links via images.rs. Build golden-page regression fixtures on the existing Quarry eval harness (10 HTML fixtures, per docs/gap-quarry.md) so selector lists do not delete real content.",
+ "effort": "M",
+ "dependencies": [
+  "OpenAPI regeneration from the same types (F-t2-064)",
+  "quarry-core contract versioning and SDK regeneration",
+  "gateway request builder in knowledge/quarry.rs",
+  "ZDR inline-return path (no persistence)",
+  "golden-page eval fixtures"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-core, quarry-transform, quarry-edge); consumers in Model Plane web_tools and Frontend gateway",
+ "risks": "Large inline payloads (cap and fall back to artifact refs); cache must never serve across orgs or for ZDR requests; strict rejection breaks existing gateway callers that send extra fields (use a lenient period); resist copying Firecrawl's hidden option normalisation. || Contract churn for existing gateway callers; inline payload size limits; must keep ZDR semantics (nothing written) while still returning content. Quarry docs overstate current state (OSS_PARITY_BACKLOG.md:22 marks scrape formats as complete), so treat the code as the baseline and fix the doc. || Selector lists remove real content on some sites; needs per-site regression fixtures; changing default output changes fingerprints used by monitors (coordinate with R-t2-02-05).",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 19,
+  "DOC": 5,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-02-01] Quarry-v2 docs/ROADMAP.md Phase 6 lists Firecrawl format parity as intent; docs/OSS_PARITY_BACKLOG.md:22 claims it done, which the code contradicts (no formats field on ScrapeRequest)."
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-01-01",
+  "R-t2-02-01",
+  "R-t2-02-03"
+ ],
+ "sourceClusters": [
+  "C-t2-01-001",
+  "C-t2-01-002",
+  "C-t2-01-003",
+  "C-t2-02-001",
+  "C-t2-02-021",
+  "C-t2-02-002"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface",
+  "Output formats & content processing"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-005",
+   "status": "partial",
+   "exactGap": "POST /v1/scrape takes only url, prev_fingerprint, cache (with max_age_s), zdr, privacy, signals, ingest, org_id, render hints and prefer_http3 (quarry-edge routes.rs:346-375): there is no formats[], timeout, onlyMainContent, selector or extractor choice, no deny_unknown_fields (so keys such as the gateway's formats/maxPages in search.rs:118-135 are silently ignored), and no GET /v1/scrape/:id (only POST /v1/scrape and /v1/scrape/stream are routed). Output is artifact refs only (FormatRef, output.rs:129-150), so web_fetch needs a second artifact GET (model-gateway quarry.rs:761-775), and under ZDR the pipeline writes no artifacts and returns html/markdown as None (pipeline.rs:597-601, 682), so a ZDR scrape returns no text. One fixed readability pass runs (pipeline.rs:506) with a whole-HTML fallback only when extraction fails (readability.rs:235-240).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:131 (only POST /v1/scrape routed)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:345-375 (ScrapeRequest fields)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:432-440, 478-486 (cache read keyed by prev_fingerprint; put_with_ttl)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:596, 687 (crawl and batch refused under ZDR; crawl handed to orchestrator at 626)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:94, 129-150 (OutputFormats holds FormatRef only; excerpt is the only inline text)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/cache.rs:5-14 (CachePolicy.max_age_s exists)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:476-506 (charset decode then single readability pass)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:597-690 (ZDR skips artifact writes; formats html/markdown become None)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/readability.rs:235-240 (fallback to full-HTML markdown if extract returns None)",
+    "apps/Model Plane/rust/services/model-gateway/src/quarry.rs:145-152 (client ScrapeOptions: render, signals, prefer_http3, zdr only)",
+    "apps/Model Plane/rust/services/model-gateway/src/quarry.rs:755-775 (comment: Quarry does not inline page text; second call resolves artifact; skipped under ZDR)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:112-140 (gateway already sends formats/maxPages that Quarry ignores)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:28-60 (body forwarded verbatim to /v1/scrape)",
+    "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:18-34 (claims scrape format parity is done)"
+   ],
+   "reuse": [
+    "quarry-transform readability.rs, links.rs, metadata.rs, markdown.rs, images.rs lazy-image helpers, attributes.rs as the clean_html/format building blocks",
+    "quarry-core OutputFormats / FormatRef / NormalizedOutput and CachePolicy (max_age_s) plus should_read / should_write / effective_ttl in routes.rs",
+    "zdr::guard with WriteKind for the no-write inline ZDR path",
+    "RenderHintsRequest and DriverSignals already on ScrapeRequest",
+    "model-gateway quarry.rs ScrapeOptions as the client struct to extend; /v1/extract + AiFormatRunner (ai_formats.rs) for the json format",
+    "docs/openapi.yaml and openapitools.json SDK regeneration path"
+   ],
+   "constraints": "Ingestion Plane owns the contract; Model Plane web_tools and the Frontend gateway stay thin clients. ZDR: inline return must write no artifacts and no cache, GET /v1/scrape/:id must not exist for ZDR runs, any URL+options cache must be org-keyed and bypassed under ZDR. Crawl and batch are refused under ZDR and crawl is handed to the Go quarry-orchestrator (routes.rs:626), so embedding options in crawl needs orchestrator work in another service. The Quarry workspace has no schemars or utoipa dependency, so the OpenAPI is hand-maintained today.",
+   "approachAdjustment": "Scope the first slice to /v1/scrape only: formats[] with inline markdown/html/links/metadata under a size cap with FormatRef fallback, onlyMainContent plus include/exclude via a clean_html stage ahead of readability, effectiveOptions in the response, and switch model-gateway web_fetch to the inline path. Defer embedding in crawl, batch, search hydration and schedules (Go orchestrator). Adopting schemars is a new dependency decision; extending docs/openapi.yaml by hand is the current practice. A whole-HTML fallback already exists when readability fails, so only a user-selectable raw/clean_full extractor is new. maxAge exists as cache.max_age_s but the read path is keyed by prev_fingerprint, not URL plus options. Keep the lenient unknown-field period since the gateway already sends ignored keys.",
+   "effortRevised": "M",
+   "effortNote": "M holds for the scrape-only slice. Embedding ScrapeOptions in crawl/batch/schedules (orchestrator handoff) would be L and should be a follow-on.",
+   "verdict": "reword",
+   "verdictReason": "Premise is verified (no formats field, no inline return, ZDR scrape yields no text, no scrape id route), but partial pieces exist (cache.max_age_s, whole-HTML fallback, ignored formats key already sent by the gateway) and the embed-everywhere scope should be cut to /v1/scrape for the first deliverable.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-005",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape.ts:361-374 (comment: semaphore has 2/3 of the timeout to get a lock; teamConcurrencySemaphore.withSemaphore)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:841, 899, 908-918 (skipTlsVerification defaults true unless headers or actions are set; waitFor <= timeout/2)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-status.ts:20-40 (GET /scrape/:id refused with 400 for forced-ZDR teams; 404 when the access row is missing or expired)",
+    "C:/dev/firecrawl/apps/api/src/services/logging/log_job.ts:514-527 (writeApiJobAccess is called whenever jobAccess !== false and passes a zeroDataRetention flag; it is not skipped for ZDR)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/index.ts:621-690 (transformerStack order; rawBase64 short-circuits)",
+    "C:/dev/firecrawl/apps/api/native/src/html.rs (EXCLUDE_NON_MAIN_TAGS has 42 entries; FORCE_INCLUDE_MAIN_TAGS has 13)",
+    "https://apify.com/apify/web-fetch (formats markdown/html/text/links/raw; Standby sync; 10 MB cap; 2 min timeout)",
+    "https://apify.com/apify/website-content-crawler (htmlTransformer: Readable text with fallback, Readable text, Extractus, Defuddle, None)"
+   ],
+   "corrections": "(1) 'Write none for ZDR' is a Verevon design choice, not what the reference does. Firecrawl still writes the job-access row and tags it with zeroDataRetention. It refuses GET /scrape/:id only for teams forced into ZDR. (2) The described transformer order does not match the code. The actual order is html, markdown, LLM clean (onlyCleanContent), redactPII, prompt-injection guard, links, images, branding, metadata, product/menu, LLM json/deterministicJson, summary, query, attributes, agent, removeBase64Images, diff, audio/video, then coerceFieldsToFormats. So redaction runs early, not after the LLM formats, and every transformer runs and checks its own option before the final coercion strips unrequested fields. Requested transformers are not the only ones run. (3) The 'choice of extractor with fallback to full HTML' comes from Apify (DOC), not Firecrawl, and Apify ties the fallback to whether the page is a clear article, not to a text-length threshold. Firecrawl uses fixed selector heuristics. (4) Apify Web Fetch does not have 'the same format list': it has only markdown/html/text/links/raw, with no screenshot, json, attributes or images.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Firecrawl parts are SRC; the Apify Web Fetch and Website Content Crawler parts are DOC-only",
+    "The skipTlsVerification=true default is a real footgun in the reference; do not copy it",
+    "onlyCleanContent is an LLM pass that is unsupported under ZDR and looks experimental",
+    "Firecrawl's openapi.json lags the code (formats are missing), so cite the code, not the spec"
+   ],
+   "confidence": "high"
+  }
+ }
+}

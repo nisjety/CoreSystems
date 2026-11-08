@@ -1,0 +1,129 @@
+{
+ "finalId": "F-t2-025",
+ "tier": "recommended",
+ "rank": 1,
+ "title": "Per-org capacity: concurrency caps with backlog and fair share, per-class rate limits and plan-aware quotas",
+ "summary": "Add a per-org concurrency cap with a bounded backlog and fair-share priority inside the existing Postgres queue (Firecrawl pattern: over-limit work waits with an expiry, 429 only when the backlog is full), per-endpoint-class rate limits on the gateway browser, scrape and search routes, and plan-keyed limits read from Control Plane entitlements via claims (no cross-plane DB reads).",
+ "whyItMatters": "With a two-session lease pool and no per-org caps, one tenant can starve all others; the browser, search and ingestion gateway routes have no rate limiting (SRC per baseline). Plan-scaled limits are table-stakes for web platforms (Firecrawl SRC, Apify DOC).",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (tenant backlog with expiry, in-flight priority penalty, 429 only on backlog overflow)",
+  "others": [
+   "Firecrawl (SRC)",
+   "Firecrawl (per-endpoint base limits times a plan multiplier, with org override)"
+  ],
+  "prevalence": "1 of 4 sources; differentiator (Apify documents plan concurrency limits but not this mechanism) || 1 of 4 sources (Firecrawl); unique as a documented design || 2 of 4 sources (both crawl platforms); common",
+  "mechanism": "Sync path: a per-tenant lease semaphore (holders with TTL, heartbeated) waits up to 2/3 of the request timeout with jittered backoff. Async path: if active(org) >= limit, insert into backlog(org, job, times_out_at) instead of the queue; when a job finishes, promote the oldest backlog entry respecting per-crawl max concurrency; a reaper expires backlog rows (max 48 h). Backlog capacity = clamp(limit x 2000, 50k, 2M); overflow returns 429 naming the limit. Fair share: priority stays at base until in_flight(org, 60 s window) exceeds a bucket limit, then base + ceil((count - bucketLimit) x planModifier). || Merged items add: A Redis limiter keyed by (org, endpoint class). Limit = base[class] x plan multiplier, with per-org overrides. Cheap status polling has a high limit and browser sessions a low one. The limiter fails open if the entitlement lookup is down, and returns 429 with Retry-After. || BASE_RATE_LIMITS per endpoint class (scrape 10, map 10, crawl 2, search 10, extract 2, browser 2, status 500 per minute) multiplied by a plan multiplier (1, 10, 50, 500), with per-org overrides per mode; a token-bucket limiter keyed by (org, mode); priority tier derived from the same multiplier. Quotas are counted on create (schedules, webhooks) and rejected with a typed error."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:889-898",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/resources_v2.go:102",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:74",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:518-610",
+   "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:127",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:147-148",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:58",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:350",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:448",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:46",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:34",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:4-51"
+  ],
+  "gap": "Only a read-only team-concurrency view exists; no backlog or fairness; per-org vector budget only; plan-aware quotas unverified (light grep; NV)."
+ },
+ "approach": "Ingestion Plane queue admission + Frontend gateway rate_limit.rs classes + Control Plane entitlement keys. Shares the admission code with F-t2-006. || Source detail: [R-t2-05-05] Ingestion Plane enforces, Control Plane owns the numbers. Quarry reads the org's concurrency limit from the verified principal or an entitlement call, counts active rows per org in the same Postgres queue (no second store), adds an org_backlog table promoted on completion, applies an in-flight priority penalty in the claim ORDER BY (postgres_queue.rs), and returns a typed 429 with Retry-After. Count agent browser leases against the same org budget or a sibling cap so agent fleets cannot bypass it (INF). Frontend: show queue position via the existing team queue-status route. First make the durable frontier the only production crawl path (hardening of the existing queue: remove the in-workflow slice fallback, add a stall counter with max-stall fail-out). || [R-t2-04-11] Frontend Plane gateway: replace the single DEFAULT_RPM bucket lookup with a class-aware limiter (class derived from route, key = org, base limits multiplied by Control Plane plan entitlements, separate interactive and agent classes so human browsing is not throttled by agents). Ingestion Plane: per-org permit accounting in the lease pool (guaranteed minimum plus burst) and a coarse per-org backstop in quarry-edge that returns the existing RATE_LIMITED envelope with retry_after_seconds. || [R-t2-05-10] Control Plane owns the multiplier and quota numbers and exposes them in the principal or entitlement claims. Quarry edge applies a token bucket per (org, endpoint class: scrape, map, crawl, search, extract, browser, status) with Retry-After, and checks quota counts when creating schedules and webhooks. Gateway keeps coarse inbound abuse protection only. Verify what exists in the Control Plane first.",
+ "effort": "M",
+ "dependencies": [
+  "Control Plane entitlement for concurrency per org",
+  "durable frontier always on in production",
+  "Gateway rate_limit.rs (exists)",
+  "Control Plane entitlements",
+  "quarry-edge api_error RATE_LIMITED envelope (exists)",
+  "Control Plane entitlement model"
+ ],
+ "planeOwner": "Ingestion Plane + Frontend gateway + Control Plane (entitlements)",
+ "risks": "Mis-set limits block onboarding crawls; keep the count in Postgres only to avoid Firecrawl's Redis-plus-Postgres reconciler drift. Do not copy Firecrawl's broker prefetch or FoundationDB backend. || Over-tight limits frustrate interactive browsing, so keep interactive and agent classes separate and the global bucket generous. || Double enforcement in gateway and Quarry if ownership is unclear; per-process buckets are inaccurate across edge replicas unless shared storage is used.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 15,
+  "DOC": 1,
+  "INF": 4
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-05-05",
+  "R-t2-04-11",
+  "R-t2-05-10"
+ ],
+ "sourceClusters": [
+  "C-t2-05-004",
+  "C-t2-04-024",
+  "C-t2-05-005"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale",
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-025",
+   "status": "partial",
+   "exactGap": "The gateway already has a distributed token-bucket limiter (one 600 rpm class in rate_limit.rs, layered over every merged router including browser/search/ingestions and, because it runs before require_session, effectively keyed by client IP; per-org inner limiters exist only on mcp, agents_runs, eval and memory, and mail-task has its own class), so 'no rate limiting on these routes' is wrong, while Control Plane already holds plan-keyed QuotaLimits (billing-core: api_calls/users/storage_mb) and org-core org_quotas rows but no browser/crawl concurrency keys, and quarry-edge Claims carry no plan data. In Quarry the only capacity controls are a process-global RuntimeLeasePool semaphore (2 local-Chromium / 4 Browserbase permits, keyed by host, org_id empty on the internal lease), a global AutoscaledPool and a per-host AIMD HostScheduler: there is no per-org concurrency, backlog or fair share, and agent browser runs (ChromiumoxideDriver plus the agent_runs map) have no cap at all. The Postgres queue is a per-crawl frontier (pop is scoped to org_id + queue_id and the queue name derives from the run id), so a cross-job org backlog cannot live there; the real admission seam is the quarry-control jobs table that the orchestrator dispatcher polls.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:50-58 (DEFAULT_RPM 600; doc says it runs before require_session so it keys by client IP)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs:269-290,350-376 (key selection org>user>ip; single middleware; exempt paths)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs:136-148 (global limiter layered over all merged domain routers incl. browser, search, ingestions)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:54-60 (inner per-org route_layer limiter; same pattern in agents_runs.rs:49-51, eval.rs:40, memory.rs:59)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs:255-259,279-285 (separate mail-task limiter class built with from_cache_with_rpm)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/quotas.rs:15-27 (ENFORCED_QUOTA_KEYS allowlist: a key is added only together with its reader)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lease_pool.rs:29-53,96-150 (global semaphore, try_acquire -> RateLimited, acquire_timeout)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:323,337 (RuntimeLeasePool::new(4) Browserbase, new(2) local Chromium)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1284-1290 (agent_driver built without a pool; agent_runs = new_runs())",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:107,1639 (AgentRuns HashMap; insert with no capacity check)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:138-142,160-163 (host-keyed acquire_timeout; internal lease org_id empty)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:271-290 (pop WHERE org_id AND queue_id; ORDER BY priority, enqueued_at)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:518-531,612 (queue name derived from RunID)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:346-350 (polls control /v1/jobs/?limit=50)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/resources_v2.go:70,102-125 (read-only team concurrency; no ceiling modeled)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:889-905 (team_concurrency view forwards to control)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs:1-40 (per-host AIMD scheduler)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/autoscale.rs:1-25 (global autoscaled pool)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:62-91 (Claims: org, user, scopes, zdr; no plan/entitlement fields)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:46-60 (RATE_LIMITED envelope with retry_after_seconds)",
+    "apps/Control Plane/billing-core/internal/billing/defaults.go:61-92 and types.go:36-37 (QuotaLimits per plan)",
+    "apps/Control Plane/org-core/internal/org/types.go:34-42 (Quota: key, value, limit, reset_period)",
+    "apps/Model Plane/rust/services/model-gateway/src/org_quota.rs:1-60,106-112 (reads org-core quotas with a service credential, fails open)",
+    "apps/Model Plane/rust/services/model-gateway/src/rate_limit.rs:1-40 (per-org RPM with org overrides)",
+    "apps/Model Plane/go/services/browser-broker/internal/server/ratelimit.go:1-60 (per-peer fixed window, not per org)",
+    "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json:29-73 (quarry-edge manifest: no org-core/billing-core row)"
+   ],
+   "reuse": [
+    "gateway RateLimiter::from_cache_with_rpm plus the route_layer-after-require_session pattern (mcp.rs, agents_runs.rs) for class-specific org-keyed limiters; mail_task_rate_limiter is the per-class precedent",
+    "Quarry ApiError::rate_limited (RATE_LIMITED + retry_after_seconds) for the typed 429",
+    "host_scheduler.rs SlotPermit RAII/AIMD and autoscale.rs for permit accounting; RuntimeLeasePool.acquire_timeout as the bounded-wait primitive",
+    "org-core org_quotas rows + model-gateway org_quota.rs service-credential read pattern; billing-core defaultQuotaLimitsByPlan as plan defaults",
+    "quarry-control jobs table + orchestrator jobs dispatcher as the job admission seam; team_concurrency view for UI queue position"
+   ],
+   "constraints": "Control Plane owns the numbers (org_quota.rs quotes CLAUDE.md: quotas and entitlements live in Control Plane), Quarry only enforces; no cross-plane DB reads, so Quarry needs an org-core read through a service credential, which requires a new row in cross-plane-token-requests.json plus a registry grant (none exists for org-core), or auth-core must mint limits into the token (Claims has no such field). Model proposes / Quarry executes: agent browser runs are started by execution-core through the broker grant, so the cap belongs at Quarry StartRun and must return a typed retryable 429 that execution-core treats as backpressure, not as a failed task. ZDR: backlog or admission rows must not persist URLs or payloads for ZDR requests (counts or in-memory only). The gateway allowlist in orgs/quotas.rs forbids adding a quota key before something reads it, so key, reader and UI land in one change.",
+   "approachAdjustment": "Correct the premise (the gateway already rate-limits every route with one IP-keyed class) and split the work: (a) gateway: add class-aware, org-keyed inner limiters for browser, scrape/search and agent classes using the existing mcp.rs pattern, keeping interactive and agent classes separate (S); (b) Quarry: per-org permits at RuntimeLeasePool and a cap on agent_runs plus agent sessions, which first requires threading org_id into the adapter acquire (it is empty today) (M); (c) job backlog and fair share belong at the quarry-control jobs / orchestrator dispatcher, not in postgres_queue.rs, whose queues are per crawl run (M); (d) numbers come from new org-core org_quotas keys read via a service credential with an explicit fail-open or fail-closed decision, plus billing-core plan defaults. Drop the 'claims carry plan limits' variant unless auth-core is changed.",
+   "effortRevised": "L",
+   "effortNote": "Original M covers only one plane. Gateway classes are S, Quarry per-org permits M, job admission with backlog M, Control Plane keys plus manifest grant S-M; also needs an ADR for fail-open vs fail-closed.",
+   "verdict": "reword",
+   "verdictReason": "The need is real (no per-org capacity in Quarry, agent runs uncapped) but the item misstates the gateway (a global limiter exists), misplaces the backlog in a per-crawl frontier queue, and understates the cross-plane work.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

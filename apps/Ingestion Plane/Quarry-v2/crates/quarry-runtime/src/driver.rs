@@ -106,12 +106,15 @@ pub struct RenderHints {
     /// WS13.5: how long the action run may take, counted from the start of the
     /// run. `None` uses the built-in 115 s.
     pub actions_deadline: Option<Duration>,
+    /// E4.4-a: the locale, timezone and location the page emulates. `None` (default): nothing is
+    /// emulated. Only a browser driver that can emulate takes it; any other refuses the fetch.
+    pub page_emulation: Option<quarry_core::page_emulation::PageEmulation>,
 }
 
 impl RenderHints {
-    /// Whether this render needs a browser: a capture or an action is asked for.
+    /// Whether this render needs a browser: a capture, an action or a page emulation is asked for.
     pub fn needs_browser(&self) -> bool {
-        self.capture.is_some() || self.actions.is_some()
+        self.capture.is_some() || self.actions.is_some() || self.page_emulation.is_some()
     }
 }
 

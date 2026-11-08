@@ -1,0 +1,109 @@
+{
+ "finalId": "F-t2-047",
+ "tier": "recommended",
+ "rank": 23,
+ "title": "Fetch-path reliability: one deadline budget, wired retries and typed failure sub-codes",
+ "summary": "Add timeout_ms to scrape and agent requests and split it across the FallbackDriver waterfall with child cancellation tokens (reserve a minimum slice for the final browser tier, map client disconnect to the root token). Wire the already-written execute_with_retry into PageRunner using ErrorCode::retryable(), with maxRetries on the policy and no retries for ChallengeDetected or SecurityBlocked. Add a sub-code and detail field on QuarryError (DNS, TLS, all drivers failed, robots-blocked, and a processing-continues detail for long jobs), versioned across Temporal, webhooks and the gateway.",
+ "whyItMatters": "Escalation through the static, TLS and browser drivers should finish inside one user-visible deadline instead of timing out with nothing. Transient failures should be retried the same way on scrape, crawl and agent paths. The Model and UI need to know why a fetch failed so they can switch source, wait or ask the user, instead of seeing a generic DriverFailed.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (SRC) for abort tiers and the transportable error vocabulary; Apify Crawlee (DOC) for the retry contract",
+  "others": [
+   "Apify Crawlee (DOC): maxRequestRetries, errorHandler before each retry, failedRequestHandler",
+   "Firecrawl robustFetch (SRC): shared internal client with retry-on-status and cooldown"
+  ],
+  "prevalence": "Retries: 2 of 4 sources (Apify, Firecrawl), table-stakes. Deadline budgeting and transportable error codes: 1 of 4 (Firecrawl), unique",
+  "mechanism": "Compose cancellation tokens: request token (client disconnect) to scrape deadline token to per-engine child tokens, so an engine timeout cancels only that engine and the waterfall continues, while a scrape timeout cancels everything. Queue waits get a fraction of the budget (2/3), waitFor is at most half the timeout, and defaults are computed from the requested features. One ErrorCode union with about 55 codes extends a transportable base with serialize/deserialize so code and details cross queues and webhooks unchanged; long jobs return a processing_continues detail with estimated remaining time. Retry: count per request, an error hook may change the request, then requeue with backoff until the retry cap, then a failure hook."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs:15-60",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:164",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-260",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:94-104",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-60",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:4-51",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:287"
+  ],
+  "gap": "execute_with_retry is exported but called only from its own tests; Temporal activity retries (5 attempts, exponential) and the FallbackDriver chain are the only live retry paths. Per the baseline, cancellation is a flat token, /v1/scrape exposes no request timeout and the waterfall has no per-driver budget (not re-checked here). quarry-core ErrorCode has 17 coarse codes with retryable() and http_status(); it has no fetch-level detail (DNS, TLS, all drivers failed, robots-blocked, cache miss) and no processing-continues contract, although api_error carries retry_after_seconds. Strict TLS everywhere is already the safe default (no accept-invalid-certs found)."
+ },
+ "approach": "Ingestion Plane. (a) Deadlines: add timeout_ms to scrape and agent-run requests with defaults computed in one function from the requested features; build a child CancellationToken per driver attempt with remaining-budget accounting in FallbackDriver and a reserved minimum slice for the last driver; map axum client disconnect to the root token; keep strict TLS. (b) Retries: call execute_with_retry from PageRunner, take the cap from RunPolicy.retry (exists in the quarry-core contract), skip ChallengeDetected, SecurityBlocked and robots denials, and consult the AIMD host scheduler so retries cannot storm a blocked host. Share one reqwest retry middleware for edge-to-control and Model Plane calls. (c) Errors: add a sub_code plus details to QuarryError (for example DriverFailed{dns|tls|connect|all_drivers_failed}, Forbidden{robots|policy}) rather than exploding the top-level enum, as the improvements doc section 39 also advises; add a processing_continues detail for long jobs; propagate through Temporal activities, webhooks, the gateway's recoverable/unrecoverable classification and Model Plane tool results; version the error schema.",
+ "effort": "M",
+ "dependencies": [
+  "FallbackDriver and PageRunner",
+  "quarry-core error.rs and api_error.rs",
+  "F-t2-016 (robots sub-code)",
+  "F-t2-027 (BlockReason maps onto the same detail field)"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-runtime, quarry-core, orchestrator); Frontend Plane gateway for classification",
+ "risks": "Budget splitting can starve the browser tier, hence the reserved slice. Retry storms against blocked hosts. Contract churn for gateway and Model Plane clients, hence a versioned schema.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 2,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-04-06] Typed failure classes are planned in QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 39 (extend the existing ErrorCode and CrawlDenialReason enums). Deadline budgeting and wiring retry.rs are not planned in the docs reviewed"
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-04-06"
+ ],
+ "sourceClusters": [
+  "C-t2-04-010",
+  "C-t2-04-011",
+  "C-t2-04-012"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-047",
+   "status": "partial",
+   "exactGap": "execute_with_retry is exported (lib.rs:164) but only its own tests call it; the live retries are Temporal activity retries (5 attempts, exponential, workflows.go:94-104), which cover job paths only, not sync /v1/scrape or agent routes. PageRunner calls fetch_conditional once while holding the per-host slot (pipeline.rs:335-364), FallbackDriver.fetch_inner walks drivers with no deadline or budget split (fallback_driver.rs:57-120), ScrapeRequest has no timeout field (routes.rs:346-375) and FetchPolicy.timeout_s is declared with a default of 30 but no fetch code reads it (policy.rs:86-103). ErrorCode has 17 coarse codes (error.rs:10-30) and DriverFailed is not retryable (error.rs:38-43), so wiring the existing helper alone would not retry DNS, connect or browser-launch failures, and there is no sub-code or processing-continues detail (api_error.rs carries only retry_after_seconds).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/retry.rs:1-130",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:164",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:86-130",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/policy.rs:6-36",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:335-364",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:57-120",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:346-375",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-70",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs:4-51",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:94-104",
+    "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:2779-2790",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:287-302",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs:205-235",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs:711",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs:37"
+   ],
+   "reuse": [
+    "execute_with_retry, backoff_delay and classify in quarry-runtime/retry.rs",
+    "RunPolicy.retry (quarry-core Retry) and the runtime RetryPolicy with transient_codes",
+    "HostScheduler (AIMD) and AutoscaledPool already used in PageRunner to avoid retry storms",
+    "ErrorCode::retryable() and http_status(), the api_error retry_after_seconds field",
+    "Temporal activity retry policy for job paths",
+    "model-gateway client-side per-scrape bound (QUARRY_EDGE_TIMEOUT_SECS, default 30 s)"
+   ],
+   "constraints": "Retry layering: Temporal already retries job-path pages 5 times, so an in-process retry on those paths would multiply attempts; wire it for sync scrape and agent paths only, or lower one layer. Retries must re-enter the per-host slot or consult the AIMD scheduler rather than sleep inside the slot (pipeline.rs:343-364 holds it across the fetch). The client-supplied timeout is a request from the caller (possibly the Model) that Quarry clamps to its own maximum. ZDR: processing-continues re-attach needs stored results and must not exist for ZDR (batch and crawl jobs are already refused under ZDR, routes.rs:563-583). Any new error sub-code or detail field changes the contract seen by the gateway and Model Plane tool results, so version it.",
+   "approachAdjustment": "Reorder: (c) sub-codes first, so DriverFailed{dns|tls|connect|all_drivers_failed} can carry its own retryable flag and robots or policy denials stay non-retryable; (a) then add timeout_ms to scrape and clamp it, with child cancellation tokens per FallbackDriver attempt and a reserved slice for the last tier (the model-gateway already bounds a scrape client-side at 30 s and escalates once to the browser itself, so avoid double budgeting); (b) last, wire execute_with_retry (or a variant taking fetch hints, since it calls driver.fetch without hints) around the sync scrape path only. Reuse RunPolicy.retry but reconcile it with the second RetryPolicy in quarry-runtime/policy.rs, there are two retry config types today. Section 39 of the improvements doc covers only the typed failure classes, not the deadline budget or retry wiring.",
+   "effortRevised": "M",
+   "effortNote": "Stays M if sub-codes stay inside Quarry's own envelope; L if they are propagated through Temporal, webhooks, the gateway and Model Plane tool results.",
+   "verdict": "reword",
+   "verdictReason": "Partial is confirmed. The item misses that DriverFailed is non-retryable (so wiring the helper alone does little), that Temporal already retries job paths (retry multiplication), that FetchPolicy.timeout_s is not enforced anywhere and that the model-gateway already bounds scrapes client-side. Reword with the corrected ordering.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

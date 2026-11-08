@@ -1,0 +1,105 @@
+{
+ "finalId": "F-t2-027",
+ "tier": "recommended",
+ "rank": 3,
+ "title": "Honest bot-block handling: closed block taxonomy, non-signals, one recovery, a user-visible blocked state, and no stealth code",
+ "summary": "Split outcomes into strong bot-block signals (captcha, WAF interstitial, challenge loop) and non-signals (bare 403/429, timeouts, sign-in or paywall pages, region blocks). Add a closed BlockReason enum with hostname-only aggregated telemetry, give the browser planner an explicit rule (at most one low-risk recovery such as a short wait and one reload, then stop, tell the user and switch source), and render a 'site blocked automated access' state with take-over and try-another-source actions in the Verevon browser. Delete the unused stealth scripts and the vestigial stealth_level plumbing.",
+ "whyItMatters": "Users and agents get a truthful, consistent result when a site blocks automation, and enterprise buyers get a defensible no-evasion posture that fits 'Model proposes, Quarry executes or rejects'. Hostname-only counters are ZDR-safe and can feed the later domain registry. The dead stealth code currently contradicts the stance.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (SRC)",
+  "others": [
+   "Apify academy (DOC): detection taxonomy, but it recommends evasion, so only the taxonomy is useful"
+  ],
+  "prevalence": "2 of 4 sources (Codex, Apify); differentiator, and the one that matches Verevon's governance stance",
+  "mechanism": "A classifier reads site-served evidence (URL, DOM markers of Cloudflare/Akamai/hCaptcha/Turnstile, a fresh screenshot) and outputs {kind, confidence, evidence}. Strong signals versus non-signals are defined explicitly: bare 403/429, timeouts, sign-in pages, paywalls and region blocks are not bot detection. At most one recovery (short wait, single reload), no fingerprint or network changes, then stop and tell the user. A closed-reason report (captcha_failed, access_denied, challenge_loop, unexpected_bot_error) records only the hostname."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:236-257",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-35",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:158-180",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs:36-47",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:57-90",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:287"
+  ],
+  "gap": "Detection exists: ChallengeKind (Captcha/Waf/Login/Consent/RateLimit/AccessDenied/Unknown), ChallengeSignal.requires_escalation defaulting to true, ErrorCode::ChallengeDetected. Missing: explicit non-signal rules (the host scheduler lumps 401/403/451/999/CDN-challenge into one Blocked bucket), a closed report taxonomy with hostname-only telemetry, planner text for the one-recovery rule, and a user-facing blocked state. stealth.rs (STEALTH_SCRIPT and an auto-accept CONSENT_DISMISS_SCRIPT) has no caller outside its own file, and DriverPlan.stealth_level is set (0/1/2) but never read outside driver_plan.rs, so the code contradicts the stance and one baseline narrative wrongly describes it as active."
+ },
+ "approach": "Ingestion Plane: add a BlockReason closed enum (strong: captcha, waf_challenge, challenge_loop; non-signal reasons stay as rate_limited, auth_required, paywall, geo_blocked), reusing the taxonomies already proposed in SOVEREIGN_SCRAPING_RELIABILITY.md section 4 and the improvements doc section 39, plus a hostname-only counter (no URL, path or content; in-memory count only for ZDR orgs). Split the host scheduler's Blocked bucket so a bare 403 is not auto-classified as a bot block. Model Plane: add the strong-signal / non-signal and one-recovery rule to the browser planner instructions, mapped onto ChallengeSignal (locate the planner prompt in the Model Plane first). Frontend Plane: show a 'Site blocked automated access' state in the browser pane with 'Take over' and 'Try another source' actions. Delete stealth.rs and stealth_level. If a consent helper is ever wired it should default to declining non-essential cookies or asking the user, never accepting on their behalf (INF).",
+ "effort": "S",
+ "dependencies": [
+  "ChallengeSignal and ErrorCode::ChallengeDetected (shipped)",
+  "Model Plane browser planner prompts",
+  "Verevon browser-pane UI state"
+ ],
+ "planeOwner": "Ingestion Plane (taxonomy, telemetry, dead-code removal); Model Plane (planner rule); Frontend Plane (UI state)",
+ "risks": "Misreading a transient 403 as a bot block could end runs early, so keep confidence thresholds and the single-retry rule. The later egress-tier work (R-t2-04-07) must not use proxy rotation to escape a strong signal.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 2,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-04-03] Partly: docs/SOVEREIGN_SCRAPING_RELIABILITY.md section 4 plans a challenge classifier with reasons (bot_wall, captcha, auth_required, paywall, geo_blocked, robots_disallowed) and QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 39 plans an acquisition-failure taxonomy; neither specifies non-signals, the one-recovery rule, hostname-only telemetry or the UI state"
+ },
+ "quickWin": true,
+ "wave": "W1",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-04-03"
+ ],
+ "sourceClusters": [
+  "C-t2-04-005"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-027",
+   "status": "partial",
+   "exactGap": "SRC: detection exists but is crude and never reaches the planner or UI: observation.rs:158-213 substring-matches url/title/text ('sign in', 'forbidden', 'cookie consent', 'access denied') and emits ChallengeSignal with a fixed 0.98 confidence and requires_escalation=true for every hit, so ordinary login and consent pages count as challenges, while execution-core's BrowserObservation (browser_agent.rs:171-186) and both planner prompts (llm_planner.rs:236-244; model-gateway http_routes.rs:2013-2022, which only forbids CAPTCHA solving and anti-bot bypass) never see the signal and BrowserChrome has a takeover chip (BrowserChrome.tsx:1228-1236) but no blocked state. SRC: the only user-facing blocked text is the gateway's classify_scrape_failure (knowledge/quarry.rs:287-294), which labels any 403/429 'site_blocked' and suggests asking for proxy access, and host_scheduler.rs:36-47 lumps 401/403/451/999/CDN-challenge into one Blocked bucket mapped from ErrorCode::Forbidden/UpstreamBlocked (pipeline.rs:372-374). SRC: stealth.rs (its header says it exists to pass Cloudflare's free tier) and DriverPlan.stealth_level are dead (lib.rs:164 declares the module, nothing calls it), but live evasion-adjacent behaviour remains: TLS-impersonation escalation on prior_block_signals (driver_plan.rs:45-47), driver rotation on 401/403/407/429/503 (fallback_driver.rs:95-108; fingerprint_rotation.rs:16-18), proxy rotation after block statuses (egress_broker.rs:155-163) and a shipped 'stealth' RunPolicy preset (presets.go:84-96).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:236-257 (ChallengeKind, ChallengeSignal) and :100-122 (BrowserTelemetry challenge counters)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:23 and :49 (ErrorCode::ChallengeDetected maps to HTTP 403)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:154-214 (classify_challenge) and :898-935 (per-run challenge counts and rate)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs:31-47 (BadKind::Blocked bucket)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:366-376 (error-code to BadKind mapping)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:1-12 (header intent) and crates/quarry-browser/src/lib.rs:164 (module declared, no callers)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:13-21, :36-48, :57-90 (signals, plan_from_signals, stealth_level)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:95-108 and crates/quarry-runtime/src/fingerprint_rotation.rs:14-18",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs:102-163 (block_rotation, mark_http_status)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:84-96 (stealth preset)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:171-186 (BrowserObservation has no challenge field)",
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:236-244 (browser agent system prompt)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs:2013-2022 (BROWSER_SUGGEST_SYSTEM_PROMPT)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:283-304 (classify_scrape_failure)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497, :624, :1228-1236 (human takeover control)",
+    "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:139-146 (planned challenge classifier reasons)"
+   ],
+   "reuse": [
+    "ChallengeKind/ChallengeSignal contracts and ErrorCode::ChallengeDetected",
+    "BrowserTelemetry.challenge_observation_count and challenge_rate_per_mille (already per run, no URL)",
+    "BrowserChrome human_takeover control chip and the owner timeline as the host for the blocked state",
+    "gateway classify_scrape_failure (rewrite, do not add a second classifier)",
+    "host_scheduler BadKind and the pipeline error mapping for the Blocked split"
+   ],
+   "constraints": "Model proposes / Quarry executes or rejects: the one-recovery rule must be enforced in Quarry (stop returning actions or return ChallengeDetected after N challenge observations, using the existing per-run counter) and only mirrored in planner text, which is advisory. ZDR: per-run counters already carry no URL; a hostname aggregate must be in-memory only for ZDR orgs as the item says. Two separate Model Plane prompts exist (execution-core llm_planner.rs and model-gateway http_routes.rs browser-suggest), and the no-evasion stance must also cover the live TLS-impersonation, rotation and preset paths or it will contradict shipped behaviour.",
+   "approachAdjustment": "Reorder the work: (1) add the challenge signal to execution-core BrowserObservation and the planner observation text first, otherwise a planner rule has nothing to key on; (2) replace the substring classifier with tiered evidence (strong: captcha widget or WAF interstitial markers and repeated challenge across steps; non-signals: login, consent, bare 403/429, paywall, region) and stop defaulting requires_escalation=true; (3) enforce the single recovery in Quarry; (4) rewrite classify_scrape_failure; (5) make an explicit decision on the live paths (TLS-impersonation escalation, block-status driver and proxy rotation, the 'stealth' preset: rename or remove) alongside deleting stealth.rs and stealth_level; (6) build the blocked state on the existing takeover control.",
+   "effortRevised": "M",
+   "effortNote": "S understates it: classifier rewrite in Quarry, signal plumbing plus prompt rule in the Model Plane, a UI state in the Frontend Plane and scheduler/gateway fixes span four components; the dead-code deletion alone is S.",
+   "verdict": "reword",
+   "verdictReason": "Detection and a takeover control exist, but the signal never reaches the planner or UI, the current classifier and gateway text contradict the proposed non-signal rules, and the live evasion-adjacent paths are broader than the dead stealth module the item targets.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

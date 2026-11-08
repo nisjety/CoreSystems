@@ -1,0 +1,107 @@
+{
+ "finalId": "F-t2-070",
+ "tier": "nice-to-have",
+ "rank": 5,
+ "title": "Browser chrome polish in the SPA: tab menu, new-tab page, typed error cards, split view, keyboard commands, activity strip, reader view",
+ "summary": "A bundle of Frontend-led refinements that need little or no new Quarry surface. Tab context menu with duplicate (new tab, same URL and profile), reopen-closed (a closed-tab stack in Quarry session state), reorder, copy URL and open in the system browser. A new tab renders a compact search-or-ask page built from DashboardSearchPanel and the composer. Quarry returns typed navigation errors (network error, egress-policy denial, domain-lock denial, anti-bot) and BrowserChrome shows a Norwegian-first error card with retry and the reason. Register browser commands in the app's shortcut registry (without stealing keys forwarded to the remote page during takeover). Optional later: split view of two Quarry tab streams, a low-rate multi-run activity strip, and a reader view from the Quarry scrape markdown (translation through Model Plane inference outside ZDR).",
+ "whyItMatters": "Removes small daily frictions once the browser is usable (items 01 to 04) and makes denials and failures understandable instead of silent.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (tab menu commands, error pages, top sites, central keymap, browser activity preview)",
+  "others": [
+   "Aside (search-or-ask new tab page, split view, tab-capture live previews, reader mode)"
+  ],
+  "prevalence": "Tab operations: 1 of 3 recorded (table-stakes by inference). New tab page and live previews: 2 of 3, common. Error pages, split view, keyboard commands, reader/translation: 1 of 3, unique.",
+  "mechanism": "Tab context-menu command ids (copyUrl, duplicate, newTabToTheRight, rename, reload, openInExternalBrowser) dispatch to a tab store and duplicate clones history; on load failure net error codes map to localized categories and a local error document is rendered with the original URL stored so reload retries it; accelerators are named commands in a central keymap. Aside paints the new-tab omnibox immediately and mounts the composer in ask mode. Preview: thumbnail of each active run's latest frame, click to open the full panel."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1083-1134 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:385-396 (new, select and close tab only)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3697-3702 (tab routes)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardWebHistory.tsx and web-history.ts:10 (continue-where-you-left-off history)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchPanel.tsx:729 (search plus ask entry)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:281,760 (frame and loop errors handled; no categorised navigation error page found, INF)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1057 (some keydown handlers; global keymap registration unverified)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39,608 (one live frame view per session)"
+  ],
+  "gap": "Only new, select and close tab; no duplicate, reopen, reorder, copy URL, open externally, split view, activity strip or reader view. A new tab does not open the search-or-ask page. Navigation error pages and keymap integration are unverified."
+ },
+ "approach": "Frontend Plane: tab menu and dock the new-tab page in BrowserChrome; error card keyed on a typed navigation error that Quarry returns; shortcut registration. Quarry: closed-tab stack and a typed navigation error code. Defer split view, activity strip and reader view until the primary surface (items 03 and 04) lands.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-011"
+ ],
+ "planeOwner": "Frontend Plane",
+ "risks": "Low. Frame bandwidth doubles for split view and for a multi-run strip (use low frame rates); translation inputs need ZDR handling.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 11,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-13"
+ ],
+ "sourceClusters": [
+  "C-t2-08-002",
+  "C-t2-08-007",
+  "C-t2-08-010",
+  "C-t2-08-012",
+  "C-t2-08-020",
+  "C-t2-08-033",
+  "C-t2-08-044"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-070",
+   "status": "partial",
+   "exactGap": "Shipped: a tab strip listing live and snapshot tabs with a new-tab button that clears and focuses the omnibox, an overflow-menu link that opens the page in the user's own browser tab, gateway and Quarry tab routes for list, new, select and close only, and a reader-style render of scraped markdown in KnowledgeScrapePreview for the Knowledge add-source flow. Missing: tab context menu (duplicate, reopen-closed, reorder, copy URL), a search-or-ask new-tab page, a typed navigation-error card with retry (owner-timeline errors print the raw errorCode and frame load errors only set a broken-frame state), browser keyboard commands (only per-feature hooks such as use-chat-shortcuts.ts exist, no central registry), split view, activity strip and a reader view of the live tab.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1075-1138 (tab strip with Live and snapshot tabs and the new-tab button; no context menu)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:852-871 (prepareNewTabNavigation clears and focuses the address input)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:872-882 (clipboard copy exists for profile id only)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1053-1062 (only keydown handler: Escape closes a popover)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1627-1650 (overflow menu: link to open the page in a new browser tab)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:270-290,575-590,750-765,1315-1330 (raw errorCode text, loop error chip, broken-frame state; no categorised navigation error card)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:380-396,802-935 (tab routes: list, new, select, close)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3873-3885 (forward_quarry_failure passes the Quarry error body through unchanged)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3697-3702 (Quarry tab routes: list, new, select, close; no closed-tab stack)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/error.rs:10-36 (no navigation-specific ErrorCode)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts:1-70 (per-feature shortcut hook that avoids collisions with the CoreNavbar global handler)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeScrapePreview.tsx:300-345 (reader-style knowledge-scrape-page render of scraped blocks)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:1-25 (local-only history, ZDR-gated)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardWebHistory.tsx:45-62 (history rows open pages via target=_blank)"
+   ],
+   "reuse": [
+    "DashboardSearchPanel and KnowledgeComposer as the new-tab page body; web-history.ts for top sites (already ZDR-aware)",
+    "KnowledgeScrapePreview markdown and block renderer for a reader view",
+    "The use-chat-shortcuts.ts pattern (modifier combos chosen against CoreNavbar bindings) for a use-browser-shortcuts hook",
+    "Quarry QuarryError.details plus the gateway forward_quarry_failure path for typed navigation errors",
+    "ownerTimelineEventMeta and the loop status chip as the places that already surface errorCode"
+   ],
+   "constraints": "The SPA never sees raw CDP or Quarry tokens (gateway rule), so every new tab operation (duplicate, reopen, reorder) must be a gateway route proxying a Quarry route, and Quarry stays the executor. Hold the closed-tab stack only in the in-memory run entry so it is ZDR-safe. Reader translation through Model Plane inference falls outside ZDR and needs the retention check. Shortcuts must not steal keys forwarded to the remote page during human takeover (BrowserControlMode human_takeover).",
+   "approachAdjustment": "Do the typed navigation-error work once, together with F-t2-032's typed denials: add a reason enum in Quarry error details (domain lock is a 403 with a BAD_REQUEST code today, navigation failures are DriverFailed with free-text details.error), pass it through the gateway, and render a Norwegian-first error card keyed on that reason. Implement shortcuts with a new per-feature hook rather than a central registry, since none exists. Drop 'open in the system browser' and the reader view from the gap list (the overflow link and KnowledgeScrapePreview already cover a first version), and move split view and the multi-run activity strip to a separate later item because they double frame bandwidth.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged for the core scope (tab menu, new-tab page, error card, shortcuts, reopen-closed); split view and the activity strip would each add M and should be separate.",
+   "verdict": "reword",
+   "verdictReason": "Partially built: two listed gaps are already covered at first-version level and the typed-error part depends on the Quarry typed-denial work; keep the core bundle but correct the gap statement and defer split view and the activity strip.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

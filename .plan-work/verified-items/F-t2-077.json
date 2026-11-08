@@ -1,0 +1,104 @@
+{
+ "finalId": "F-t2-077",
+ "tier": "nice-to-have",
+ "rank": 12,
+ "title": "Design spike only: drive the user's own signed-in Chrome through an attested extension backend, behind per-tab consent",
+ "summary": "Only after the multi-backend work in R-t2-03-09: ship an MV3 extension with debugger permission and a relay to Quarry (native messaging or a hosted bridge) that registers a 'user_browser' BrowserBackend with isolated_egress=false and security_evidence=false. Allow it only for interactive (non-background) runs with explicit per-tab user consent, a visible indicator, and Quarry relaying and recording every action the Model proposes. || Write an ADR and prototype scope for an extension plus native-host bridge that lets the user's own Chrome/Edge profile act as a Quarry executor kind. To keep the Model-proposes/Quarry-executes rule, the extension would only run actions that Quarry has already validated against a BrowserBroker grant and would return receipts to Quarry; it must not take instructions from the Model Plane or the SPA directly. Do not start implementation until the connector-to-browser bridge and Quarry profile login hand-off have shipped.",
+ "whyItMatters": "It is the only route to SSO-protected enterprise apps and the user's signed-in state without importing credentials, and it delivers the 'it uses my browser' experience that Codex offers. It is high value but conflicts with Verevon's governed-egress model, so it is a later, deliberate product decision. || Users want agents to use sites where they are already signed in, without re-authentication. It is an alternative to R-t2-10-01 for authenticated access, but it weakens the server-side containment that makes ZDR, egress proof and grants enforceable.",
+ "referenceBestPractice": {
+  "bestSource": "Codex native messaging host plus extension using chrome.debugger (codexbrowser-in-app-browser-010, SRC)",
+  "others": [
+   "Codex browser plugin (Chrome extension plus Rust native messaging host bridged to the app server)"
+  ],
+  "prevalence": "1 of 4 sources (codex), unique || 1 of 4 sources for the extension and native-host pattern (Codex only); unique",
+  "mechanism": "MV3 extension with the debugger permission attaches chrome.debugger to tabs the user shares; a native messaging host (or hosted WebSocket bridge) relays CDP commands from the agent service; the extension enforces per-tab consent and shows an indicator. || Merged items add: Extension to native host over stdin/stdout; native host to app server over a local WebSocket or named pipe; the manifest pins extension ids and required protocol versions with explicit update-required errors; tab-context assets are written in bounded chunks."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1-6 (gateway rule: the SPA never sees raw CDP or Quarry tokens)",
+   "grep: no extension or user-browser bridge in Quarry-v2/crates or the gateway",
+   "apps/Frontend Plane/verevonv3/src/shared/api/browser-client.ts:204-261,384-428 (browser sessions and tabs are all remote Quarry sessions via the gateway)",
+   "CLAUDE.md gateway rule: the browser never sees CDP endpoints, Quarry tokens or provider secrets",
+   "findings/t2/v-browser-app.baseline.md section 7 (extensions absent)"
+  ],
+  "gap": "No extension or user-browser bridge; login is handled only by persisted profiles and human takeover of a leased Chromium. Any bridge has to be designed around the rule that the browser client never receives CDP endpoints or Quarry tokens. || No extension or native host; all browsing is a remote leased Chromium in Quarry. This is deliberate and enforces ZDR, egress control and grants server-side."
+ },
+ "approach": "Spike, not build: measure how much of the need is already met by the secret bridge (F-t2-024) and takeover login into scoped profiles, then decide in an ADR. If pursued, it is one more backend in the multi-backend abstraction (F-t2-059) with its own reduced capability set, because it gives up egress containment, SSRF guarantees and ZDR evidence. || Source detail: [R-t2-03-12] Frontend Plane: extension and consent UI. Ingestion Plane: 'user_browser' BrowserBackend with capability flags set false for containment and ZDR evidence so policy can refuse it for ZDR and background runs; the Model proposes and Quarry relays and records; the Model Plane approval grants (sensitive actions) still apply. Treat as a separate product decision with security review before any build. || [R-t2-10-08] Frontend Plane (extension, distribution) plus Ingestion Plane (a new executor kind registered with Quarry) plus Model Plane (BrowserBroker grant). Start with an ADR; a prototype would register the extension as a lease provider attested by a device key, with egress proof and ZDR weaker than remote Chromium and clearly labelled.",
+ "effort": "XL",
+ "dependencies": [
+  "F-t2-059 (multi-backend abstraction)",
+  "Approval grants for sensitive actions",
+  "Extension store review and enterprise policy deployment",
+  "Production BrowserBroker grant issuance",
+  "F-t2-024 (secret bridge) and Quarry profile login hand-off, to measure how much of the need they already meet",
+  "Extension distribution channel"
+ ],
+ "planeOwner": "Ingestion Plane (backend abstraction) + Frontend/extension distribution",
+ "risks": "Loses egress containment and SSRF guarantees; ZDR evidence cannot be guaranteed; extension store review and enterprise rollout; prompt-injected pages act with the user's real sessions. || Exposes the user's full signed-in profile to agent actions; hard to audit; conflicts with Quarry executes and with ZDR/egress guarantees; extension permissions and store review burden.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 1,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-03-12",
+  "R-t2-10-08"
+ ],
+ "sourceClusters": [
+  "C-t2-03-018",
+  "C-t2-10-017"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "Integration-plane overlap"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-077",
+   "status": "absent",
+   "exactGap": "No extension, native host or user-browser executor exists (a repo search for chrome.debugger, nativeMessaging and manifest_version matches only a plan JSON); all browsing is a Quarry-leased chromiumoxide with one agent driver in AppState, and persisted profiles plus human takeover cover signed-in access. The product owner ruled on 2026-09-28 that the user's own Chrome and its logins are not driven and the 2026-10-01 parity audit records it as parked or ruled out. Quarry's fail-closed gate (require_isolated_agent_egress) refuses any agent driver without isolated_egress and security_evidence, so a user_browser backend flagged false on both would be refused unless that gate is redesigned.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md:250-264 (owner ruling: hosted, governed browser first; the user's own Chrome and its logins are not driven)",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PAGE_GAP_PLAN_2026-09-28.md:39,88,240 (the same plan still lists the bridge as a gap and a Wave 3 item: internally inconsistent)",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-10-01.md:54 (user-own-Chrome row: parked or ruled out; nothing to build while the ruling stands)",
+    "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md:479 (OD13: the user's own Chrome is never used)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:255-283 (BrowserDriverCapabilities: isolated_egress and security_evidence are deny-by-default)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1131-1139,1180-1215,1304-1305 (agent runs refused without isolated egress and security evidence)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1280-1290 (a single chromiumoxide agent_driver)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1-6,263-285 (SPA never sees CDP or Quarry tokens; control modes only drive the leased Chromium)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:437-445 (profile create, restore-probe and patch routes: persisted-profile login path)",
+    "apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs:228-260 (browser MCP calls route to Quarry; no other executor)",
+    "grep (negative): no chrome.debugger, nativeMessaging or manifest_version in code under apps (only chat-parity-audit-2026-10-01.json)",
+    "apps/Endpoint Plane/docs/architecture.md:25 (grep line only: names a native Verevon Agent; not read in full)"
+   ],
+   "reuse": [
+    "Persisted Quarry profiles with human takeover (profile routes, BrowserChrome profile manager) as the shipped answer to signed-in access",
+    "BrowserDriverCapabilities flags and require_driver_capabilities as the place a second backend would declare what it gives up",
+    "BrowserBroker sensitive grants and Quarry receipts if a user-device executor were ever approved",
+    "INF, low confidence: the native Verevon Agent in the Endpoint Plane is a more natural host than a Chrome extension for any user-device executor; its suitability for browser control was not verified"
+   ],
+   "constraints": "Direct conflict with an owner ruling (2026-09-28) and with the architecture rules: the extension must not take instructions from Model Plane or the SPA, since the Model proposes and Quarry executes or rejects; the SPA never sees CDP endpoints or Quarry tokens; a user_browser backend gives up isolated egress, SSRF guarantees and ZDR evidence, which today's gate treats as mandatory for agent runs; prompt-injected pages would act with the user's real sessions. Any reopening needs an owner decision and an ADR first.",
+   "approachAdjustment": "Do not carry this as a build recommendation. Record it as parked by owner ruling (2026-09-28, restated 2026-10-01) and list what would have to change to reopen it: an owner decision, the multi-backend abstraction (F-t2-059; AppState holds a single agent_driver today), a redesigned fail-closed gate that distinguishes interactive consented runs from background runs, and an attested relay in which Quarry validates every action against a BrowserBroker grant before the extension executes it. Measure how much of the need persisted profiles, human takeover and the secret bridge (F-t2-024) already meet before any spike.",
+   "effortRevised": "XL",
+   "effortNote": "Unchanged: it needs an extension, a native host or hosted relay, a new executor kind, a gate redesign, store review and security review.",
+   "verdict": "demote",
+   "verdictReason": "Absent, so it cannot be dropped as shipped, but it contradicts the owner's recorded ruling and the fail-closed egress gate; it should be moved out of the recommendation set into a parked or decision-record note that only an explicit owner reversal reopens.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

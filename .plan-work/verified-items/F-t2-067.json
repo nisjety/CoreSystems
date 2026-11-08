@@ -1,0 +1,100 @@
+{
+ "finalId": "F-t2-067",
+ "tier": "nice-to-have",
+ "rank": 2,
+ "title": "One honest product identity: unified user-agent and optional signed agent traffic (Web Bot Auth style)",
+ "summary": "Step 1 (S): replace the four inconsistent Quarry user-agent strings with one product UA, publish a matching bot-information page, and use the same token for robots matching. Step 2 (M): add optional Web Bot Auth style request signing (Ed25519 key per deployment, Signature-Agent header) for agent-originated traffic on the static, TLS and browser-egress paths, with the key held in Control Plane. Human-driven browsing stays unsigned unless policy says otherwise.",
+ "whyItMatters": "Sites that allow verified agents will let governed Verevon traffic through instead of blocking it, which is the compliant alternative to stealth and fits the governance story. The inconsistent UAs (one still pointing at an older domain) also undermine robots matching and site-owner trust.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (SRC, medium confidence)",
+  "others": [
+   "Industry analogue: Web Bot Auth, HTTP Message Signatures with a published key directory (INF, not a studied source)"
+  ],
+  "prevalence": "1 of 4 sources (Codex); unique",
+  "mechanism": "A feature gate requires an identifying agent header on every agent-originated request from the extension backend, and clients without support get an 'update required' refusal. Web Bot Auth extends this by signing requests so sites and WAFs can verify the agent against a key directory."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs:301-303",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1263",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:23",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:716",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:37-70"
+  ],
+  "gap": "HTTP drivers do identify themselves, but inconsistently: 'Quarry/2.0 (+https://triodelab.com/quarry)' as the default (config.rs, answer.rs), 'QuarryBot/1.0 (+https://verevon.io/bot)' for HTTP/3 (main.rs:1263) and bare 'QuarryBot' for /v1/map (map_routes.rs:23). TLS-impersonating and browser drivers present a Chrome identity; the browser UA path was not verified. There is no signed identity, no published key directory and no agent marker on browser traffic."
+ },
+ "approach": "Ingestion Plane: define one product UA constant and bot-info URL in quarry-core and use it everywhere, including robots matching (R-t2-04-01) and map. Add an optional signer (Ed25519, Signature-Agent, covered components per the draft standard) applied in the static and TLS drivers and in the browser egress proxy for agent-run traffic only; mark the policy flag in the run policy. Control Plane holds and rotates the key and serves the key directory. Decide explicitly how the browser driver's UA should look when it presents a Chrome identity, so the product's stance on honest identification is consistent.",
+ "effort": "M",
+ "dependencies": [
+  "Browser egress proxy (shipped)",
+  "Key management in Control Plane",
+  "F-t2-016 robots enforcement (UA token)"
+ ],
+ "planeOwner": "Ingestion Plane; Control Plane for key custody",
+ "risks": "Self-identifying makes some sites block more, and the standard is still emerging. Signing must not apply to user-driven browsing by default.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 5,
+  "DOC": 0,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-04-09"
+ ],
+ "sourceClusters": [
+  "C-t2-04-007"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-067",
+   "status": "partial",
+   "exactGap": "Quarry uses five unaligned UA strings and no signing: 'Quarry/2.0 (+https://triodelab.com/quarry)' as the edge default (config.rs:302), in the answer fetcher (answer.rs:716) and in the Ingestion compose env (docker-compose.yml:21), 'Quarry/2.0' in FetchPolicy (policy.rs:101, hashed at :349 but never applied to a request), 'QuarryBot/1.0 (+https://verevon.io/bot)' for HTTP/3 (main.rs:1263) and bare 'QuarryBot' for /v1/map robots matching (map_routes.rs:23). The chromiumoxide driver never sets a UA (it only reads navigator.userAgent), the TLS driver presents Chrome, Firefox or Safari identities, and driver_plan escalates static to tls to browser, so the presented identity changes along the fallback chain. A grep of apps finds no Signature-Agent, Signature-Input or Web Bot Auth code, no key directory and no bot-information page.",
+   "evidence": [
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs:301-303 (default_ua names triodelab.com), :14-15 (user_agent config field)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:285-290 (StaticDriver built with cfg.user_agent), :1215 (answer fetcher uses cfg.user_agent), :1255-1264 (HTTP/3 driver hard-codes QuarryBot/1.0 with verevon.io/bot)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/map_routes.rs:23 (MAP_UA = \"QuarryBot\"), :250-258 (the only production robots allow-filter, keyed on MAP_UA)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs:716 (second default UA with triodelab.com)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/policy.rs:87-104 (FetchPolicy user_agent \"Quarry/2.0\" and headers), :349 (UA only hashed into determinism id; no request reads policy.fetch.user_agent)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/docker-compose.yml:21 (QUARRY_EDGE__USER_AGENT triodelab.com)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/policy.rs:65-69 and :140 (RobotsMode defined, never read in the runtime); quarry-runtime/src/lib.rs:165 (RobotsCache only exported)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-tls/src/lib.rs:55-75 (TLS profiles present Chrome, Firefox and Safari UAs)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:60-92 (static falls back to tls then browser; stealth_level 0, 1, 2)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1797 (reads navigator.userAgent only) and :706-780 (install_network_guard: CDP Fetch listener whose ContinueRequestParams::new(request_id) sets no headers)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:52-65 (STEALTH_SCRIPT masks navigator.webdriver)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:1-9 and :417-434 (proxy permits only HTTP absolute requests or opaque HTTPS CONNECT tunnels)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/docs/CONTRACTS.md:310-318 (UA overrides only as explicit fields; must not downgrade the TLS profile) and :192-201 (QUARRY_PROFILE_KEY env or kms key-source convention)"
+   ],
+   "reuse": [
+    "quarry-core as the home for one product UA and bot-info URL constant",
+    "FetchPolicy.user_agent and headers (policy.rs:87-104) as the policy carrier, once a driver actually applies them",
+    "CDP Fetch interception in install_network_guard (chromiumoxide.rs:706-780) as the per-request seam for browser traffic",
+    "Static/TLS driver request builders (fetch.rs build_client, quarry-tls lib.rs header assembly) for signing non-browser traffic",
+    "QUARRY_PROFILE_KEY env or kms key-source convention as the precedent for holding a signing key"
+   ],
+   "constraints": "Honest identification cannot be uniform while the driver ladder static to tls to browser deliberately presents browser identities on the upper tiers (CONTRACTS.md:318, driver_plan.rs:66-90); the product needs an explicit stance per tier before signing is meaningful. UA unification has little enforcement effect until robots matching is wired into the live crawl path (F-t2-016): RobotsMode is never read and only /v1/map filters by robots. Key custody: a grep of Control Plane finds only HMAC service-auth files and no key-directory service (INF), Control Plane must stay out of the per-request hot path, and no plane may read another's database, so signing keys should live where the signer runs. Human takeover and agent actions share one Chromium instance and one CDP seam, so agent-only signing needs a per-run actor flag that Quarry does not carry at the Fetch seam today (initiator exists on control events only).",
+   "approachAdjustment": "Three corrections. (1) The count is five sources plus a dead policy field: route one constant from quarry-core into StaticDriver, Http3Driver, SimpleHttpMarkdownFetcher, ReqwestRobotsFetcher, MAP_UA and the compose env, and either apply or delete FetchPolicy.user_agent. (2) Do not sign in browser_egress_proxy: it cannot add headers to HTTPS CONNECT tunnels; sign browser requests at the CDP Fetch seam (ContinueRequestParams with headers) and sign static and TLS requests in their drivers. (3) Hold the Ed25519 private key in Quarry's own secret or KMS source and publish the public key directory from a public edge or gateway route; Control Plane only audits rotation. Gate step 2 on an ADR that states the identity policy for the TLS and browser tiers.",
+   "effortRevised": "M",
+   "effortNote": "Step 1 stays S; step 2 stays M only if signing goes through the CDP Fetch seam and drivers (three transports plus a public key directory and rotation make it the upper end of M).",
+   "verdict": "reword",
+   "verdictReason": "Partial is right and the direction is sound, but the item miscounts the UA sources, points signing at a component that cannot sign HTTPS requests, and places key custody in Control Plane without a seam for it. Reword with the corrected placement and the tier-identity ADR as a prerequisite.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

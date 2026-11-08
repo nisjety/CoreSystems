@@ -1,0 +1,93 @@
+{
+ "finalId": "F-t2-071",
+ "tier": "nice-to-have",
+ "rank": 6,
+ "title": "Render MCP App (ui://) resources in an opaque-origin sandbox, and retire the permissive web-view iframe",
+ "summary": "Support interactive UI returned by MCP servers: Frontend Plane renders MCP App resources in an opaque-origin iframe served from a separate sandbox origin with a strict CSP and scheme allow-list, with a postMessage bridge that proxies tool calls through the gateway to Model Plane approvals. In the same change, delete or constrain the unused WebPageViewer iframe that combines allow-scripts with allow-same-origin.",
+ "whyItMatters": "Lets integration results (forms, pickers, dashboards from MCP servers) appear inline and be operated safely, and removes a latent client-side security hazard. It is emerging and not a parity blocker.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (MCP App guest view on a dedicated sandbox origin, only about/blob/data/https/wss allowed, permission requests denied, agent limited to locator actions)",
+  "others": [],
+  "prevalence": "1 of 4 sources (Codex only); unique",
+  "mechanism": "Render MCP App resources in a guest view on a separate sandbox origin; a session request filter allows only safe schemes; permission requests are denied; attach requests are queued with expiry; the agent drives the view through accessibility locators, never raw script."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:495-518 (model-generated HTML in srcdoc iframe with sandbox=\"allow-scripts\" and deliberately no allow-same-origin, referrerpolicy no-referrer)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx:147-192 (WebPageViewer: iframe src is a result URL with allow-scripts and allow-same-origin; grep finds no importer, so it appears unused)",
+   "grep for ui://, resourceUri and the mcp-app mime type across Model Plane services and verevonv3 src/apps found no match"
+  ],
+  "gap": "Chat artifacts are correctly sandboxed, but there is no MCP Apps rendering, no postMessage tool bridge and no agent operation of rendered widgets. WebPageViewer would load third-party pages directly in the user's browser with same-origin retained and no URL scheme check if it were ever wired in, which also bypasses Quarry's egress, ZDR and SSRF controls."
+ },
+ "approach": "Frontend Plane. Add an McpAppFrame component next to ChatArtifactPanel using the same sandbox=\"allow-scripts\" opaque-origin pattern, served from a separate sandbox domain with CSP (no network except an allow-list), and a postMessage bridge that sends tool-call requests to the gateway, which routes them to Model Plane (approvals apply). Needs Model Plane MCP gateway support to pass ui:// resources through. Remove WebPageViewer or replace it with the Quarry-backed remote browser view.",
+ "effort": "M",
+ "dependencies": [
+  "Model Plane MCP gateway/runtime support for UI resources in tool results",
+  "A separate sandbox origin/domain and CSP"
+ ],
+ "planeOwner": "Frontend Plane",
+ "risks": "T2 note: the DashboardSearchResults.tsx:184 iframe combining allow-scripts and allow-same-origin is a possible security issue if its content can be same-origin; it was not verified. If verification confirms it, split that fix out and treat it as a priority quick win. || Sandbox escape if allow-scripts and allow-same-origin are ever combined on same-origin content; phishing UI inside widgets; widgets triggering tool calls that skip approvals.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 4,
+  "DOC": 0,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-10-07"
+ ],
+ "sourceClusters": [
+  "C-t2-10-015"
+ ],
+ "sourceCategories": [
+  "Integration-plane overlap"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-071",
+   "status": "partial",
+   "exactGap": "MCP App rendering is absent: no ui://, resources/read, resourceUri or postMessage tool bridge exists in model-gateway, execution-core, mcp-bridge, the gateway or the SPA, the MCP client implements tools/list and tools/call only, and tool_result_handles unwraps a single text block. Reusable and shipped: ArtifactHtmlPreview (srcdoc iframe with sandbox allow-scripts and no allow-same-origin, no-referrer, wrapped in a strict CSP with connect-src none, pinned by a test). WebPageViewer (DashboardSearchResults.tsx:147-192) is exported but has no importer and carries sandbox allow-scripts plus allow-same-origin on a third-party src.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx:497-525 (ArtifactHtmlPreview: sandbox=\"allow-scripts\", srcdoc, referrerpolicy no-referrer)",
+    "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts:10-40 (PREVIEW_CSP with connect-src none; sandboxHtmlDocument)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.test.tsx:115-135 (test pins sandbox without allow-same-origin)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardSearchResults.tsx:147-192 (WebPageViewer; sandbox with allow-same-origin at :184)",
+    "grep (negative): WebPageViewer is referenced only by its own definition under verevonv3/src and verevonv3/apps",
+    "grep (negative): no ui://, resources/read, resourceUri or mcp-app in apps/Model Plane rust/go services and bridges, or in verevonv3 src, gateway and packages",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs:263-275 (builds tools/call requests only)",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs:1-30 (Streamable HTTP transport; grep finds no resources/read anywhere in model-gateway)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs:150-185 (unwrap_mcp_content handles only one text block)",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:223-232,280 (external mcp__ tools are gated only under the ask posture, not in chat auto posture)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs:1-60 (MCP server registry proxy with user, org and share scopes)",
+    "apps/Model Plane/docs/MODEL_PLANE_IMPROVEMENTS_2026.md:2160-2170 (doc note that MCP Apps becomes an opt-in extension)"
+   ],
+   "reuse": [
+    "ArtifactHtmlPreview opaque-origin srcdoc pattern and sandbox-html.ts CSP wrapper (connect-src none still allows a postMessage bridge)",
+    "model-gateway MCP registry and Streamable HTTP client (mcp_http.rs) as the place to add resources/read",
+    "Gateway mcp.rs server registry for user, org and shared scoping",
+    "execution-core permission evaluation (is_risky_tool, mcp__ gating) for approvals on widget-originated calls"
+   ],
+   "constraints": "Rendering untrusted MCP server UI is a Frontend concern but the data path is Model Plane's: the gateway must proxy resource reads through model-gateway (no direct browser to MCP server), and widget-initiated tool calls must go through the same Model Plane permission evaluation. In chat auto posture external MCP tools are not gated (permission/mod.rs:223-232), so the bridge needs an explicit approval class for widget calls. Content from MCP servers is untrusted data, and screenshots or widget state must follow ZDR retention. Removing WebPageViewer is consistent with the rule that browsing goes through Quarry's egress, SSRF and ZDR controls.",
+   "approachAdjustment": "Split in two. (a) S, do now: delete WebPageViewer or replace it with the Quarry-backed remote browser view. It is dead code, and because its src is cross-origin the allow-scripts plus allow-same-origin pair does not break the app's own isolation, so it is hygiene (third-party pages loaded directly in the user's browser, bypassing Quarry egress and ZDR), not the priority security quick win the T2 risk note suggests. (b) L, later: add MCP resources/read and ui:// metadata pass-through in model-gateway first, a gateway resource route, then an McpAppFrame beside ChatArtifactPanel using the same opaque-origin srcdoc pattern with a postMessage bridge to a gateway tool-call route. A separate sandbox domain is optional because an opaque-origin srcdoc frame already isolates; add it only if resources must be served by URL.",
+   "effortRevised": "L",
+   "effortNote": "MCP Apps is L (model-gateway resource support, gateway route, SPA bridge and approvals) because the Model Plane lane does not exist yet; the WebPageViewer removal is S and should ship separately.",
+   "verdict": "reword",
+   "verdictReason": "Partly built: the sandbox primitive exists and WebPageViewer is unused dead code, while MCP App rendering has no backend support at all; rewrite as a small hygiene item plus a later, larger, Model-Plane-led item and correct the severity of the dead iframe.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

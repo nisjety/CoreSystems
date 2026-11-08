@@ -1,0 +1,108 @@
+{
+ "finalId": "F-t2-040",
+ "tier": "recommended",
+ "rank": 16,
+ "title": "Parallel batch scrape with shared options, idempotent creation and wait-or-resume",
+ "summary": "Make /v1/batch fan out under a concurrency bound (min of maxConcurrency, the org limit and the per-host AIMD scheduler) with shared scrapeOptions, appendToId, an invalid-URL report and the shared status/errors/cancel routes. Accept a client Idempotency-Key on crawl/batch/schedule creation (payload hash, response replay, 409 on key reuse with a different payload) and add a bounded wait_ms that returns a resumable 408 'processing_continues' response with Retry-After instead of failing or duplicating work.",
+ "whyItMatters": "Sequential batches are a visible slowness for ingestion and for agents that want to read N search hits at once. Retries from the gateway or the Model Plane must not double-start crawls, and slow OCR/PDF/browser work should stop failing at gateway timeouts.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (api-surface fc-007 batch with maxConcurrency/append/ignoreInvalidURLs; fc-028 processing_continues 408 contract)",
+  "others": [
+   "Apify (run-sync with a wait window, DOC)",
+   "Codex in-app browser (declares bulk content but refuses it)"
+  ],
+  "prevalence": "batch scrape: 2 of 4 sources (Firecrawl, Codex declared only), common; sync-with-wait and resume: 2 of 4 (Apify, Firecrawl), common; idempotency: 1 of 4 and Firecrawl's is a negative example",
+  "mechanism": "POST /batch {urls[], scrapeOptions, maxConcurrency, appendToId?, webhook?} returns a job id and separately lists invalid URLs; status/errors/cancel reuse the crawl controllers. For waiting: key every heavy request by (org, request hash), wait up to the timeout, then return 408 {code:TIMEOUT, details:{state:'processing_continues', jobId, retryAfterSeconds}} with Retry-After so an identical retry re-attaches to the same job. For idempotency, copy the shape not Firecrawl's guard: store (org, route, key) -> {payloadHash, status, responseBody}, replay on match, 409 on mismatch, expire after 24 h."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:134 and :670-726 (batch handoff: urls, ingest, zdr only)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:359-394 (sequential Temporal batch loop)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:471-474 (edge generates a fresh Idempotency-Key per forwarded control call)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:165-171 (same on schedules)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386 and :423 (curated batch crawl of up to 200 deduped URLs with SSE progress)"
+  ],
+  "gap": "Batch has no per-batch options, maxConcurrency, append, invalid-URL report or status/cancel route; public crawl/batch do not accept a client idempotency key (the generated key only protects edge-to-control retries); scrape is sync-only and crawl/batch are async-only with no wait option, no processing_continues contract and no re-attach on retry."
+ },
+ "approach": "Ingestion Plane. Orchestrator: turn the BatchWF loop into bounded child activities honouring maxConcurrency and the existing per-host scheduler, accept ScrapeOptions (R-t2-01-01), add appendToId and invalidUrls. Edge: read Idempotency-Key from callers and forward it instead of a random one; control already dedupes on (org_id, key, route), so add payload-hash comparison and response replay and scope strictly by org. Add wait_ms to crawl/batch/extract with in-flight dedupe on (org, request hash, zdr posture) and the 408 resumable envelope; gateway and Model Plane clients honour Retry-After. ZDR jobs cannot keep results for re-attach beyond the request.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-005 ScrapeOptions",
+  "F-t2-017 job status route"
+ ],
+ "planeOwner": "Ingestion Plane (quarry-orchestrator, quarry-edge, quarry-control)",
+ "risks": "Parallel fan-out must still respect per-host politeness and org concurrency budgets; request-hash dedupe must include org and ZDR posture so it never crosses tenants; replayed responses must not retain ZDR content.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 1,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-01-06"
+ ],
+ "sourceClusters": [
+  "C-t2-01-005",
+  "C-t2-01-020",
+  "C-t2-01-004"
+ ],
+ "sourceCategories": [
+  "Acquisition API surface"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-040",
+   "status": "partial",
+   "exactGap": "/v1/batch is a durable handoff that forwards only urls, ingest, org and user (routes.rs:669-716) to BatchJobWF, which processes URLs in a plain sequential loop (workflows.go:359-381) with no per-batch options, maxConcurrency, append, invalid-URL report or cancel handlers, and the edge exposes no per-job status or cancel route (only /v1/:kind/jobs and /v1/jobs/:id/events, routes.rs:192, 232); durable batch and crawl jobs are refused under ZDR (routes.rs:563-583). The crawl and batch handoff sends no Idempotency-Key at all (handoff.rs:26-82); the random keys at resource_routes.rs:471-474 and schedule_routes.rs:164-171 belong to other forwarded mutations, while control's createJob already returns the existing job for a repeated (org, key) (resources.go:395-450) but its unique index is on idempotency_key alone (migration 007) and the generic route-level handler is a no-op placeholder (cycle23.go:436). There is no wait_ms, no 408 processing_continues contract and no re-attach; scrape is sync-only and crawl or batch are async-only.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:131-134",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:192",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:232",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:563-583",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:669-716",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/handoff.rs:26-82",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:466-474",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:164-171",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:357-381",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:396-420",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:395-450",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/cycle23.go:420-437",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/migrations/007_jobs_idempotency_key.sql:1-10",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:145-150",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:335-364",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/host_scheduler.rs:1-30",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:305-345",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:420-445"
+   ],
+   "reuse": [
+    "Shared HostScheduler (per-host AIMD) and AutoscaledPool, already applied inside PageRunner for every page, so workflow-level fan-out stays politeness-bounded",
+    "Control createJob idempotency lookup and unique index (extend, do not replace)",
+    "CrawlJobWF pause, resume and cancel signal handlers as the model for batch",
+    "Edge /v1/:kind/jobs list and /v1/jobs/:id/events routes",
+    "Gateway curated batch crawl (200 URL cap, SSRF-normalised, SSE progress) as the first consumer",
+    "Model Plane model-gateway idempotency registry pattern (claim, replay, in-flight) as a reference"
+   ],
+   "constraints": "Idempotency keys and request-hash dedupe must be scoped by org: the unique index on idempotency_key alone makes two orgs choosing the same client key collide at insert, so namespace keys by org or change the index to (org_id, idempotency_key). ZDR: durable jobs are refused under ZDR, so wait-or-resume and replay apply only to non-ZDR orgs and must never store ZDR content. Fan-out must respect per-host and org concurrency budgets (already in PageRunner) and keep billing semantics (one BATCH_URL meter event with quantity = URL count at handoff). Ownership stays in the Ingestion Plane (edge, control, orchestrator); the gateway still SSRF-normalises URLs before calling.",
+   "approachAdjustment": "Reorder. (1) S quick win: accept Idempotency-Key on /v1/crawl, /v1/batch and schedules, namespace it by org, forward it as a header from handoff.rs (there is no random key to replace on the crawl or batch path), change migration 007's unique index to (org_id, idempotency_key), and add a payload-hash check with 409 on mismatch in createJob. (2) M: make BatchJobWF bounded-parallel (workflow.Go with a semaphore or child workflows), accept ScrapeOptions from F-t2-005, add appendToId and an invalid-URL report, and add the pause and cancel handlers CrawlJobWF has; per-host politeness is already enforced in PageRunner. (3) M to L: add per-job get and cancel routes on the edge (F-t2-017) before any wait_ms, then a 408 processing_continues envelope for non-ZDR durable jobs only.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged overall: roughly S for idempotency, M for parallel batch, M for status/cancel and wait-or-resume.",
+   "verdict": "reword",
+   "verdictReason": "Partial is confirmed, but the idempotency description is wrong for crawl and batch (the handoff sends no key and the random keys serve other mutations), the DB index is not org-scoped, ZDR removes the re-attach case, and per-host politeness is already enforced in PageRunner. Reword and split the S idempotency fix out as a quick win.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

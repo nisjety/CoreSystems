@@ -1,0 +1,110 @@
+{
+ "finalId": "F-t2-039",
+ "tier": "recommended",
+ "rank": 15,
+ "title": "Governed downloads and uploads: quarantined, tenant-scoped artifacts, a downloads drawer and hand-off to the Data Plane",
+ "summary": "Turn on downloads in the Chromiumoxide driver: route downloads to a per-session quarantine directory and register the result as a tenant-scoped Quarry artifact (size and type limits, hash, malware-scan hook), withheld under ZDR. User-initiated downloads under takeover are allowed; agent downloads need the existing single-use sensitive download_ref child grant, and unsolicited downloads are cancelled. Emit started, in_progress, complete, failed and canceled events into the timeline, and add a downloads drawer in BrowserChrome with 'Save to Knowledge'. || Flip on the already-implemented artifact-only upload/download path in the Quarry driver (the capability flag is false today). Store downloads as Quarry artifacts with checksum, MIME sniffing and malware scan, and hand them to the Data Plane through its ingest API; allow uploads only from artifacts the run's owner can read, each behind a one-shot approval grant bound to the exact artifact and frame.",
+ "whyItMatters": "Agents and users need to fetch PDFs and exports into Knowledge, and the authority model already exists in the contracts and the broker. Without it any page that serves a file is a dead end. || Agents that research or file paperwork need PDFs/CSVs and form uploads. Landing files as Verevon artifacts or documents (not on a desktop) matches the product's data model, and most of the mechanism already exists.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (download gating, iab-042)",
+  "others": [
+   "Aside (download bubble and dangerous-download blocking, aside-browser-product-024)",
+   "Codex in-app browser (grant {grantedAtMs, sessionId, url} consumed in the will-download handler with URL-chain matching and expiry; upload via intercepted file chooser and DOM.setFileInputFiles)"
+  ],
+  "prevalence": "1 of 3 sources record it as a gated manager (Codex); Aside has a standard download bubble. Unique as an agent-aware gate. || 2 of 3 sources (Aside, Codex); table-stakes",
+  "mechanism": "will-download handler: cancel unless the download is user-initiated or matches a consumed agent grant (consumeAllowedBrowserUseDownload); a status machine started, in_progress, paused, complete, failed, canceled is pushed to the agent. Verevon: download_ref already requires a single-use sensitive child grant; files become tenant-scoped Quarry artifacts listed in a downloads drawer. || Merged items add: allowDownload(url) stores a one-time grant; the download handler consumes a matching grant (URL or redirect chain, same tab/session, not expired) else cancels. Uploads: wait for Page.fileChooserOpened (intercepted), check approval, then DOM.setFileInputFiles with artifact paths."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1877 (downloads_to_artifacts: false)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:487 (unsupported_action download_ref)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:803-810 (DownloadRef and FrameDownloadRef actions exist)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:233-274 (sensitive action requires a parent BrowserBroker run grant)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx (no downloads UI)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2102",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2211",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1877-1882",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2276-2292",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/contracts.rs:683-830"
+  ],
+  "gap": "Contracts and broker model download_ref as a sensitive single-use grant, but the driver reports the capability as false and there is no UI. Quarry's artifact store is not tenant-scoped yet (baseline gap 14). || Quarry implements UploadRef/DownloadRef (and frame variants) with artifact-only transfer and one-shot approval grants, but the driver capability is false so these actions are rejected by require_action_capabilities."
+ },
+ "approach": "Ingestion Plane: enable the stubbed upload/download actions behind one-shot sensitive grants, store downloads as quarantined tenant-scoped artifacts (scan and type-check before release), never persist under ZDR; Data Plane ingest via its public contract; Frontend downloads drawer with agent-aware gating. || Source detail: [R-t2-08-09] Ingestion Plane: set the download behavior per session to a quarantine path, create the artifact through a tenant-scoped store, enforce caps and a scan hook, cancel unsolicited agent downloads, tag the source user|agent in the timeline, and withhold under ZDR. Frontend Plane: downloads drawer with 'Save to Knowledge' through the existing knowledge scrape route. Keep uploads separate (they stay unavailable until quarantine and OOPIF proof exist, chromiumoxide.rs:1877-1882). || [R-t2-09-10] Ingestion Plane: enable the driver capability, add checksum, MIME sniffing and a scan step, and register downloads as Quarry artifacts (ephemeral under ZDR). Data Plane: ingest through its document API (no cross-plane DB access). Upload source checks run against the owner-plane ACL through the API.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-001",
+  "Tenant-scoped Quarry artifact store (baseline gap 14)",
+  "Data Plane document ingest API",
+  "F-t2-001 grant wiring"
+ ],
+ "planeOwner": "Ingestion Plane + Data Plane (ingest API) + Frontend Plane",
+ "risks": "Malware, exfiltration and storage of sensitive files; artifact store isolation is the single control until it is tenant-scoped. || Malware in downloads; ACL widening on uploads; ZDR artifacts must be ephemeral; needs a safety review before enabling.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 12,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-08-09] docs/BROWSER_WORKSPACE_PLAN.md open item 1 (downloads and uploads risk classification) and target capability 10 (file up/download); the plan itself is stale."
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-09",
+  "R-t2-09-10"
+ ],
+ "sourceClusters": [
+  "C-t2-08-034",
+  "C-t2-09-033"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)",
+  "AI-browser control"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-039",
+   "status": "partial",
+   "exactGap": "SRC: the driver, runtime and edge paths for governed downloads already exist and are gated off by one flag: ChromiumoxideDriver creates a per-session quarantine directory with AllowAndName and download events (chromiumoxide.rs:433-456) and implements a frame-bound, 25 MiB-capped download_from_verified_target (chromiumoxide.rs:75,2211-2390), and the runtime handler refuses under ZDR, applies the cap plus executable-magic and magic/extension admission and stores an org-stamped artifact (observation.rs:475-512,1322-1368,1428-1445), but capabilities() reports downloads_to_artifacts=false (chromiumoxide.rs:1877) so require_driver_capabilities rejects every download_ref (agent_routes.rs:1191-1193,1251-1258). SRC: what is missing around it is production issuance of the sensitive child grant (the gateway start_ai_run sends an interim 'session:<id>' grant_id and says real grant issuance is unbuilt, browser.rs:1235,1258-1262, although the broker supports it, browser-broker server.go:40-95), any downloads UI or events in BrowserChrome, user-initiated/takeover and unsolicited-download handling (the quarantine behaviour is applied to every context unconditionally, so unsolicited downloads are allowed into the temp dir rather than cancelled), a malware-scan hook (observation.rs:1329-1332 says antivirus remains a routing gate), tests for the download path, and the Data Plane hand-off. SRC: the artifact store is already tenant-scoped by org on read and list (artifact_store.rs:100-120,215-240; resource_routes.rs:133-159), contrary to the item's 'baseline gap 14' dependency; per-user and Space scoping are not present.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:75-77 (25 MiB cap, begin/complete timeouts), :433-456 (quarantine dir, SetDownloadBehavior AllowAndName), :1877-1882 (capability flags false), :2102 (upload_staged_file_to_target), :2211-2390 (download_from_verified_target)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:272, :317-326 (BrowserDownloadedFile), :476-488 (trait defaults return unsupported_action)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:152, :475-512 (DownloadRef handler, ZDR refusal at :479), :1322-1368 (validate_download_admission; admits pdf, png, jpg, gif, webp and text types only), :1428-1445 (put_artifact_if_allowed)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:233-274 (parent BrowserBroker grant required), :1191-1193 and :1251-1258 (capability gate), :2276-2292 (one-shot approval use)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:100-120 and :215-240 (org-bound get and list)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:133-159 (tenant-bound GET /v1/artifacts/{id})",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:34-36 and :263-265 (download_ref sensitive grant, one frame)",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:40-95 (AcquireGrant supports sensitive child grants)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235 and :1258-1262 (interim session-scoped grant_id; grant issuance unbuilt)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:3499 and rust/services/execution-core/src/tool_bridge/mod.rs:681-707 (download_ref tool and bridge)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1228-1236 (takeover control; grep finds no download UI in BrowserChrome.tsx or browser.rs)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json:18-28 (ingest row to the Data Plane documents API)"
+   ],
+   "reuse": [
+    "Existing Chromiumoxide quarantine plus download_from_verified_target path (flip and prove, do not rebuild)",
+    "observation.rs download admission and put_artifact_if_allowed (extend with scan and type rules)",
+    "BrowserBroker sensitive child grants (download_ref, one frame) and agent_routes one-shot approval tracking",
+    "Org-bound artifact store and GET /v1/artifacts/{id} for the downloads drawer",
+    "Quarry ingest client and the ingest token-request row for the Data Plane hand-off",
+    "BrowserChrome owner timeline and human takeover control for download events"
+   ],
+   "constraints": "Model proposes / Quarry executes or rejects: agent downloads stay behind a single-use sensitive grant bound to one frame (grant.go:263-265; agent_routes.rs:2276-2292), and uploads stay deferred (chromiumoxide.rs:1878-1881). ZDR: the runtime already refuses artifact downloads under ZDR (observation.rs:479), but the quarantine behaviour is installed for every context, so unsolicited downloads must be cancelled by default (INF; verify on a ZDR session). Plane ownership: the Data Plane hand-off must use its document ingest API and stamp the owner ACL (no cross-plane DB access; Space access never widens it); admission currently refuses office formats and archives, which limits 'Save to Knowledge' until a scanner exists. A safety review is needed before enabling.",
+   "approachAdjustment": "Do not rebuild quarantine or artifact storage. Order: (1) F-t2-001 grant issuance (gateway/execution-core calling BrowserBroker AcquireGrant with allowed_actions=[download_ref] and one frame); (2) add tests and a runtime proof for the Chromium download path, deny unsolicited downloads by default and open the download behaviour only during a governed action; (3) flip downloads_to_artifacts; (4) downloads drawer and timeline events in the Frontend Plane; (5) Data Plane hand-off via the ingest client and a scan hook before widening admitted types. Drop the 'artifact store is not tenant-scoped' dependency (it is org-scoped) and keep uploads out of scope.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged: M excluding F-t2-001 grant issuance, because the driver, runtime, edge and broker pieces exist; the remaining work is tests and proof, default-deny for unsolicited downloads, UI and events, the scan hook and the hand-off.",
+   "verdict": "reword",
+   "verdictReason": "Most of the Quarry side is built and merely disabled, the artifact store is already org-scoped, and the real blockers are grant issuance, unsolicited-download policy, UI and the Data Plane hand-off; reword from \"turn on and build\" to \"prove, gate and surface the existing path\".",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

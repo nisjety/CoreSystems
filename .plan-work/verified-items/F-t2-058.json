@@ -1,0 +1,118 @@
+{
+ "finalId": "F-t2-058",
+ "tier": "recommended",
+ "rank": 34,
+ "title": "Scrape request context and egress tiers: locale/geo/mobile emulation, country egress with policy-gated auto-escalation, profile pinning and cache partitioning",
+ "summary": "Add profile_id, location {country, languages} and a mobile/device preset to ScrapeRequest and to lease creation. When a profile is set, the planner must use only profile-capable browser drivers, never the static/TLS tiers, never read or write the scrape cache, and stamp the profile scope into receipts. Apply Emulation.setLocaleOverride, setTimezoneOverride, setGeolocationOverride, setDeviceMetricsOverride and setUserAgentOverride at context creation, tag proxy-pool entries with a country, and include (country, languages, mobile) in the cache key. || Extend ProxyPool and EgressBroker with a vendor-neutral tier (direct/first-party, basic datacenter, enhanced residential or mobile) and an optional country, exposed as proxy: auto|basic|enhanced and country on scrape and agent runs. The broker plans basic first and escalates to enhanced only on rate-limit, transport or region-block outcomes when org policy allows it. The Model never picks the proxy. In a second phase turn the in-memory (host, proxy) health into a SessionPool that scores identities (proxy, cookie jar, fingerprint) and retires bad ones.",
+ "whyItMatters": "The UI is Norwegian-first, so localized pricing and content matter. Scraping behind a login is only safe for knowledge ingestion if personalised pages can never leak across tenants through a shared cache and if the content inherits the owner's ACL. || Higher success on geo-restricted and rate-limited public sites for both user browsing and agent research, and localized results for market-research use cases, without a per-request choice by the Model. Verevon currently has only a flat proxy list, no geo control in the gateway or UI, and no identity health beyond a 60 s cooldown.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (profile routing firecrawl-engine-and-infra-018; location and mobile firecrawl-api-surface-060 and firecrawl-engine-and-infra-014, SRC)",
+  "others": [
+   "Apify locale-constrained fingerprints and proxy country (DOC, mentioned in the comparator note rather than in this category's records)",
+   "Firecrawl (SRC) for the user contract; Apify (DOC) for the knob set and Crawlee SessionPool"
+  ],
+  "prevalence": "1 of 4 sources for each (firecrawl), unique; geo is common in hosted scrapers || Tiers and geo proxies: 2 of 4 sources (Firecrawl, Apify), table-stakes for scrapers. Session health: 1 of 4 (Apify), unique",
+  "mechanism": "Planner: if request.profile is set, candidate engines are the browser engines that support profiles (parsers only with bytes the browser downloaded). Cache layer: personalised = headers || actions || profile means no cache lookup and no cache store. location validates an ISO alpha-2 country (special pools gated by team permission), chooses egress by country, sets Accept-Language from languages[], timezone from country default, optional coordinates, and mobile sets device metrics plus UA; cache key includes (country, languages, mobile). || Merged items add: Request field proxy: basic|enhanced|auto (default auto). Attempt 1 uses the basic pool. On a block signal (401/403/429 or a challenge hint) a typed 'needs stronger egress' error is caught by the waterfall, which retries once on the enhanced pool inside the same retry budget, with the timeout raised for stronger tiers. Pool choice is encoded as (group, country, sticky session id). Policy can pin the maximum tier per org (Safe Mode forces basic). A SessionPool holds N sessions (proxy session id, cookie jar, score): markGood decays the score, markBad raises it, a blocked status retires the session, and state persists across restarts."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:19-41 (profile_required forces the browser; it is only ever set from the client-supplied `signals` body field, routes.rs:357 and :440, and no profile id can be passed to scrape)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1851-1860 (only viewport.is_mobile)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-244 (launch flags only; no UA/locale/timezone/geolocation override)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:345 (gateway accepts a viewport)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:817 (SPA hard-codes 1280x800)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_pool.rs:1-40",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs:1-30",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs:50-70",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_affinity.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:37-70",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:95-108",
+   "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:106-141"
+  ],
+  "gap": "Scrape cannot run with a profile at all (profiles exist only on agent sessions), so the 'authenticated content never enters a shared cache' rule is only trivially true today and must ship with any profile-on-scrape feature. No locale, timezone, geolocation or device presets, and no country egress selection; search has country and language but the browser does not. || The proxy pool is a flat env list (QUARRY_PROXY_POOL) with sticky (org, host) hashing, processor-approval gating, per-run affinity and a DNS-pinned browser egress proxy, which is richer than either reference at the plumbing level. Missing: tier or class, country, residential or mobile integration, any request-level proxy field, tier escalation, and any proxy or geo control in the gateway or UI. EgressBroker keeps in-memory (host, proxy) health with a 60 s block cooldown and 3 attempts, but there is no session object binding proxy, cookie jar and fingerprint, no retirement or score decay, and no persistence across instances."
+ },
+ "approach": "Ingestion Plane: locale, timezone, geolocation and mobile emulation per page (needs per-page emulation from F-t2-007), country-targeted egress tiers behind the processor-approval gate with auto-escalation only on 401/403/429 within the retry budget and capped by the org policy floor (F-t2-022), authenticated-profile pinning for scrape (profiles never use the shared cache), and options partitioning the cache. Session health retirement is phase 2. || Source detail: [R-t2-03-05] Ingestion Plane: add profile_id, location and mobile to ScrapeRequest and BrowserLease; set profile_required internally (ignore the client `signals` value for it), reject static/TLS fallback and cache admission when set, record the profile scope in receipts; apply CDP overrides at context creation (uses the per-page emulation from R-t2-03-01); add country tags to QUARRY_PROXY_POOL entries and a PrivacyPolicy check for third-party proxy processors. Data Plane ingestion must give scraped authenticated content the owner's ACL. Frontend Plane: device/locale picker in BrowserChrome and pass the user's locale instead of the fixed viewport. || [R-t2-04-07] Ingestion Plane. Phase 1: add ProxyTier plus country tags to ProxyPool entries; add proxy and country fields to /v1/scrape, crawl and agent-run requests; EgressBroker plans basic first and escalates to enhanced only for 429, repeated transport failure or an explicit region-block signal, and only when the org policy floor (R-t2-04-05) allows enhanced; never escalate to get past a strong bot signal (R-t2-04-03, INF adaptation of Firecrawl's 401/403/429 trigger). Record tier and country in the existing redacted egress receipts and in usage so Control Plane can meter per-GB cost and entitlement. Every vendor stays a registered third-party processor under the PrivacyPolicy gate, and ZDR orgs may only use processors with ZDR terms. Phase 2: promote broker health to a SessionPool keyed (org, host-group) with EWMA error scores and retirement; keep it in memory for ZDR orgs and use Redis with TTL otherwise; keep agent-run affinity sticky and, when blocked mid-run, propose a choice to the user instead of silently rotating mid-login. Follow the egress-tier and session-health phases already drafted in SOVEREIGN_SCRAPING_RELIABILITY.md.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-020 (profile persistence fixes)",
+  "F-t2-007 (per-page emulation)",
+  "Geo-capable proxy supply",
+  "Processor registry / PrivacyPolicy gate (shipped)",
+  "Control Plane entitlements and cost metering",
+  "F-t2-022 org policy floor (tier cap)",
+  "F-t2-027 block taxonomy (escalation triggers)",
+  "Redis for phase 2"
+ ],
+ "planeOwner": "Ingestion Plane + Control Plane (tier cap, metering)",
+ "risks": "Third-party residential proxies are a data processor under ZDR/DPA; geolocation spoofing must be disclosed in receipts; authenticated scrape content must not widen ACLs in the Data Plane. || Residential proxies carry consent and sourcing risk and conflict with the explicit anti-evasion stance, so keep them off by default and use them for geo and rate-limit resilience, not to defeat a deliberate block. Cost per GB. Rotating identities during an authenticated run breaks sessions.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 10,
+  "DOC": 4,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-05] apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md Phase 2 (egress tiers with ASN/region metadata) covers only the egress side; profile pinning and locale emulation are not listed || [R-t2-04-07] docs/SOVEREIGN_SCRAPING_RELIABILITY.md: Phase 2 (EgressBroker v2: egress tiers, per-domain health scoring, cooldown and quarantine, BYO proxy pools) and Phase 3 (session health states, encrypted profile TTLs, ZDR persistence tests); status 'proposed backlog feature'"
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-03-05",
+  "R-t2-04-07"
+ ],
+ "sourceClusters": [
+  "C-t2-03-009",
+  "C-t2-03-011",
+  "C-t2-04-002",
+  "C-t2-04-004"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-058",
+   "status": "partial",
+   "exactGap": "SRC: ScrapeRequest has no profile_id, location, device or proxy field (routes.rs:346-375; profile_required arrives only through the client-supplied signals object, driver_plan.rs:13-21,36-43), the local Chromiumoxide driver sets no user-agent, locale, timezone, geolocation or device-metrics override and only maps viewport.is_mobile (chromiumoxide.rs:1851-1860), and ensure_browser relaunches the single shared Chromium and clears every session's pages whenever the viewport changes (chromiumoxide.rs:194-270); only the managed Kernel driver forwards locale, timezone and user agent, and only from a restored profile snapshot (kernel.rs:119-135,301-306). SRC: egress is richer than the item says in one respect and absent in another: QUARRY_PROXY_POOL is a flat list wired only into the StaticDriver (main.rs:271-291) with sticky (org, host) ordering (proxy_pool.rs:1-40) and EgressBroker already rotates to another proxy after 401/403/407/429/503 with a 60 s cooldown and 3 attempts (egress_broker.rs:13-14,102-163), but the Chromium path uses a loopback DNS-pinned direct connection with no upstream proxy chaining (browser_egress_proxy.rs:1-8,297) and there is no tier, country or request-level proxy field anywhere. SRC: the scrape cache is Redis quarry:page:{content fingerprint}, read only when the client supplies prev_fingerprint, and its key is neither org-prefixed nor option-keyed (cache.rs:1-36; routes.rs:430-438,478-488), while the URL/vary fingerprint function that would suit partitioning is dead scaffolding (cache.rs:77-98).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:346-375 (ScrapeRequest), :430-438 and :478-488 (cache read/write guards)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs:1-36 (PageCache key quarry:page:{fingerprint}) and :77-98 (dead URL/vary fingerprint)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:13-21 and :36-48 (DriverSignals, plan_from_signals)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-270 (ensure_browser relaunch), :177-178 and :662-667 (profile store), :1851-1860 (viewport only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:119-135 and :301-306 (locale, timezone, user agent from profile snapshot)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:271-291 (QUARRY_PROXY_POOL into StaticDriver)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/proxy_pool.rs:1-40 (flat env list, sticky hashing, server-side DNS for http/socks5h)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/egress_broker.rs:13-14 and :102-163 (block_rotation, health map)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:1-8 and :297 (loopback DNS-pinned direct egress)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fingerprint_rotation.rs:14-18 (block status set)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/privacy.rs:65 (guard_third_party_processing)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:810-817 (session create with fixed 1280x800 and profile selection) and apps/gateway/src/domains/browser.rs:335-348 (default viewport)",
+    "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:100-141 (planned EgressBroker v2 and session health)"
+   ],
+   "reuse": [
+    "BrowserLease plus ProfileStore persistence (chromiumoxide.rs:177, :662-667; kernel.rs snapshot) for profile pinning",
+    "EgressIdentity processor_id and PrivacyPolicy::guard_third_party_processing for the processor gate",
+    "EgressBroker health map and ProxyPool ordering as the base for tiers",
+    "DriverSignals/DriverPlan for forcing browser-capable drivers when a profile is set",
+    "SOVEREIGN_SCRAPING_RELIABILITY.md phases 2 and 3 as the already-drafted design"
+   ],
+   "constraints": "SRC: ZDR already skips cache reads and writes (routes.rs:430,478) and persistent profiles are refused for ZDR sessions by the gateway guard reject_zdr_persistent_profile (apps/gateway/src/domains/browser.rs:113,139,174) and mirrored in the SPA (KnowledgeComposer.tsx:805-815), so any profile or location feature inherits that. SRC: third-party proxies are processors under PrivacyPolicy (default deny, privacy.rs:65), and http/https/socks5h proxies resolve DNS server-side so the DNS-pin SSRF boundary cannot be asserted for them (proxy_pool.rs:18-33): browser country egress needs an explicit decision on that trust boundary. SRC: today's block_rotation already rotates proxies on a bare 401/403/407/503, so the proposed 'escalate only on rate-limit, transport or region block, never past a strong bot signal' needs the block-status set narrowed in step with F-t2-027. INF: authenticated scrape output must be ingested under the owner's ACL and never widened by Space access.",
+   "approachAdjustment": "Split into independent slices and drop the cache-key wording. (a) Per-page locale/timezone/geolocation/UA/device emulation with session-scoped contexts (needs F-t2-007; this also removes the all-sessions relaunch); (b) profile pinning for scrape with a hard no-cache-read/no-cache-write rule when a profile or location is set, ignoring the client signals value for profile_required, and add an org prefix to the quarry:page key before anything authenticated can be cached; (c) egress tiers and country behind the processor gate, with browser chaining designed first; (d) defer the SessionPool phase. Pass the user's locale (for example nb-NO) from the SPA instead of the fixed 1280x800 once (a) exists.",
+   "effortRevised": "XL",
+   "effortNote": "As one item it is XL: emulation M, profile-on-scrape M, egress tiers plus browser proxy chaining L, SessionPool L (defer). The locale/device slice alone is M and is the part with immediate value.",
+   "verdict": "reword",
+   "verdictReason": "The plumbing is richer than described (processor-gated pool, rotation, DNS-pinned browser egress) but request-level context is wholly absent, the cache premise is wrong (content-addressed, not URL/option keyed), and the escalation design conflicts with current block-status rotation; reword and split, demoting residential tiers and SessionPool.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

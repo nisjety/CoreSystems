@@ -363,3 +363,9 @@ Standard envelope, `error.details.reason` as below. A message never echoes docum
 | 504 | `TIMEOUT` | none | the parse took more than 15 seconds | the file is too slow to read; do not retry as is |
 
 A 200 may carry `warnings[]` (`document_has_no_text_layer`, `some_pages_have_no_text_layer`, `document_has_no_text`, `truncated_at_8mib`): they are not errors.
+
+## Scrape locale, timezone and location (E4.4-a)
+
+Field errors (400, in `details.fields[]`, each with a path and never a value): `invalid_locale` (at `locale`: not a language tag such as en-US or nb-NO), `invalid_timezone` (at `timezone`: not an IANA-shaped name), `out_of_range` (at `location.latitude`, `location.longitude` or `location.accuracy`), `missing_field` (at `location.latitude` or `location.longitude`), `unknown_field` (at `location.<key>`: the object takes latitude, longitude and accuracy), and `invalid_type` (at `locale`, `timezone` or `location`). While `QUARRY_EDGE__PER_PAGE_LOCALE` is off these keys are not errors at all: they are unknown fields, a warning (or `unknown_field` in strict validation), as they were before.
+
+Browser errors: 400 `BAD_REQUEST` with `details.reason` `page_emulation_failed`, `details.field` (`locale`, `timezone` or `location`) and `details.error_class` (`invalid_value`, `already_set` or `cdp_error`), when the browser refuses a value. Any other browser failure of this kind is `DRIVER_FAILED` with the same details. The value is never in the error. No browser on the edge: 400 `BAD_REQUEST` with one field error per emulated field in `details.fields[]`, each with code `unsupported_option` (paths `locale`, `timezone` and `location`). A browser that serves the request but cannot emulate (a remote provider): 501 `UNSUPPORTED` with `details.reason` `browser_capability_unavailable`.

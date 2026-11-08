@@ -1,0 +1,106 @@
+{
+ "finalId": "F-t2-060",
+ "tier": "recommended",
+ "rank": 36,
+ "title": "Isolate each browser session or tenant in its own container or VM instead of a shared Chromium",
+ "summary": "Lease a container or microVM per browser session (per-org warm pools first, per-session later) with its own Chromium, a tmpfs profile directory, cgroup limits and egress only through the egress broker, destroyed at session end with persistent profiles exported encrypted. Either reuse Model Plane sandbox-manager leasing primitives or build a dedicated browser-pool service owned by the Ingestion Plane; the already present Browserbase, Browserless and Kernel drivers are an alternative route to provider-hosted isolation.",
+ "whyItMatters": "Tenant isolation for a browser that both users and agents drive on arbitrary sites: a renderer exploit or cross-context leak in a shared Chromium crosses tenants. It is also needed before persistent profiles and downloads are offered more widely.",
+ "referenceBestPractice": {
+  "bestSource": "Apify (isolated per-run containers; SOC 2 Type II; runtime technology not disclosed, DOC)",
+  "others": [],
+  "prevalence": "1 of 4 sources in this category (Apify, DOC only); unique",
+  "mechanism": "A sandbox manager leases a container or microVM per browser session or tenant: own Chromium, tmpfs profile, cgroup limits, egress through the egress broker only; destroy at session end and export persistent profiles encrypted to storage."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go:84",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/pool.rs"
+  ],
+  "gap": "Isolation is a per-session CDP browser context inside a shared quarry-edge Chromium (baseline v-browser-app-057). sandbox-manager leases only code and workspace sandboxes, and the Kernel driver, which would give VM-level isolation, is unwired. Mitigations in place: Chromium sandbox on by default, per-session contexts (the cookie-leak fix) and isolated-egress proof required for agent runs."
+ },
+ "approach": "Ingestion Plane owns the browser fleet (quarry-browser pool.rs): add a lease interface that can be backed by a per-org container pool or a provider driver, route CDP and frame streams through it, and keep the egress broker as the only network path. Start with per-org pools and a warm pool to hide cold-start latency; per-session microVMs later.",
+ "effort": "L",
+ "dependencies": [
+  "sandbox-manager leasing primitives or a new browser-pool service",
+  "Egress broker",
+  "Item F-t2-008 for per-session cost metering"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Cold-start latency and cost; operational complexity of a fleet. The reference is documentation only, although the Verevon gap is verified in source.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 1,
+  "DOC": 1,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-07-09"
+ ],
+ "sourceClusters": [
+  "C-t2-07-019"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-060",
+   "status": "absent",
+   "exactGap": "Isolation today is one Chromium per ChromiumoxideDriver (launched in ensure_browser, chromiumoxide.rs:194-262) with a per-session CDP browser context inside it (396-420); there is no container or microVM boundary per org or session. ensure_browser also relaunches that single shared Chromium, clearing every session's pages, whenever a lease asks for a different launch viewport (194-223, lease.rs:20-23), so concurrent tenants with different viewports can kill each other's runs. sandbox-manager is only a Postgres lease registry for thread/agent code scopes that hands out a sandbox://<id> string and starts nothing (server.go:84-97, lease.go:154), and the Kernel driver is a REST shim that is never registered (kernel.rs:1-20, main.rs:322-340).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:194-223",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:226-262",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:396-420",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:877-881",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:888-905",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1925",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1960-1972",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:3452-3458",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/lease.rs:20-23",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:331-360",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/kernel.rs:1-20",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:322-340",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:1283-1288",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:139-148",
+    "apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml:97-99",
+    "apps/Ingestion Plane/Quarry-v2/deploy/compose/.env.example:20",
+    "apps/Ingestion Plane/Quarry-v2/deploy/compose/Dockerfile.edge:198",
+    "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:299-303",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go:84-97",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go:154",
+    "apps/Model Plane/go/services/sandbox-manager/cmd/main.go:60",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:471-474"
+   ],
+   "reuse": [
+    "ChromiumoxideDriver code (CDP, AX snapshot, live frames, download quarantine) as the worker-side implementation",
+    "BrowserEgressProxyProvider (per-session pinned DNS-pinning proxy with receipts)",
+    "RuntimeLeasePool / LeasePool (affinity key, TTL, semaphore admission)",
+    "ProfileStore (tenant-scoped profile snapshots, keyed org_id + profile_id) for exporting persistent profiles",
+    "Dockerfile.edge pinned Chromium build",
+    "BrowserDriverCapabilities gating and the SOVEREIGN_SCRAPING_RELIABILITY.md Phase 5 'owned browser fleet' plan"
+   ],
+   "constraints": "Ingestion Plane must own the browser fleet. Model Plane sandbox-manager is a Space-capability-bound lease registry for code sandboxes (its backend id is pinned by a Control capability decision, server.go:84-107, main.go:60); making Quarry depend on it inverts 'Model proposes, Quarry executes' and drags Space authority into scraping, so that option in the item should be dropped. PinnedEgressProxyEndpoint is deliberately loopback-only (lib.rs:331-360), so a per-container Chromium needs its own proxy sidecar in the same network namespace or an explicit, reviewed relaxation of that type. ZDR: per-session workers must be ephemeral and profile export must stay blocked under ZDR (the gateway already rejects ZDR plus persistent profile, browser.rs:471-474). Space access never widens an owner-plane ACL, so any lease must be keyed by the verified org_id, not by caller input.",
+   "approachAdjustment": "Split the item. Step 1 (S to M, no fleet): stop the cross-session blast radius by applying viewport per page or context through CDP emulation instead of relaunching the shared browser (chromiumoxide.rs:194-223), and change the compose default of QUARRY_BROWSER_NO_SANDBOX from 1 to 0 (docker-compose.yml:99 disables the Chromium sandbox when the variable is unset, contradicting its own comment at line 97 and .env.example:20); production manifests were not checked. Step 2 (L): add a CDP-connect mode to ChromiumoxideDriver (Browser::connect to a worker WebSocket) and a per-org pool of Chromium worker containers, each with its own pinned-proxy sidecar, all owned by the Ingestion Plane. Step 3 (XL, optional): microVM per session. Do not present the Kernel or Browserless drivers as a shortcut, they are one-shot REST shims. Also note that scrape-path sessions are keyed by host only (browser_driver.rs:139-148), so concurrent same-host browser scrapes from different orgs may share one session_key (INF, not tested).",
+   "effortRevised": "XL",
+   "effortNote": "Original L covered only the pool. Real per-org or per-session isolation needs the CDP-connect driver plus a worker fleet and proxy placement. The cheap hardening in Step 1 is S to M and should be split off as its own quick win.",
+   "verdict": "reword",
+   "verdictReason": "The isolation gap is real and absent, but the item omits two existing defects that matter more in the short term (viewport-triggered relaunch of the shared Chromium; sandbox disabled by the compose default), offers a wrong-plane option (sandbox-manager) and ignores the loopback-proxy invariant. Reword as a staged item with a quick-win first step.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

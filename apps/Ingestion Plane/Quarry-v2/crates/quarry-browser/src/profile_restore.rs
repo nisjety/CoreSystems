@@ -29,6 +29,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use quarry_core::contracts::ProfileRestoreSummary;
 use quarry_core::error::{ErrorCode, QuarryError};
+use quarry_core::page_emulation::PageEmulation;
 
 use crate::profile_snapshot::{
     CookiePriority, OriginState, PartitionKey, SameSite, SourceScheme, SEEDED_SENTINEL_KEY,
@@ -479,6 +480,24 @@ impl ProfileEmulation {
     pub fn is_empty(&self) -> bool {
         self.locale.is_none() && self.timezone.is_none()
     }
+
+    /// What the profile emulates once the page's own request sets some of it: a field the request
+    /// sets is the request's to emulate, not the profile's (E4.4-a).
+    #[must_use]
+    pub fn without(&self, request: &PageEmulation) -> Self {
+        Self {
+            locale: if request.locale.is_some() {
+                None
+            } else {
+                self.locale.clone()
+            },
+            timezone: if request.timezone.is_some() {
+                None
+            } else {
+                self.timezone.clone()
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -725,19 +744,24 @@ pub fn build_seeding_script(origins: &[OriginState]) -> Option<String> {
 // ---------------------------------------------------------------------------------------
 
 #[cfg(feature = "chromiumoxide")]
-pub(crate) use cdp::{apply_profile_emulation, restore_into_context};
+pub(crate) use cdp::{apply_page_emulation, apply_profile_emulation, restore_into_context};
 
 #[cfg(feature = "chromiumoxide")]
 mod cdp {
-    use ::chromiumoxide::cdp::browser_protocol::browser::BrowserContextId;
+    use ::chromiumoxide::cdp::browser_protocol::browser::{
+        BrowserContextId, PermissionDescriptor, PermissionSetting, SetPermissionParams,
+    };
     use ::chromiumoxide::cdp::browser_protocol::emulation::{
-        SetLocaleOverrideParams, SetTimezoneOverrideParams,
+        SetGeolocationOverrideParams, SetLocaleOverrideParams, SetTimezoneOverrideParams,
     };
     use ::chromiumoxide::cdp::browser_protocol::network as net;
     use ::chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
     use ::chromiumoxide::cdp::browser_protocol::storage::{GetCookiesParams, SetCookiesParams};
     use ::chromiumoxide::{Browser, Page};
     use chrono::{DateTime, Utc};
+    use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+    use quarry_core::page_emulation::{Location, PageEmulation, DEFAULT_ACCURACY_M};
+    use serde_json::json;
 
     use super::{
         apply_cookies, plan_restore, CookieKey, CookiePlan, CookieSink, ProfileEmulation,
@@ -882,6 +906,84 @@ mod cdp {
                 );
             }
         }
+    }
+
+    /// E4.4-a: the request's own emulation, on `page` before its first navigation. Unlike the
+    /// profile's, a failure is an error: the caller asked for this page to be emulated, and a page
+    /// that quietly has the host's locale is not that. The position is granted to the page's origin,
+    /// since a site checks that permission before it reads the position; a page with no origin
+    /// (`about:blank`) gets the override and no grant.
+    pub(crate) async fn apply_page_emulation(
+        browser: &Browser,
+        page: &Page,
+        context: &BrowserContextId,
+        initial_url: &str,
+        emulation: &PageEmulation,
+    ) -> QuarryResult<()> {
+        if let Some(locale) = emulation.locale.as_ref() {
+            page.execute(SetLocaleOverrideParams {
+                locale: Some(locale.clone()),
+            })
+            .await
+            .map_err(|error| emulation_failed("locale", &error.to_string()))?;
+        }
+        if let Some(timezone) = emulation.timezone.as_ref() {
+            page.execute(SetTimezoneOverrideParams::new(timezone.clone()))
+                .await
+                .map_err(|error| emulation_failed("timezone", &error.to_string()))?;
+        }
+        if let Some(location) = emulation.location.as_ref() {
+            page.execute(geolocation_override(location))
+                .await
+                .map_err(|error| emulation_failed("location", &error.to_string()))?;
+            if let Some(origin) = origin_of(initial_url) {
+                let mut grant = SetPermissionParams::new(
+                    PermissionDescriptor::new("geolocation"),
+                    PermissionSetting::Granted,
+                );
+                grant.origin = Some(origin);
+                grant.browser_context_id = Some(context.clone());
+                browser
+                    .execute(grant)
+                    .await
+                    .map_err(|error| emulation_failed("location", &error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The CDP override for a location. The accuracy is always sent: without one Chromium reports
+    /// the position as unavailable.
+    fn geolocation_override(location: &Location) -> SetGeolocationOverrideParams {
+        SetGeolocationOverrideParams {
+            latitude: Some(location.latitude),
+            longitude: Some(location.longitude),
+            accuracy: Some(location.accuracy.unwrap_or(DEFAULT_ACCURACY_M)),
+            ..Default::default()
+        }
+    }
+
+    /// The origin of `url` as a permission is granted to it; `None` for a URL with no origin.
+    fn origin_of(url: &str) -> Option<String> {
+        let parsed = url::Url::parse(url).ok()?;
+        let origin = parsed.origin();
+        origin.is_tuple().then(|| origin.ascii_serialization())
+    }
+
+    /// The typed failure of one emulated field. The CDP text is classed, never echoed: it can carry
+    /// the value, and the value is the caller's.
+    fn emulation_failed(field: &'static str, cdp_message: &str) -> QuarryError {
+        let class = emulation_cdp_class(cdp_message);
+        let code = if class == "invalid_value" {
+            ErrorCode::BadRequest
+        } else {
+            ErrorCode::DriverFailed
+        };
+        QuarryError::new(code, "chromiumoxide page emulation failed").with_details(json!({
+            "reason": "page_emulation_failed",
+            "field": field,
+            "error_class": class,
+        }))
     }
 
     /// The CDP error text can echo the value; only a class is logged. The name ends in
@@ -1141,6 +1243,22 @@ mod tests {
             ..Default::default()
         };
         assert!(ProfileEmulation::from_snapshot(&bad).is_empty());
+    }
+
+    #[test]
+    fn a_page_request_replaces_the_profiles_locale_and_zone_field_by_field() {
+        let profile = ProfileEmulation {
+            locale: Some("nb_NO".to_owned()),
+            timezone: Some("Europe/Oslo".to_owned()),
+        };
+        let request = PageEmulation {
+            locale: Some("en_US".to_owned()),
+            ..PageEmulation::default()
+        };
+        let left = profile.without(&request);
+        assert_eq!(left.locale, None);
+        assert_eq!(left.timezone.as_deref(), Some("Europe/Oslo"));
+        assert_eq!(profile.without(&PageEmulation::default()), profile);
     }
 
     // ---- D2-028: a failed load is a visible, typed report that blocks the save ----

@@ -319,7 +319,12 @@ async fn create_batch(
     };
     let count = urls.len();
 
-    let request = json!({ "urls": urls });
+    let mut request = json!({ "urls": urls });
+    // Selective ingest: quarry keeps the pages out of Knowledge unless `ingest` is true,
+    // so only a boolean the caller sent is forwarded.
+    if let Some(ingest) = body.get("ingest").and_then(Value::as_bool) {
+        request["ingest"] = json!(ingest);
+    }
     let (status, resp) = quarry_call(
         state,
         Method::POST,
@@ -1032,5 +1037,119 @@ mod extract_forward_tests {
         assert_eq!(refusal["code"], "extract_ai_formats_off");
         let sent = sent_bodies(&quarry).await;
         assert_eq!(sent[0]["schema"], json!({ "type": "object" }));
+    }
+}
+
+#[cfg(test)]
+mod batch_forward_tests {
+    use super::*;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A quarry-edge double for `POST /v1/batch`: it answers `status` with `body`, and
+    /// expects `calls` requests.
+    async fn quarry_answering(status: u16, body: Value, calls: u64) -> MockServer {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/batch"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .expect(calls)
+            .mount(&quarry)
+            .await;
+        quarry
+    }
+
+    fn state_for(quarry: &MockServer) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        state
+    }
+
+    /// The JSON bodies the double received, in arrival order.
+    async fn sent_bodies(quarry: &MockServer) -> Vec<Value> {
+        quarry
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|request| serde_json::from_slice::<Value>(&request.body).expect("a JSON body"))
+            .collect()
+    }
+
+    async fn json_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn accepted() -> Value {
+        json!({ "data": { "job_id": "job_b1", "accepted_at": "2026-11-08T10:00:00Z" } })
+    }
+
+    /// E4.1-5: "Ingest selected" sends `ingest: true` beside the URLs, and quarry gets it.
+    #[tokio::test]
+    async fn a_batch_with_ingest_forwards_the_flag_beside_the_urls() {
+        let quarry = quarry_answering(201, accepted(), 1).await;
+        let body = json!({
+            "kind": "batch",
+            "urls": ["https://vg.no/a", "https://vg.no/b"],
+            "ingest": true,
+        });
+
+        let response = create_batch(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({ "urls": ["https://vg.no/a", "https://vg.no/b"], "ingest": true })]
+        );
+    }
+
+    /// Without the flag, or with a value that is not a boolean, quarry gets the URLs alone.
+    #[tokio::test]
+    async fn a_batch_without_a_boolean_ingest_sends_only_the_urls() {
+        let quarry = quarry_answering(201, accepted(), 2).await;
+        let state = state_for(&quarry);
+        let plain = json!({ "kind": "batch", "urls": ["https://vg.no/a"] });
+        let stringly = json!({ "kind": "batch", "urls": ["https://vg.no/a"], "ingest": "yes" });
+
+        for body in [plain, stringly] {
+            let response = create_batch(&state, &body, None, "user-1").await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![
+                json!({ "urls": ["https://vg.no/a"] }),
+                json!({ "urls": ["https://vg.no/a"] }),
+            ]
+        );
+    }
+
+    /// Batch is refused under ZDR: quarry answers 403 with `details.zdr_refusal`, and the
+    /// gateway passes that refusal through unchanged so the SPA can show it.
+    #[tokio::test]
+    async fn a_zdr_refusal_of_an_ingest_batch_reaches_the_spa_with_its_details() {
+        let refusal = json!({
+            "data": null,
+            "meta": { "request_id": "req_1" },
+            "error": {
+                "code": "FORBIDDEN",
+                "message": "ZDR active: durable batch jobs are not available under zero data retention",
+                "details": { "zdr_refusal": { "code": "zdr_durable_mutation_forbidden", "action": "batch" } },
+            },
+        });
+        let quarry = quarry_answering(403, refusal, 1).await;
+        let body = json!({ "kind": "batch", "urls": ["https://vg.no/a"], "ingest": true });
+
+        let response = create_batch(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let forwarded = json_of(response).await;
+        assert_eq!(forwarded["error"]["details"]["zdr_refusal"]["code"], "zdr_durable_mutation_forbidden");
+        assert_eq!(forwarded["error"]["details"]["zdr_refusal"]["action"], "batch");
+        assert_eq!(sent_bodies(&quarry).await[0]["ingest"], true);
     }
 }

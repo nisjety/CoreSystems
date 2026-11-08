@@ -2187,6 +2187,8 @@ Needs Redis (`REDIS_URL`): without it `max_age` is ignored with the warning `cac
 
 The pages a crawl or batch fetched, with the ids of what was stored for each, come back from `GET /v1/crawl/{id}/results`, `/v1/batch/{id}/results` and `/v1/jobs/{id}/results`. The contract is `docs/CONTRACTS.md`, "Job results". It is off: `QUARRY_EDGE__JOB_RESULTS` is unset in the default composes, which is off, and no compose line is needed.
 
+Exports (E4.1-4): `format=csv` or `format=jsonl`, with an optional `fields` projection, returns the same rows as a file on the same routes, under the same flag and gates. A read is at most 100 rows and a file at most 10 MiB; an oversized export is a 400 that names `limit` (`details.reason: export_too_large`), so a caller narrows the read rather than receiving a cut file. Rollback is the same flag, `QUARRY_EDGE__JOB_RESULTS` unset or `0`.
+
 **Enable.** Set `QUARRY_EDGE__JOB_RESULTS=1` (also `true`, `yes`, `on`) on the edge and restart it. Rebuild both the edge and the orchestrator: the edge returns the artifact ids from `run_page`, the orchestrator copies them onto each `page_fetched` event, and control reads the rows back. Deploy the edge first. Pages fetched before the orchestrator carries the fields have rows without artifact ids (url, status and title only); nothing is lost and nothing needs a migration. Replaying an in-flight workflow is safe: only the payload of an event changes, no workflow command is added.
 
 **Disable.** Unset the variable or set it to `0` and restart. The three routes answer 501; the events keep the extra fields.
@@ -2423,3 +2425,19 @@ flag is not carried on the search path. The processor gate that applies today is
 **Tests (Linux container, `qtest-lane.sh`).** `cargo test -p quarry-runtime --lib content_route`, `--test doc_parse_sandbox`; `cargo test -p quarry-edge --lib parse_routes`, `--test parse_route`, `--test parse_route_off`, `--test parse_route_process` (starts the real edge binary and sends it a decompression bomb), `--test zdr_feature_matrix`, `--test web_policy_routes`, `--test log_field_discipline`; `node --test scripts/tests/*.test.mjs`.
 
 **Evidence owed (stack session).** On a side-by-side stack with the flag on: `curl --data-binary @file.pdf -H 'Content-Type: application/pdf'` with a user token returns the text, and a following `GET /v1/artifacts` shows no new artifact; a scanned PDF returns the warning; a second parse started while the first runs is a 429 with `Retry-After`.
+
+## Scrape locale, timezone and location: enable, disable and what to check (E4.4-a, built, NOT run, 2026-11-07)
+
+`POST /v1/scrape` accepts `locale` (`nb-NO`), `timezone` (`Europe/Oslo`) and `location` (`{"latitude": 59.9139, "longitude": 10.7522, "accuracy": 100}`), and the browser emulates them on the page it opens. The contract is in `docs/openapi.yaml` (`ScrapeRequest`) and `docs/ERROR_REASONS.md`. It is off: `QUARRY_EDGE__PER_PAGE_LOCALE` is unset in the default composes, which is off, and no compose line is needed. While it is off, those keys are unknown fields exactly as before: ignored with an `unknown_field` warning, or a 400 in strict validation.
+
+**Turn on.** Set `QUARRY_EDGE__PER_PAGE_LOCALE=on` (also `1` or `true`) on the edge and restart it. It needs a browser that can emulate. The local Chromium driver can. A remote provider cannot, and answers 501 `UNSUPPORTED` with `details.reason` `browser_capability_unavailable`. An edge with no browser answers 400 `BAD_REQUEST`, with one field error per emulated field (`locale`, `timezone` or `location`), each with code `unsupported_option`.
+
+**Check.** Scrape `{"url": "https://example.com/", "locale": "nb-NO", "timezone": "Europe/Oslo"}`. The answer's `data.effective_options.page_emulation` shows what was applied (`locale` is `nb_NO`). The scrape is never a cache hit, and nothing about it is written to the page cache or the URL result cache.
+
+**Disable.** Unset the variable or set it to `off`, and restart. The keys are unknown fields again. Nothing stored changes.
+
+**What it does not do.** It does not change the user agent or `Accept-Language` (an identity change, ADR 5). It does not route through a country (E4.4-c, behind ADR 5 and ADR 10). The geolocation permission is granted to the origin of the requested URL only, so a redirect to another origin gets the position override but not the permission, and the site sees a denial. The stream route refuses the keys with 400 `unsupported_in_stream` while the switch is on. Crawl and batch treat them as unknown fields.
+
+**Answers.** 400 `BAD_REQUEST` with a field error at `locale`, `timezone`, `location` or `location.<key>`: `invalid_locale`, `invalid_timezone`, `out_of_range`, `missing_field`, `unknown_field` or `invalid_type`. 400 `BAD_REQUEST` with `details.reason` `page_emulation_failed` when the browser refuses a value (`details.field` names it; the value is not echoed). `DRIVER_FAILED` with the same details for any other browser failure. 501 as above, for a remote provider that cannot emulate; 400 `unsupported_option` on an edge with no browser.
+
+**Tests.** Unit tests: `quarry-core` (`page_emulation.rs`, `scrape.rs`), `quarry-edge` (`scrape_contract.rs`, `scrape_actions.rs`), `quarry-runtime` (`browser_driver.rs`, module `page_emulation_tests`) and `quarry-browser` (`profile_restore.rs`, `chromiumoxide.rs`: the session store, and the refusal once a page is open). The live tests in `crates/quarry-browser/src/page_emulation_live.rs` are `#[ignore]`d and need Chromium: `CHROMIUMOXIDE_TEST=1 QUARRY_BROWSER_NO_SANDBOX=1 CHROME=/usr/bin/chromium cargo test -p quarry-browser --features chromiumoxide page_emulation -- --ignored --nocapture`. They were not run when this was written.

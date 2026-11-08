@@ -1,0 +1,100 @@
+{
+ "finalId": "F-t2-052",
+ "tier": "recommended",
+ "rank": 28,
+ "title": "Per-run result sets with a dataset table view and server-side export",
+ "summary": "Give every crawl, batch and extract run an append-only result set (JSONL in the artifact store, indexed by run) behind GET /v1/runs/{id}/items?format=csv|jsonl|xlsx&fields=&omit=, with a dataset table view in the Ingestions page and a per-org retention policy. ZDR runs stream items and persist nothing. Ingestion into the Data Plane stays an explicit, selective decision.",
+ "whyItMatters": "Users extracting structured data (prices, listings, procurement notices) need a table they can inspect, filter and export without forcing everything into the Data Plane. Today the Ingestions page shows runs, schedules, monitors, sources, evidence and profiles but no result data.",
+ "referenceBestPractice": {
+  "bestSource": "Apify (dataset, key-value store and request queue per run)",
+  "others": [],
+  "prevalence": "1 of 4 sources; unique",
+  "mechanism": "Run creation allocates dataset_id, kv_id and queue_id and injects them into the run. The dataset is append-only (items up to 9 MB) and exports server-side with format=csv|jsonl|xlsx|xml|rss, field projection (fields, omit, clean) and hidden #-prefixed debug fields. The KV store holds content-typed records for blobs and state; named storages persist indefinitely while unnamed ones expire after about 7 days; per-object rate limits return 429."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:171",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_queue.rs:74",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ingest_client.rs",
+   "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:155"
+  ],
+  "gap": "SRC and baseline: artifact storage (memory, filesystem, S3 with content addressing), a durable Postgres URL frontier and Data Plane ingest exist, but there is no per-run result set, no dataset or key-value API, no export formats and no dataset browser; the SPA's Quarry client (quarry-client.ts) is unused code."
+ },
+ "approach": "Ingestion Plane: at job completion write each result item to a JSONL object in the artifact store under org/run, with an index row in Postgres, and add the items route with the export formats and projection. Retention policy per org (default expiry, longer for named sets); ZDR returns items on the stream only. Frontend: dataset table view in the Ingestions run detail with an 'ingest to Data Plane' action and a download menu. Optional output schema fields arrive with R-t2-06-06.",
+ "effort": "M",
+ "dependencies": [
+  "Optionally F-t2-053 for typed field metadata"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Must stay a working set with retention, not a second Data Plane (no retrieval or graph). Export of large sets needs streaming. Items can contain sensitive scraped content, so ACLs follow the run owner.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 3,
+  "DOC": 4,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-06-05"
+ ],
+ "sourceClusters": [
+  "C-t2-06-017"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-052",
+   "status": "absent",
+   "exactGap": "No per-run result set, dataset or key-value API, export formats or dataset browser exist: the edge route table has artifacts list/get, jobs list, run and job events, sources, snapshots and team aggregates only (routes.rs:130-293), ArtifactSummary has no run_id and the list has no run filter even though artifact keys are laid out org=/run/page_hash/kind/id (resources.rs:83-97, artifact_store.rs:186-200). The Ingestions page has runs, schedules, monitoring, sources, evidence (job events) and profiles but no result data (VerevonIngestionsPage.tsx:67-114); manual extract results are returned once inline as ephemeral evidence under a synthetic run id (ingestions/runs.rs:268-340), and the SPA quarry-client.ts is used only by its own test. Structured /v1/extract is synchronous and persists nothing.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:555-575",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:776-830",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:112-175",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:1015-1075",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/resources.rs:83-97",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs:160-200",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/event.rs:60-97",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:197-201",
+    "apps/Frontend Plane/verevonv3/src/features/ingestions/components/VerevonIngestionsPage.tsx:67-114",
+    "apps/Frontend Plane/verevonv3/src/features/ingestions/components/VerevonIngestionsPage.tsx:584-600",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/mod.rs:25-49",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:25-45",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/runs.rs:268-340",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/evidence.rs:1-60",
+    "apps/Frontend Plane/verevonv3/src/shared/api/quarry-client.ts:140-174",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/CrawlPagePicker.tsx:1-60"
+   ],
+   "reuse": [
+    "ArtifactStore with per-run key layout (org=/run_id/page_hash/kind/id) and tenant-bound get_with_key: add a run_id field and filter to the artifact list instead of a second store.",
+    "page_extracted events (title, excerpt, summary, word_count, lang, driver; routes.rs:776-830, event.rs) already stored in control per job and served by GET /v1/runs/:id/events and /v1/jobs/:id/events: a ready-made per-page row source for crawl and batch.",
+    "Gateway /api/ingestions/runs and /api/ingestions/evidence plus the Evidence panel as the place to attach a results table.",
+    "Selective ingest to the Data Plane (crawl ingest flag, CrawlPagePicker) for the explicit promote action.",
+    "Quarry retention janitor in control (main.go:197-201, inert unless QUARRY_RETENTION_DAYS is set) for retention policy."
+   ],
+   "constraints": "ZDR: /v1/crawl and /v1/batch are refused for ZDR callers (routes.rs:555-575), so a durable run result set never applies to ZDR; only synchronous scrape and extract can run under ZDR and those must stay stream-only. The result set must remain a working set with retention, not a second Data Plane (no retrieval or graph); Data Plane ingest stays an explicit decision. ACL: artifact reads are tenant (org) bound (resource_routes.rs:125-155), not per actor, so per-owner result visibility would be new work. Stored items can hold sensitive scraped content, so export must be streamed and audited.",
+   "approachAdjustment": "Do not start with a new JSONL store plus Postgres index plus xlsx export. Smaller path: (1) add run_id to ArtifactSummary and a run filter on /v1/artifacts (S); (2) project per-page rows for crawl and batch from page_extracted events plus artifact refs, exposed as GET /v1/runs/{id}/items with csv and jsonl export streamed by the edge or gateway (M); (3) a table view in the Ingestions run detail with an ingest action. A durable structured result set only becomes meaningful once structured extraction runs as a durable job (today /v1/extract is synchronous and unpersisted), so tie the JSONL dataset design to that dependency rather than to existing runs.",
+   "effortRevised": "M",
+   "effortNote": "M for the projection-based approach; the item as originally designed (new JSONL store, Postgres index, retention policy, xlsx, table UI) is L.",
+   "verdict": "keep",
+   "verdictReason": "The feature does not exist and the gap description is accurate, but the proposed storage design overbuilds when per-run artifact keys and page_extracted events already exist. Keep as a medium-priority item with the lighter projection approach and the durable-extract dependency stated.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

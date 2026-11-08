@@ -1,0 +1,98 @@
+{
+ "finalId": "F-t2-045",
+ "tier": "recommended",
+ "rank": 21,
+ "title": "Memory pollution guard for runs that ingested web or browser content (verify first)",
+ "summary": "Mark a run or thread memory_mode=polluted when any web, browser or MCP tool result enters context. The session-core memory extraction (dreaming) and graph or memory writes then skip polluted runs or route them to a review queue, with user-confirmed promotion for research tasks. Reuse the existing ZDR memory-write suppression pattern as the enforcement point.",
+ "whyItMatters": "It stops prompt injection from becoming persistent: poisoned memories and graph facts would affect every later session, a cross-session risk specific to an AI-first product with memory. It is small and high leverage next to the browser and web tools Verevon is adding.",
+ "referenceBestPractice": {
+  "bestSource": "Codex (no_memories_if_mcp_or_web_search setting and a polluted thread memory mode)",
+  "others": [],
+  "prevalence": "1 of 4 sources (Codex, SRC with medium confidence); unique",
+  "mechanism": "A flag set on the thread or run when a web, browser or MCP tool result is added to context; the memory extraction job checks it and either skips extraction or sends candidates to a review queue; optionally only user-confirmed memories are stored."
+ },
+ "verevonToday": {
+  "status": "unknown",
+  "evidence": [
+   "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:23",
+   "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4469",
+   "apps/Model Plane/rust/services/session-core/src/dreaming.rs:739-756",
+   "apps/Model Plane/rust/services/session-core/src/grpc.rs:4159"
+  ],
+  "gap": "The model gateway labels web results as data, not instructions, and web-only turns skip memory recall. extract_memory_candidates takes only role and content, extracts from user and assistant text, and a grep of the Model Plane finds no polluted or taint flag, so no guard on memory writes after web or browser tool use was found. Not verified: execution-core and Data Plane graph-write paths. ZDR already suppresses memory writes (ZDR_MEMORY_WRITE_SUPPRESSED), a ready pattern."
+ },
+ "approach": "Model Plane: execution-core and model-gateway set a taint flag on the run when web or browser tools return content; session-core dreaming and letta_adapter writes refuse or quarantine tainted runs; Data Plane enforces the same flag when ingesting agent-derived facts. Add a user-confirmed promotion path in the UI.",
+ "effort": "S",
+ "dependencies": [],
+ "planeOwner": "Model Plane",
+ "risks": "A guard that is too strict disables useful memory from research tasks; offer user-confirmed promotion. The taint must survive resume and fleet child runs.",
+ "significance": 4,
+ "confidence": "low",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 2,
+  "DOC": 0,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": true,
+ "wave": "W2",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-07-08"
+ ],
+ "sourceClusters": [
+  "C-t2-07-026"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-045",
+   "status": "absent",
+   "exactGap": "No run, thread or memory row carries a web, browser or MCP taint: searches of Model Plane, Control Plane, Data Plane v2, the gateway and the SPA find no polluted/taint/memory_mode flag, and both write paths (execution-core execute_save_memory and session-core Dreaming upsert_agent_memory, which always writes review_state='accepted') never ask whether web content entered the run. What exists is mitigation, not a guard: the LLM extractor frames conversation as untrusted, tags inferred rows extractor:llm, strips pasted-document blocks, and Dreaming reads only user and assistant message rows (never tool results), but an assistant turn that paraphrases a poisoned page is still extracted and save_memory is deliberately low-risk and ungated. The ZDR suppression the item proposes to reuse is bound to the verified credential (MemoryRetention::of(caller)) so it cannot express a taint that appears mid-run, and review_state 'pending' exists in the schema but nothing writes or promotes it.",
+   "evidence": [
+    "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:1-60 (module doc: Dreaming rows land as accepted and are injected into every later prompt; conversation treated as untrusted; extractor:llm tag; ZDR turns never reach messages)",
+    "apps/Model Plane/rust/services/session-core/src/dream_extractor.rs:109,552,616-640 (LLM_SOURCE_LINK; strip_document_blocks; render_window keeps only user and assistant turns)",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs:1263-1290,1318-1330 (pending-message and context queries select roles user and assistant only; zdr_waived threads skipped)",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs:1636-1690 (upsert_current_key inserts review_state 'accepted' with no taint input)",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs:223,434 (conversation_only suppression; reads filter review_state='accepted')",
+    "apps/Model Plane/rust/services/session-core/migrations/0004_tasks_cron_hooks_skills_memory.sql:226 (review_state pending|accepted|rejected|expired)",
+    "apps/Model Plane/rust/services/session-core/migrations/0038_thread_source_scope.sql:1-4 (threads.source_scope workspace|conversation)",
+    "apps/Model Plane/rust/services/session-core/migrations/0013_tool_audit_intents.sql:1-15 (per-run tool name and data_category rows exist in session-core)",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs:4096-4150 (MemoryRetention derived from the verified caller; permits_external_memory_indexing)",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs:444-505,625-635 (index_memory has no taint or provenance input; external indexing gated by retention only)",
+    "apps/Model Plane/proto/model_plane/v1/memory.proto:126-140 (IndexMemoryRequest fields: no provenance or taint)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs:650-663,2172 (save_memory dispatch and execute_save_memory take no taint)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:314-332,4235-4240 (data_category marks mcp__ tools unclassified; save_memory description only asks the model not to save tool output)",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:171-182 (save_memory deliberately low-risk and ungated)",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:796-808 (save_memory low risk, refused under ZDR before the gate)",
+    "apps/Model Plane/rust/services/execution-core/src/wiki_agent.rs:1-15 (wiki edits are proposals; tool not offered to the model, so no agent-derived Data Plane write path)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4469 (tool results labelled data, never instructions)",
+    "negative searches: no polluted/taint/memory_mode in Model Plane, Control Plane, Data Plane v2, gateway or SPA (only an unrelated flag in home-draft.ts); no Model Plane doc plans a memory pollution guard"
+   ],
+   "reuse": [
+    "agent_memory.review_state ('pending'|'accepted'|'rejected'|'expired') and the existing reads that already filter on 'accepted' (dreaming.rs:434), so a pending row is invisible to recall with no read-side change",
+    "MemoryRetention::permits_external_memory_indexing (grpc.rs:4147) as the model for 'keep the local row, do not mirror to Letta'; the waived-run behaviour is the closest existing analogue",
+    "threads.source_scope='conversation' and PendingMessage.conversation_only (dreaming.rs:223) as the existing thread-level extraction suppression",
+    "session_tool_audit_intents (run_id, tool, data_category) and the [data_category=.. tool=..] step prefix to derive taint inside session-core without a new execution-core signal",
+    "the extractor:llm source_links marker (dream_extractor.rs:109) for provenance in the memory-management surface"
+   ],
+   "constraints": "Memory is Model Plane (session-core/execution-core); Data Plane v2 has no agent-derived write path today, so the item's 'Data Plane enforces the same flag' clause has nothing to enforce. ZDR already prevents durable memory writes and Dreaming never sees ZDR turns, so the guard only concerns persistent runs; a quarantine must also stop the Letta semantic mirror because Letta reads in memory_grpc search/list are not filtered by review_state. Taint must be thread-window level, not only run level: Dreaming extracts from a window that includes up to 6 earlier consolidated messages and assistant turns that paraphrase web content. Only the memory owner may promote a quarantined memory and Space membership must not widen that.",
+   "approachAdjustment": "Do not use the ZDR credential flag as the carrier: MemoryRetention is derived from the token fixed at issuance, while taint appears mid-run. (1) In execution-core, save_memory preflight marks or refuses the write when the run's own tool history contains web_search/web_fetch/web.*/browser.*/mcp__* calls (data_category already distinguishes them). (2) In session-core Dreaming, skip or write 'pending' for extraction windows whose thread has such tool steps, derived from session_tool_audit_intents/step records, and suppress the Letta mirror for them. (3) Ship skip-only first with no promotion UI; add the pending-review path later through the memory management surface. Remove the Data Plane and graph clauses until an agent-derived graph write path exists.",
+   "effortRevised": "M",
+   "effortNote": "Item said S. S holds for a skip-only first slice (execution-core preflight plus a Dreaming window filter); the pending-review path needs a new accept/reject RPC (none exists in memory.proto or memory_grpc.rs), Letta mirror suppression and a UI, which is M.",
+   "verdict": "reword",
+   "verdictReason": "The guard is genuinely absent and worth building, but the carrier (credential-bound ZDR pattern), the Data Plane clause and the S estimate are wrong; reword to the thread-level taint approach with a skip-only first slice. Existing prompt-level and provenance mitigations should be mentioned so the document does not say memory is entirely unprotected.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

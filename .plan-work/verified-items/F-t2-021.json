@@ -1,0 +1,125 @@
+{
+ "finalId": "F-t2-021",
+ "tier": "priority",
+ "rank": 21,
+ "title": "Secret redaction at capture time: AX/DOM snapshots, screenshots, OCR, receipts and logs, before storage or model exposure",
+ "summary": "Wire the existing agent_memory::redact_sensitive (used today only by the scratchpad) into observation, evidence, OCR and log paths, and add Aside-style two-tier redaction inside Quarry's snapshot builder: snapshots always mask password, tel, one-time-code and card fields (input type, autocomplete token, label and secret-pattern rules, Luhn check), and durable captures redact by field meaning and value shape (JWTs, API-key prefixes, private keys, OTPs); mask the same fields in screenshots using their boxes. The opaque credential vault is F-t2-024.",
+ "whyItMatters": "Verevon records more than any reference (receipts, timeline, proof bundles, live frames), so it also captures more secrets. Only URLs and egress receipts are redacted today and the AX projection copies node values verbatim (SRC; whether Chromium masks password values in the AX tree was not checked). Redaction is a precondition for credential handoff.",
+ "referenceBestPractice": {
+  "bestSource": "Aside (secret redaction at capture, aside-browser-product-041)",
+  "others": [
+   "Aside (opaque vault refs; fills run in an isolated world that re-checks origin and password-field type; two-tier redaction: snapshots always redact password inputs, durable capture redacts by input type, autocomplete semantics and value shape)"
+  ],
+  "prevalence": "1 of 3 sources (Aside); unique. || Redaction 2 of 4 (differentiator); credential vault 1 of 4 (Aside, unique)",
+  "mechanism": "In the accessibility-snapshot capture: drop values for input types password and tel and for sensitive autocomplete tokens; regexes on field labels (cvv, otp, pin, ssn, secret); value patterns (jwt, aws-access-key, api-key, slack-token, private-key-block, labelled secret, numeric OTP) plus a Luhn check for digit runs; replace with [redacted]. Rules are layered and applied before storage. || Merged items add: The REPL or tool API returns summaries and opaque refs only. fill() runs Runtime.callFunctionOn in an isolated world that checks protocol and host against the bound origin and that the element is a connected, enabled input[type=password], then sets the value with Input.insertText and never returns it. Persisted evidence goes through a redactor with typed detectors; secrets injected into runs are registered so their literal values are scrubbed from logs."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1053 (redact_egress_url redacts egress URLs only)",
+   "Light grep of apps/Ingestion Plane/Quarry-v2/crates found no input-type, secret-pattern or Luhn redaction outside a test site (INF)",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs (no password, secret or redact matches)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:5-52",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:101",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1104-1110",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1053",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs",
+   "findings/t2/v-quarry.baseline.md (Credential vaults and Safety gaps sections, DOC-level baseline)"
+  ],
+  "gap": "Only URLs and egress receipts are redacted. No value-level redaction of AX snapshots, DOM observations or screenshots was found; the snapshot builder was not read end to end, so confirm before building. || Egress receipts are redacted (redact_egress_url), but redact_sensitive is exported and used only by AgentScratchpad::push, not by observation, evidence or OCR paths. The AX projection copies each node value verbatim (ax_value_text(node.get(\"value\"))) with no role-based masking in Verevon code; whether Chromium already masks password values in its AX tree, and what screenshots or OCR expose, was not confirmed. There is no credential vault, autofill or secret-reference action; persistent-profile cookies are unencrypted per the baseline; integration-corev2 has an AES-GCM token vault, but only for OAuth tokens."
+ },
+ "approach": "Ingestion Plane (quarry-browser snapshot and observation builder, artifact writers) first, then Model Plane observation and log paths. Verify the snapshot builder end to end before building. || Source detail: [R-t2-08-08] Ingestion Plane (quarry-browser snapshot and observation builder): a rule module with unit tests that run before persistence and before the response to the Model Plane; screenshot masking of password-like fields using their rects; keep rules auditable and versioned. Confirm separately whether typed text for sensitive fields appears in action receipts. Reuse rule definitions with R-t2-02-09 (PII stage for scraped content) but keep this pass deterministic and local to live observation. || [R-t2-07-07] Ingestion Plane: apply redact_sensitive at the observation builder and evidence/OCR persistence points, add password-field masking to native_projection_from_cdp and the DOM snapshot, and test against the quarry-runtime TestSite login page. Vault: secrets live in the Control Plane or integration-corev2 (reuse its AES-GCM vault crypto); the Model Plane proposes fill(item_ref, target_ref) (the Model proposes, Quarry executes); Quarry performs the origin-checked injection after a sensitive one-shot grant and a first-use approval, with an audit event per fill. Decide explicitly how vault use interacts with ZDR.",
+ "effort": "M",
+ "dependencies": [
+  "Sensitive one-shot grants (shipped)",
+  "Item F-t2-036 for the fill audit and durable grants",
+  "Encrypted profile storage"
+ ],
+ "planeOwner": "Ingestion Plane (Quarry) + Model Plane (agent_memory, logs)",
+ "risks": "False positives hide useful values (keep rules auditable); regex cost on large snapshots; screenshot masking depends on accurate rects. || High: credential exfiltration through prompt injection, mitigated by origin binding, per-item policy and approval on first use. Over-redaction can break extraction, so keep rules narrow and typed.",
+ "significance": 4,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 8,
+  "DOC": 1,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-08-08",
+  "R-t2-07-07"
+ ],
+ "sourceClusters": [
+  "C-t2-08-048",
+  "C-t2-07-016",
+  "C-t2-07-015"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)",
+  "Observability & operations"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-021",
+   "status": "partial",
+   "exactGap": "Quarry has no capture-time masking by field meaning: native_projection_from_cdp copies AX node name and value verbatim (chromiumoxide.rs:1096-1110), snapshot target text falls back to the AX value (observation.rs:1613), StepReceipt stores the whole AgentAction (including Type text) and the post-action observation (step_receipts.rs:190-206), and screenshot/OCR artifacts are stored unmasked behind only a ZDR gate (observation.rs:700-790). redact_sensitive (agent_memory.rs:52) is exported but has no callers at all because AgentScratchpad is itself unused, so the item's 'used today by the scratchpad' understates the gap. Partial coverage exists elsewhere: Quarry redacts egress URLs (chromiumoxide.rs:1053) and Model Plane execution-core scrub.rs scrubs token patterns from step output and checkpoints before persistence (grpc.rs:1015-1042), yet the LlmPlanner prompt receives raw observation text (llm_planner.rs:~200-230).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1053-1066 (redact_egress_url only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:1096-1130 (AX projection copies value verbatim)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_memory.rs:1-70 (redact_sensitive and AgentScratchpad)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:101 (only export; grep shows no other caller in Quarry or Model Plane rust)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:700-790 (OCR/clean/annotated PNG artifacts written via put_artifact_if_allowed, ZDR-gated only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1573-1640 (target text = AX name or value)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1979-2100 (DOM fallback attribute list excludes value)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:100-125, 190-206 (receipt keeps action and observation)",
+    "apps/Model Plane/rust/services/execution-core/src/scrub.rs:1-60 (scrub_string / scrub_json_value pattern set)",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs:1015-1042 (scrub of step output, error and checkpoint)",
+    "apps/Model Plane/rust/services/execution-core/src/llm_planner.rs:170-263 (observation text and targets go into the prompt unscrubbed)"
+   ],
+   "reuse": [
+    "execution-core scrub.rs pattern set (Bearer, JWT, sk-, AWS, GitHub, PEM, DSN, key=value) as the richer rule source, ported into a Quarry module",
+    "agent_memory.rs redact_sensitive as a seed (email, long token, card-like digit runs)",
+    "redact_egress_url and the ZDR-gated put_artifact_if_allowed choke point in observation.rs",
+    "native_projection_from_cdp and build_active_snapshot as the single places to mask AX targets",
+    "model-gateway moderation.rs redact_pii for request-content masking only"
+   ],
+   "constraints": "Ingestion Plane owns capture, so masking must happen before artifact write, event emission and the response to the Model Plane; Model Plane keeps its own scrub at persistence. Rules must be deterministic and local with no model call. ZDR: live observations and frames are returned even when nothing is persisted, so masking applies on the ZDR path too. Quarry and Model Plane are separate workspaces, so share patterns by duplication with a conformance test (or an ADR for a shared crate) rather than a cross-plane dependency. Credential fill stays in F-t2-024 with origin binding.",
+   "approachAdjustment": "Correct the premise: redact_sensitive is dead code and the better pattern source is execution-core scrub.rs. Field-semantic masking needs input type and autocomplete, which an AX node does not carry, so the snapshot builder must fetch them (for example a DOM describe or page evaluate per input target); whether Chromium already masks password values in the AX tree is not verified here. Redact AgentAction::Type text and the stored observation at receipt persistence, and scrub the planner prompt's extracted_text before inference. Treat screenshot masking by element rects as a follow-on slice.",
+   "effortRevised": "L",
+   "effortNote": "The item spans AX, DOM, receipts, screenshots, OCR and logs; text surfaces alone (AX, DOM, receipts, planner prompt) are M, screenshot and OCR masking adds a second M.",
+   "verdict": "reword",
+   "verdictReason": "Quarry-side capture masking is genuinely absent, but the item misstates what exists: redact_sensitive is unwired, a pattern scrubber already guards Model Plane persistence, and receipts keep typed text; reword with scrub.rs as the source and split text from screenshot masking.",
+   "confidence": "medium"
+  },
+  "reference": {
+   "finalId": "F-t2-021",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@2987327 (capture-redaction.ts: CAPTURE_REDACTED '[redacted:capture]', SENSITIVE_AUTOCOMPLETE_TOKENS, SENSITIVE_INPUT_TYPES {password, tel}, SENSITIVE_FIELD_LABEL_RE, SECRET_VALUE_PATTERNS jwt/aws-access-key/api-key/slack-token/private-key-block/labeled-secret/otp-numeric/otp-numeric-reverse, CARD_CANDIDATE_RE plus passesLuhn)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@10346349 (fillPasswordInput: Runtime.callFunctionOn checks origin, isConnected, type=password, disabled/readOnly, then sets the value with the native HTMLInputElement setter and dispatches input/change; its only caller is autofillUnlockPassword with origin chrome-extension://<provider id>)",
+    "daemon_sea_blob.bin grep for redact identifiers (redactArg for tool args, redactSensitive for error bodies, context_awareness_blobs.redacted_bytes; no screenshot, image or OCR redaction found)",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/transformers/redactPII.ts (opt-in redactPII on markdown through the external fire-privacy service; fails closed to an empty string)",
+    "https://docs.apify.com/platform/actors/development/programming-interface/environment-variables (Secret env vars are encrypted at rest and redacted from run logs)"
+   ],
+   "corrections": "(1) Scope is overstated. No reference redacts screenshots, OCR output or receipts. Aside's rules apply to text and ARIA snapshots for durable Context Awareness capture, plus redaction of tool arguments and error bodies in logs. (2) 'Before model exposure' is only partly true. The interactive agent snapshot path redacts only non-empty password inputs, so other secrets on a page reach the model. (3) The fill mechanism is wrong in one detail and over-generalized. Aside's origin-checked fillPasswordInput sets the value with the native HTMLInputElement value setter plus input/change events, not Input.insertText. Its only call site is autofillUnlockPassword, which unlocks an external password-manager extension page (chrome-extension:// origin), not a general website login fill. Aside Vault website fills go through the Vault extension with agent-session, policy and URL-match checks (record 054). (4) Prevalence: Firecrawl also has opt-in output redaction (redactPII on markdown through an external fire-privacy service, failing closed), and Apify's redaction covers only secret env vars in run logs. Restate this as: capture-time page redaction is 1 of 4 (Aside); some redaction is 3 of 4 (Aside capture and logs, Firecrawl PII on output, Apify secret env vars in logs, DOC).",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Aside evidence is a bundled string or byte offset in the scratch copy of the NODE_SEA_BLOB; no runtime confirmation",
+    "The Context Awareness passive capture is the durable path; whether it is on by default or opt-in was not determined",
+    "Apify secret log redaction is DOC-only",
+    "Firecrawl redactPII depends on an external fire-privacy service that is not in the repo"
+   ],
+   "confidence": "high"
+  }
+ }
+}

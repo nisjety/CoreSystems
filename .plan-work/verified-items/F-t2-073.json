@@ -1,0 +1,97 @@
+{
+ "finalId": "F-t2-073",
+ "tier": "nice-to-have",
+ "rank": 8,
+ "title": "Control Plane governance extras: SIEM export, saved approval preferences and privacy-safe usage events",
+ "summary": "After the unified decision audit exists, add a per-org audit-core exporter (batches with gzip, bounded queue that drops the oldest with a lag metric, retry ladder then a DLQ, encrypted credentials, destination host allowlist, test delivery). Store browser approval preferences in Control Plane user settings (approval_mode, per-origin rules, revision, revision-checked PATCH) so the Model Plane risk gate can record decided_by=saved_user_permission. Add typed, enum-only product usage events (takeover, approval requested and resolved, tool called with terminal status) forwarded server-side to the Control Plane usage stream.",
+ "whyItMatters": "SIEM export is an enterprise procurement checkbox once audit is unified; saved approvals cut approval fatigue on repeat sites; usage events show which browser features users and agents actually use, to prioritise parity work. All are invisible to day-one users.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl for SIEM (per-org batches of 200 events or 1 s, bounded 100k queue dropping the oldest, retry ladder 5 s to 30 min then a DLQ kept 7 days, destination host allowlist) and Codex for preferences and usage events (revisioned server document mirrored locally; typed events without URLs)",
+  "others": [
+   "Aside (usage telemetry with opt-out)"
+  ],
+  "prevalence": "SIEM 1 of 4 (unique); approval preferences 1 of 4 (unique); product usage analytics 2 of 4 (differentiator)",
+  "mechanism": "An audit-core consumer per org with {kind, endpoint allowlist, encrypted credentials}; user browser_prefs with If-Match revision read by the risk gate; an analytics event catalogue whose properties are enums and counts only, disabled for ZDR orgs and on user opt-out, with no third-party script in the page."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Control Plane/audit-core/internal/subscriber/subscriber.go:27-29",
+   "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:144-148"
+  ],
+  "gap": "SIEM export is absent (audit-core persists verevon.audit.v2.> and usage events with no export integration, and Quarry does not publish to audit-core subjects). Saved approval preferences and product usage events are unknown: a limited grep found no analytics client (posthog, statsig, mixpanel, amplitude, sentry) in the SPA source or gateway manifest, and no browser approval-preference setting was located. Not checked: Model Plane approve-for-session persistence."
+ },
+ "approach": "Control Plane: audit-core exporter, user settings schema for browser_prefs, usage event ingestion. Model Plane: risk gate reads preferences but never auto-approves ZDR-forbidden or sensitive one-shot actions; saved rules are origin-scoped and expiring. Frontend Plane: a small typed event module posting to a gateway endpoint, suppressed under ZDR.",
+ "effort": "M",
+ "dependencies": [
+  "Item F-t2-036 (decision audit)",
+  "audit-core subjects"
+ ],
+ "planeOwner": "Control Plane",
+ "risks": "Exporting URLs for ZDR orgs and destination SSRF (allowlist hosts); saved permissions silently widening authority; third-party analytics conflicting with ZDR and sovereignty positioning.",
+ "significance": 2,
+ "confidence": "low",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 0,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-07-11"
+ ],
+ "sourceClusters": [
+  "C-t2-07-013",
+  "C-t2-07-018",
+  "C-t2-07-014"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-073",
+   "status": "absent",
+   "exactGap": "None of the three deliverables exists. audit-core is a durable consumer of verevon.audit.v2.> and verevon.usage.v2.> with append-only audit_events and usage_events tables and a pull API (GET /v1/audit, /v1/usage) but no push exporter, destination config or delivery queue, and Quarry publishes no audit events (only Model Plane session-core publishes tool_action). User settings are generic per-category rows with no revision field and no browser category, and the browser decided event leaves decided_by empty (browser_events.rs:148,574,612), so no saved-approval path exists. No analytics client appears in the SPA package.json or gateway Cargo.toml, and usage_events holds billable usage, not product events.",
+   "evidence": [
+    "apps/Control Plane/audit-core/internal/subscriber/subscriber.go:27-29 (audit v2, usage v2 and DLQ subjects; durable consumers)",
+    "apps/Control Plane/audit-core/internal/api/api.go:106-115 (health plus GET/POST /v1/audit and /v1/usage; no export route)",
+    "apps/Control Plane/audit-core/migrations/001_init.sql:11-60 (audit_events and usage_events tables)",
+    "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs:1-34 (Model Plane tool_action publisher to verevon.audit.v2.model.session-core.*)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs:100-150 (decided() publishes BrowserActionDecided with empty decided_by)",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs:826-833 (DECIDE_APPROVAL_SQL records decided_by on the durable approval)",
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs:6-12 (per-call Auto/Ask/Deny; nothing persisted per user)",
+    "apps/Control Plane/user-core/internal/users/types.go:136-143 (UserSettings: category row, no revision)",
+    "apps/Control Plane/user-core/internal/http/handlers.go:836-860 (loaded categories: appearance, language, notifications; no browser)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs:4485 (Space agent binding approval_mode: partial analogue, not per-site)",
+    "apps/Model Plane/MODEL_PLANE_ROADMAP.md:417 and apps/Infra Plane/docs/SECURITY.md:387 (export/SIEM named as intent only)",
+    "grep (negative): no posthog/statsig/mixpanel/amplitude/sentry/analytics in verevonv3/package.json or gateway Cargo.toml; no verevon.audit.v2 publisher under apps/Ingestion Plane"
+   ],
+   "reuse": [
+    "audit-core durable JetStream consumer pattern and GET /v1/audit as the read API for a first customer pull integration",
+    "nats-provisioner manifest (Model Plane go/services/nats-provisioner) for adding a second consumer",
+    "user-core UserSettings upsert for a browser preferences category (add a revision or If-Match on updated_at)",
+    "session-core durable approvals (decided_by) and the BrowserActionDecided event for the saved-permission decider",
+    "Existing usage v2 subject for server-side product usage counters"
+   ],
+   "constraints": "Control Plane owns audit, usage and user settings, so the exporter and preferences store live there; Model Plane may read preferences only through a Control authority call and must never auto-approve sensitive one-shot actions or anything ZDR forbids. Exported audit must carry no page content for ZDR orgs and the destination needs a host allowlist (SSRF) and encrypted credentials. Saved approvals must be origin-scoped, expiring and never widen a Space or owner-plane ACL. Third-party analytics in the SPA conflicts with the ZDR and sovereignty positioning.",
+   "approachAdjustment": "Split the bundle. (1) SIEM export stands alone as an audit-core consumer with per-org destination, allowlist, retry then DLQ and test delivery; an S interim is to let customers pull GET /v1/audit with a service token. (2) Saved approval preferences duplicate F-t2-032's per-origin consent store: put them in Control Plane user settings (new browser category with a revision) and merge the work into F-t2-032 instead of building a second store; the BrowserActionDecided sink must carry the real decider before decided_by can say saved_user_permission. (3) Product usage events should not add a SPA analytics client: emit enum-only counters server-side from the gateway or execution-core into the existing usage v2 subject, suppressed for ZDR orgs. Quarry must first publish decision audit (F-t2-036) before an export is meaningful for browser actions.",
+   "effortRevised": "L",
+   "effortNote": "Raised from M as a bundle: the SIEM exporter alone is M-L (queue, retry, DLQ, encrypted credentials, allowlist), the preferences store is shared with F-t2-032 and the usage events need a new server-side path.",
+   "verdict": "reword",
+   "verdictReason": "All three parts are absent and the item correctly sits late, but it bundles unrelated work, double-counts the approval-preference store that F-t2-032 needs, and proposes a SPA analytics path that conflicts with ZDR; rewrite as a SIEM-export item plus a merge note into F-t2-032 and a server-side-only usage-counter note.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

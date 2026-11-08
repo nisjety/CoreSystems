@@ -5,6 +5,11 @@
 //! and the ids of the stored artifacts. The content itself is not returned; a client reads
 //! it through the existing org-bound `GET /v1/artifacts/{id}`.
 //!
+//! `format=csv` and `format=jsonl` export the same rows as text (E4.1-4): `fields` projects
+//! the columns, a read takes at most 100 rows and a body is at most 10 MiB. An export passes
+//! the same gates as the JSON read, and its headers name the kind (`page_index`) and the next
+//! cursor.
+//!
 //! Dark by default: `QUARRY_EDGE__JOB_RESULTS` must be on, otherwise every route answers 501
 //! before control is called. The rows carry page URLs, so a caller under Zero Data Retention
 //! gets a 403 (the same floor as the errors routes), and a service principal is refused by
@@ -15,14 +20,16 @@
 use std::collections::HashMap;
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 
 use quarry_core::envelope::{Envelope, PageMeta};
 use quarry_core::error::{ErrorCode, QuarryError};
-use quarry_core::resources::JobResultsView;
+use quarry_core::resources::{JobResultView, JobResultsView};
 
 use crate::auth::Claims;
 use crate::control_client;
@@ -121,9 +128,10 @@ async fn results_for(
     id: &str,
     kind: Option<&str>,
     query: &HashMap<String, String>,
-) -> Result<(JobResultsView, u32), QuarryError> {
+) -> Result<ResultsRead, QuarryError> {
     gate(job_results_enabled(), claims.effective_zdr(false))?;
     let params = parse_params(query)?;
+    let export = parse_export(query, params.limit)?;
     // The summary settles existence, org and kind before the rows are read.
     require_job_of_kind(state, claims, id, kind).await?;
     let mut forward: Vec<(&str, String)> = vec![("limit", params.limit.to_string())];
@@ -142,13 +150,259 @@ async fn results_for(
     .await?;
     let view: JobResultsView = serde_json::from_value(raw)
         .map_err(|_| QuarryError::new(ErrorCode::Internal, "control results unreadable"))?;
-    Ok((view, params.limit))
+    Ok(ResultsRead {
+        view,
+        limit: params.limit,
+        export,
+    })
 }
 
-/// Renders the view as `{data: {items, next_seq?}, meta: {request_id, page: {next?, limit}}}`.
-fn render(request_id: String, result: Result<(JobResultsView, u32), QuarryError>) -> Response {
+/// A checked results read: the rows, the page size, and the export options when the caller
+/// asked for CSV or JSON Lines (`None` keeps the JSON envelope).
+struct ResultsRead {
+    view: JobResultsView,
+    limit: u32,
+    export: Option<Export>,
+}
+
+/// The export formats of a results read. `json`, the default, is the envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    Csv,
+    Jsonl,
+}
+
+impl ExportFormat {
+    fn content_type(self) -> &'static str {
+        match self {
+            Self::Csv => "text/csv; charset=utf-8",
+            Self::Jsonl => "application/x-ndjson; charset=utf-8",
+        }
+    }
+
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Csv => "job-results.csv",
+            Self::Jsonl => "job-results.jsonl",
+        }
+    }
+}
+
+/// The fields of a row, in the order a default export writes them. A `fields` projection
+/// names a subset of these, each at most once.
+pub const ROW_FIELDS: [&str; 11] = [
+    "seq",
+    "url",
+    "status",
+    "content_type",
+    "title",
+    "fetched_at",
+    "word_count",
+    "driver",
+    "markdown_artifact_id",
+    "source_artifact_id",
+    "bytes",
+];
+
+/// An export reads at most this many rows (D14b's 100-item cap; the JSON read allows 500).
+pub const MAX_EXPORT_LIMIT: u32 = 100;
+
+/// An export body is at most this many bytes (D14b's 10 MiB cap).
+pub const MAX_EXPORT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Names the kind of result a read returns: an index of the pages a job fetched, not the page
+/// content, which stays behind `GET /v1/artifacts/{id}`.
+pub const RESULT_KIND_HEADER: &str = "x-quarry-result-kind";
+
+/// Carries the cursor of the next export page, when there is one.
+pub const NEXT_SEQ_HEADER: &str = "x-quarry-next-seq";
+
+/// The checked export options of a results read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Export {
+    pub format: ExportFormat,
+    pub fields: Vec<&'static str>,
+}
+
+/// Parses `format` and `fields`. `json` (or no format) is `None` and keeps the envelope. A
+/// `fields` without an export format is a 400, and so is an export whose `limit` is over 100.
+pub fn parse_export(
+    query: &HashMap<String, String>,
+    limit: u32,
+) -> Result<Option<Export>, QuarryError> {
+    let format = match query.get("format").map(String::as_str) {
+        None | Some("json") => None,
+        Some("csv") => Some(ExportFormat::Csv),
+        Some("jsonl") => Some(ExportFormat::Jsonl),
+        Some(_) => return Err(bad("format", "format must be json, csv or jsonl")),
+    };
+    let Some(format) = format else {
+        if query.contains_key("fields") {
+            return Err(bad(
+                "fields",
+                "fields applies only with format=csv or format=jsonl",
+            ));
+        }
+        return Ok(None);
+    };
+    if limit > MAX_EXPORT_LIMIT {
+        return Err(bad(
+            "limit",
+            "an export reads 1 to 100 rows: use a smaller limit",
+        ));
+    }
+    let fields = match query.get("fields") {
+        None => ROW_FIELDS.to_vec(),
+        Some(raw) => parse_fields(raw)?,
+    };
+    Ok(Some(Export { format, fields }))
+}
+
+/// A `fields` list: names from [`ROW_FIELDS`], comma separated, each at most once.
+fn parse_fields(raw: &str) -> Result<Vec<&'static str>, QuarryError> {
+    let mut fields: Vec<&'static str> = Vec::new();
+    for name in raw.split(',').map(str::trim) {
+        let Some(known) = ROW_FIELDS.iter().copied().find(|field| *field == name) else {
+            return Err(bad(
+                "fields",
+                "fields must name row fields from docs/CONTRACTS.md, comma separated",
+            ));
+        };
+        if fields.contains(&known) {
+            return Err(bad("fields", "fields must not name a field twice"));
+        }
+        fields.push(known);
+    }
+    Ok(fields)
+}
+
+/// A row as the JSON envelope writes it, so an export and a JSON read carry the same keys.
+fn row_object(row: &JobResultView) -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::to_value(row) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// One CSV cell (RFC 4180). A value that a spreadsheet would read as a formula (a leading `=`,
+/// `+`, `-`, `@`, tab or carriage return) gets a leading apostrophe, so a page title or URL
+/// stays text when the file is opened.
+fn csv_cell(value: Option<&serde_json::Value>) -> String {
+    let raw = match value {
+        None | Some(serde_json::Value::Null) => return String::new(),
+        Some(serde_json::Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+    };
+    let guarded = if raw.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{raw}")
+    } else {
+        raw
+    };
+    if guarded.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", guarded.replace('"', "\"\""))
+    } else {
+        guarded
+    }
+}
+
+/// The rows as CSV: a header line of the field names, then one CRLF-ended line per row.
+pub fn render_csv(rows: &[JobResultView], fields: &[&str]) -> String {
+    let mut out = fields.join(",");
+    out.push_str("\r\n");
+    for row in rows {
+        let object = row_object(row);
+        let cells: Vec<String> = fields
+            .iter()
+            .map(|field| csv_cell(object.get(*field)))
+            .collect();
+        out.push_str(&cells.join(","));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// The rows as JSON Lines: one object per row, with the projected fields only. A field the
+/// row does not have is `null`, so every line has the same keys.
+pub fn render_jsonl(rows: &[JobResultView], fields: &[&str]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        let object = row_object(row);
+        let projected: serde_json::Map<String, serde_json::Value> = fields
+            .iter()
+            .map(|field| {
+                (
+                    (*field).to_owned(),
+                    object
+                        .get(*field)
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect();
+        out.push_str(&serde_json::Value::Object(projected).to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// Refuses an export body over the cap with a 400 that names the limit. The file is never
+/// cut short: a caller who gets this reads fewer rows or projects fewer fields.
+pub fn check_export_size(len: usize) -> Result<(), QuarryError> {
+    if len > MAX_EXPORT_BYTES {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "the export is larger than 10 MiB: use a smaller limit or fewer fields",
+        )
+        .with_details(serde_json::json!({ "field": "limit", "reason": "export_too_large" })));
+    }
+    Ok(())
+}
+
+/// The export of a read: the rows as CSV or JSON Lines, with the kind and the cursors in
+/// headers. The gates ran before, so this only renders.
+fn export_response(export: &Export, view: &JobResultsView) -> Result<Response, QuarryError> {
+    let body = match export.format {
+        ExportFormat::Csv => render_csv(&view.items, &export.fields),
+        ExportFormat::Jsonl => render_jsonl(&view.items, &export.fields),
+    };
+    check_export_size(body.len())?;
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, export.format.content_type())
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", export.format.file_name()),
+        )
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(RESULT_KIND_HEADER, "page_index");
+    if let Some(next) = view.next_seq {
+        builder = builder.header(NEXT_SEQ_HEADER, next.to_string());
+    }
+    if view.scan_capped {
+        builder = builder.header("x-quarry-scan-capped", "true");
+    }
+    builder
+        .body(Body::from(body))
+        .map_err(|_| QuarryError::new(ErrorCode::Internal, "export response could not be built"))
+}
+
+/// Renders a read: the export when the caller asked for one, otherwise the JSON envelope
+/// `{data: {items, next_seq?}, meta: {request_id, page: {next?, limit}}}`.
+fn render(request_id: String, result: Result<ResultsRead, QuarryError>) -> Response {
     match result {
-        Ok((view, limit)) => {
+        Ok(ResultsRead {
+            view,
+            export: Some(export),
+            ..
+        }) => match export_response(&export, &view) {
+            Ok(response) => response,
+            Err(err) => fail(&request_id, err).into_response(),
+        },
+        Ok(ResultsRead {
+            view,
+            limit,
+            export: None,
+        }) => {
             let next = view.next_seq.map(|seq| seq.to_string());
             let mut envelope = Envelope::ok(request_id, view);
             envelope.meta.page = Some(PageMeta {
@@ -277,5 +531,123 @@ mod tests {
         assert_eq!(err.code, ErrorCode::Forbidden);
         assert_eq!(err.details.as_ref().unwrap()["reason"], "job_result_urls");
         assert!(gate(true, false).is_ok());
+    }
+
+    #[test]
+    fn json_is_the_default_and_an_export_names_its_format() {
+        assert_eq!(parse_export(&q(&[]), 100).unwrap(), None);
+        assert_eq!(parse_export(&q(&[("format", "json")]), 100).unwrap(), None);
+        let csv = parse_export(&q(&[("format", "csv")]), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(csv.format, ExportFormat::Csv);
+        let jsonl = parse_export(&q(&[("format", "jsonl")]), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(jsonl.format, ExportFormat::Jsonl);
+        let err = parse_export(&q(&[("format", "xml")]), 100).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.details.as_ref().unwrap()["field"], "format");
+    }
+
+    #[test]
+    fn fields_need_an_export_and_name_each_row_field_once() {
+        let err = parse_export(&q(&[("fields", "url")]), 100).unwrap_err();
+        assert_eq!(err.details.as_ref().unwrap()["field"], "fields");
+
+        let projected = parse_export(&q(&[("format", "csv"), ("fields", "url, seq")]), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projected.fields, vec!["url", "seq"]);
+        let all = parse_export(&q(&[("format", "csv")]), 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(all.fields, ROW_FIELDS.to_vec());
+
+        for bad in ["url,nope", "url,url", "", "url,"] {
+            let err = parse_export(&q(&[("format", "csv"), ("fields", bad)]), 100).unwrap_err();
+            assert_eq!(err.code, ErrorCode::BadRequest, "fields={bad:?}");
+            assert_eq!(
+                err.details.as_ref().unwrap()["field"],
+                "fields",
+                "fields={bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_export_reads_at_most_100_rows_and_the_json_read_keeps_500() {
+        assert!(parse_export(&q(&[("format", "csv")]), 100).is_ok());
+        let err = parse_export(&q(&[("format", "csv")]), 101).unwrap_err();
+        assert_eq!(err.details.as_ref().unwrap()["field"], "limit");
+        assert_eq!(parse_export(&q(&[]), 101).unwrap(), None);
+    }
+
+    fn sample_row(seq: u64, url: &str, title: Option<&str>) -> JobResultView {
+        use chrono::TimeZone;
+        JobResultView {
+            seq,
+            url: url.to_owned(),
+            status: 200,
+            content_type: Some("text/html".to_owned()),
+            title: title.map(str::to_owned),
+            fetched_at: chrono::Utc
+                .with_ymd_and_hms(2026, 10, 23, 10, 0, seq as u32)
+                .unwrap(),
+            word_count: Some(120),
+            driver: Some("static".to_owned()),
+            markdown_artifact_id: Some("art_01MD".to_owned()),
+            source_artifact_id: None,
+            bytes: Some(900),
+        }
+    }
+
+    #[test]
+    fn csv_cells_are_rfc4180_and_formula_safe() {
+        let text = |s: &str| serde_json::Value::String(s.to_owned());
+        assert_eq!(csv_cell(Some(&text("plain"))), "plain");
+        assert_eq!(csv_cell(Some(&text("a,b"))), "\"a,b\"");
+        assert_eq!(csv_cell(Some(&text("say \"hi\""))), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_cell(Some(&text("line\nbreak"))), "\"line\nbreak\"");
+        assert_eq!(csv_cell(Some(&text("=1+1"))), "'=1+1");
+        assert_eq!(csv_cell(Some(&text("+x"))), "'+x");
+        assert_eq!(csv_cell(Some(&text("@SUM(A1)"))), "'@SUM(A1)");
+        assert_eq!(csv_cell(Some(&text("=1,2"))), "\"'=1,2\"");
+        assert_eq!(csv_cell(Some(&serde_json::json!(42))), "42");
+        assert_eq!(csv_cell(None), "");
+        assert_eq!(csv_cell(Some(&serde_json::Value::Null)), "");
+    }
+
+    #[test]
+    fn csv_writes_the_projected_header_and_one_crlf_line_per_row() {
+        let rows = vec![
+            sample_row(1, "https://a.test/x", Some("A, B")),
+            sample_row(2, "https://a.test/y", None),
+        ];
+        assert_eq!(
+            render_csv(&rows, &["seq", "url", "title", "bytes"]),
+            "seq,url,title,bytes\r\n1,https://a.test/x,\"A, B\",900\r\n2,https://a.test/y,,900\r\n"
+        );
+        assert_eq!(render_csv(&[], &["seq"]), "seq\r\n");
+    }
+
+    #[test]
+    fn jsonl_projects_each_row_and_nulls_what_a_row_lacks() {
+        let rows = vec![sample_row(1, "https://a.test/x", None)];
+        let body = render_jsonl(&rows, &["seq", "source_artifact_id"]);
+        assert_eq!(body, "{\"seq\":1,\"source_artifact_id\":null}\n");
+        let line: serde_json::Value = serde_json::from_str(body.trim_end()).unwrap();
+        assert_eq!(
+            line,
+            serde_json::json!({ "seq": 1, "source_artifact_id": null })
+        );
+    }
+
+    #[test]
+    fn an_export_over_10_mib_is_refused_with_the_reason_named() {
+        assert!(check_export_size(MAX_EXPORT_BYTES).is_ok());
+        let err = check_export_size(MAX_EXPORT_BYTES + 1).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BadRequest);
+        assert_eq!(err.details.as_ref().unwrap()["reason"], "export_too_large");
     }
 }

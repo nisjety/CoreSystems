@@ -1,0 +1,96 @@
+{
+ "finalId": "F-t2-075",
+ "tier": "nice-to-have",
+ "rank": 10,
+ "title": "Contract and signal hygiene: deprecation registry, signed browser and sandbox images, web-result usefulness signal",
+ "summary": "Three independent small tasks. (a) A typed deprecation registry and tower middleware in quarry-edge that sets Deprecation, Sunset, Link and Warning headers on retiring routes, plus a CI contract test that fails when the gateway or Model Plane call a deprecated route. (b) Sign the Quarry browser, mcp-bridge and sandbox images in CI (cosign) and verify them at deploy or admission. (c) A usefulness event per web tool result (used, ignored, failed) from the Model Plane, aggregated per domain or provider in Ingestion and fed into capability-core scoring, with no content stored under ZDR.",
+ "whyItMatters": "Quarry's contracts evolve quickly while the gateway and Model Plane clients lag, browser and sandbox images handle live user sessions, and source ranking improves cheaply from a machine-readable usefulness signal. None of these is user-visible, but each is cheap insurance.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (deprecation protocol and result feedback), Codex (signed bundle receipts)",
+  "others": [
+   "Codex in-app browser"
+  ],
+  "prevalence": "1 of 4 sources each; unique",
+  "mechanism": "Firecrawl: a typed registry {id, route matcher, deprecated_at, sunset_at, successor, message} drives Deprecation (RFC 9745), Sunset, Link rel=successor-version and Warning 299 headers plus JSON warnings, attached before auth so rejected calls still see them, with per-version request adapters; POST /v2/feedback is keyed by job id inside a short window and requires specifics on negative ratings. Codex: CI signs a receipt (RSA PKCS1 SHA256, key id, per-plugin sha256, source sha, workflow ref) and the runtime verifies it before enabling a bundle."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-293",
+   "apps/Model Plane/docs/decisions/ledger.md:2441",
+   ".github/workflows",
+   "apps/Model Plane/go/services/capability-core/internal/scoring/scoring.go:1-15"
+  ],
+  "gap": "SRC: Quarry exposes /v1 only, the Firecrawl-compat adapter was deleted and no Deprecation or Sunset handling was found in Quarry crates (comparator grep). A grep of .github/workflows finds no cosign, sigstore, attest, slsa, trivy or provenance step, and the Model Plane decision ledger records no cosign, SLSA or SBOM in the plane. No feedback route exists in quarry-edge/src (comparator grep); capability-core has an operator_rating input to scoring but no per-result signal from agents. Image signing could live in a deploy pipeline outside this repo, which was not checked."
+ },
+ "approach": "Ingestion Plane: deprecation registry plus middleware in quarry-edge and a contract test in quarry-v2-ci.yml. Support Plane or CI: cosign signing and verification for the images and the mcp-bridge bundle. Model Plane: emit the usefulness event keyed by the Quarry request id; Ingestion aggregates ids and domains only; capability-core scoring consumes it.",
+ "effort": "M",
+ "dependencies": [],
+ "planeOwner": "Ingestion Plane, with Support Plane (signing) and Model Plane (usefulness events)",
+ "risks": "Low. The usefulness signal must not log content under ZDR (ids and domains only). The signing task needs a registry and key-management decision before it is worth doing.",
+ "significance": 2,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 6,
+  "DOC": 2,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-06-12"
+ ],
+ "sourceClusters": [
+  "C-t2-06-032",
+  "C-t2-06-028",
+  "C-t2-06-030"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-075",
+   "status": "absent",
+   "exactGap": "None of the three tasks exists: quarry-edge serves /v1 routes only with no Deprecation, Sunset, Link or Warning handling (routes.rs:131-275; the only 'deprecated' in routes.rs is a Rust lint allow at :80), no workflow under .github/workflows references cosign, sigstore, SLSA, SBOM or provenance, and no web-result usefulness event or Quarry feedback route exists. Two premises also fail: only auth-service, org-service and user-service workflows build and push images (none for Quarry or Model Plane; the Model Plane compose header says to build only through a host build script, and both composes carry SOURCE_REVISION and BUILD_DATE build args), and capability-core scoring ranks capabilities from health columns rather than domains or search results, although its rollout_state 'deprecated' is an unrelated capability lifecycle flag.",
+   "evidence": [
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:76-82 and :131-275 (all routes under /v1; #[allow(deprecated)] is a lint attribute)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs (grep of apps/Ingestion Plane for \"deprecat\" in rs/go/yaml finds only routes.rs, integration-corev2 catalog.go:1017 comment and shipping-core http.go:75 field comment)",
+    "C:/dev/CoresSystem/apps/Model Plane/docs/CUTOVER.md:103 (doc claims legacy HTTP paths emit Deprecation and Sunset; no code found in Model Plane rs or go beyond generated protos and capability rollout_state)",
+    "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/scoring/scoring.go:1-12, :42-51, :77-90 (inputs are capability health columns and rollout_state; deprecated multiplier 0.10)",
+    "C:/dev/CoresSystem/apps/Model Plane/go/services/capability-core/internal/server/server.go:544 and internal/api/registry_apis.go:851 (rollout_state deprecated is a capability registry value)",
+    "C:/dev/CoresSystem/.github/workflows/auth-service.yml:112 (docker/build-push-action; same in org-service.yml:137 and user-service.yml:101); quarry-v2-ci.yml has no image push (only prune steps at :183-300); grep of .github for cosign|sigstore|slsa|sbom|trivy|syft|grype|provenance returns nothing",
+    "C:/dev/CoresSystem/apps/Model Plane/deploy/docker-compose.yml:3-14 (build only via the build script; SOURCE_REVISION and BUILD_DATE build args required for provenance labels) and C:/dev/CoresSystem/apps/Ingestion Plane/docker-compose.yml:4-5 (same args, default unverified)",
+    "C:/dev/CoresSystem/apps/Model Plane/docs/decisions/ledger.md:2441 (no signed artifact, no cosign, SLSA or SBOM in the plane)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/model-gateway/src/implicit_feedback.rs:35 (reuses mp.v1.feedback.rated), :63 (ZDR drops the signal); tool_loop.rs:207 (ToolOutcome)",
+    "C:/dev/CoresSystem/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:794 (web_search, web_fetch, web.search, web.read map to cap.tool.http)",
+    "C:/dev/CoresSystem/.github/workflows/quarry-docs-contract.yml:1-40 and C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/scripts/tests/docs-contract.test.mjs (existing OpenAPI and route contract test harness)"
+   ],
+   "reuse": [
+    "quarry-docs-contract.yml plus scripts/tests/docs-contract.test.mjs as the home for a deprecated-route contract check",
+    "F-t2-064 planned OpenAPI generation with route-coverage CI: carry deprecated flags and successor routes in the same spec instead of a second registry",
+    "SOURCE_REVISION and BUILD_DATE build args already required by the Model Plane compose, as provenance labels to sign against",
+    "implicit_feedback.rs envelope pattern on mp.v1.feedback.rated (negative-only, namespaced keys, ZDR drop) for any usefulness event",
+    "Quarry service-principal and cross-plane-token-requests manifest path for a Model Plane to Quarry call"
+   ],
+   "constraints": "Quarry's only callers today are the gateway and Model Plane, so protocol deprecation headers have almost no audience until the external API of F-t2-064 exists; deprecation belongs with that OpenAPI work. Image signing has no CI artifact to sign: Model Plane images are built through a host build script and compose (its compose header), and no workflow pushes Quarry or Model Plane images, so a publish pipeline, registry and key-management decision (Support Plane or infra) must come first; mcp-bridge is not a Quarry component, it is referenced from Model Plane docs and the model-gateway registry. Usefulness signal: ZDR must drop it (as implicit_feedback does under ZDR) and it may carry only ids and domains; Model Plane must not write Ingestion storage, so it needs a NATS event or a Quarry endpoint with a service principal (a new entry in the cross-plane token manifest and Control Plane registry checked by quarry-docs-contract.yml). Behavioural signals are asymmetric: ignored is weak evidence and silence is not approval (implicit_feedback.rs header), and failed is already known to Quarry.",
+   "approachAdjustment": "Split the bundle. (a) Fold deprecation metadata into F-t2-064 as OpenAPI deprecated flags plus a CI route-coverage check, and add tower middleware only when an external audience exists. (b) Defer image signing until a registry publish pipeline exists, then sign in that pipeline; frame it as a deploy-pipeline item for infra, not a Quarry change. (c) Keep a much smaller usefulness signal: Model Plane emits used (cited) with Quarry request id and domain, Quarry aggregates per domain for its own search and answer ranking, and capability-core is not the consumer because it scores tools, not sources.",
+   "effortRevised": "L",
+   "effortNote": "As a bundle L: (a) S-M and absorbed by F-t2-064, (b) L because there is no image publish pipeline to attach signing to, (c) M including a cross-plane contract and a ranking consumer that does not exist yet.",
+   "verdict": "demote",
+   "verdictReason": "Status absent is accurate, but the bundle rests on premises the code contradicts: no external API consumers for deprecation headers, no image publish pipeline to sign, and capability-core cannot consume a per-domain usefulness signal. Demote and split; (a) belongs to F-t2-064 and (c) is a smaller, differently placed item.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

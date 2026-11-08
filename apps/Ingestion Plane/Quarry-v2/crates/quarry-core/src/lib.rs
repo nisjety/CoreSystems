@@ -23,6 +23,7 @@ pub mod json_schema;
 pub mod lease;
 pub mod output;
 pub mod output_profile;
+pub mod page_emulation;
 pub mod pagination;
 pub mod policy;
 pub mod presets;

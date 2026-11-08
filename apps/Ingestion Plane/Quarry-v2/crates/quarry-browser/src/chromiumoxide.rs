@@ -327,6 +327,9 @@ struct SessionPages {
     lease_restore_failed: bool,
     /// WS17.C2: the locale and timezone the restored profile asks every tab to emulate.
     profile_emulation: Option<ProfileEmulation>,
+    /// E4.4-a: the locale, timezone and location each tab of this session emulates, set by
+    /// `set_page_emulation` before the first tab opens and applied as each tab opens.
+    page_emulation: Option<quarry_core::page_emulation::PageEmulation>,
 }
 
 /// Local Chromium driver backed by chromiumoxide.
@@ -1454,14 +1457,15 @@ impl ChromiumoxideDriver {
 
         // WS17.C2: the profile is loaded and restored once per context, by its first tab. A
         // later tab shares that context's live jar and must not write the saved copy over it.
-        let (first_tab, stored_emulation) = {
+        let (first_tab, stored_emulation, page_emulation) = {
             let pages = self.pages.lock().await;
             match pages.get(&session_key) {
                 Some(session_pages) => (
                     !session_pages.profile_restored,
                     session_pages.profile_emulation.clone(),
+                    session_pages.page_emulation.clone(),
                 ),
-                None => (true, None),
+                None => (true, None, None),
             }
         };
         // SC4 D1: a placeholder tab (an observation of a session with no page) leaves the
@@ -1526,12 +1530,37 @@ impl ChromiumoxideDriver {
             .as_ref()
             .map(ProfileEmulation::from_snapshot)
             .or(stored_emulation);
-        if let Some(emulation) = profile_emulation.as_ref().filter(|e| !e.is_empty()) {
+        // E4.4-a: the request's own locale and timezone replace the profile's on this page, so each
+        // override is set once. The profile's stay for whatever the request left unset.
+        let profile_to_apply = match page_emulation.as_ref() {
+            Some(request) => profile_emulation
+                .as_ref()
+                .map(|profile| profile.without(request)),
+            None => profile_emulation.clone(),
+        };
+        if let Some(emulation) = profile_to_apply.as_ref().filter(|e| !e.is_empty()) {
             let _ = best_effort(Op::TabAttach, async {
                 profile_restore::apply_profile_emulation(&page, emulation).await;
                 Ok::<(), std::convert::Infallible>(())
             })
             .await;
+        }
+        // E4.4-a: the request's own emulation. A failure fails the open, so the caller gets an
+        // error rather than a page with the host's locale; the attach guard closes the tab.
+        if let Some(request) = page_emulation.as_ref() {
+            let browser_guard = self.browser.read().await;
+            let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+            with_deadline(
+                Op::TabAttach,
+                profile_restore::apply_page_emulation(
+                    browser,
+                    &page,
+                    &context_id,
+                    initial_url,
+                    request,
+                ),
+            )
+            .await?;
         }
         // The tab's own policy is in place before the guard below can decide
         // any of its requests (WS8.E). It is removed with the tab or the session.
@@ -4938,6 +4967,8 @@ impl BrowserDriver for ChromiumoxideDriver {
             // WS13.3: scrape-time actions and capture options run on this driver.
             scrape_actions: true,
             capture_options: true,
+            // E4.4-a: the page's locale, timezone and geolocation are emulated with CDP overrides.
+            page_emulation: true,
         }
     }
 
@@ -4977,6 +5008,26 @@ impl BrowserDriver for ChromiumoxideDriver {
             .lock()
             .await
             .insert(session_key, policy);
+        Ok(())
+    }
+
+    async fn set_page_emulation(
+        &self,
+        session: &BrowserSession,
+        emulation: &quarry_core::page_emulation::PageEmulation,
+    ) -> QuarryResult<()> {
+        self.refuse_lost(session)?;
+        let session_key = Self::session_key(session);
+        let mut pages = self.pages.lock().await;
+        let session_pages = pages.entry(session_key).or_default();
+        if !session_pages.tabs.is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                "page emulation must be set before the session opens its first page",
+            )
+            .with_details(json!({ "reason": "page_already_open" })));
+        }
+        session_pages.page_emulation = (!emulation.is_empty()).then(|| emulation.clone());
         Ok(())
     }
 
@@ -12114,6 +12165,8 @@ mod tests {
     include!("profile_capture_live.rs");
     // WS17.C2: restore against a real Chromium.
     include!("profile_restore_live.rs");
+    // E4.4-a: the per-page locale, timezone and location (one test needs no browser).
+    include!("page_emulation_live.rs");
 
     // ---- W3-E3.4-6: governed downloads against a real Chromium (lane C4).
     //

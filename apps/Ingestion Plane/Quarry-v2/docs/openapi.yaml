@@ -2021,6 +2021,24 @@ paths:
               schema:
                 type: object
   /v1/crawl/{job_id}/results:
+    parameters:
+      - name: format
+        in: query
+        required: false
+        description: json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4).
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          - jsonl
+          default: json
+      - name: fields
+        in: query
+        required: false
+        description: With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400.
+        schema:
+          type: string
     get:
       operationId: get_crawl_results
       summary: The pages a crawl fetched, with their artifact ids (INNH-12)
@@ -2288,6 +2306,24 @@ paths:
         '404':
           description: Not found for this organization.
   /v1/batch/{job_id}/results:
+    parameters:
+      - name: format
+        in: query
+        required: false
+        description: json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4).
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          - jsonl
+          default: json
+      - name: fields
+        in: query
+        required: false
+        description: With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400.
+        schema:
+          type: string
     get:
       operationId: get_batch_results
       summary: The pages a batch fetched, with their artifact ids (INNH-12)
@@ -2370,6 +2406,24 @@ paths:
         '501':
           description: Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS).
   /v1/jobs/{job_id}/results:
+    parameters:
+      - name: format
+        in: query
+        required: false
+        description: json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4).
+        schema:
+          type: string
+          enum:
+          - json
+          - csv
+          - jsonl
+          default: json
+      - name: fields
+        in: query
+        required: false
+        description: With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400.
+        schema:
+          type: string
     get:
       operationId: get_job_results
       summary: The pages any durable job fetched, with their artifact ids (INNH-12)
@@ -8636,6 +8690,54 @@ components:
             for any other value. A redacted request never reads or writes the
             page or result cache. Refused on /v1/scrape/stream
             (unsupported_in_stream).
+        locale:
+          type: string
+          maxLength: 35
+          description: >-
+            E4.4-a. The language tag the page emulates, as Chromium takes it:
+            navigator.language and Intl see it. nb-NO is stored as nb_NO. Absent: the
+            host's locale, as before. Off unless QUARRY_EDGE__PER_PAGE_LOCALE is on; while
+            off the key is an unknown field. 400 invalid_locale (path locale) for a value
+            that is not a language tag such as en-US or nb-NO. A request with a locale is
+            browser work: the page is emulated before its first navigation, and it never
+            reads or writes the page or result cache. Refused on /v1/scrape/stream
+            (unsupported_in_stream) while the switch is on. On an edge with no browser,
+            400 unsupported_option, one field error per emulated field (locale,
+            timezone or location).
+        timezone:
+          type: string
+          maxLength: 64
+          description: >-
+            E4.4-a. The IANA timezone the page emulates, such as Europe/Oslo (Date and
+            Intl use it). Absent: the host's timezone. The same switch, cache and stream
+            rules as locale. 400 invalid_timezone (path timezone) for a name that is not
+            IANA-shaped. A name the browser does not know is refused with 400
+            page_emulation_failed (details.field timezone).
+        location:
+          type: object
+          required: [latitude, longitude]
+          additionalProperties: false
+          properties:
+            latitude:
+              type: number
+              minimum: -90
+              maximum: 90
+            longitude:
+              type: number
+              minimum: -180
+              maximum: 180
+            accuracy:
+              type: number
+              exclusiveMinimum: 0
+              maximum: 100000
+          description: >-
+            E4.4-a. The geolocation the page reports to navigator.geolocation, in decimal
+            degrees, with an accuracy in metres (default 100). The position is granted to
+            the origin the scrape navigates to, which is the permission a site checks before
+            it reads the position. The same switch, cache and stream rules as locale. 400
+            out_of_range with path location.latitude, location.longitude or
+            location.accuracy; missing_field or unknown_field inside the object; invalid_type
+            for a value that is not a number or an object.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
@@ -9226,7 +9328,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported. `page_emulation` (E4.4-a) carries the locale, timezone and location the page emulated, and is absent when the request asked for none.
           warnings:
             type: array
             items:

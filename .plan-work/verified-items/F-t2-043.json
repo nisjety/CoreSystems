@@ -1,0 +1,121 @@
+{
+ "finalId": "F-t2-043",
+ "tier": "recommended",
+ "rank": 19,
+ "title": "URL-aware planner guidance: site skills, integration-corev2 provider capability hints by domain, driver capability matrix",
+ "summary": "Three small changes in one pass. (a) Replace the one-line web_search and web_fetch descriptions with narrowest-tool-first routing and freshness guidance (and the escalation path to crawl or browser) as tool descriptions plus a built-in 'web access' org skill. (b) Add GET /v1/drivers/{id}/capabilities to quarry-edge (driver by capability matrix with one-line descriptions) so execution-core builds the browser tool schema at grant time and offers a describe-capability tool. (c) Add url_patterns and an optional snapshot_scope to org agent skills so site playbooks inject when the current Quarry session URL matches. || Make integration-corev2 publish a versioned, machine-readable operation catalog (provider, operation, isWrite, params schema, provider domains) and have Model Plane load it instead of the hard-coded CATALOG. When a Quarry observation lands on a host that maps to a provider the org has connected, offer that provider's matching read/write actions for the next step (or a \"connect this provider\" suggestion card when no connection exists) instead of brittle UI clicking. Cap the hint to a few operations to avoid tool-list bloat.",
+ "whyItMatters": "Cheap, measurable gains in tool choice: fewer proposals that the driver cannot execute (fewer Quarry rejections), smaller prompts, less spend, and more reliable runs on the sites customers use most. All of it informs the Model; Quarry still decides. || When the agent is on a GitHub, Meta, LinkedIn, Google or Shopify page it can switch to a governed API action: faster, cheaper, auditable, with approvals and idempotency already in place and no sensitive browser grant. It directly reduces browser load and risk and ties the two planes together at low cost.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (capability registry with per-backend support), Firecrawl (endpoint-selection skills) and Aside (URL-triggered site skills)",
+  "others": [
+   "Firecrawl",
+   "Aside",
+   "Firecrawl (scrape/search returns provider tools matched by domain or semantic query; one execute endpoint)"
+  ],
+  "prevalence": "1 of 4 sources each for the three mechanisms; unique (together a differentiator) || 1 of 4 sources (Firecrawl only); unique",
+  "mechanism": "Codex: the API description marks each member unsupportedByDefaultIn [backends], the agent calls capabilities.list() for {id, one line} and fetches documentation only on demand, disabled ids are not registered, and the runtime is transport-agnostic (REA: no Electron code in the parsed runtime scripts). Firecrawl: an umbrella skill plus per-endpoint skills tell agents which endpoint to use, narrowest first, kept separate from generated parameter docs. Aside: SKILL.md frontmatter {name, description, autoInject.keywords, autoInject.url, siteSpecific}; 16 site skills scope page snapshots with selectors; matched site skills are injected (bounded) and the rest are listed by name. || Merged items add: Catalog entries {provider, capability, description, inputSchema, price, domains[]}; discovery matches the URL host to a provider (or does semantic search over descriptions) and returns data.tools with matchedBy domain|semantic and matchedUrls; execution is a single endpoint taking [{provider, capability, options}] with a caller request id; limited to 24 tools in a 10 s budget, three detail levels, and refused under ZDR because it calls an external exchange. Verevon keeps discovery internal so ZDR is unaffected."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184-4192",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1009-1070",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:23-35",
+   "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go:1-10",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:262-290",
+   "apps/Ingestion Plane/Quarry-v2/docs/DRIVER_MATRIX.md",
+   "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+   "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:60-75 (hard-coded curated CATALOG of operations; comment warns that too many near-duplicate tool names degrade selection)",
+   "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:257-263 (list_provider_actions lists the run org's live connections, tenant-scoped)",
+   "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:68-86 (Provider struct has Capabilities and Bundles but no domains field)",
+   "apps/Ingestion Plane/integration-corev2/internal/api/server.go:376,514 (per-connection capabilities and discovery routes)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:123 (scrape output carries final_url)"
+  ],
+  "gap": "SRC: web tool descriptions are one sentence each with no routing, freshness or escalation guidance. Org agent skills (session-core agent_skills with name, trigger_keywords and content) are matched by keyword overlap against the run goal at run start, at most 3 injected under a size budget; there is no URL-pattern trigger, no tab-aware injection and no snapshot scoping. Drivers declare eight deny-by-default capability booleans and gate actions fail-closed, but the matrix is only a human-readable doc (DRIVER_MATRIX.md) and not an endpoint the Model Plane reads; whether browser planner prompts adapt per driver was not verified. OpenAPI covers 46 of about 75 routes (baseline). || The agent sees a static curated operation list for connections the org already has. There is no domain-to-provider matching from browsed URLs, no input schemas in an IC-served catalog (operations are string switch arms, so no declarative registry exists), and no suggestion to connect a provider when the agent browses its site."
+ },
+ "approach": "Model Plane: URL-pattern site skills on top of session-core skills (Aside SKILL.md pattern), routing guidance and the driver capability matrix fed to the planner; Ingestion Plane integration-corev2 serves its action catalog with schemas and provider domains so the planner can offer a governed API action or a connect-this-provider suggestion when the browsed host matches. Bound the hints with a tool-selection budget. || Source detail: [R-t2-06-08] Model Plane (execution-core): rewrite the tool descriptions in agent.rs and ship a built-in 'web access' skill; add url_patterns and snapshot_scope fields to AgentSkill (session-core proto and ListAgentSkills) and match against the current Quarry session URL when browser.observe runs; ship 3 to 5 first-party site skills for the sites customers use most. Ingestion Plane: expose GET /v1/drivers/{id}/capabilities (from BrowserDriverCapabilities plus the allowed action set) and complete OpenAPI so parameter docs can be generated; execution-core shapes the browser tool list from it at grant time and adds describe_capability. || [R-t2-10-03] Ingestion Plane (integration-corev2) + Model Plane (execution-core). IC: add Domains []string to providers.Provider and a declarative operation registry in internal/actions (name, isWrite, params schema) that the Execute switch and a new GET /internal/catalog endpoint both read; version it. Model Plane execution-core: replace CATALOG with a cached IC catalog fetch per org, and add a host-to-provider matcher run on each browser observation (canonical registrable domain from the observation URL). Inject at most N matching operations as a \"provider hint\" in the next step, marking writes as approval-gated, or emit a connect-provider suggestion. Execution keeps using the existing named-operation path (execute_provider_action) with approvals, so no new write surface.",
+ "effort": "M",
+ "dependencies": [
+  "Browser loop production wiring (cross-category)",
+  "OpenAPI completeness",
+  "IC declarative operation registry and catalog endpoint with schemas",
+  "Browser observations carrying the canonical URL/host to Model Plane (verify per step event)",
+  "Model Plane tool-selection budget so hints do not flood the prompt"
+ ],
+ "planeOwner": "Model Plane + Ingestion Plane (integration-corev2 catalog)",
+ "risks": "Skill text is operator-authored prompt content: keep it out of untrusted-web channels and inside the skill budget. Capability lists must stay in sync with driver reality, so generate them from the driver trait rather than writing them by hand. || Tool-list bloat degrading model choice (the CATALOG comment already warns); stale or wrong domain mappings pointing the agent at the wrong provider; showing connect suggestions for providers the org's policy disallows.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 1,
+  "SRC": 12,
+  "DOC": 3,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-06-08",
+  "R-t2-10-03"
+ ],
+ "sourceClusters": [
+  "C-t2-06-019",
+  "C-t2-06-025",
+  "C-t2-06-018",
+  "C-t2-10-009"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem",
+  "Integration-plane overlap"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-043",
+   "status": "partial",
+   "exactGap": "Confirmed: execution-core's web_search and web_fetch descriptions are one sentence with no routing or escalation guidance and the system prompt has no web snippet (the chat path's web_search description does carry freshness and narrowest-tool guidance); org skills are keyword-matched against the run goal at run start (3 skills, 8000 characters) and AgentSkill has trigger_keywords plus a stored-but-unused trigger_file_patterns but no URL pattern and only user and background_review origins; and integration-corev2 has a coarse provider catalog (connect-time capabilities with read/write direction, no domains, no operation schemas) while execution-core uses a hard-coded CATALOG over a Go string switch. Corrected: driver capabilities are not only a human-readable doc, because POST /v1/agent/runs already accepts driver_requirements and returns driver_capabilities, execution_tier and execution_engine (documented in openapi.yaml) and quarry-edge gates actions fail-closed on them. The real gap is that neither execution-core nor the gateway reads those fields and there is no pre-run GET /v1/drivers route, so the Model's static browser.act schema never adapts to the driver.",
+   "evidence": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:4184-4192 (one-sentence web_search and web_fetch descriptions)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:85-170 (conditional SNIPPET_* prompt guidance, measured; no web snippet)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1006-1100 (skill injection: goal keyword overlap, MAX_INJECTED_SKILLS 3, size-fitted blocks)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/skill_budget.rs:18-40 (8000 character budget, truncation marker, reattach_skill)",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto:876-893 (AgentSkill: trigger_keywords, trigger_file_patterns, tool_restrictions, origin user|background_review)",
+    "apps/Model Plane/rust/services/session-core/migrations/0006_agent_skills_origin.sql:1-25 and 0004_tasks_cron_hooks_skills_memory.sql:198 (origin constraint; trigger_file_patterns column)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:4304-4310,4359-4361 (chat-path web_search guidance; fetch_url one-liner)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:262-290 (BrowserDriverCapabilities: eight deny-by-default booleans)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:543-551,1132-1135,1180-1260,1305,1658 (driver_requirements checked at start, driver_capabilities returned, actions gated fail-closed)",
+    "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml:2425-2510 (driver_requirements request and driver_capabilities response documented)",
+    "apps/Ingestion Plane/Quarry-v2/docs/DRIVER_MATRIX.md:1-60 (human-readable driver family matrix)",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs:60-110,257-275 (hard-coded CATALOG, is_write flag, tenant-scoped list_provider_actions)",
+    "apps/Ingestion Plane/integration-corev2/internal/providers/catalog.go:8-18,68-86 (Capability and Provider: no domains field)",
+    "apps/Ingestion Plane/integration-corev2/internal/api/server.go:221-224,376,514-537 (providers catalog, per-connection capabilities and discovery routes)",
+    "apps/Ingestion Plane/integration-corev2/internal/actions/service.go:727 (operations are string switch arms; no declarative registry)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:112-125 (scrape output carries requested, final and canonical URL)",
+    "negative searches: no /v1/drivers route; no consumer of driver_capabilities or driver_requirements in execution-core, model-gateway or the gateway; no url_patterns/snapshot_scope/autoInject"
+   ],
+   "reuse": [
+    "the existing conditional SNIPPET_* mechanism in execution-core agent.rs as the measured home for routing guidance",
+    "the already-returned driver_capabilities, execution_tier and execution_engine from POST /v1/agent/runs",
+    "AgentSkill.trigger_file_patterns plumbing (proto, session-core upsert, capability-core registry_apis, migrations) as the template for a URL-pattern field, plus the two existing injection paths (execution-core fetch_skill_context and model-gateway skills.rs)",
+    "integration-corev2 /api/v1/providers catalog (capability keys, read/write direction) as the seed of a per-operation catalog",
+    "execute_provider_action with its human approval and integration-corev2 approvalId check as the unchanged write path",
+    "list_provider_actions tenant-scoped connection listing for the hint"
+   ],
+   "constraints": "All hints inform the Model and Quarry or integration-corev2 still decide: provider actions keep the named-operation path with human approval for writes, so the hint adds no write surface. Tenant scope: hints may use only the run org's live connections, and a connect-this-provider suggestion must respect org policy on allowed providers. Skill text is operator-authored prompt content injected into model context: keep site skills out of untrusted-web channels and inside the 8000-character budget. Ownership: provider domains and operation schemas belong in integration-corev2 (Ingestion Plane) served as a versioned read-only catalog, not mirrored by hand in the Model Plane. ZDR: host-to-provider matching uses the observed URL only in memory and hints must not persist URLs. Tool-list bloat measurably degrades selection (the CATALOG comment and the measured prompt snippets), so cap hints and measure.",
+   "approachAdjustment": "Split into four. (1) S: rewrite execution-core web_search and web_fetch descriptions and add a conditional web snippet beside the existing SNIPPET_* constants; do not ship it as a built-in org skill, because skills have no first-party origin and are matched on goal keywords. (2) S: forward the already-returned driver_capabilities and execution_tier from run start into the observation or tool result the Model sees (optionally prune browser.act variants) instead of building GET /v1/drivers/{id}/capabilities. (3) M: url_patterns on AgentSkill mirroring trigger_file_patterns end to end, matched on the observed URL when browser.observe runs, keeping both injection paths in step. (4) L: an integration-corev2 versioned operation catalog (declarative registry replacing the Execute switch) with provider domains, then replace execution-core's CATALOG and add the host-to-provider hint; start with a small hand-maintained domain map for the already-curated providers.",
+   "effortRevised": "L",
+   "effortNote": "Item said M. M holds only for (1) to (3); (4) is L because integration-corev2 actions are a large string switch with no declarative registry.",
+   "verdict": "reword",
+   "verdictReason": "The driver-matrix endpoint is based on a wrong premise (capabilities are already returned at run start), the web guidance is half-present in the chat path, and a built-in web-access skill does not fit the skill model. Reword into S quick wins, an M site-skill item and an L provider-catalog item.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

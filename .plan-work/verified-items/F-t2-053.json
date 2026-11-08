@@ -1,0 +1,112 @@
+{
+ "finalId": "F-t2-053",
+ "tier": "recommended",
+ "rank": 29,
+ "title": "Saved job definitions: expose presets, then first-party Quarry packs with typed schemas",
+ "summary": "Phase 1 (M): expose quarry-control's preset catalog through quarry-edge with org and Space scoping, add 'save as preset' on ingestion runs, and make scrape, crawl and batch schedules actually execute. Phase 2 (L): define a declarative QuarryPack manifest (id, version, kind, input JSON Schema with UI hints and isSecret, output schema, required driver capabilities, ZDR compatibility, cost class) and wire the existing NAV vacancies, procurement and official-statistics collectors as the first first-party packs, with a generated schema form in the SPA.",
+ "whyItMatters": "Saved, typed job definitions give users and the Model Plane a menu of known-good jobs instead of free-form crawls, and Quarry keeps execution authority by validating (pack id, input) against the schema. It also gives dormant code (presets, collectors, schedule validation) a way to ship.",
+ "referenceBestPractice": {
+  "bestSource": "Apify (Actor manifest, input schema, tasks)",
+  "others": [
+   "Codex in-app browser (availability-gated plugin bundles)"
+  ],
+  "prevalence": "2 of 4 sources; differentiator",
+  "mechanism": "One manifest per unit (.actor/actor.json) declares name, version, build tag, env, input and output schema and default storages, and the same unit runs from the console, API, CLI, schedule or another unit. A JSON input schema with UI hints (editor, prefill, enum titles, isSecret, resource picker) renders the form and validates API input identically. Tasks are saved input plus run-option presets (up to 5,000 per user) that can be run, scheduled and shared; schedules reference presets. Codex adds an availability check (gates) before a bundled plugin is installed for a user or org."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:150-194",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:24-60",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/presets.rs:1-60",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:48-90",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/navacancies/navacancies.go:1-30",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/procurement/procurement.go:1-12",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:47",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts:1",
+   "apps/Ingestion Plane/Quarry-v2/docs/SCHEDULES.md",
+   "apps/Ingestion Plane/Quarry-v2/docs/PRESETS.md"
+  ],
+  "gap": "SRC: MountPresets is registered only on quarry-control (GET /v1/presets and /v1/presets/{name}); edge does not proxy it, so the SPA cannot reach presets, and the Rust domain preset bundles are unused. Schedules are stored and cron-validated, but control mounts the schedule lifecycle aliases with a nil Temporal client, so trigger and backfill return a typed 501, and only the change_monitor schedule kind is wired as a user-facing flow (baseline v-quarry-080, not re-verified). The NAV vacancies, procurement and official-series collectors are Go packages that nothing outside their own directories imports. The durable sources registry with monitor presets is the only user-facing preset surface. Schema-driven forms: grep of verevonv3/src for SchemaForm, schema-form, zodToForm, zod-to-json and JsonSchemaForm found nothing, so no generic renderer exists; the zod (v4) action registry shared by human UI and AI actions is the right foundation."
+ },
+ "approach": "Phase 1, Ingestion Plane: quarry-edge proxies control /v1/presets (read) and adds org-scoped saved presets (preset id, base preset, overrides, owner, visibility); wire a scheduler for scrape/crawl/batch kinds (the Temporal client, or a minimal control-side runner) so schedules reference presets. Frontend: 'save as preset' on ingestion runs. Phase 2, Ingestion Plane: QuarryPack manifest in quarry-core, registry in quarry-control, GET /v1/packs and POST /v1/packs/{id}/runs on edge, validated against the schema; start with the three existing collectors. Publish input and output JSON Schemas (for example schemars from the Rust types) at /v1/schemas, render them with a Solid SchemaForm, and reuse the same schema as the Model Plane tool parameters. Space-shared presets reference only sources the viewer may already see.",
+ "effort": "L",
+ "dependencies": [
+  "Schedule runner (Temporal client wiring)",
+  "F-t2-052 for output schema and views",
+  "OpenAPI completeness (baseline v-quarry-019: 46 of about 75 routes)",
+  "capability-core registry for F-t2-042"
+ ],
+ "planeOwner": "Ingestion Plane (with Frontend Plane for forms)",
+ "risks": "Scope creep toward a third-party marketplace or arbitrary user code (sandbox isolation for browsers is absent), so keep packs declarative and first-party. Space-shared presets must not widen owner-plane ACLs. Divergence between zod and Rust schemas if both are hand-written: generate one from the other.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 3,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-06-06] docs/PRESETS.md and docs/SCHEDULES.md describe the preset catalog and schedule lifecycle; edge exposure and non-monitor schedule execution are not done"
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-06-06"
+ ],
+ "sourceClusters": [
+  "C-t2-06-007",
+  "C-t2-06-001",
+  "C-t2-06-002",
+  "C-t2-06-004"
+ ],
+ "sourceCategories": [
+  "Platform & ecosystem"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-053",
+   "status": "partial",
+   "exactGap": "SRC: GET /v1/presets exists only on quarry-control (main.go:174; presets.go:24-52) and edge does not proxy it, and its RunPolicy presets are inert end to end: control stamps the policy on the job (resources.go:460-483) but InternalRunPage has no policy field (routes.rs:743-768), the orchestrator's Policy fields in workflows.go (:17-18,:40,:71,:86) are never populated or read, and every PageRunner is built with RunPolicy::default() (routes.rs:461,1001,1116); the Rust preset bundles that PRESETS.md calls shipped (presets.rs:320-353) have no caller and no route accepts them, and the NAV, procurement and official-series collectors have no importer. SRC: schedule creation accepts cron for any kind (gateway schedules.rs:99-188) but control maps only change_monitor to a workflow (schedule_wire.go:37-52) and the orchestrator skips the rest (schedules.go:153-165), even though ScrapeJobWF, CrawlJobWF and BatchJobWF are registered and used by the ad-hoc job dispatcher (orchestrator main.go:94-118; dispatcher.go:266-290), so stored cron scrape/crawl/batch schedules never fire. SRC: a durable Sources registry (kind crawl|scrape|search, free-form config, optional hourly|daily|weekly monitor) is already shipped end to end (gateway sources.rs:47,154-175; resource_routes.rs:410-426) and overlaps 'save as preset', and no schema-form renderer exists in verevonv3/src although z.toJSONSchema already feeds agent tools (agent-tools.ts:64-69).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:174, :188, :192 (MountPresets, MountSources, MountScheduleAliases with nil Temporal client; comment :176-187)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/presets.go:24-52 (catalog endpoints), :69 (fast preset ignores robots), :84-96 (stealth preset)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:460-483 (createJobInput, resolveJobPolicy)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:461, :1001, :1116 (RunPolicy::default()) and :743-768 (InternalRunPage without policy)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:17-18, :40, :71, :86 (Policy field declared, never read)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:94-118 (Scrape/Crawl/Batch/ChangeMonitor workflows registered)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:266-290 (ad-hoc jobs start Scrape/Crawl/Batch workflows)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/schedule_wire.go:25-52 (only change_monitor mapped)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:153-165 (unmapped kinds skipped)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:247-296 (preset = hourly|daily|weekly cadence for change monitors)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:99-188 (accepts cron for any kind)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/presets.rs:320-353 (builtin_presets, resolve_preset: no callers) and docs/PRESETS.md:1-30 (documents them as shipped)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:410-426 and apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/sources.rs:47, :154-175 (Sources registry)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/navacancies/navacancies.go:1-3, internal/procurement/procurement.go:1-4, internal/officialseries/series.go:1-3 (no importers)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/agent-tools.ts:64-69 and src/shared/actions/action-registry.ts:1-25 (zod to JSON Schema)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:563-575 (crawl and batch refused under ZDR)"
+   ],
+   "reuse": [
+    "quarry_sources registry (name, url, kind, config, optional monitor) as the saved-definition entity instead of a new preset entity",
+    "Registered ScrapeJobWF/CrawlJobWF/BatchJobWF plus ChangeMonitorWF per-fire run_id derivation as the template for scheduled workflows",
+    "zod action registry and z.toJSONSchema (agent-tools.ts) as the single schema source for a generated Solid form and Model Plane tool parameters",
+    "quarry-control resources.ResolvePreset and the preset catalog shape, once policy is enforced",
+    "collector packages in quarry-control (navacancies, procurement, officialseries) as logic to wrap in first-party workflows"
+   ],
+   "constraints": "SRC: the 'fast' preset ignores robots (presets.go:69) and 'stealth' escalates on bot signals (presets.go:84-96), so the catalog must not be exposed to users as-is; 'preset' already means three things (hourly|daily|weekly cadence, RunPolicy bundle, dead Rust bundles). SRC: saved crawl and batch jobs and schedules are durable by construction and refused under ZDR (routes.rs:563-575), so ZDR orgs cannot use them. INF: Space-shared definitions must reference only sources the viewer may already see (no widening of owner-plane ACLs); the collectors sit inside quarry-control, a metadata service, so pack execution belongs in the orchestrator or edge rather than in control.",
+   "approachAdjustment": "Reframe Phase 1 around what is real: (a) make non-monitor schedules fire by extending workflowFor and giving scheduled Scrape/Crawl/Batch workflows a per-fire run_id like ChangeMonitorWF; (b) define a saved job definition as a Source plus a request-level options bundle and plumb it through InternalRunPage, or drop the Go RunPolicy presets, and do not expose /v1/presets until its policy is enforced; (c) rename the overloaded 'preset' term. Demote Phase 2 (QuarryPack manifest, registry, /v1/packs, schema form) until Phase 1 ships and a second consumer exists, and wire the collectors only as first-party workflows.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged overall. Phase 1 is M if RunPolicy plumbing is dropped in favour of request-level options (schedule mapping S to M, edge exposure S) and L if the policy must be enforced in the Rust runtime; Phase 2 is L.",
+   "verdict": "reword",
+   "verdictReason": "Presets are not a user-reachable surface today and are decorative at execution time, schedules for scrape/crawl/batch silently never run, and a Sources registry already covers much of \"save as preset\"; the item should be reworded around schedule execution and options plumbing, with packs demoted.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

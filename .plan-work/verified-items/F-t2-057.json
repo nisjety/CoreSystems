@@ -1,0 +1,118 @@
+{
+ "finalId": "F-t2-057",
+ "tier": "recommended",
+ "rank": 33,
+ "title": "Engine planner v2: declared capability matrix, typed re-plan signals with budgets, learned per-domain mode and a domain-intelligence registry",
+ "summary": "Replace plan_from_signals's five booleans with a FeatureFlags set and a static per-driver capability matrix (reusing BrowserDriverCapabilities for browser drivers), so callers never name a driver and each plan can be explained in receipts. Let drivers and content checkers return a typed Replan {NeedsBrowser, NeedsStealth, IsFile, Drop(flag)} under a ScrapeBudget {max_attempts, per_flag_flips, deadline}, and make static-to-browser hedging an opt-in preset. Add a DomainRenderProfile store (host-level verdicts only, ZDR-safe) fed by FallbackDriver escalations and a 5-10 percent dual-run sampler on crawls, with operator approval before a learned verdict is promoted. || Build the planned per-domain registry in quarry-control and give it two first consumers. (1) Passive, non-ZDR learning of which driver (static, TLS, browser) works per domain, using deterministic text similarity in Rust, feeding DriverPlan. (2) A trusted site-guidance field (rate hints, playbooks, 'do not automate' notes) that Quarry attaches to observations as labelled trusted metadata for the Model, separate from page content.",
+ "whyItMatters": "Today every request to a JS-only site pays a static attempt plus a hydration settle, and adding a stealth tier, remote provider, file parser or provider-API engine means editing branching code. A declared matrix and typed re-plan make cost and tail latency bounded and auditable, which fits Verevon's receipts-first design, and learned verdicts cut browser cost on large crawls. || Cheaper and faster crawls with fewer wasted browser launches and fewer block events, and a clean way to steer the Model with trusted site knowledge that does not come from the untrusted page, reducing prompt-injection exposure.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl engine matrix, hedged waterfall and typed re-plan (firecrawl-engine-and-infra-001, -002, -003, -004, SRC); Apify AdaptivePlaywrightCrawler for the learned mode (apify-platform-055, DOC)",
+  "others": [
+   "Firecrawl API surface feature flags (firecrawl-api-surface-061, SRC)",
+   "Firecrawl engpicker (SRC) for learned verdicts; Codex in-app browser (SRC) for the trusted guidance channel"
+  ],
+  "prevalence": "1 of 4 sources for each facet (firecrawl for matrix and re-plan, apify for learned mode), unique || 1 of 4 sources for each (Firecrawl, Codex); unique",
+  "mechanism": "buildFeatureFlags(request) -> Set<Flag>; each engine declares {flag: bool} plus a quality number; candidates are engines whose unsupported-flag weight is below a threshold, sorted by (supported weight desc, quality desc). Loop: start engine[i], select over in-flight results and a timer(maxReasonableTime_i); on timer start engine[i+1] while keeping the others; the first acceptable result wins and losers are aborted (acceptable = non-empty markdown for 2xx/304; non-2xx pass through with status). NeedsFeature{flag, prefetch?} or DropFeature{flag} errors re-run planning under a retry tracker (about 6 total attempts, per-flag caps). Learned mode: per registrable domain keep {p_browser_needed, samples}; with probability 0.1 run both HTTP and browser and compare outputs; otherwise use the predicted mode and fall back to browser if a checker rejects the HTTP result. Rust: const ENGINE_MATRIX, pure plan(flags, registered), tokio::select! over FuturesUnordered with AbortHandles. || Merged items add: Verdicts: a background job samples about 10 indexed pages per domain, scrapes each with Chrome and with a TLS client, judges success, computes text similarity and stores a verdict (TlsClientOk, ChromeCdpRequired, Uncertain) that the scrape path looks up in about 250 ms to boost the cheap engine. Guidance: a trusted operator proxy sets a header on document responses; the runtime captures it through CDP Fetch, strips it before the page sees it, keys it by (tab, URL), clears it on navigation, delivers it once to the model as trusted metadata, ignores private hosts, and suppresses it once credentials were used."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:15-60 (plan_from_signals: actions, screenshot, pdf, prior_block_signals, profile_required; fixed static->TLS->browser order; TLS plan always uses TlsProfile::default())",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-260 (sequential rotation on 401/403/407/429/503 or JS shell) and :354-455 (needs_browser_escalation per request, no per-domain memory)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:265-269 (BrowserDriverCapabilities, unused by the scrape planner)",
+   "grep: execute_with_retry is exported (quarry-runtime/src/lib.rs:164) but has no callers outside retry.rs; Kernel/Browserless are not referenced in quarry-edge/src/main.rs",
+   "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:83-110 and Phase 4 (domain intelligence registry proposed)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:95-108",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:36-95",
+   "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:83-104",
+   "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:292-296",
+   "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:1503",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:706"
+  ],
+  "gap": "No declared capability matrix, no typed escalation vocabulary, no budget object, no hedging, no per-domain memory of the rendering verdict and no sampled dual-mode comparison. Per-request JS-shell detection, soft-404 and challenge classification already exist and are richer than Firecrawl's empty-page gate. || FallbackDriver escalates per request (JS-shell detection, block statuses, prior_block_signals) but nothing is learned or persisted per domain, and no site-guidance field exists on observations. The registry is only planned (Phase 4 of the reliability proposal; the improvements doc marks site profiles GREENFIELD). The CDP Fetch guard and pinned browser egress proxy are in place as the hook for guidance injection."
+ },
+ "approach": "Ingestion Plane: callers state needs and the planner picks the engine from a declared matrix (Firecrawl), typed AddFeature/RemoveFeature re-plan signals with retry budgets, HTTP-first with sampled browser comparison to learn a per-domain mode (Apify, DOC), stored in the planned domain-intelligence registry with operator approval for promotion (SOVEREIGN_SCRAPING_RELIABILITY.md Phase 4). || Source detail: [R-t2-03-06] Ingestion Plane, quarry-runtime: (1) FeatureFlags + ENGINE_MATRIX + pure plan() replacing the booleans, recording chosen and dropped engines in the scrape determinism stamp. (2) enum Replan and ScrapeBudget driving FallbackDriver, with the content checker returning Replan values (R-t2-03-04 becomes Replan::IsFile). (3) DomainRenderProfile (Postgres + Redis cache keyed by registrable domain, org-scoped or global for public hosts only) fed by escalations and a 5-10 percent sampler on crawls; DriverPlan reads it as a prior; operator approval before promotion, as in the Sovereign Scraping proposal. Hedge only idempotent GETs, never for profile-bound or ZDR runs where egress receipts must be one-per-request, and respect HostScheduler AIMD and robots politeness. ZDR orgs store host-level verdicts only, never content. || [R-t2-04-12] Ingestion Plane: after the registry schema exists in quarry-control (Postgres), record per-domain outcomes passively from production runs (driver used, shell detected, block reason from R-t2-04-03) for non-ZDR orgs only, compute a verdict with deterministic similarity in Rust (no model calls inside Quarry, optionally ask Model Plane), with TTL and re-calibration, and feed it into DriverPlan. Proposed profile changes need operator approval, as the reliability doc already requires. For guidance, populate it from the registry inside Quarry (no external header needed) and attach it as a labelled trusted field on observations returned to Model Plane; if a header channel is ever used it must come only from Verevon's own egress proxy, never from a response of an arbitrary site.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-009 (file routing as first typed Replan)",
+  "Registered remote drivers (F-t2-059) to make the matrix meaningful",
+  "Domain intelligence registry (planned, Phase 4)",
+  "Postgres in quarry-control",
+  "F-t2-027 BlockReason",
+  "Observation trust labelling (prompt-injection program)"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Over-engineering if only three drivers ever exist (keep the matrix small); hedging doubles origin load and can trip rate limits; stale learned verdicts after a site redesign; sampled dual runs double cost; cross-org sharing of verdicts must not leak tenant behaviour. || Stale verdicts when sites change (TTL and re-calibration). A compromised registry could steer agents, so authorship is operator-only. Value is cost and robustness rather than a user-visible capability.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 12,
+  "DOC": 5,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-06] apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md Phase 4 (domain profile schema and registry, route DriverPlan from the domain profile; operator approval for promotion) and OSS_PARITY_BACKLOG.md (auto-rotation on block); the capability matrix, typed re-plan and dual-run sampler are not listed || [R-t2-04-12] docs/SOVEREIGN_SCRAPING_RELIABILITY.md section 1 (Domain Intelligence Registry) and Phase 4; QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md section 25 (site profiles) and section 38 (adaptive target memory)"
+ },
+ "quickWin": false,
+ "wave": "W4",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-03-06",
+  "R-t2-04-12"
+ ],
+ "sourceClusters": [
+  "C-t2-03-002",
+  "C-t2-03-003",
+  "C-t2-03-004",
+  "C-t2-04-023",
+  "C-t2-04-008"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "Anti-bot, proxies & reliability"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-057",
+   "status": "partial",
+   "exactGap": "plan_from_signals maps five request signals to one of three plans in a fixed static, TLS, browser order (driver_plan.rs:36-50; the TLS plan always uses TlsProfile::default() and url_type is declared but never read) and FallbackDriver escalates per request on block statuses and JS-shell detection (fallback_driver.rs:56-140) with no per-domain memory; DriverKind has only Static, Browser and Tls (output.rs:239-243), and BrowserDriverCapabilities (browser-agent flags such as persistent_profile and full_visual_fidelity) is not read by the scrape planner. There is no capability matrix, typed Replan, budget object, hedging, sampled dual-run, learned domain store or site-guidance field; the registry is only proposed (SOVEREIGN_SCRAPING_RELIABILITY.md Phase 4) and the only trace in code is a placeholder shared_domain_intel_id on fleets (fleet.rs:49, 014_fleets.sql).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:1-96",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fallback_driver.rs:56-140",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:19",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:239-243",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:263-285",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:695-730",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:290-340",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:440",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:143-146",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs:164",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/fleet.rs:40-60",
+    "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:78-112",
+    "apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md:286-300",
+    "apps/Ingestion Plane/Quarry-v2/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026_OWNERSHIP_RECONCILED.md:1497-1510",
+    "apps/Model Plane/rust/services/model-gateway/src/moderation.rs:195-240"
+   ],
+   "reuse": [
+    "FallbackDriver escalation logic and needs_browser_escalation (per-request JS-shell, block-status and soft-404 handling is already richer than a simple empty-page gate).",
+    "Serving driver already recorded per page (NormalizedOutput driver info, output.rs:19, and page_extracted.driver) as the passive signal for a per-domain verdict store.",
+    "quarry-control Postgres store and migrations (014_fleets.sql pattern) for a domain profile table.",
+    "The proposed schema and approval rules in SOVEREIGN_SCRAPING_RELIABILITY.md Phase 4 (operator approval before promotion).",
+    "CDP Fetch network guard and pinned browser egress proxy (chromiumoxide.rs:695-730) only as enforcement points, not as a guidance channel."
+   ],
+   "constraints": "ZDR: record verdicts only from non-ZDR traffic (which hosts an org visits is itself retention-relevant); ZDR callers may read global verdicts but not contribute, and dual-run sampling or hedging must never run for ZDR or profile-bound runs. Trusted site guidance cannot ride inside the observation: the trust class of a browser_agent tool result is a pure function of the tool name and wholly untrusted (moderation.rs:204-240), so guidance needs a separate Model-Plane-owned channel (execution-core injecting operator-authored guidance for the run's allowed domains), operator-authored only. Promotion of learned verdicts needs an operator approval surface, and no operator or admin UI for Quarry was found. A capability matrix keyed on three DriverKind variants is premature until remote drivers are registered (the edge registers only static, TLS, Browserbase or local chromiumoxide, main.rs:290-340).",
+   "approachAdjustment": "Defer the declared matrix and typed Replan/ScrapeBudget refactor until a fourth driver exists (F-t2-059), since per-request escalation already works and the refactor is mostly internal. Narrow the item to a per-domain render-mode memory: host to {js_required, last_good_driver, ttl} in quarry-control Postgres, written passively from non-ZDR page results, read as a prior in plan_from_signals, promotion by operator approval per the Phase 4 doc. Split the trusted site-guidance idea into its own Model Plane item with the separate-channel design above.",
+   "effortRevised": "M",
+   "effortNote": "M for the narrowed per-domain memory slice; the full item as described (matrix, typed Replan with budgets, hedging, dual-run sampler, registry, guidance) remains L.",
+   "verdict": "demote",
+   "verdictReason": "Partial and mostly an internal efficiency and robustness refactor with little user-visible value: per-request escalation already exists, only three drivers are registered, the registry is already planned (Phase 4), and the guidance part is placed on a channel the Model Plane treats as untrusted. Demote and narrow to the per-domain render-mode memory.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

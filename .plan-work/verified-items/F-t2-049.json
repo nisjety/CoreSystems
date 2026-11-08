@@ -1,0 +1,113 @@
+{
+ "finalId": "F-t2-049",
+ "tier": "recommended",
+ "rank": 25,
+ "title": "URL and domain reputation gate before fetch and navigation, then layered screening (reviewer model, Quarry-side injection labels)",
+ "summary": "Add a ReputationProvider trait in quarry-security that SecurityEngine.preflight and the agent validate_navigation hook call before any fetch, redirect or discovered crawl link. Start with a local hash-prefix list (Web Risk Update-style) so full URLs never leave the platform, add per-org modes (off, normal, customer secure-web-gateway categories such as Zscaler) in Control Plane, and never persist verdicts for ZDR orgs. || Three optional defence-in-depth layers. Model Plane: a fixed-rubric, tool-less reviewer model that can pre-approve low-risk first-visit approvals (never hand-off or always-confirm tiers), fails closed, caches allow per (thread, origin) with a short TTL and logs decisions in receipts. Ingestion Plane: a local, hashed-prefix reputation check in egress policy (decision_source=site_status) evaluated with the domain grant. Quarry scrape/extract: an opt-in prompt-injection flag that labels suspicious spans or fails with a typed error.",
+ "whyItMatters": "Autonomous browsing can reach phishing or malware pages, and enterprise customers want their own secure-web-gateway policy applied to Verevon's agent traffic. validate_navigation already gates every Model-proposed navigation, so the hook exists and the feature is a strong enterprise-sales point. || Cuts approval fatigue and supports unattended scheduled runs, protects agents from phishing and injection farms, and gives direct Quarry API consumers the same guard the agent path already has.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (SRC)",
+  "others": [
+   "Codex in-app browser (guardian v2 reviewer with {thread, origin} cache and 5-minute expiry, credential rubric and evidence fencing; site_status reputation endpoint with per-origin cache)"
+  ],
+  "prevalence": "1 of 4 sources (Firecrawl); unique || Reviewer 1 of 3 (unique); reputation 1 of 3 (unique); injection guard 3 of 3 (table-stakes, Verevon agent path already covered)",
+  "mechanism": "checkUrl(url, orgConfig): local allow/deny lists and blocked TLDs, then optional customer SWG category rules synced on an interval, then a reputation provider (Google Web Risk hash-prefix database or a batched Zscaler lookup) with a risk threshold and an explicit fail-open or fail-closed policy. It runs before the first engine and on every redirect and discovered link. Modes are off, manual, normal, zscaler. Verdicts are cached only within the request, which respects the ZDR boundary, and a per-request override is allowed only if org config permits. || Merged items add: Approval request -> reviewer sub-agent with {action, origin, sanitized URL, bounded transcript}; returns allow|deny|escalate; missing evidence is never permission. Reputation: lookup(origin, path) in a cache, call the service on miss, deny blocked categories. Injection: neutralise role-tag lookalikes, wrap in BEGIN/END UNTRUSTED markers, optionally classify chunks with a small model."
+ },
+ "verevonToday": {
+  "status": "absent",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-security/src/heur.rs:15",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:109",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2307",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3092",
+   "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1",
+   "apps/Model Plane/rust/services/execution-core/src/provenance.rs:61",
+   "apps/Model Plane/go/services/capability-core/internal/llmreviewer/reviewer.go",
+   "apps/Model Plane/go/services/capability-core/internal/models/capability.go:92",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs"
+  ],
+  "gap": "quarry-security has SSRF heuristics, URL-signature analysis and blocklists but no reputation provider and no customer SWG integration (no WebRisk or reputation code found). The right hook, validate_navigation, is already called for Model-proposed navigation and recovery actions. || Execution-core screens ExternalWeb/BrowserScraped/ThirdPartyMcp results unconditionally (shipped). No safety reviewer exists for browser approvals (capability-core's llmreviewer is a skill-learning reviewer), no reputation lookup was found in Quarry crates (only a capability flag cap.self_owned.quarry_url_reputation_feeds), and Quarry's observation path has no injection labelling for direct API consumers."
+ },
+ "approach": "Phase 1: reputation gate in SecurityEngine.preflight and validate_navigation (Google Web Risk or a customer-chosen provider, verdicts not stored, ZDR-safe). Phase 2 (from R-t2-09-13, lower priority): reviewer-model screening of approvals and Quarry-side trust labels on observations as part of the prompt-injection program. || Source detail: [R-t2-04-08] Ingestion Plane: ReputationProvider trait in quarry-security, called from SecurityEngine.preflight, validate_navigation, redirect handling and crawl-link discovery. Implement a local hash-prefix provider first (periodic list sync, local match, full-URL lookup only if a prefix matches and the org mode allows it), then an optional Zscaler adapter. Per-org mode and failure policy live in Control Plane and arrive through the policy floor (R-t2-04-05). Return ErrorCode::SecurityBlocked with a reputation sub-code and show a clear block message in the browser pane. No verdict persistence for ZDR orgs. || [R-t2-09-13] Model Plane: optional reviewer step in the approval pipeline for tiers marked pre-approvable. Ingestion Plane: local reputation feed in the egress policy; opt-in injection flag on scrape/extract while execution-core screening stays authoritative for agents. Build after per-origin consent (R-t2-09-08) and typed denials (R-t2-09-07).",
+ "effort": "M",
+ "dependencies": [
+  "SecurityEngine.preflight and validate_navigation (exist)",
+  "Control Plane org config (F-t2-022)",
+  "F-t2-032 typed denials",
+  "F-t2-032 per-origin consent"
+ ],
+ "planeOwner": "Ingestion Plane + Model Plane (reviewer)",
+ "risks": "Lookup APIs that receive full URLs leak user intent (ZDR), hence the local-prefix design. False positives block legitimate research, so offer an allow-list and clear messages. || The reviewer can itself be prompt-injected (fence evidence, never sole gate for irreversible actions); cost per approval; do not send full ZDR URLs to third-party reputation services; classifier false positives.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 18,
+  "DOC": 1,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-04-08",
+  "R-t2-09-13"
+ ],
+ "sourceClusters": [
+  "C-t2-04-017",
+  "C-t2-09-025",
+  "C-t2-09-031",
+  "C-t2-09-036"
+ ],
+ "sourceCategories": [
+  "Anti-bot, proxies & reliability",
+  "AI-browser control"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-049",
+   "status": "partial",
+   "exactGap": "A feed-backed local host reputation list already exists: scripts/sync-security-feeds.py (operator-run, URLhaus CSV, optional PhishTank) writes a host blocklist snapshot that quarry-edge loads once at boot into DefaultEngine, and SecurityEngine.preflight (scrape path, pipeline.rs:305) plus validate_navigation (explicit Navigate actions and tab creation) consult it, so 'absent' is wrong. Missing are scheduled sync and hot reload (no runtime mutation path outside tests), subdomain or URL-level matching (exact host only), per-org modes (the quarry-control /v1/blocklists CRUD is not wired into the engine), enforcement on redirects, click-initiated navigations and subresources (quarry-browser's guard_navigation_target and guard_page_request_target use only the SSRF heuristic, not the engine; the DNS-pinned egress proxy with decision receipts is the natural seam), and any hash-prefix or customer-gateway provider. No safety-reviewer step or Quarry-side injection labelling exists, while Model Plane screening of external-trust results is already unconditional and cross-domain navigation is already a deterministic HITL approval category.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-security/src/lib.rs:47-55 (SecurityEngine: preflight, check_discovered)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-security/src/preflight.rs:22-60,100-175 (DefaultEngine host blocklist/allowlist HashSets; exact-host match; snapshot loaded in with_persistence)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs:345-372 (snapshot loaded once at boot; falls back to empty policy)",
+    "apps/Ingestion Plane/scripts/sync-security-feeds.py:1-12,25-28 (operator-run URLhaus/PhishTank host feed, 600 s minimum interval)",
+    "apps/Ingestion Plane/config/security-feeds/README.md:1-30 (snapshot shape: blocklist/allowlist host arrays)",
+    "apps/Ingestion Plane/docker-compose.yml:197 (QUARRY_EDGE__SECURITY_SNAPSHOT_PATH wiring)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:109-130 (validate_navigation handles AgentAction::Navigate only: preflight + dns_guard)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3240-3300 (new_tab also calls validate_navigation)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:305 (scrape-path preflight)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/navigation.rs:1-35,55-65 (guard_navigation_target/guard_page_request_target use heur::check and DNS public-address checks only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_egress_proxy.rs:1-50 (DNS-pinned loopback egress proxy with BrowserEgressReceipt decisions)",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/blocklists.go:8-9 (CRUD only; no engine consumer found by grep in edge/runtime)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs:10-55 (CrossDomainNavigation HITL category, deterministic classifier)",
+    "apps/Model Plane/rust/services/execution-core/src/provenance.rs:1-40 (unconditional screening of external-trust tool results)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-14 (every Quarry model feature off by default; manifest grants none today)",
+    "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json:40-73 (model-invoke/stream/audio granted:false)"
+   ],
+   "reuse": [
+    "quarry-security DefaultEngine / ListSnapshot and sync-security-feeds.py as the base for a scheduled, hot-reloaded feed",
+    "SecurityEngine.preflight and check_discovered call sites (pipeline.rs, validate_navigation)",
+    "PinnedBrowserEgressProxy + BrowserEgressPolicy decisions/receipts as the enforcement point for redirects, clicks and subresources",
+    "execution-core deterministic RiskCategory gates and provenance screening",
+    "PrivacyPolicy::guard_third_party_processing for any external lookup"
+   ],
+   "constraints": "Quarry (Ingestion Plane) owns egress and security gating and the Model only proposes navigation, so the gate stays in Quarry; per-org mode and failure policy must come from Control Plane through a service read or the policy floor (F-t2-022), never a cross-plane DB read. ZDR: no verdict persistence and no full URLs sent to third-party reputation services (hence local list or hash-prefix design). A Model Plane reviewer would put a model into the approval path although approvals are deterministic HITL today, and Quarry to Model Plane calls are not granted, so layers 2 and 3 need grants and an ADR and must never be the sole gate for irreversible tiers.",
+   "approachAdjustment": "Reword phase 1 as 'automate and extend the existing feed-backed blocklist': scheduled sync job plus hot reload (swap the RwLock sets), suffix/subdomain matching, per-org mode via the policy floor, and a reputation callback in BrowserEgressPolicy / the egress proxy so redirects, click-driven navigations and subresources are covered and receipts carry a decision source (today validate_navigation covers only explicit Navigate actions). Introduce the ReputationProvider trait and a hash-prefix Web Risk style provider only if feed coverage proves insufficient; wire or retire the unconnected /v1/blocklists CRUD. Demote the reviewer-model screening, Quarry-side injection labels and any Zscaler or other customer-gateway adapter to optional follow-ups.",
+   "effortRevised": "M",
+   "effortNote": "Unchanged for phase 1 (extend existing engine, feed automation, egress hook, per-org mode); layers 2 and 3 are separate L-sized work behind grants.",
+   "verdict": "reword",
+   "verdictReason": "The item claims no reputation provider exists but a URLhaus feed-backed host blocklist is already loaded by quarry-edge; the real gaps are automation, matching depth, per-org mode and redirect/click coverage at the egress boundary, and the reviewer layers should be demoted.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

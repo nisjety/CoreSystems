@@ -1,0 +1,124 @@
+{
+ "finalId": "F-t2-011",
+ "tier": "priority",
+ "rank": 11,
+ "title": "Let users browse freely: a human-session policy plus an omnibox that routes free text to Verevon search",
+ "summary": "Add a human-browsing session mode distinct from agent runs: an idle-timeout lease (reset by user input and frame activity) instead of max_steps 12 and 120 s, and a broker-defined navigation policy that is not a single-host list, so omnibox entries and link clicks under takeover work. Agent-initiated cross-domain navigation keeps the existing cross_domain_navigation HITL gate, and Quarry's egress/SSRF policy stays on. Add hard reload and make reload retry a failed URL. Rewire browser-omnibox.ts so URL-like input navigates and free text opens Verevon search (Quarry /v1/search results, or Ask into chat), with suggestions from the gateway's existing search autocomplete and local web history.",
+ "whyItMatters": "A browser locked to its first host for 120 s is not a browser, and today free text in the address bar becomes a google.com URL that the domain lock then rejects. This is the largest day-one usability gap for people, and it is the part of 'a built-in browser users and AI both use' that users touch first.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (navigation commands iab-037; omnibox suggestion service iab-036)",
+  "others": [
+   "Aside (omnibox reuses the browser engine plus an AI mode with attached tabs, aside-browser-product-011)"
+  ],
+  "prevalence": "Navigation controls: 1 of 3 recorded (Codex), table-stakes because Aside is Chromium (INF). Omnibox suggestions: 2 of 3, common.",
+  "mechanism": "Commands navigateBack, navigateForward, reload and hardReload (ignore cache); the preload captures mouse buttons 3 and 4; reload from an error page retries the original URL. The suggestion service is token based: start(query) streams matches {contents, description, destinationURL, acceptToken, deleteToken}; accept(token) navigates and records; deleteMatch removes a history entry. For Verevon: a gateway suggest call that merges local history, search autocomplete and URL heuristics, and non-URL input goes to Verevon search rather than google.com."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-495 (every user session: allowed_domains = first host, max_steps 12, max_runtime_s 120)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446 (lease ttl defaults to max_runtime_s or 120 s)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:326-345,1397-1412 (in governed mode the broker's domain list overwrites client domains and must equal the live run's domains every step)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:59-77 (canonical_broker_domains rejects an empty or over-32 list, so there is no open-web grant today)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-omnibox.ts:14 (free text becomes a google.com search URL)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1146 (omnibox use); back/forward/reload ship, hard reload does not"
+  ],
+  "gap": "Back, forward and reload ship, but the user cannot leave the first host or browse past 120 s. Because Quarry's governed mode makes the broker the only source of host authority, the allowlist cannot be extended by the gateway or by Quarry alone; a broker-defined policy mode (or a versioned grant re-issue that Quarry validates) is needed. The omnibox has no suggestions and its search fallback cannot work."
+ },
+ "approach": "Ingestion Plane (Quarry): add a human session kind on /v1/agent/runs (or a dedicated session route) with an idle reaper, per-navigation timeline rows tagged source=user, and unchanged egress policy. Model Plane BrowserBroker: add a human-browse grant kind (open public web minus a broker/org denylist, audited, bounded) that Quarry validates in place of the exact domain-list equality; Quarry keeps rejecting agent-initiated cross-domain navigation without HITL approval, and Quarry-owned control mode decides whether an action is human or agent. Frontend gateway/omnibox: hard reload, error-page retry, suggest endpoint combining web-history.ts, the search domain autocomplete and URL heuristics; free text opens Quarry /v1/search results in the tab or sends to chat. Share the idle/absolute TTL machinery with R-t2-03-08 instead of building it twice.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001",
+  "F-t2-035 (idle and absolute TTLs, shared)",
+  "Gateway search cache gets org/user key and ZDR gating before it feeds suggestions (baseline gap 9)"
+ ],
+ "planeOwner": "Ingestion Plane (Quarry) with Model Plane broker and Frontend Plane omnibox",
+ "risks": "SSRF and egress abuse (keep private-IP blocks and per-navigation audit), unbounded host growth, cost of long-lived Chromium leases (idle reaping), unforgeable user-versus-agent origin of a navigation. Under ZDR no history or suggestions are stored.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 9,
+  "DOC": 0,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-08-02"
+ ],
+ "sourceClusters": [
+  "C-t2-08-011",
+  "C-t2-08-009"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-011",
+   "status": "partial",
+   "exactGap": "The chrome already ships back, forward, soft reload (navigate to the session URL), new tab and a human-takeover control mode (BrowserChrome.tsx:1143-1215, browser.rs:263-300 and 690-790), but every user session is created with allowed_domains = first host, max_steps 12 and max_runtime_s 120 (browser.rs:483-490), and Quarry applies the same step budget and domain list to human steps (agent_routes.rs:446-451, 2258-2300). In governed mode the broker list must be non-empty, canonical, at most 32 hosts and equal to the live run's list on every step (quarry-browser lib.rs:55-77, agent_routes.rs:314-339) and broker grants expire after 15 minutes (server.go:22), so open-web human browsing needs a broker policy kind, not a gateway change. The omnibox turns free text into a google.com URL (browser-omnibox.ts:14-15), has no suggestions, and web-history.ts is a search-home card store, not omnibox history.",
+   "evidence": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:483-490 (allowed_domains first host, max_steps 12, max_runtime_s 120)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:255-300 (BrowserActionActor, BrowserControlMode)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:690-790 (agent blocked during human takeover; set_control_mode)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:446-451, 2258-2300 (enforce_step_budget and domain check apply to every step)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1735-1770 (control mode set and timeline event initiated_by Human)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446 (ttl_s defaults to max_runtime_s or 120)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:314-339, 1397-1412 (broker domains authoritative and re-checked each step)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/lib.rs:55-77 (canonical_broker_domains rejects empty or over 32)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/persistent_session.rs:55-110 (idle reaper exists, but for a separate persistent-session registry)",
+    "apps/Model Plane/go/services/browser-broker/internal/server/server.go:22 (defaultGrantTTL 15 minutes)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/browser-omnibox.ts:1-15",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:846-852, 1143-1215 (navigateFromAddress; back/forward/reload buttons; reload = navigate to session().url; no suggestions)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:1-60 (local search/page card, not omnibox history)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/search.rs:36-70, 100-140 (search/web handles URL or keyword; search/suggest and suggestions routes exist)"
+   ],
+   "reuse": [
+    "BrowserControlMode / set_browser_session_control and the timeline initiator tagging for human versus agent",
+    "gateway /api/v1/search/web (already opens URLs or runs keyword search) and /api/v1/search/suggest and /suggestions",
+    "browser-omnibox.ts browserOmniboxTarget and the existing search-client.ts",
+    "execution-core browser_risk CrossDomainNavigation approval gate",
+    "BrowserEgressPolicy private-IP and SSRF blocks",
+    "PersistentSessionRegistry idle-reaper pattern as the model for an idle lease TTL"
+   ],
+   "constraints": "Host authority is broker-only in governed mode, so the human-browse policy must be a Model Plane BrowserBroker feature validated by Quarry and depends on F-t2-001; neither the gateway nor Quarry may widen the list alone. Agent-initiated cross-domain navigation keeps its HITL gate, and human versus agent origin must come from Quarry's control mode, never a client-supplied flag. ZDR: no local or server history or suggestion storage (web-history already refuses local copies under ZDR). The Frontend gateway search cache needs org and user keys and ZDR gating before it feeds suggestions. Space access must not widen a user's host policy.",
+   "approachAdjustment": "Split into two deliverables. (a) Frontend-only slice, S to M: free text goes to Verevon search through the existing /api/v1/search/web or Ask, add a suggestion dropdown from /api/v1/search/suggest plus local history, and add hard reload; no backend change. (b) L slice: broker human-browse grant kind with renewal for idle sessions (the 15-minute broker TTL also caps sessions), Quarry human-session semantics that exempt human steps from max_steps and use an idle TTL instead of 120 s, with egress and SSRF policy unchanged. Human takeover and its audit already exist, so do not rebuild them.",
+   "effortRevised": "L",
+   "effortNote": "L stands for the backend policy slice; the omnibox slice is independently S to M.",
+   "verdict": "reword",
+   "verdictReason": "Gap is real and verified, but part of the machinery already exists (human takeover mode, search/suggest routes, idle-reaper pattern) and the item bundles a small frontend fix with a broker-owned policy change; reword and split.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-011",
+   "verdict": "confirmed",
+   "checked": [
+    "extract/codex/.vite/build/main-BklS_2Y2.js (browserAutocomplete service Jy with start/stop/accept/recordNavigation/deleteMatch; coordinator Uy calls session.autocomplete.createController; acceptToken/deleteToken matches; navigateBrowserBack, hardReloadBrowserPage menu commands, reloadIgnoringCache; on loadError, reload calls navigatePageToUrl(loadError.failedUrl), else pendingUrl)",
+    "extract/codex/.vite/build/browser-page-preload.js (mouseup/auxclick handlers for buttons 3/4, isTrusted check, invoke browser-sidebar-runtime-mouse-navigation)",
+    "extract/codex/.vite/build/main-BklS_2Y2.js config requirements (browserPane, browserExtensions, inAppBrowserUse, inAppBrowserUseAllowed default false; no URL allowlist for human browsing found, only commentModeBlocklist and cookieDomainAllowlist)",
+    "extract/codex/package.json (electron 42.3.0)",
+    "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (strings asideOmnibox.queryAutocomplete, addTabContext, deleteAutocompleteMatch, setActiveModelMode, at.studio.Aside.ext.private.omnibox each present)",
+    "C:/Program Files/Aside/Application/1.0.928.2/AsideAgentManager/assets/newtab-ZLplOYox.js and search-navigation-DuuoGVFz.js (chrome.asideOmnibox.queryAutocomplete; one-off session with a 1500 ms wait for the first match)"
+   ],
+   "corrections": "None to the mechanism. Wording: 'free cross-site browsing' for Codex is inferred from the absence of a URL allowlist for human navigation (INF). The 'human-session policy' framing is a Verevon proposal. Routing non-URL text to Verevon search is the recommendation; which search provider Codex's suggestions use was not verified.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Codex browser pane, extensions and browser-use are remote config requirements that default to false (flag or plan gated); the in-app browser is not universally available",
+    "Codex autocomplete runs through session.autocomplete.createController, which stock Electron does not offer: INF that this is a patched Electron/Chromium omnibox; suggestion sources unverified",
+    "Aside AI-mode omnibox members are upstream Chromium composebox/AIM names wrapped in an Aside private extension API; whether Google AI Mode is reachable is unverified",
+    "REA not used; evidence from grep over pre-extracted bundles and installed files"
+   ],
+   "confidence": "high"
+  }
+ }
+}

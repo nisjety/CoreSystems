@@ -1,0 +1,134 @@
+{
+ "finalId": "F-t2-014",
+ "tier": "priority",
+ "rank": 14,
+ "title": "Surface one canonical agent run trace in the UI: typed events, receipts, live view, correlation envelope",
+ "summary": "Define a versioned TraceEvent envelope owned by the Model Plane ({schema_version, event_id, run_id, occurred_at, producer_seq, correlation{org_id, actor_id, turn_id, request_id, origin}, agent{id, role, parent_id}, type, payload}); have Quarry publish browser-session, step-receipt, egress-decision and artifact events in the same envelope on NATS (persisted unless ZDR), served as GET trace with a cursor plus an SSE tail by from_seq. Gateway proxies the Quarry receipts, egress-receipts, procedure and live-view routes it does not proxy today and the SPA renders one run timeline in place of the FleetRunConsole placeholder; fix the run-start grant/bearer wiring first. Quarry edge adopts x-request-id through a tower layer and an origin enum on runs, and the devtools route gains level/substring filters with a read-only browser.console model tool.",
+ "whyItMatters": "This is what users watch while the agent browses. Without it, \"the Model proposes, Quarry executes or rejects\" is invisible, approvals lack context and support cannot follow one run across gateway, Model Plane, Quarry and audit. It blocks the vision of a browser shared by humans and AI, and most server-side pieces already exist.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (versioned run-trace envelope with producerSequence, parent agent, typed events, artifact snapshot versions and structured errors; x-request-id reused as idempotency key)",
+  "others": [
+   "Codex in-app browser and automation (toolSurface/tab metadata on every result, size-capped activity, async browser notifications appended to the next result, tab.dev.logs typed pull tool with levels/filter/limit)",
+   "Apify (meta.origin enum on runs, run log with size cap and secret redaction)"
+  ],
+  "prevalence": "Run trace 2 of 4 sources (differentiator); correlation id and origin 3 of 4 (table-stakes); agent-readable console logs 2 of 4 (common)",
+  "mechanism": "Model Plane and Quarry emit TraceEvent onto NATS; non-ZDR events are persisted; GET /runs/{id}/trace serves a cursor and an SSE tail by from_seq; artifacts are referenced by snapshot id; each step response carries surface_meta {surface, tab list, sanitized url} plus drained async notifications (popups, dialogs, downloads). Edge middleware reads x-request-id (or generates it), puts it in the span and response header and forwards it on every internal call. Console pull: a bounded per-tab ring buffer exposed as GET .../console?levels=warn,error&filter=substr&limit=N."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:625-648",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1819",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:1053",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:371",
+   "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:199",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1061-1072",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1739",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3662-3716",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/httpx/httpx.go:26-30"
+  ],
+  "gap": "Quarry already exposes receipts, egress-receipts, procedure compile and replay-check, live-view, tabs, devtools and a typed agent-event SSE (agent_routes.rs:3662-3716), but the gateway proxies only the browser-session timeline and devtools, and a grep of the SPA finds no use of egress-receipts or procedure routes, so none of that is visible. The AI-run start likely fails on grant/bearer wiring (INF from the baseline, high; unconfirmed here). No envelope with a producer sequence spans Model Plane and Quarry, FleetRunConsole is a stub, quarry-edge mints its own request_id per handler (RequestKind::new()) and has no x-request-id intake (quarry-control echoes it, and a grep finds no x-request-id handling in the gateway source), no run origin enum exists, and devtools events are paged only by after_sequence and limit with no filters and no model-facing pull tool."
+ },
+ "approach": "Model Plane owns the run-trace contract (it owns runs and sessions): add TraceEvent to the Model Plane protos and publish from execution-core. Ingestion Plane: publish browser-session, receipt and egress events in the same envelope (reuse the existing NATS bus, PostgresEventHistory and ?from_seq replay), add a tower layer for x-request-id and an origin field on runs, and add levels/filter params to the devtools route. Application Plane projects the stream for realtime. Frontend Plane gateway proxies the missing Quarry routes and the SPA renders a single run timeline (replace FleetRunConsole, which calls an unrouted /v1/fleets). Model Plane execution-core adds a read-only browser.console tool that goes through the grant-checked run. ZDR runs stay live-only: no trace persistence.",
+ "effort": "L",
+ "dependencies": [
+  "Run-start grant/bearer fix (baseline v-browser-app-053)",
+  "Application Plane realtime projection",
+  "Item F-t2-004 for ZDR-safe trace and log handling"
+ ],
+ "planeOwner": "Model Plane (trace contract); Ingestion Plane and Frontend Plane deliver their halves",
+ "risks": "Event volume and cross-plane ordering. Console text and page content can carry prompt injection or secrets, so apply the same redaction and untrusted-content labelling as observations. Never use the request id as an authorization or tenancy key; cap its length and charset.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 9,
+  "DOC": 2,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-07-02] Quarry side only: W3 typed agent-event SSE (apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs ~3711) and the job-history envelope in docs/gap-quarry.md:347. No cross-plane Model Plane envelope or UI plan was found."
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-07-02"
+ ],
+ "sourceClusters": [
+  "C-t2-07-011",
+  "C-t2-07-005",
+  "C-t2-07-001"
+ ],
+ "sourceCategories": [
+  "Observability & operations"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-014",
+   "status": "partial",
+   "exactGap": "A canonical Model Plane Event envelope already exists (events.proto: event_id, schema_version, producer, correlation_id, causation_id, org_id, user_id, resource_ref, zdr, with fields 14-20 reserved), as do EventLog query/subscribe with an opaque cursor and an OrchestrationEvent run stream carrying browser_action_dispatched, observation and approval events with Last-Event-Id resume, and the SPA already renders these in ChatLiveRunPanel and shows a per-session timeline with console, network and artifacts in BrowserChrome/BrowserTimelineDetail. Missing: producer_seq and agent/origin fields on that envelope, Quarry receipt/egress/artifact events published in it, gateway proxies for Quarry egress-receipts, procedure and agent-events SSE (routes exist at agent_routes.rs:3660-3730 but the gateway router at browser.rs:368-470 does not expose them), x-request-id intake (Quarry handlers mint RequestKind::new() and no x-request-id handling exists in the gateway or Quarry edge), a run origin enum, and devtools level/text filters (DevtoolsQuery has only after_sequence and limit). Quarry's typed agent-event SSE accepts ?from_seq but replay is a no-op today (agent_routes.rs:2698-2706), and FleetRunConsole is a multi-run fleet console against an unrouted /v1/fleets, not the single-run trace.",
+   "evidence": [
+    "apps/Model Plane/proto/model_plane/v1/events.proto:8-60, 112-130 (canonical Event envelope, run event types)",
+    "apps/Model Plane/proto/model_plane/v1/eventlog.proto:26-37, 50-90 (EventLog append/query/subscribe, EventFilter, Cursor)",
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto:990-1040 (StreamRunEventsRequest after_event_id; OrchestrationEvent with browser tags 17-22)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:360-380 (renders browser approval and run events)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserTimelineDetail.tsx:1-50 (timeline detail with artifacts, console, network)",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/FleetRunConsole.tsx:1-60 (fleet console on /v1/fleets)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:368-470 (router: timeline, frames, devtools, artifacts; no egress-receipts, procedure or agent-events proxy)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:930-960 (AgentEventsQuery from_seq)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2650-2706 (agent_events_stream; replay is a no-op live tail)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:3660-3730 (receipts, egress-receipts, procedure, live-view, events/stream routes)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1055-1072 (DevtoolsQuery after_sequence and limit only)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:100-125, 190-206 (owner timeline and StepReceipt)",
+    "grep of gateway and Quarry edge sources: x-request-id appears only in quarry-runtime ingest_client.rs:180 (upstream response read), no intake"
+   ],
+   "reuse": [
+    "model_plane.v1.Event and EventType run events, extended rather than replaced",
+    "EventLog Query/Subscribe with its opaque cursor",
+    "OrchestrationEvent run stream and the gateway /api/v1/runs/:id/events proxy",
+    "ChatLiveRunPanel, chat-run-watch and BrowserTimelineDetail/browser-session.ts as the UI surfaces",
+    "Quarry owner timeline plus StepReceipt store; NATS event bus and durable event history",
+    "execution-core scrub.rs and provenance labelling for console and page text"
+   ],
+   "constraints": "Model Plane owns run and session events, so extend model_plane.v1.Event (reserved fields 14-20) instead of introducing a second envelope. Quarry (Ingestion Plane) publishes in that envelope and never writes Model Plane storage; Application Plane projects for realtime; the Frontend gateway only proxies (no cross-plane DB access). ZDR: the envelope carries a zdr flag, ZDR runs stay live-only with no persisted trace, and egress receipts are readable live but the immutable receipt is not retained under ZDR. Request ids must never be used for authorization or tenancy and all Quarry routes stay owner-scoped (caller_owns_live_run). Depends on F-t2-001 for AI-run start.",
+   "approachAdjustment": "Do not define a new TraceEvent; add producer_seq and agent/origin to the existing Event and carry Quarry receipt and egress events as new EventType values or payloads. Do not replace FleetRunConsole, which is a fleet (multi-run) console; the single-run surfaces already exist and should gain egress-receipt and procedure panels. First slice (S to M): gateway proxies for egress-receipts, receipts and procedure, plus devtools filters. Later slice (L): envelope unification, tower-layer x-request-id intake, run origin enum, and real from_seq replay for the Quarry agent SSE. Demote the envelope unification relative to the proxy slice.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged for the full item; the proxy-only first slice is S to M.",
+   "verdict": "reword",
+   "verdictReason": "The missing pieces (Quarry route proxies, x-request-id, origin, devtools filters, no-op replay) are real, but the canonical Model Plane envelope, event-log cursor, run event stream and in-UI timeline already exist and FleetRunConsole is the wrong target; reword to extend the existing envelope and ship the proxy slice first.",
+   "confidence": "medium"
+  },
+  "reference": {
+   "finalId": "F-t2-014",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/agent-trace.ts:1-60 (trace is proxied from EXTRACT_V3_BETA_URL/internal/extracts/:id/trace; throws 'Agent beta is not enabled' without it; liveView sessions merged locally)",
+    "C:/dev/firecrawl/apps/elixir-sdk/openapi.json:3603, 7271-7286 (envelope schemaVersion, eventId, runId, occurredAt, producerSequence, agent; producerSequence monotonic per emitting agent)",
+    "C:/dev/firecrawl/apps/api/src/routes/v2.ts:441 (/agent/:jobId/trace)",
+    "C:/dev/firecrawl/apps/api/src/lib/external-request-id.ts:1-50 (request-row attribution reads External-Request-Id, not x-request-id; 2048-byte cap, never 400)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/scrape-alexandria.ts:78-80, 147 (x-request-id adopted or generated, echoed, used for safe retry on provider tools)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/research-proxy.ts:38-39; routes/exchange.ts:25; controllers/v2/support-proxy.ts:12; lib/exchange.ts:869 (x-request-id forwarded per route; Exchange billing keyed by it)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:10274 (tab_dev_logs schema: levels enum debug|info|log|warn|error, filter, limit)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:18965-18968 (tab_dev_logs handler)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:25101-25125 (Lee toolSurface/browser_use url; GN openTabIds for all backends, openTabs title/origin only when backend is chrome)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:24914-24925, 25490 (po() gate: browser notifications and tab meta suppressed when native credentials were used)",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/api.json (TabDevLogsOptions present)",
+    "https://docs.apify.com/platform/actors/running/runs-and-builds (meta.origin: DEVELOPMENT, WEB, API, CLI, SCHEDULER, TEST, WEBHOOK, ACTOR, STANDBY, CI, MCP; no log cap or redaction on this page)"
+   ],
+   "corrections": "1) Firecrawl run trace: only the API contract (openapi plus types) and a proxy controller are in the repo. The events come from an upstream agent-beta service (EXTRACT_V3_BETA_URL), so the producer, persistence and ordering are not inspectable, and the feature is beta-gated. producerSequence is monotonic per emitting agent, not global: consumers group by agent.id and then order by sequence. Mark it 'contract observed, implementation upstream'. 2) Firecrawl x-request-id has no edge middleware. It is handled per route: provider tools adopt or generate and echo it and use it for safe retries, research/exchange/support proxies forward it, and Exchange billing is keyed by it. Request-row attribution uses a separate External-Request-Id header. Reword 'caller's x-request-id is logged, forwarded upstream and reused as the idempotency key' to cover only those routes. The proposed tower-layer design is Verevon's own. 3) Run-trace prevalence '2 of 4' is generous: Codex has size-capped WebMCP activity, response meta and drained notifications, but no ordered, versioned run envelope. Say 1 of 4 full envelope (Firecrawl, beta) plus Codex for UI-side pieces. 4) Codex details: the open-tab list with titles and origins is filled only for the Chrome backend (the in-app backend gets ids), notifications and tab meta are suppressed after native credential use, and the shipped console level enum is debug|info|log|warn|error ('warning' is not in the service schema).",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Firecrawl agent trace is beta-only (EXTRACT_V3_BETA_URL) with an upstream closed implementation",
+    "Apify meta.origin is DOC (verified on the public page); the 10M-char log cap and secret redaction are DOC from other Apify pages and were not re-verified here",
+    "Codex behaviour comes from a prettified copy of the shipped browser-service bundle (SRC); the notification gate depends on credential-observation state"
+   ],
+   "confidence": "high"
+  }
+ }
+}

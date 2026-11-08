@@ -1289,6 +1289,10 @@
   font-size: 12px;
 }
 
+.ingestions-error-list li.ingestions-pick-row {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
 .ingestions-error-list a {
   color: var(--ing-info);
 }

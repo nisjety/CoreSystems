@@ -1045,9 +1045,14 @@ const ingestionsCreateRunInput = z
     schema: z.union([z.record(z.string(), z.unknown()), z.string()]).optional(),
     // Extract only: instructions for the model (1 to 10,000 characters after trimming).
     prompt: z.string().trim().max(10_000).optional(),
+    // Batch only: re-fetch each URL and persist its page to Knowledge. Absent, the pages are not persisted.
+    ingest: z.boolean().optional(),
   })
   .refine((value) => (value.kind === 'batch' ? (value.urls?.length ?? 0) > 0 : !!value.url), {
     message: "kind 'batch' requires a non-empty 'urls' array; any other kind requires 'url'",
+  })
+  .refine((value) => value.ingest !== true || value.kind === 'batch', {
+    message: "'ingest' is only accepted for kind 'batch'",
   })
 
 const ingestionsJobControlInput = z.object({

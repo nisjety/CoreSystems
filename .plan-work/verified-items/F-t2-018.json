@@ -1,0 +1,129 @@
+{
+ "finalId": "F-t2-018",
+ "tier": "priority",
+ "rank": 18,
+ "title": "Make scrape, crawl and batch schedules actually execute (Temporal schedules)",
+ "summary": "Map crawl, scrape and batch schedule target kinds to Temporal ScheduleSpec instead of skipping them, wire a Temporal client into quarry-control so trigger and backfill stop returning 501, add a timezone field and record skipped reasons as job events. Until this ships, stop the gateway UI offering actions the backend cannot perform.",
+ "whyItMatters": "Scheduled re-crawls of tracked sources keep Verevon's knowledge fresh, and the UI already lets users create such schedules. Today only change_monitor schedules run, so users can create schedules that silently never fire, which erodes trust and leaves knowledge stale.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (scheduler with lease claim, deterministic jitter, skipped_overlap/skipped_no_credits, stale recovery, plain-English cron)",
+  "others": [
+   "Apify (timezone-aware cron, per-run input overrides, failure notifications)"
+  ],
+  "prevalence": "2 of 4 sources (both crawl platforms); table-stakes",
+  "mechanism": "Scheduler tick selects due schedules FOR UPDATE SKIP LOCKED and sets lease_until; fire_at = next_cron(tz) + sha256(id) mod min(interval/2, 5 min); if the previous run is still active record skipped_overlap and advance; if entitlement is insufficient record skipped_no_credits; otherwise reserve credits, start the workflow with the stored input override and advance next_run_at. Runs active past a threshold are marked failed and released. A phrase parser turns 'every 30 minutes' into cron with a 5-minute minimum. Failures notify the owner."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/schedule_wire.go:39-51",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:185-193",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:104-330",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:239-340",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:305-357",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:99",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:191",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardCrawlSchedules.tsx:3"
+  ],
+  "gap": "workflowFor in schedule_wire.go maps only change_monitor to a workflow; scrape, crawl and batch return an empty workflow and the orchestrator skips them (the code comment says they are not run_id-safe for recurring dispatch yet). MountScheduleAliases receives a nil Temporal client, so trigger and backfill return a typed 501. Cron is a strict 5-field expression with no timezone, and there is no jitter or skipped-reason status. The gateway UI exposes overlap policy, pause, trigger and backfill that the backend cannot fully honour (INF from comparing gateway and control code)."
+ },
+ "approach": "Ingestion Plane. Extend workflowFor to return CrawlJobWF, scrape and batch workflow names plus args, deriving a fresh replay-safe run_id from each scheduled workflow execution exactly as ChangeMonitorWF already does. Let Temporal schedules provide overlap policy (skip), jitter, timezone and backfill rather than building a custom Firecrawl-style scheduler. Inject the Temporal client into quarry-control (MountScheduleAliases) so trigger and backfill work. Add a timezone column and spec field, write skipped/failed reasons as job events, and send failure notifications via notification-core in the Application Plane. Scheduled fires must inherit the org's ZDR floor and re-check entitlement at fire time, not only at create time. Migrate with an explicit enable step so previously created schedules do not all start firing at once.",
+ "effort": "M",
+ "dependencies": [
+  "Temporal client in quarry-control",
+  "F-t2-008 entitlement check for a skipped_no_credits state",
+  "notification-core for failure notices"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "Existing schedules will start firing after the fix, which can surprise users and spend budget; require an explicit re-enable. Recurring crawls without R-t2-05-01 scoping would repeat the off-site walk, so sequence after scoping.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 7,
+  "DOC": 1,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-05-02] apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md Phase 5 (Temporal start/pause/resume/backfill/cancel); code comments in schedule_wire.go and cmd/control/main.go mark the gap as a follow-up"
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-05-02"
+ ],
+ "sourceClusters": [
+  "C-t2-05-010"
+ ],
+ "sourceCategories": [
+  "Orchestration & scale"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-018",
+   "status": "partial",
+   "exactGap": "Only change_monitor schedules run: workflowFor maps nothing else (schedule_wire.go:39-51), the orchestrator skips workflowless schedules (schedules.go:158-163), and MountScheduleAliases receives a nil Temporal client so trigger and backfill return 501 (control main.go:177-192), although CrawlJobWF, BatchJobWF and ScrapeJobWF are already registered (orchestrator main.go:94-116) and Manager.Trigger/Backfill already exist unused (schedules.go:365-398). The gap is larger than 'skipped': the edge's non-preset create path forwards the raw request (schedule_routes.rs:307-338), whose kind/config/overlap_policy/name keys do not exist on store.Schedule (store.go:333-355), whose Validate requires org_id and target_ref (schedule_validate.go:39-55) while the create handler never reads the org query parameter (resources.go:113-130), so a UI-created scrape, crawl or batch schedule is most likely rejected with 400 at control (INF from reading the code, not executed). Nothing persists config (urls, max_pages, schema), overlap policy, timezone or skipped reasons, and create/update set only CronExpressions (schedules.go:302-327).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/schedule_wire.go:39-51",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:177-193",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:113-130",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:333-355",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/schedule_validate.go:39-62",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/temporal/client.go:1-60",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:136-176",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:302-327",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:365-398",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:94-116",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:31-41",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:75-87",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:296-320",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:45-90",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_routes.rs:239-340",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:563-588",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:99-141",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ingestions/schedules.rs:191-256"
+   ],
+   "reuse": [
+    "CrawlJobWF, BatchJobWF, ScrapeJobWF (registered) and the ChangeMonitorWF replay-safe run_id derivation from workflow.GetInfo (workflows.go:296-320)",
+    "Manager.Trigger and Manager.Backfill in the orchestrator (schedules.go:365-398), already implemented with SKIP/ALLOW_ALL overlap",
+    "the orchestrator reconcile loop (30 s pull from control, org-scoped reaper) as the single writer of Temporal schedules",
+    "Temporal ScheduleSpec native overlap, jitter and TimeZone instead of a custom Firecrawl-style scheduler",
+    "the preset create path in schedule_routes.rs (org and created_by stamped from the verified claim) as the pattern for the other kinds"
+   ],
+   "constraints": "Ingestion Plane owns schedules end to end (control, orchestrator, edge); the Frontend gateway should only stop offering overlap, trigger and backfill controls the backend cannot honour. Failure notices go through Application Plane notification-core via its API and entitlement re-checks at fire time must call the Control Plane, with no cross-plane DB reads. ZDR: durable jobs are refused under ZDR (routes.rs:563-588) and the workflow inputs carry no zdr field, so schedule creation must be refused for ZDR orgs and the posture re-checked at fire time. Existing rows must not all start firing at once after the fix, so require an explicit enable step.",
+   "approachAdjustment": "Add the persistence step first: extend store.Schedule and the control schema with name, config (url/urls, max_pages, schema), overlap policy and timezone, map kind -> target_kind and config -> target_ref/args in the edge, and stamp or require the org from the signed query in the control create handler (the preset path already stamps it). Then extend workflowFor for the three workflows and derive the run_id from the workflow execution exactly as ChangeMonitorWF does; set overlap policy and TimeZone in schedules.go create/update. For trigger and backfill prefer reusing the orchestrator's existing Manager.Trigger/Backfill, reached through a pull-model request row or an internal orchestrator endpoint, over a second Temporal client in quarry-control; the repo's control-side interface (temporal/client.go) was designed for an SDK client there, so record the choice in the ADR.",
+   "effortRevised": "L",
+   "effortNote": "M understated it: store schema and migration, edge-to-control mapping, run_id derivation for three workflows, trigger/backfill plumbing, ZDR and entitlement gating, and an explicit enable step are all required.",
+   "verdict": "reword",
+   "verdictReason": "The gap is real and already on Quarry's roadmap, but the item misdescribes the failure (creation likely fails rather than silently not firing) and omits the persistence layer that the workflow mapping depends on; effort and approach need adjusting.",
+   "confidence": "medium"
+  },
+  "reference": {
+   "finalId": "F-t2-018",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/services/monitoring/scheduler.ts:45-135 (claimDueMonitors with workerId/limit/leaseSeconds=60, deferForJitter, clearFinishedOrStaleCurrentCheck, skipped_overlap)",
+    "C:/dev/firecrawl/apps/api/src/services/monitoring/jitter.ts:1-13 (sha256(id) mod min(interval/2, 5 min))",
+    "C:/dev/firecrawl/apps/api/src/services/monitoring/stale.ts:1-54 (60 min stale, 10 min for search-only)",
+    "C:/dev/firecrawl/apps/api/src/services/monitoring/cron.ts:1,172-200,339 (5 min minimum, IANA timeZone support)",
+    "C:/dev/firecrawl/apps/api/src/services/monitoring/runner.ts:35-37,1090-1105 (skipped_no_credits when credit lock denied; email/Slack/in-app summaries)",
+    "C:/dev/firecrawl/apps/api/src/db/rpc.ts:109 (claim is SQL RPC monitoring_claim_due_monitors; its body is not in the repo)",
+    "C:/dev/firecrawl/apps/api/src/services/queue-worker.ts:449-456 (scheduler tick)",
+    "https://docs.apify.com/platform/schedules (timezone/DST, input JSON overrides, email on failure to start, 10 s min, 10 actors + 10 tasks)"
+   ],
+   "corrections": "'FOR UPDATE SKIP LOCKED' is not observable in Firecrawl: the claim is the RPC monitoring_claim_due_monitors whose SQL is not in the open repo, so present SKIP LOCKED as the Verevon design choice (INF). Firecrawl's scheduler drives change-tracking monitors (scrape/crawl/search targets), not generic scheduled scrape/crawl/batch jobs. Timezone-aware cron exists in both Firecrawl (cron.ts) and Apify, not Apify-only. Apify's default failure email covers a scheduled run that fails to start due to misconfiguration, not every run failure; Firecrawl notifications are monitor result summaries (email/Slack/in-app). The credit check happens at run time via a credit lock in the runner (check recorded as skipped_no_credits), not before dispatch in the scheduler tick.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Apify side is DOC-only",
+    "Firecrawl monitoring is recent (2026) and partly routed through a billing rollout (firebill) for some orgs; behaviour may change",
+    "Firecrawl monitors require the DB-backed (cloud-style) deployment; self-host availability not verified"
+   ],
+   "confidence": "high"
+  }
+ }
+}

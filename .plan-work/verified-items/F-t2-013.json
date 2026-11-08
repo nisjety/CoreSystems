@@ -1,0 +1,144 @@
+{
+ "finalId": "F-t2-013",
+ "tier": "priority",
+ "rank": 13,
+ "title": "Co-browsing: the agent works in the user's visible session in agent-flagged tabs, with takeover enforced inside Quarry",
+ "summary": "Phase 1 (S, land in W1): make quarry-edge /step reject agent steps while control_mode is human_takeover (typed USER_TOOK_OVER, monotonic control epoch) and record the initiator (user or agent) in step receipts. Phase 2: an attach mode so a Model Plane run binds to the user's Quarry session through a session-bound child grant and works in a new agent-flagged tab that appears without stealing focus, with Reveal, Take over and Give back. Phase 3: deliverable and handoff tab marks so finished pages stay open for the user.",
+ "whyItMatters": "Co-browsing is table-stakes in both browser references (Codex and Aside) and is the core of a browser that users and AI share. Today the AI run drives a separate hidden lease that inherits only profile_id and start_url (SRC). T2 re-read the code: takeover is enforced only in the Frontend gateway (browser.rs:705-723 and 2071-2090), and the Quarry /step admission path in agent_routes.rs never consults control_mode (SRC). A Model Plane run that calls Quarry directly is therefore not stopped by a human takeover. This corrects the strength claim (C-t2-08-017) that takeover is authoritative in Quarry.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (claimTab with fail-closed mention resolution, typed user_took_over, interrupt hooks, requestManualHandoff, markTab handoff|deliverable)",
+  "others": [
+   "Aside (AB062 'controlling this tab / Take over' strip; AA030/AA031 owned vs borrowed tab rows with orphan reconciliation)",
+   "Codex in-app browser (iab-068, hidden agent tabs)"
+  ],
+  "prevalence": "2 of 3 sources (Aside, Codex); table-stakes || 1 of 3 sources (Codex); unique as a co-browsing model.",
+  "mechanism": "Session control_mode {agent|human}; 'Take over' flips it and cancels in-flight steps; every agent step checks control_mode and returns USER_TOOK_OVER. Claim: a mention token {browserId, tabId, title, url} is validated against live state, a control lease is taken and released (not closed) at end of turn. session_tabs(ownership owned|borrowed, mark) lets turn end close owned unmarked tabs and keep deliverable/handoff ones; an idle sweeper reconciles orphans. || Merged items add: Each agent tab gets a hidden webview host (about:blank until the snapshot URL is known); open-browser-tab is sent with active:false; presentation state decides whether the hidden host stays mounted, and the tab strip shows it without focus change. For Verevon: the AI loop attaches to the user's visible Quarry run (same lease, own tab) and Quarry's control-mode arbitration decides who may act."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1733-1785",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2250-2300",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:86-90",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:497-624",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:674",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2447-2590",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:969-1005",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:669-690 (the durable run calls start_run for its own leased session; continuity is profile_id and start_url only)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1235-1245 (ai-run body: grant_id 'session:{id}', profile_id, start_url)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:39,608 (read-only frame view with pause/resume)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1230 (takeover control in the Crawl composer browser)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:67-70 (control_mode is persisted by the browser owner so a restart cannot reset a takeover)"
+  ],
+  "gap": "Takeover enforced in the gateway, not in the executor; receipts lack the initiator; no attach mode; no agent tab marker; no deliverable/handoff marks (SRC)."
+ },
+ "approach": "Ingestion Plane first (control epoch and USER_TOOK_OVER in /step, initiator in step_receipts.rs, lease-holder field with a transfer API, opened_by agent|user on tabs). Model Plane execution-core browser_agent gains attach_session_id and maps USER_TOOK_OVER to a suspended run. Frontend BrowserChrome: agent badge, Ask AI on this tab, Reveal / Take over / Give back. The Model proposes, Quarry executes or rejects. || Source detail: [R-t2-09-03] Ingestion Plane (quarry-edge, quarry-runtime): enforce control_mode and a control epoch in /step, add initiator to step receipts, add request_handoff with reason, then a lease-holder field on the session with a transfer API and tab marks. Model Plane: browser_run accepts an existing session/tab id with a session-scoped grant, and maps USER_TOOK_OVER to a suspended run. Frontend (BrowserChrome.tsx): 'Ask AI on this tab', take over / give back, show marked tabs after the run. || [R-t2-08-03] Model Plane: add an attach mode to execution-core browser_agent (attach_session_id instead of client.start_run at browser_agent.rs:669); BrowserBroker issues a run grant bound to that session id, not a free string. Quarry: tab ownership flag opened_by agent|user in the tab list and timeline, agent steps allowed only on agent-flagged tabs (or the active tab when control_mode is agent), existing 409-during-takeover rule kept. Frontend: agent badge on tabs, new agent tab opens without focus, Reveal and Take over buttons, shared timeline. Keep the plane rule that Quarry executes or rejects every proposed action.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-001 grant wiring",
+  "F-t2-038 agent activity presentation (cursor)",
+  "F-t2-001",
+  "F-t2-011"
+ ],
+ "planeOwner": "Ingestion Plane (control lease, tabs) + Model Plane (attach mode) + Frontend Plane (tab UI)",
+ "risks": "Races between an in-flight step and takeover (hence the epoch); the agent must inherit only the session's grant and never widen the user's ACL; ZDR sessions stay non-persistent; tab leaks without an idle sweeper. || Concurrency between human and agent inside one session; step and cost budgets versus the idle policy of item 02; grant binding to exactly one session; cross-domain navigation by the agent stays behind HITL.",
+ "significance": 5,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 17,
+  "DOC": 1,
+  "INF": 1
+ },
+ "alreadyPlanned": {
+  "is": false,
+  "where": ""
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-09-03",
+  "R-t2-08-03"
+ ],
+ "sourceClusters": [
+  "C-t2-09-018",
+  "C-t2-09-019",
+  "C-t2-09-017",
+  "C-t2-08-019"
+ ],
+ "sourceCategories": [
+  "AI-browser control",
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-013",
+   "status": "partial",
+   "exactGap": "Takeover state exists (BrowserControlMode persisted on the run record, step_receipts.rs:55-90; set by set_browser_session_control, agent_routes.rs:1733-1785, which hard-codes initiated_by Human) and the SPA has an AI/Manual chip (BrowserChrome.tsx:1225-1245), but it is enforced only by the Verevon gateway from a caller-supplied actor field (browser.rs:696-723 and 2065-2075); Quarry step handler (agent_routes.rs:2227-2294) never reads control_mode, step receipts carry only the run owner actor_id (step_receipts.rs:198 area) rather than a per-step human-or-agent initiator, tab events have no owner field, and there is no control epoch. A Model Plane run never attaches: execution-core start_run (browser_agent.rs:674) leases its own session with only profile_id, start_url and an interim grant string (browser.rs:1235), and the SPA shows the agent session through a read-only BrowserChrome embed (ChatLiveRunPanel.tsx:608), with no agent badge, reveal, give-back-with-state or deliverable/handoff marks.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:474-509",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1725-1800",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2222-2310",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:55-200",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs:60-139",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:244-300",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:640-700",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:488-567",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:663-732",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:761-796",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:1190-1236",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:2050-2090",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1215-1250",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:1-16",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx:598-612",
+    "apps/Model Plane/go/services/browser-broker/internal/grant/grant.go:30-130"
+   ],
+   "reuse": [
+    "BrowserControlMode and the persisted run record (step_receipts.rs:55-90) as the owner state to enforce",
+    "BrowserTimelineEventKind Control and Tab events plus the owner timeline endpoint for the audit trail",
+    "Claims::is_service and actor_id (auth.rs:60-139) to derive the initiator from the verified principal",
+    "browser-broker Grant.SessionKey, ParentGrantID and CreateScopedSensitiveApproval (grant.go:44-130) for a session-bound child grant",
+    "BrowserChrome control chip and the ChatLiveRunPanel embed of BrowserChrome for the shared-view UI",
+    "Gateway takeover pre-checks (browser.rs:704-723, 2065-2075) kept as UX-level early rejection"
+   ],
+   "constraints": "Model proposes, Quarry executes: enforcement has to move into Quarry /step, with the gateway check kept as UX only. Ownership blocks attach today: caller_owns_browser_run (agent_routes.rs:474-482) requires claims.actor_id() to equal the run actor, execution-core calls Quarry with an org-scoped service token (browser:execute, quarry_agent.rs:34,556), and Claims has no on-behalf-of field (auth.rs:62-91), so a Model Plane run is answered 404 on a user-owned session; attach needs a delegation design (Auth Core claim or session-bound child grant) that never widens the user ACL or Space authority. Production browser grant issuance is unbuilt (gateway sends the interim session:{id} string, browser.rs:1222-1236; no non-test AcquireGrant caller found in Model Plane), a prerequisite shared with F-t2-001. ZDR sessions stay non-persistent (control timeline writes are skipped under ZDR, agent_routes.rs:493-495).",
+   "approachAdjustment": "Derive the initiator inside Quarry from the verified principal (service principal means agent, user token means human) rather than trusting the gateway body field. Phase 1 (S, ship alone): /step rejects agent-principal steps while control_mode is HumanTakeover with a typed USER_TOOK_OVER, a monotonic control epoch is stamped on control events and receipts, and initiator is added to StepReceipt and tab operations. Phase 2 (attach, agent-flagged tabs) needs an explicit delegated-authority design first, because the ownership check rejects service principals; schedule it after grant issuance (F-t2-001) and treat it as L to XL.",
+   "effortRevised": "L",
+   "effortNote": "Unchanged in letter, but Phase 1 is S and Phase 2 carries an Auth Core / Control Plane delegation dependency, so Phase 2 may exceed L.",
+   "verdict": "reword",
+   "verdictReason": "Gap confirmed in code (enforcement only in the gateway, no initiator, no attach), but Phase 2 as written ignores that Quarry rejects non-owner service principals, and Phase 1 should be split out as an immediate small fix with initiator derived from the principal.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-013",
+   "verdict": "partial",
+   "checked": [
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:14656, 14790-14800 (openai/user_took_over only inside the browserAuth sign-in elicitation: decline + meta flag -> declined/user_took_over)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:10160, 24913-24927, 25268 (tab_manual_handoff_request command)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:8521, 10246 (browser_user_claim_tab)",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/docs/tab-claiming-chrome.md, tab-mentions-iab.md, browser-control-interruption.md",
+    "C:/Program Files/WindowsApps/OpenAI.Codex_26.1007.2314.0_x64__2p2nqsd0c76g0/app/resources/plugins/openai-bundled/plugins/browser/.codex-plugin/plugin.json (Interrupt, SubagentStop, Stop hooks)",
+    "scratchpad/tmp/cxib/main.pretty.js:41154-41200 (markTab handoff|deliverable with turn_id; turnEnded restores clipboards, detaches debugger, keeps handoff temp tab but clears mark, releases marked/persistent tabs)",
+    "scratchpad/extract/codex/webview/assets/hidden-browser-use-webview-host-b6797e1e4891.js (hostKind hidden-browser-use, isVisible false, about:blank until URL known)",
+    "C:/Program Files/Aside/Application/1.0.928.2/Locales/en-US.pak (strings 'Aside is controlling the tab', 'Take over', 'Tabs controlled by Aside while it works')",
+    "C:/Program Files/Aside/Application/1.0.928.2/Aside.dll (AsideAiTabsTakeOver symbol present)",
+    "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:101-102 (interactiveLiveViewUrl)",
+    "findings/t2 records aside-agent-control-architecture-030/031/032/061, aside-browser-product-062/063, codexbrowser-* 045/046/047/068/088/089/090"
+   ],
+   "corrections": "Codex has no general 'user took over' state that cancels in-flight steps: user_took_over is only the decline reason of the browserAuth secure sign-in elicitation, and in the IAB the user can interact with the page at any time with no input lock or control arbitration found. requestManualHandoff is supported only on the cloud CDP backend. The fail-closed mention resolution (match providerTabId + title + url, never guess ids) is written as model instructions in plugin docs, not code-enforced; claimTab is for the external-browser (extension/cloud) backends, while IAB mentions resolve via tabs.get. Aside shows a 'controlling the tab / Take over' strip (pak strings, DLL symbol) but no daemon-side takeover handling was found (absence claim, INF). So 'takeover enforced inside Quarry' via control_mode + USER_TOOK_OVER per step is a Verevon design with no reference implementation observed; say so. Confirmed: Codex markTab handoff|deliverable with turn-scoped release, Interrupt/SubagentStop/Stop hooks ending the turn, hidden agent tabs; Aside owned vs borrowed session_tabs with idle sweep and orphan reconciliation.",
+   "prevalenceCorrect": false,
+   "caveats": [
+    "Codex fail-closed tab claiming is DOC (prompt instructions to the model), not runtime enforcement",
+    "Codex manual handoff is cloud-backend only",
+    "Aside takeover is UI-string/symbol evidence only; enforcement mechanism unknown",
+    "Firecrawl browser sessions expose an interactiveLiveViewUrl (human can interact with the agent's session), so a co-browsing-adjacent capability exists in a third source; the '3 sources' denominator is unclear",
+    "No source observed implements server-side control-mode arbitration of agent steps"
+   ],
+   "confidence": "high"
+  }
+ }
+}

@@ -1,0 +1,135 @@
+{
+ "finalId": "F-t2-031",
+ "tier": "recommended",
+ "rank": 7,
+ "title": "Tenant-scoped, SSRF-guarded outbound webhooks with per-job events, then completion-triggered follow-ups and generalised monitors",
+ "summary": "Keep the quarry-control dispatcher (HMAC signing, 1s/5s/30s/5m/1h backoff, DLQ, retry route; stronger than Firecrawl's single attempt) and add org_id on webhook registrations, edge exposure, per-job webhook config with event filters and metadata echo, and an SSRF-guarded client (port the Model Plane safe_mcp_http_client rules; the dispatcher uses a plain http.Client, INF). Then completion-triggered follow-up actions and generalised multi-target monitors once the automation owner is decided.",
+ "whyItMatters": "Webhooks are how customers and other planes react to crawl and monitor results. They cannot be offered to tenants until they are org-scoped and SSRF-guarded; today the risk is latent because tenants cannot register URLs through the edge (INF).",
+ "referenceBestPractice": {
+  "bestSource": "Apify (webhooks with rich event vocabulary, payload/header templates, ad-hoc per-run webhooks)",
+  "others": [
+   "Firecrawl (SSRF refusal of private targets, wildcard event filters, delivery logs; single attempt, no retry)",
+   "Apify (integrations: run output triggers another run with templated input, plus a test event)",
+   "Firecrawl (api-surface fc-024 Monitor API; fc-025 webhook contract with event filters and metadata echo)"
+  ],
+  "prevalence": "2 of 4 sources (both web platforms); common || 2 of 4 sources (both crawl platforms); common || monitors: 1 of 4 sources (Firecrawl), unique; job webhooks: 1 of 4 (Firecrawl), where Verevon's delivery is already stronger",
+  "mechanism": "Webhook {url, secret, eventTypes[], payloadTemplate, headersTemplate, org scope}; on an event render the template with {eventType, eventData, resource, createdAt}; sign the body with timestamped HMAC-SHA256; deliver through an SSRF-guarded client (no private IPs, DNS pinning, no redirects); retry with backoff into a DLQ; log each attempt for the tenant. Ad-hoc webhooks can also be attached to a single run. || Merged items add: A periodic check detects groups with no queued, active or backlogged jobs, marks them completed and enqueues exactly one finalise job (idempotent on group id) that writes the summary, bills and emits webhook and notification events. An integration rule {on: run.succeeded, source, action: start Y, input_template} is evaluated by a dispatcher; a workflow_key groups related runs. || Monitor {name, schedule{cron|text, tz}, targets[] up to 50, retentionDays, goal, webhook, notification}; each check scrapes the targets, diffs against the previous snapshot, records per-page status, optionally asks an LLM judge whether the change matters to the goal, then notifies; minimum interval 5 minutes; refused for ZDR. Webhook payload {type, id, data, error, metadata} signed sha256=HMAC(body, org secret), private destinations refused."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-33 (backoff 1s..1h, max 5 attempts, DLQ)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:107-123 (timestamped HMAC, X-Quarry-Signature t=,v1=)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:40-41 and cmd/control/main.go:197 (nil client defaults to plain http.Client{Timeout:30s}; no CheckRedirect or address vetting)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-383 (Webhook has Events filter but no org_id; Secret carries a json tag, so generic CRUD likely echoes it (INF))",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:615-645 (fanoutWebhooks lists up to 1000 webhooks across all orgs and queues the full event JSON for each match; pkg/quarrycontracts/event.go:53 Event has no org field)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go:8-10 (generic mountSimple CRUD at /v1/webhooks)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_webhook.rs:23 (only the inbound change-webhook route is exposed at the edge; no webhook CRUD found there)",
+   "apps/Ingestion Plane/integration-corev2/internal/egress/guard.go:208 (ResolveAndVet / SafeClient pattern already exists in Go in the same plane); apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs (Rust equivalent)",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/cmd/orchestrator/main.go:94-151",
+   "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:128-313"
+  ],
+  "gap": "Delivery mechanics (retry, DLQ, timestamped signature) are ahead of Firecrawl, but webhooks are internal-only and not tenant-safe: no org_id, cross-org fan-out with full payloads, no per-request webhook, no templates, no delivery log API, and no SSRF/redirect guard on the delivery client. The latent issues become real the moment tenants can register URLs. || Completion is deterministic inside the Temporal workflow and selective ingest to the Data Plane is shipped; change-detected webhooks reach notification-core. But control webhooks carry no org_id and are not forwarded by the edge, so tenants cannot register crawl webhooks, there is no per-job webhook, and there is no user-configurable chain. No Application Plane service for user-defined automations was found in a directory scan (INF), so the owner of phase 2 is undecided. || Webhook CRUD has no org_id and is not forwarded by the edge, there is no per-job webhook parameter on crawl/batch, and no customer-facing webhook UI; only change_monitor schedules map to a Temporal workflow while scrape/crawl/batch schedules are skipped and trigger/backfill return 501; no multi-target monitor resource with check history and per-page statuses; no goal or judge."
+ },
+ "approach": "Ingestion Plane quarry-control and quarry-edge. Owner decision for follow-up automation (Application Plane vs Model Plane routines) is an ADR topic. || Source detail: [R-t2-10-02] Ingestion Plane, quarry-control (Go) plus quarry-edge (Rust). (1) Store: add org_id to Webhook and WebhookDelivery (migration in store/pg), resolve an event's org from its job_id (or add org_id to the Event envelope) and filter fan-out by org. (2) Dispatcher: build the client with the resolve-once vetted dial from integration-corev2/internal/egress (extract to a shared Go module or port) or the Model Plane safe_mcp_http_client rules; HTTPS only, forbidden ranges, CheckRedirect returns ErrUseLastResponse. Make Secret write-only and add rotation. (3) Edge: org-scoped CRUD (/v1/webhooks) and GET /v1/webhook-deliveries, plus a per-request webhook field on crawl, batch and agent requests; wildcard filters already work. (4) Optional payloadTemplate later. (5) ZDR orgs: payload is ids and status only. Matches the ROADMAP Phase 9 item \"crawl errors/status/webhook parity\". || [R-t2-05-08] Phase 1 (Ingestion Plane, effort S): org_id on webhooks and deliveries in quarry-control, edge routes to register and list them with org check, a run.completed event emitted at the end of CrawlJobWF with a stable idempotency key, and an optional webhook field on crawl/batch jobs. Phase 2: decide the owner of rule evaluation before building. Model Plane routines (R-t2-05-12) with event triggers is the natural fit for 'crawl finished then agent run'; notification-core covers 'crawl finished then notify'. Each hop passes through the owning plane's API; cap chain depth and require idempotency keys. Skip Apify-style metamorph (no actor model). || [R-t2-01-08] Ingestion Plane control (Go): add org_id and per-org secrets to webhooks, scope every read and write by org, forward through the edge, and add the webhook parameter to crawl/batch/monitor creation. Reuse the ChangeMonitor workflow: map scrape/crawl/search schedules to workflows, implement trigger, persist checks and per-page statuses. Application Plane notification-core stays the internal notification path (the change webhook already fans out there). Model Plane supplies the optional goal judge. For ZDR orgs, refuse monitors or keep content hashes only.",
+ "effort": "M",
+ "dependencies": [
+  "Edge org scoping for control resources",
+  "Public async job lifecycle (status/cancel routes) so webhooks have something to report",
+  "Shared Go egress guard (extract from integration-corev2 or port)",
+  "tenant-scoped webhooks (phase 1)",
+  "owner decision for the automation service (Application Plane or Model Plane routines)",
+  "F-t2-017 job lifecycle",
+  "Temporal client in control",
+  "Application Plane notification-core"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "SSRF to internal services (cloud metadata, other planes) if the guard is skipped; cross-tenant event leakage if fan-out is not org-filtered; payload content under ZDR; secret rotation and replay windows. Ship the guard and org filter before any tenant-facing route. || Cross-plane event loops; enforce idempotency keys and a maximum chain depth. Webhook payloads must not carry content for ZDR orgs. || SSRF via customer webhook URLs (reuse the security preflight); tenant isolation of signing secrets; retention conflicts with ZDR; notification noise.",
+ "significance": 3,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 16,
+  "DOC": 5,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-10-02] apps/Ingestion Plane/Quarry-v2/docs/ROADMAP.md:58-62 (Phase 9 crawl errors/status/webhook parity); tenant scoping and SSRF guard not mentioned"
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": true,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-10-02",
+  "R-t2-05-08",
+  "R-t2-01-08"
+ ],
+ "sourceClusters": [
+  "C-t2-10-005",
+  "C-t2-05-012",
+  "C-t2-01-019",
+  "C-t2-01-018"
+ ],
+ "sourceCategories": [
+  "Integration-plane overlap",
+  "Orchestration & scale",
+  "Acquisition API surface"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-031",
+   "status": "partial",
+   "exactGap": "quarry-control's dispatcher is solid (timestamped HMAC X-Quarry-Signature, retry 5s/30s/5m/1h with DLQ, dispatcher.go:25-33, 107-123) and a run_completed event with a stable idempotency key is already emitted at the end of the scrape, crawl and batch workflows (workflows.go:289-292, 350, 379-382, 507-511, 607-609), but webhooks are internal-only and not tenant-safe: store.Webhook has no org_id and a json-tagged Secret (store.go:376-383), fanoutWebhooks lists up to 1000 webhooks across all orgs and queues the full event JSON for each match (resources.go:615-645), the edge exposes no webhook or delivery routes, and the delivery client defaults to a plain http.Client with a 30s timeout and no address vetting or redirect control (dispatcher.go:40-42, main.go:197). Delivery list and retry routes already exist inside control (webhook_deliveries.go), so only tenant-facing exposure is missing; crawl and batch requests have no per-job webhook field (routes.rs:533-553) and only change_monitor schedules map to a Temporal workflow (schedules.go:154-162).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:25-45",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go:100-145",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go:150-200",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go:376-394",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:331-369",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:612-650",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go:1-10",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhook_deliveries.go:1-34",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go:1-60",
+    "apps/Ingestion Plane/Quarry-v2/pkg/quarrycontracts/event.go:53-62",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:124-148",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:496-512",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:602-610",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/schedules/schedules.go:153-162",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:130-275",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:533-575",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/nats_event_bus.rs:1-20",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/dns_guard.rs:98-112",
+    "apps/Ingestion Plane/integration-corev2/internal/egress/client.go:1-110",
+    "apps/Ingestion Plane/integration-corev2/internal/egress/guard.go:200-236",
+    "apps/Ingestion Plane/integration-corev2/go.mod:1",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs:426-436",
+    "apps/Model Plane/go/services/capability-core/internal/watch/watch.go:1-60",
+    "apps/Model Plane/go/services/capability-core/internal/watch/watch.go:95-98",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx:1930-1940"
+   ],
+   "reuse": [
+    "quarry-control dispatcher (HMAC signing, backoff, DLQ) and the internal delivery list/retry routes: keep, wrap with org scoping.",
+    "The run_completed event emitted by the Scrape, Crawl and Batch workflows through emitEvent with an idempotency key (workflows.go:124-148): no new completion event is needed.",
+    "integration-corev2 egress Guard/SafeClient (resolve once, vet, pinned dial, re-vet redirects): copy or extract into a shared Go package; it lives under internal/ of a different Go module (module github.com/triodelab/integration-corev2) so quarry-control cannot import it as is.",
+    "Rust references for the same rules: quarry-runtime dns_guard.rs resolve_public_url and model-gateway safe_mcp_http_client.",
+    "Quarry already publishes events to NATS (quarry.run.<run>.<type> and quarry.events.<type>, nats_event_bus.rs): internal planes should subscribe there instead of using webhooks.",
+    "Model Plane capability-core Watch/cron/runwatch primitives as the likely owner of completion-triggered follow-ups (Watch source kinds today only process_output, watch.go:95-98).",
+    "Event to job to org resolution as done in the control Postgres store (events joined to jobs.org_id, pg/resources_v2.go) because the Event envelope has no org field."
+   ],
+   "constraints": "Tenant isolation: add org_id before any edge exposure, filter fan-out by the event's job org, make Secret write-only with rotation, and never return the secret from list or get (the generic mountSimple CRUD would echo it). SSRF: HTTPS only, resolve-once vetted dial, forbidden ranges, CheckRedirect refusing redirects. ZDR: /v1/crawl and /v1/batch are refused under ZDR today (routes.rs:555-575), so crawl webhooks never carry ZDR content now; if webhooks later cover agent runs, payloads must be ids and status only. Plane ownership: outbound tenant webhooks are an Ingestion Plane concern, but cross-plane reactions (crawl finished then agent run or notification) must use NATS events or the owning plane's API, not webhooks, and need idempotency keys and a chain-depth cap. The owner of follow-up automation (Model Plane routines/capability-core versus Application Plane) needs an ADR. Product demand is unproven: no Verevon surface registers webhooks (the Settings 'Webhook delivery' panel is a placeholder) and no Quarry passthrough for API keys was found.",
+   "approachAdjustment": "Remove 'emit run.completed at the end of CrawlJobWF' from phase 1: it already exists. Phase 1 is then: org_id on Webhook and WebhookDelivery, org-filtered fan-out (derive org from job_id), write-only per-webhook secret, SafeClient-style dispatcher client built from a shared Go egress package, org-scoped edge CRUD plus a delivery list route, and an optional per-request webhook field on crawl and batch. Correct the wording 'no delivery log API' to 'no tenant-facing delivery log API'. Treat the guard plus org filter as a hardening step that can ship now, and gate the public CRUD surface on a decision to expose a customer API. Keep phase 2 (follow-up actions, multi-target monitors) as a separate, ADR-gated item owned by Model Plane routines or Application Plane.",
+   "effortRevised": "M",
+   "effortNote": "Phase 1 stays M (guard extraction S, org scoping S, edge routes and per-job field M). Phase 2 is L or larger and should not be bundled.",
+   "verdict": "reword",
+   "verdictReason": "Delivery mechanics and the completion event exist and the control delivery log routes exist internally, so the description must not imply otherwise; the missing parts (org scoping, SSRF-safe client, edge exposure, per-job webhook) are accurate and security-relevant. Reword phase 1 accordingly, mark tenant exposure as demand-gated, and split phase 2 out.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

@@ -1,0 +1,100 @@
+{
+ "finalId": "F-t2-068",
+ "tier": "nice-to-have",
+ "rank": 3,
+ "title": "Browsing data lifecycle: server-side history with agent/user source, bookmarks, clear-site-data, permission-deny events, support export",
+ "summary": "Derive a per-user visit log from Quarry session timelines, tagged source agent|user, retention-limited and disabled under ZDR, and show it in a history page with an agent filter and a short list of user-scoped bookmarks (or reuse Knowledge saved sources). Add clear-site-data on a profile by type and origin (cookies, storage, cache) with counts first. Make permission handling deny-by-default in the driver with a 'permission requested' event shown as an info chip. Add an opt-in, redacted export of a session's timeline and receipts to support tickets, never under ZDR.",
+ "whyItMatters": "History and clear-data are table-stakes in both reference browsers and let users see and undo what the agent did in their profile; Verevon today only keeps a browser-local list of 10 entries. Category 1 deferred a consent-gated history query for agents to this item, so it also prepares a bounded read tool.",
+ "referenceBestPractice": {
+  "bestSource": "Codex in-app browser (history with Agent badge and source filter; clear-browsing-data dialog with counts; prompts keyed per page)",
+  "others": [
+   "Aside (bookmarks, history panel, downloads bubble, privacy page)"
+  ],
+  "prevalence": "History and bookmarks: 2 of 3 sources, table-stakes. Clear data: 2 of 3, table-stakes. Permission prompts and diagnostics: 1 of 3 each, unique.",
+  "mechanism": "History store deduplicated by day with favicons; each visit tagged agent|user; a settings page with search, delete-selected and a source filter; agent-facing history reads are gated by their own approval mode. Clear dialog maps selected data types and range to storage clears and shows counts first. Permissions: default deny for request and check handlers with a prompt store keyed per page. Diagnostics: opt-in tab diagnostics attachment and a bounded ring buffer of recent session events."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:10 and DashboardWebHistory.tsx:1 (browser-local list, max 10, per workspace and user, purged under ZDR)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1181,1245 (profile popover: create, rename, delete, restore-probe, ZDR chip)",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/KnowledgeComposer.tsx:1413 (profile and ZDR controls, per the comparator's evidence)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs (no permission handling found, INF)",
+   "docs/BROWSER_WORKSPACE_PLAN.md target capability 13 (debug export) never closed (baseline)"
+  ],
+  "gap": "No server-side history, no bookmarks, no agent/user tagging, no typed or ranged clearing of a profile's data, no permission events, and no browser-session diagnostics export."
+ },
+ "approach": "Ingestion Plane: visit log derived from the existing session timeline, tenant-scoped, TTL-bound, off under ZDR; clear-site-data endpoint by profile, type and origin (Storage.clearDataForOrigin, Network.clearBrowserCookies); explicit deny-all permission policy with events. Frontend Plane: history page in the browser settings hub (R-t2-08-07), clear-data options in the profile popover, bookmarks list. Gateway: opt-in redacted timeline export for support.",
+ "effort": "M",
+ "dependencies": [
+  "F-t2-011",
+  "F-t2-032"
+ ],
+ "planeOwner": "Ingestion Plane (Quarry) with Frontend Plane",
+ "risks": "Stored URLs are sensitive and must respect ZDR and retention; exports must be redacted and never include page data under ZDR.",
+ "significance": 3,
+ "confidence": "medium",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 12,
+  "DOC": 0,
+  "INF": 2
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-08-14] docs/BROWSER_WORKSPACE_PLAN.md target capability 13 (debug export) listed but never closed; stale plan."
+ },
+ "quickWin": false,
+ "wave": "W5",
+ "needsVerification": true,
+ "adrNeeded": false,
+ "sourceItems": [
+  "R-t2-08-14"
+ ],
+ "sourceClusters": [
+  "C-t2-08-035",
+  "C-t2-08-039",
+  "C-t2-08-036",
+  "C-t2-08-046"
+ ],
+ "sourceCategories": [
+  "In-app browser shell (user-facing)"
+ ],
+ "originalTier": "nice-to-have",
+ "finalTier": "nice-to-have",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-068",
+   "status": "partial",
+   "exactGap": "A durable, actor-bound per-run owner timeline already exists: StepReceipt plus BrowserTimelineEvent (Control events carry initiated_by human|agent|system), served by GET /v1/agent/runs/{id}/browser-session/timeline and refused with 409 for ZDR runs; saved profiles also have delete and a restore-probe that reports cookie, storage and IndexedDB counts, which the shell already renders. Missing: any cross-run per-user visit listing (StepReceiptStore lists per run only and quarry-edge has no list-runs route), per-visit agent|user tagging (receipt actor_id is the signed user for both drivers, timeline action items carry names and outcomes but no URL), bookmarks, clear-by-type/origin, any permission policy or event in quarry-browser, and a support export. The only history in the UI is the Nett search card's browser-local list capped at 10 entries (web-history.ts), unrelated to browser sessions.",
+   "evidence": [
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/web-history.ts:12 (comment: no server-side search or visit history) and :32 (WEB_HISTORY_MAX_ENTRIES = 10)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/shared/session/home-local-content.ts:60-72 (clearWebHistories / clearHomeLocalContent purge local history under ZDR)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs:161-165 (BrowserTimelineInitiator Human|Agent|System), :183-210 (StepReceipt with org_id, actor_id, action, observation), :221-300 (StepReceiptStore: list_for_actor and list_browser_timeline_events are per-run only)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:764-811 (timeline item projection: action name/outcome only, Control carries initiated_by), :1787-1860 (browser_session_timeline, ZDR 409 at :1837), :3661-3728 (route table: no cross-run listing)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_routes.rs:301-318 (delete_profile), :361-432 (restore_probe with cookies/local/session/IDB counts)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/session.rs:15-40 (SessionSnapshot), :147-159 (ProfileStore trait), :308-317 (Cookie has domain)",
+    "C:/dev/CoresSystem/apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/stealth.rs:111-120 (only permissions.query patch; grep of quarry-browser/src finds no Browser.setPermission or permission event)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx:1447 (cookie count in profile popover), :1556-1573 (delete profile confirm)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:352-357 (per-run observation history constants are #[cfg(test)] only), :371-447 (route table: sessions, timeline, tabs, profiles; no history or export), :625-655 (get_owner_timeline proxies Quarry)",
+    "C:/dev/CoresSystem/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/tickets.rs:1-5 (thin proxy to conversation-core, no browser timeline export)",
+    "C:/dev/CoresSystem/docs/BROWSER_WORKSPACE_PLAN.md:25 (never persist ZDR screenshots, cookies or profile state), :63 (capability 13 session replay and debugging export listed, not closed)"
+   ],
+   "reuse": [
+    "StepReceipt/BrowserTimelineEvent stores (Postgres, tenant+actor predicates, ZDR callers skip writes) as the source for a derived visit log",
+    "GET /v1/agent/runs/{id}/browser-session/timeline plus gateway get_owner_timeline as the per-session history and as the basis of a redacted support export",
+    "ProfileStore load/save and restore_probe counts for a snapshot-level clear-data and its counts-first dialog",
+    "BrowserChrome profile popover (delete confirm, cookie count) for the clear-data UI",
+    "BrowserTimelineInitiator enum for agent|user tagging once receipts carry it"
+   ],
+   "constraints": "ZDR: the owner timeline already returns 409 and receipts/timeline events are skipped for ZDR runs; a history view must keep that and never store URLs for ZDR runs (plan hard constraint, BROWSER_WORKSPACE_PLAN.md:25). Plane ownership: a visit log derived from receipts is Ingestion-owned (tenant and actor predicates), but bookmarks are user content, not browser evidence, and Quarry may persist durable knowledge only through Data Plane contracts, so they belong in a user-owned store outside Quarry (Data Plane saved sources, Application Plane or a gateway-side user store) with the Frontend only displaying them. Space authority: profile scope includes org_shared (any org member), so clear-data on an org-shared profile must be limited to its owner or an org admin and must not widen access. A stored-snapshot clear can race a live lease that re-saves the snapshot on release (the Kernel driver does, kernel.rs:194-200; not verified for the Chromium driver, INF), so it needs lease coordination.",
+   "approachAdjustment": "Split into two deliverables. (A) clear-data plus permissions, S-M: implement clear-site-data as load, filter (cookie domain, storage and IndexedDB origin keys) and save on the stored SessionSnapshot through ProfileStore, with counts reused from restore_probe, and use CDP Storage.clearDataForOrigin only for a live session; add an explicit deny-all permission policy and a 'permission requested' timeline event in chromiumoxide. (B) visit history, M-L: add a tenant and actor scoped cross-run query on the receipt store (new Quarry route), project only host/path, time and initiator with a TTL, add initiator to receipts (or derive it from Control events) and keep it off under ZDR; put bookmarks in a user-owned store outside Quarry. Treat the redacted support export as a separate small gateway item that composes the existing timeline and receipts routes.",
+   "effortRevised": "L",
+   "effortNote": "Raised from M: five sub-features across three planes; history needs a cross-run receipt query, an initiator field and retention, and bookmarks need a store that does not exist. Clear-data plus permission deny alone is S-M.",
+   "verdict": "reword",
+   "verdictReason": "Status partial and the gap is real, but the item understates the existing seam (a durable actor-bound owner timeline with initiator and ZDR handling already exists) and misplaces two parts: clear-data should mutate the stored profile snapshot rather than rely only on CDP calls, and bookmarks should not live in Quarry. Reword and split before scheduling.",
+   "confidence": "medium"
+  },
+  "reference": null
+ }
+}

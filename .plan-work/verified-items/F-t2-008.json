@@ -1,0 +1,151 @@
+{
+ "finalId": "F-t2-008",
+ "tier": "priority",
+ "rank": 8,
+ "title": "Enforce cost and runtime budgets in the Quarry executor, meter browser time, and clamp crawls to the remaining entitlement",
+ "summary": "The run contract carries max_cost_usd and max_runtime_s, but only max_steps is enforced on the /step path, defaults are unbounded and browser minutes are not metered (SRC). Quarry, as the executor, reserves on run start, charges per step and per browser-second, stops gracefully at the cap with a typed BUDGET_EXCEEDED, and clamps crawl/batch page limits and requests per minute to the remaining entitlement. Model Plane cost-core passes the remaining budget inside the grant and reconciles; org default caps arrive via the policy claims of F-t2-022.",
+ "whyItMatters": "Agents with live browsers and paid providers can run up unbounded cost. docs/WEB_AGENT_ROADMAP_EXECUTION.md:50-53 says max_cost_usd is enforced, but the HTTP step path does not enforce it (doc/code divergence, SRC). Apify (charge within cap, DOC) and Firecrawl (reserve then settle, SRC) both enforce in the executor.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (reserve then settle exactly once under a row lock with a reconciliation sweep for browser sessions; request-scoped CostTracking that throws CostLimitExceededError)",
+  "others": [
+   "Apify (per-run cost display and caps, DOC)",
+   "Apify (executor-side charge limit), with Firecrawl's reserve-then-settle for time-billed browser sessions",
+   "Firecrawl (limit clamped to remaining credits at kickoff, depth cap, per-crawl concurrency/delay, sharded usage counters, crawl TTL)"
+  ],
+  "prevalence": "2 of 4 sources; common || 2 of 4 sources; differentiator || 2 of 4 sources (both crawl platforms); table-stakes",
+  "mechanism": "On session create: check entitlement, reserve a concurrency slot and estimated cost. On stop: SELECT ... FOR UPDATE the session row, compute duration-based cost (separate rates for human, AI-driven and ZDR use) and mark it settled; a periodic sweep settles sessions whose stop was missed. Per step: add action and LLM cost to a run-scoped accumulator and fail the step with BUDGET_EXCEEDED when it passes max_cost_usd. || Merged items add: Caller sets a max total charge per run. Before each billable step the executor calls charge(event, count), which returns how many units are still chargeable within the cap; when the cap is reached it finishes the current step, persists partial results and ends with a budget-exhausted status. For time-billed browser sessions Firecrawl reserves the full TTL at the per-minute rate before the first prompt (402 if the balance is short), re-rates sessions that used prompts, settles actual duration on stop and releases the remainder. || At submit: limit = min(requested, remaining_entitlement) and both values are stored on the job. maxDiscoveryDepth bounds link depth; per-crawl maxConcurrency and delay feed the scheduler; usage counters are sharded so huge crawls do not contend on one row; results and state carry expires_at (default 24 h). A run aborts with a recorded reason when spend reaches the max charge."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1370-1372",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2225-2370",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs:154-163",
+   "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:26-31",
+   "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:255",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:300-302",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:433-451",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2294",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:703-760",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2346-2362",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1446",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_cost.rs:1-40"
+  ],
+  "gap": "Only max_steps is enforced; cost and runtime caps are accepted and ignored; no browser-time meter; crawls are not clamped to entitlement (SRC)."
+ },
+ "approach": "Ingestion Plane quarry-edge step path and crawl admission; Model Plane cost-core ledger reconciliation; Control Plane entitlement read via claims. Ship safe org defaults (for example a runtime cap) on day one. || Source detail: [R-t2-07-03] Ingestion Plane: in the step handler (agent_routes.rs) keep a per-run accumulator on RunEntry, check it against the constraints before executing and return a typed budget error; emit usage events (not content) to NATS. Model Plane cost-core: consume session start/stop events, settle lease time with a row-locked settle-once plus a reconciliation job, and carry the budget in the BrowserBroker grant so the cap is minted by the Model Plane and enforced by Quarry. Frontend Plane: show per-run cost in the run timeline. || [R-t2-06-01] Ingestion Plane, quarry-edge/agent_routes.rs: add spent_micro_usd and started_at to RunEntry; after each executed step add the same cost_usd already computed for the receipt (provider-billed first, flat table fallback). Replace enforce_step_budget() with enforce_budget() covering steps, cost and wall-clock, returning a typed budget_exhausted error (new ErrorCode, 429 or 402) and emitting a run event so the Model Plane planner can stop or ask for more budget. Resolve effective caps as min(request, grant claim, org default); default org caps come from the entitlement claim channel in R-t2-06-02. Model Plane: cost-core passes the remaining budget with each BrowserBroker grant and keeps one ledger key per run to avoid double counting. Then extend to crawl/batch/search: a per-job max_cost_usd that charges page and paid-provider units before dispatch. || [R-t2-05-06] Ingestion Plane. Agent side (do first, small): accumulate receipt cost_usd on RunEntry and reject the next step with a typed budget-exhausted error when it reaches constraints.max_cost_usd, alongside the existing max_steps check; ttl/max_runtime_s enforcement comes from the reaper in R-t2-05-04. Crawl side: extend CrawlRequest with max_cost_usd, max_requests_per_minute, max_concurrency and delay; at submit read remaining entitlement from the Control Plane, store requested and clamped limits and return the clamped value explicitly; enforce in the workflow and in the Rust per-host throttle; add expires_at to crawl results. Reconcile cost with Model Plane cost-core for agent-planner spend.",
+ "effort": "M",
+ "dependencies": [
+  "cost-core ledger",
+  "BrowserBroker grants (budget carried in the grant)",
+  "Item F-t2-014 for the per-run cost display",
+  "BrowserBroker grant issuance in production (cross-category; comparator baseline v-browser-app-083, not re-verified)",
+  "F-t2-022 (claim channel for org default caps)",
+  "F-t2-046 (cost attributes for paid providers and browser minutes)",
+  "Control Plane remaining-entitlement read",
+  "Model Plane cost-core reconciliation",
+  "F-t2-006 for runtime/ttl enforcement"
+ ],
+ "planeOwner": "Ingestion Plane (enforcement) + Model Plane cost-core (ledger) + Control Plane (entitlements)",
+ "risks": "Double counting between Quarry action costs and cost-core LLM costs; clock skew on settle (use Quarry authoritative timestamps). The flat cost table is an estimate. || Double counting between cost-core (model spend) and Quarry (execution spend): define one run-id ledger key. The flat table is an estimate, so budgets fail closed and may stop runs early; mark estimated vs provider-billed on receipts. Mid-run resumes must reload persisted constraints (the resume path already treats checkpoint constraints as authoritative). || Silent clamping surprises users, so return and display the clamped value. Flat-table cost estimates are approximations and must be labelled as estimated versus provider-billed.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 16,
+  "DOC": 4,
+  "INF": 3
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-06-01] docs/WEB_AGENT_ROADMAP_EXECUTION.md:50-53 states max_cost_usd is enforced via the flat table and AgentLoop; code on the HTTP step path does not match (doc/code divergence)"
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-07-03",
+  "R-t2-06-01",
+  "R-t2-05-06"
+ ],
+ "sourceClusters": [
+  "C-t2-07-007",
+  "C-t2-06-011",
+  "C-t2-05-006"
+ ],
+ "sourceCategories": [
+  "Observability & operations",
+  "Platform & ecosystem",
+  "Orchestration & scale"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-008",
+   "status": "partial",
+   "exactGap": "Only max_steps is enforced on the Quarry step path (enforce_step_budget at agent_routes.rs:446-451, called at 2294); default_constraints (433-440) leaves cost and runtime unbounded, max_runtime_s only becomes the lease ttl_s (1446), and the cost and runtime logic exists only in the library AgentLoop (agent_loop.rs:154-163, 190-215) which has no HTTP caller. Per-step cost_usd is already computed for receipts with a flat-table fallback (agent_routes.rs:2346-2362, 725-765) but nothing accumulates it on RunEntry, browser time is not metered (usage.rs metrics list has no browser metric), and crawls are bounded only by max_pages where absent means 0 means unlimited (workflows.go:456, dispatcher.go:452, gateway clamp of 5000 only when sent at quarry.rs:396-404) plus a fixed 30-minute Temporal execution timeout (dispatcher.go:254). Model Plane execution-core enforces max_steps and max_runtime_s on its own planner clock (browser_agent.rs:320-330) but never checks max_cost_usd (it is only forwarded, line 666).",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:433-451",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:700-765",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1366-1372",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:1436-1456",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2222-2310",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:2310-2400",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/agent_loop.rs:140-215",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/usage.rs:1-110",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/observation.rs:1000-1018",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:553-680",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:244-345",
+    "apps/Model Plane/rust/services/execution-core/src/browser_agent.rs:640-690",
+    "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go:15-45",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:455-492",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:663-732",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge/quarry.rs:386-405",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:75-110",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go:385-460",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/jobs/dispatcher.go:236-262",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/resources_v2_mem.go:115-126"
+   ],
+   "reuse": [
+    "Receipt cost_usd already computed per step (observation_receipt_cost_usd and estimated_action_cost_usd, agent_routes.rs:700-765) as the accumulator input",
+    "AgentLoop over_budget and LoopTermination logic and the fleet.rs spend tracker as the reference implementation",
+    "UsageEvent and UsageMeter to billing-core (usage.rs) for browser-second and crawl page units",
+    "execution-core PlanConfig and check_limits as the planner-side twin",
+    "quarry-control team credit-usage read model (resources_v2_mem.go:115-126) for the entitlement-side read",
+    "cost-core ErrBudgetExceededCost for model spend only"
+   ],
+   "constraints": "Quarry executes, so enforcement belongs in the step admission path (Ingestion Plane); cost-core owns model spend only and Control Plane owns entitlements (quarry-control comments say no ceiling is modelled). Conflict with the item approach: the gateway creates every manual in-app browser session with max_steps 12 and max_runtime_s 120 (browser.rs:481-488), human actions use the same /step (browser.rs:663-732) and share ctx.step (observation.rs:1015), so switching on runtime or cost enforcement in /step would also cap human browsing (INF: the step cap of 12 therefore already applies to human and agent steps alike). ZDR: receipts are skipped under ZDR, so accumulation must be in memory on RunEntry and usage events content-free.",
+   "approachAdjustment": "Apply cost, runtime and step budgets only to agent-initiated runs or steps (grant claim, or an initiator derived from the verified principal as in F-t2-013), or stop the gateway passing 12 and 120 for manual sessions and use an idle TTL instead. Resolve caps as min(request, grant claim, org default) and fail closed with a typed budget error. Split into (1) S: accumulator and wall clock on RunEntry in the step path; (2) M: browser-second UsageEvent on close_run plus crawl and batch page-unit clamping; the entitlement read (F-t2-022) is only needed for org defaults and clamping, not for (1).",
+   "effortRevised": "L",
+   "effortNote": "Raised from M: three planes and a Control Plane entitlement read are involved; the step-path slice alone is S.",
+   "verdict": "reword",
+   "verdictReason": "Gap confirmed (docs claim enforcement, code only enforces max_steps), but the proposed runtime and cost caps would break manual browsing sessions that carry 12/120 constraints, and Model Plane already enforces runtime on the planner side, so scope and sequencing must change.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-008",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/lib/browser-billing.ts:1-23 (120/420/+120 ZDR credits per hour, min ceil(rate/60))",
+    "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:155-215 (createBrowserSession: autumnService.checkCredits on TTL estimate -> 402; reserveExternalSlot -> 429; updateKeylessBrowserCredits only for keyless)",
+    "C:/dev/firecrawl/apps/api/src/lib/browser-lifecycle.ts:390-440 (reserveBrowserPromptCredits: credit check at interact rate for full TTL, marks prompt use under row lock)",
+    "C:/dev/firecrawl/apps/api/src/lib/browser-sessions.ts:70-106 (withLockedBrowserSession SELECT ... FOR UPDATE; settleBrowserSessionOnce; listUnsettledHangarSessions sweep)",
+    "C:/dev/firecrawl/apps/api/src/lib/cost-tracking.ts:1-57 (CostTracking limit + CostLimitExceededError)",
+    "grep 'new CostTracking(' over C:/dev/firecrawl/apps (every construction passes no limit; only a remote smartScrape error string maps to CostLimitExceededError)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/crawl.ts:311-385 (limit = min(remainingCredits, limit); original only logged; maxConcurrency capped to team limit; crawlTtlHours flag default 24)",
+    "https://docs.apify.com/sdk/js/docs/guides/pay-per-event (ChargeResult fields; platform aborts run automatically at max total charge)"
+   ],
+   "corrections": "1) Firecrawl's browser-session create does NOT hold/reserve the estimated cost for paying teams: it runs an Autumn credit CHECK for the full TTL (402 if short) and reserves only a concurrency slot; a debit-ahead exists only for keyless/free usage (updateKeylessBrowserCredits). Rephrase 'reserve then settle and release the remainder' as 'admission check at full TTL, settle actual duration exactly once under a row lock, refund keyless pre-debits'. 2) CostTracking's throwing limit exists as a class feature, but no OSS caller sets a limit (all 'new CostTracking()'); do not present it as an enforced per-request budget in Firecrawl. 3) At crawl submit Firecrawl stores only the clamped limit; the requested limit is logged, not stored on the job. 4) Apify: when max total charge is reached the platform aborts the run automatically and charge()/pushData stop; there is no documented 'finish current step, persist partial results, budget-exhausted status' - that is a Verevon design proposal (INF). 5) Firecrawl's rate classes are plain browser vs session-that-used-a-prompt (whole session re-rated) plus a ZDR surcharge; 'human vs AI-driven' is an interpretation.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Apify half is DOC-only (pay-per-event SDK, run cost display); not observed in code",
+    "Firecrawl CostTracking limit is dormant in OSS (never set); enforcement may exist only in hosted services (INF)",
+    "Firecrawl 420 credits/hour interact rate is in code only; public pricing shows 2 credits/min",
+    "Browser sessions require HANGAR_URL (hosted browser service); self-hosted Firecrawl lacks them"
+   ],
+   "confidence": "high"
+  }
+ }
+}

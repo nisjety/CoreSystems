@@ -1,0 +1,111 @@
+{
+ "finalId": "F-t2-030",
+ "tier": "recommended",
+ "rank": 6,
+ "title": "Monitor change quality: normalised-content fingerprint, text/JSON diffs, tags and an optional goal-aware judge",
+ "summary": "Phase 1 (priority): compare a fingerprint of normalised main-content markdown instead of the raw response bytes, return a paragraph diff from /v1/change/check using the unused diff_paragraphs, accept a tag so one URL can keep separate histories, and add an optional schema-based JSON diff. Phase 2 (recommended, needs the model grant): a Model Plane judge reads the diff and the monitor's stated goal and returns {meaningful, confidence, reason, changes[]}; alerts fire when meaningful or when the judge fails (fail open).",
+ "whyItMatters": "Monitoring already ships in the Verevon UI, so noise (ads, timestamps flagged as change) and the absence of any diff are visible to users now. A goal-aware verdict turns monitors into an agent-grade feature and cuts notification noise in the Application Plane.",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl (engine-and-infra-094 change tracking with normalised compare and git/JSON diffs; engine-and-infra-095 goal-aware judge)",
+  "others": [],
+  "prevalence": "1 of 4 sources in this record set (Firecrawl); unique",
+  "mechanism": "Store the last snapshot per (org, url, tag). Normalise before compare (strip whitespace, iframe links, volatile tokens); status new|same|changed|removed from presence and equality; on changed produce a unified diff (similar crate) and, when a schema is given, extract JSON on both sides and diff fields. Judge: prompt = goal + optional extraction prompt + unified diff + field diffs; temperature 0, 30 s timeout, 3 retries with jitter, strict JSON {meaningful, confidence, reason, changes[]}; persist the verdict with the diff artifact; alert when meaningful or when judging fails."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:46-51",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:459-560",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:518-528",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/fingerprint.rs:14-27",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs:72",
+   "apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md:125-128",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:129-134",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:205-257"
+  ],
+  "gap": "The monitor check takes NormalizedOutput.fingerprint, a blake3 hash over the raw response body (content_fingerprint(&resp.body)), so ad or timestamp churn reads as change. A whitespace/case-normalised text_fingerprint of the markdown is already computed (pipeline.rs:520-521) but not used for the compare. The caller must supply fresh_fingerprint (the gateway scrapes first, then sends it), there is no text or JSON diff output, and diff_paragraphs/SemanticDiff (diff.rs:72) has no caller; CHANGE_TRACKING.md lists diff computation as still pending. Monitors alert on any fingerprint change with no goal field or judgement."
+ },
+ "approach": "Ingestion Plane quarry-edge/quarry-runtime: derive the compare fingerprint server-side from normalised main-content markdown (reuse text_fingerprint over the R-t2-02-03 output) and have /v1/change/check fetch and compare itself; persist the previous markdown in the baseline store (not under ZDR) and return diff_paragraphs output plus a stored diff artifact; add a tag parameter; add an optional schema JSON diff using the R-t2-02-02 json format. Under ZDR keep hashes only or refuse the monitor. Phase 2: Model Plane judge endpoint (temperature 0, fail open), goal field on the monitor create route in the gateway, verdict attached by the Quarry monitor workflow, Application Plane notifications filter on meaningful. Frontend Plane: render the diff and verdict in the monitoring view.",
+ "effort": "L",
+ "dependencies": [
+  "F-t2-005 (stable main-content output before hashing)",
+  "F-t2-019 for the JSON diff and for the model-invoke grant (judge)",
+  "postgres baseline store (change routes require it)"
+ ],
+ "planeOwner": "Ingestion Plane (diff and fingerprint) with Model Plane (judge) and Application Plane (notification filter)",
+ "risks": "Snapshot storage conflicts with ZDR (monitors must be refused or hash-only); changing the fingerprint basis invalidates existing baselines (migrate or re-baseline); a strict judge could suppress real alerts, so keep fail-open.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 9,
+  "DOC": 1,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-02-05] Quarry-v2 docs/CHANGE_TRACKING.md:125-128 lists diff computation as still pending; the judge and normalised fingerprint are not planned."
+ },
+ "quickWin": false,
+ "wave": "W3",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-02-05"
+ ],
+ "sourceClusters": [
+  "C-t2-02-013",
+  "C-t2-02-014"
+ ],
+ "sourceCategories": [
+  "Output formats & content processing"
+ ],
+ "originalTier": "recommended",
+ "finalTier": "recommended",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-030",
+   "status": "partial",
+   "exactGap": "The monitor compare basis is NormalizedOutput.fingerprint, a blake3 hash of the raw response bytes (pipeline.rs:524, 696); the normalised text_fingerprint is computed at pipeline.rs:525 but only put into the change event payload. /v1/change/check needs a caller-supplied fresh_fingerprint (change_routes.rs:37-51, 95-98), baselines are saved with artifact_id None and the diff artifact is only the string 'content fingerprint changed: a to b' (change_routes.rs:555, 573), so no previous content exists to diff, diff_paragraphs/SemanticDiff (diff.rs:72) has no non-test caller and no edge route returns a diff. Baselines are keyed (org_id, source_url) only (postgres_baseline_store.rs:72, 96) and the monitor create body has only url and preset (monitoring.rs:275-283), so there is no tag, goal or judge.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:520-545",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:696",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/fingerprint.rs:14-27",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs:1-140",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:37-51",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:82-110",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs:440-620",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_baseline_store.rs:72-96",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/activities.go:374-430",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go:60-170",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go:286-300",
+    "apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/notify/sink.go:20-26",
+    "apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md:125-128",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/model_plane_gate.rs:1-14",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs:203-229",
+    "apps/Ingestion Plane/Quarry-v2/docs/SELF_HOST.md:112-114",
+    "apps/Control Plane/auth-core/src/auth/fixtures/cross-plane-token-requests.json:40-46",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:129-134",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:195-262",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/monitoring.rs:275-320",
+    "apps/Frontend Plane/verevonv3/src/shared/api/monitoring-client.ts:34"
+   ],
+   "reuse": [
+    "quarry-transform text_fingerprint and diff_paragraphs/SemanticDiff (Added/Removed/Moved ops, is_real_delta)",
+    "PostgresBaselineStore.compare_snapshot, save_baseline and create_diff_record with DiffRecord, plus the ArtifactStore already used by record_check",
+    "emit_change_side_effects (fails closed under ZDR) and quarry-control change_webhook.go with fanoutWebhooks and notifyOnChange",
+    "notify::HTTPSink to notification-core intake (already delivers change_detected to the schedule creator)",
+    "AiFormatRunner and ModelPlaneClient (ai_formats.rs, mp_client.rs) behind the model_plane_gate switches for the future judge",
+    "Gateway normalize_change_record and the existing ingestions monitoring tab for rendering"
+   ],
+   "constraints": "ZDR already fails closed: change side effects are not emitted under ZDR and quarry-control rejects any ZDR-flagged change payload (change_webhook.go:85), so previous markdown and diffs must only be stored and shipped for non-ZDR orgs and never put in webhook or event payloads under ZDR. The Quarry to Model Plane inference path is currently refused: every Model Plane feature switch is OFF by default and the cross-plane manifest row model-invoke is granted:false (cross-plane-token-requests.json:40-46, SELF_HOST.md:114, model_plane_gate.rs:1-14), and the org-bound metered design DEF-QB-T17-PART2 has no owner, so the Phase 2 judge cannot run until that grant lands. Baselines are org-scoped at SQL level; the judge call must be org-bound and metered through the Model Plane, never a cross-plane DB read.",
+   "approachAdjustment": "Phase 1 stays in the Ingestion Plane but is larger than 'switch the fingerprint': NormalizedOutput exposes only the raw-byte fingerprint (the orchestrator reads page.Fingerprint, activities.go:411), so add a text fingerprint field to NormalizedOutput and the run_page response, switch both monitor paths (gateway check_now and the orchestrator CheckChange) to it, and re-baseline existing monitors because stored fingerprints are raw-byte hashes. Normalising whitespace and case does not remove ads or timestamps, so hash the readable main-content markdown. To produce a paragraph diff the previous markdown must be persisted as an artifact on the baseline (artifact_id is None today), and a new edge route is needed to fetch a diff by diff_id. The notification filter belongs in quarry-control notifyOnChange (resources.go:286-300, Ingestion Plane) feeding notification-core, not in an Application Plane filter. Treat Phase 2 as blocked on the model-invoke grant and DEF-QB-T17-PART2; the JSON schema diff also depends on /v1/extract, which is off by default.",
+   "effortRevised": "L",
+   "effortNote": "Phase 1 is M (fingerprint field, artifact persistence, diff route, tag column, re-baseline migration). Phase 2 is L to XL and externally blocked. Overall L stays.",
+   "verdict": "reword",
+   "verdictReason": "Partial status confirmed and nothing in the item already exists in production, but the approach misplaces the notification filter, understates the work to get a previous-content diff, and treats the judge as a normal Phase 2 when the inference grant is currently refused. Demote Phase 2 to blocked; keep Phase 1 as the actionable core.",
+   "confidence": "high"
+  },
+  "reference": null
+ }
+}

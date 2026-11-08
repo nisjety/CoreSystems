@@ -1,0 +1,139 @@
+{
+ "finalId": "F-t2-023",
+ "tier": "priority",
+ "rank": 23,
+ "title": "Scrape-time page actions plus screenshot and PDF formats, under one bounded, grant-gated action policy",
+ "summary": "Add actions[] (the tagged Action enum in quarry-browser/src/actions.rs) to ScrapeOptions and run it through the existing ActionRuntime on one page before extraction, with Firecrawl-style caps (about 50 actions, 60 s total wait, script size cap), lowering waitFor and screenshot into the same ordered list. Make screenshot{fullPage, clip, quality, viewport} and pdf first-class formats that reuse the agent capture code, add tile-and-stitch for tall pages plus element and clip shots, return per-action outputs, and keep everything inline only under ZDR. Evaluate inside actions follows the F-t2-002 policy.",
+ "whyItMatters": "Declarative actions and screenshot/PDF output are table-stakes for scrape APIs (Firecrawl SRC, Apify DOC; screenshots also in Codex and Aside). The runtime pieces already exist in Quarry but scrape cannot reach them: screenshot and pdf formats are always None (SRC).",
+ "referenceBestPractice": {
+  "bestSource": "Firecrawl scrape actions (firecrawl-api-surface-057 and firecrawl-engine-and-infra-012, SRC)",
+  "others": [
+   "Apify Crawlee page hooks and Playwright actions (apify-platform-060, DOC)",
+   "Codex screenshot pipeline for fresh frames (codexbrowser-automation-and-safety-061, SRC)",
+   "Firecrawl /execute with size, time and language limits (firecrawl-engine-and-infra-020, SRC)",
+   "Aside (agent-control-architecture-027: tiling with overlap, element shots, printToPDF)"
+  ],
+  "prevalence": "Actions: 2 of 4 sources (apify, firecrawl), table-stakes. Screenshot pipeline and bounded code execution: 1 of 4 each, unique. || 3 of 4 sources (Firecrawl, Codex in-app browser, Aside); table-stakes",
+  "mechanism": "Request.actions: Vec<Action> (nine types: wait, click, write, press, scroll, screenshot, scrape, executeJavascript, pdf). Validate caps (count, total wait, script size). Lower implicit options (waitFor, screenshot, consent removal) into the list. Execute sequentially on one page and collect per-action outputs into an ordered results array; any action forces a browser-capable driver. Screenshots in CSS or device pixels, JPEG q80, fresh-frame check for hidden pages. Execute endpoints return {stdout, stderr, result, exit code, truncated} with code <= 100,000 bytes and timeout 1-300 s. || Merged items add: CDP Page.getLayoutMetrics; if content height is within the capture limit use Page.captureScreenshot with captureBeyondViewport, otherwise plan vertical tiles with 200 CSS px overlap, scroll to each, wait 150 ms plus two requestAnimationFrame, capture, and compose the tiles into one image trimming overlap. Element shot: DOM.getBoxModel plus margin as the clip. PDF: Page.printToPDF. JPEG with quality for model use, PNG for archive."
+ },
+ "verevonToday": {
+  "status": "partial",
+  "evidence": [
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:346-373 (ScrapeRequest has only render.waitForSelector/waitForTimeoutMs; signals.actions is a Vec<String> hint per quarry-runtime/src/driver_plan.rs:13-17, not an action payload)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:62-100,380-390 (ActionRuntime exists; Action::Evaluate calls driver.evaluate directly; used only in its own tests per grep)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/actions.rs:7-78",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes.rs:140-290 (sensitive approval grants required only for RespondDialog, Upload and Download; everything else falls to `_ => Ok(None)`)",
+   "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs:161 (Evaluate{script} is part of the Model Plane action contract); grep: no 'evaluate' handling in browser_agent/browser_risk.rs",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs:3751 (gateway denies evaluate for UI sessions)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:702-703 (OutputFormats screenshot: None and pdf: None; screenshot is never captured on scrape)",
+   "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:23 (marks scrape actions as parity; overstated because no scrape route calls ActionRuntime)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:140-147",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:696-706",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2396",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2438-2440"
+  ],
+  "gap": "Scrape cannot run actions or return a screenshot even though the runtime pieces exist; the interactive session path is rich but separate. Evaluate has no approval gate, size, timeout or result cap on the Quarry agent path. || NormalizedOutput.formats.screenshot and .pdf are always None on scrape. Capture exists only as agent actions (chromiumoxide capture_beyond_viewport(full_page) and page.pdf(PrintToPdfParams::default())) and in PageRenderer, which writes one full-page PNG per document for visual RAG when ZDR is off. There is no tile-and-stitch for very tall pages, no element or clip shot, no quality/viewport options, and the UI has no field for PDF artifacts. Quarry's GET /v1/artifacts/:id is already tenant-bound (get_with_key with the claim org), so the gateway comment saying otherwise is stale."
+ },
+ "approach": "Ingestion Plane (quarry-core ScrapeOptions.actions, quarry-browser ActionRuntime and capture, quarry-edge envelope); Frontend timeline renders the outputs. || Source detail: [R-t2-03-03] Ingestion Plane. Step 1 (S, ship first): an EvaluatePolicy in quarry-runtime used by both ActionRuntime and the agent path, with script/time/result caps, approval-grant requirement via the existing BrowserBroker grant validator (agent_routes.rs sensitive_approval_for_action), and script hash in receipts. Step 2 (M): add actions[] to ScrapeRequest (routes.rs), validate caps, force the browser driver, run through ActionRuntime with on_error handling, and return per-action outputs; screenshots are stored as artifact refs through the artifact store with ZDR no-store. The Model proposes scrape actions and Quarry validates and executes them (authority rule); treat selectors and scripts from model output as untrusted input. Frontend Plane: show screenshot/actions output in the scrape preview. || [R-t2-02-06] Ingestion Plane: add screenshot and pdf to FormatSpec (R-t2-02-01); the pipeline forces the browser driver and calls the BrowserDriver screenshot/pdf methods through the session path PageRenderer already uses; extend quarry-browser with options (clip, quality, format, viewport) and a tile-and-stitch fallback that only runs past the single-capture height limit; write artifacts with correct content types (content_type_for_key) and return inline bytes only under ZDR with a size cap. Frontend Plane: render screenshot and PDF artifacts in BrowserTimelineDetail through the owner-gated gateway artifact route, and correct the stale tenant-scoping comment in browser.rs.",
+ "effort": "M",
+ "dependencies": [
+  "Artifact store ZDR no-store behaviour (quarry-runtime/src/artifact_store.rs)",
+  "BrowserBroker approval grants (existing grant validator)",
+  "F-t2-005 (format registry)",
+  "BrowserDriver session path used by PageRenderer"
+ ],
+ "planeOwner": "Ingestion Plane",
+ "risks": "CSS selectors and scripts from model output are an injection surface; keep evaluate off by default; screenshots can contain sensitive data (ZDR must suppress persistence); long action lists raise cost, so the caps must be enforced server-side. || Memory use on very tall pages; stitched seams on sticky or lazy-loaded content; PDF output of authenticated pages must go through the existing owner gate.",
+ "significance": 4,
+ "confidence": "high",
+ "provenanceMix": {
+  "REA": 0,
+  "SRC": 17,
+  "DOC": 2,
+  "INF": 0
+ },
+ "alreadyPlanned": {
+  "is": true,
+  "where": "[R-t2-03-03] apps/Ingestion Plane/Quarry-v2/docs/SOVEREIGN_SCRAPING_RELIABILITY.md Phase 6 (product parity layer: Firecrawl-compatible outputs and /interact with policy gates and browser receipts); not scheduled in code"
+ },
+ "quickWin": false,
+ "wave": "W2",
+ "needsVerification": false,
+ "adrNeeded": true,
+ "sourceItems": [
+  "R-t2-03-03",
+  "R-t2-02-06"
+ ],
+ "sourceClusters": [
+  "C-t2-03-010",
+  "C-t2-03-016",
+  "C-t2-03-022",
+  "C-t2-02-004"
+ ],
+ "sourceCategories": [
+  "Rendering & browser engines",
+  "Output formats & content processing"
+ ],
+ "originalTier": "priority",
+ "finalTier": "priority",
+ "verification": {
+  "verevon": {
+   "finalId": "F-t2-023",
+   "status": "partial",
+   "exactGap": "Scrape cannot run actions or return a screenshot or PDF: ScrapeRequest has only render.waitFor* hints (routes.rs:346-373), the pipeline hard-codes screenshot: None and pdf: None (pipeline.rs:702-703), and signals.actions/screenshot/pdf are planning hints only (driver_plan.rs:13-20). The pieces exist on the agent path only: screenshot via capture_beyond_viewport and PDF via PrintToPdfParams::default() (chromiumoxide.rs:2392-2445), plus ActionRuntime, which has no production caller beyond a lib.rs re-export and acquires its own session rather than using the scrape session in BrowserDriverAdapter::do_fetch (browser_driver.rs:128-240). OSS_PARITY_BACKLOG.md:21-23 marks both as full parity, which is overstated.",
+   "evidence": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:346-373",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs:405-470",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs:685-715",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/output.rs:128-160",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver_plan.rs:8-22",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/driver.rs:31-79",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_driver.rs:128-240",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/actions.rs:1-80",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:62-110",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:164-200",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/action_runtime.rs:380-392",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-browser/src/chromiumoxide.rs:2392-2445",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs:190-215",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vision.rs:124-144",
+    "apps/Ingestion Plane/Quarry-v2/docs/OSS_PARITY_BACKLOG.md:18-26"
+   ],
+   "reuse": [
+    "BrowserDriverAdapter::do_fetch, which already sequences acquire, egress policy, goto, wait_for and content on one session (browser_driver.rs:128-240)",
+    "the Action enum and ActionScript with on_error (actions.rs:1-80; it already includes Navigate and Evaluate, so both need explicit policy) and the ActionRuntime executor (action_runtime.rs), extended to accept an existing session",
+    "driver.screenshot and driver.pdf plus the put_artifact_if_allowed ZDR no-store helper used on the agent path (observation.rs:525-545)",
+    "OutputFormats.screenshot/pdf FormatRef fields, which already exist unpopulated (output.rs:140-147)",
+    "the tenant-bound artifact read (resource_routes.rs:157) and the gateway owner-gated artifact route for the UI"
+   ],
+   "constraints": "Ingestion Plane owns this; the Model proposes scrape actions and Quarry validates, caps and executes them, and selectors or scripts from model output are untrusted input. ZDR: screenshots and PDFs must not be persisted under ZDR (inline-only within a size cap) and the visual page-image producer already writes PNGs only when ZDR is off. Artifacts must be stored under the claim's org. Scrape-time actions must keep the host-pinned browser egress policy that do_fetch derives from the request URL (off-host navigation denied), and Evaluate stays denied until the F-t2-002 gate exists. Cache admission must exclude requests with actions, headers or screenshot options (F-t2-003).",
+   "approachAdjustment": "Split into two deliverables. (1) Formats (M): capture screenshot and PDF inside do_fetch after goto/wait_for, return the bytes through the fetch response so the pipeline fills OutputFormats.screenshot/pdf as artifacts, with ZDR no-store and cache bypass, and options clip, quality, viewport and fullPage; add tile-and-stitch only past the single-capture height limit. The vision sidecar's tiles (vision.rs, ArtifactKind::Tiles) are OCR/visual-RAG preprocessing, not capture, so do not reuse them. (2) Actions (M): carry a validated, capped Vec<Action> on RenderHints/FetchHints and run it in do_fetch on the same page (extend ActionRuntime to take an existing session instead of acquiring one), returning per-action outputs. Do not run actions through a second ActionRuntime page, because that loses the scrape session's egress and cookie context.",
+   "effortRevised": "L",
+   "effortNote": "Two features (formats and actions), new channels through FetchResponse and the pipeline, cache admission, ZDR handling, API contract and UI; each half alone is M.",
+   "verdict": "reword",
+   "verdictReason": "Gap confirmed, but the stated integration point (run through the existing ActionRuntime) is not wired to any production path and uses a different session; the item should be split and its hook moved to BrowserDriverAdapter::do_fetch.",
+   "confidence": "high"
+  },
+  "reference": {
+   "finalId": "F-t2-023",
+   "verdict": "partial",
+   "checked": [
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:249-350 (MAX_ACTIONS=50, ACTIONS_MAX_WAIT_TIME=60, nine action literals incl. pdf, screenshot quality 1-100 and 7680x4320 viewport cap, executeJavascript script: z.string() with no length cap)",
+    "C:/dev/firecrawl/apps/api/src/controllers/v2/types.ts:1518-1530 (results grouped as screenshots[], scrapes[], javascriptReturns[], pdfs[])",
+    "C:/dev/firecrawl/apps/api/src/scraper/scrapeURL/engines/index.ts:252-430 (actions:true only for fire-engine;chrome-cdp[;stealth]; playwright engine actions:false)",
+    "scratchpad/tmp/cxas/pretty/browser-service.pretty.js:14574-14660 (JPEG q80, captureBeyondViewport+clip, Page.startScreencast fresh-frame timestamp check)",
+    "scratchpad/tmp/aside/daemon_sea_blob.bin@11465958 (planVerticalTiles with OVERLAP_CSS, 150 ms + double rAF, Page.captureScreenshot png with captureBeyondViewport:false, PNG bitblt compose); Page.printToPDF string present",
+    "findings/t2 records firecrawl-api-surface-057/051, firecrawl-engine-and-infra-012/020, apify-platform-060, codexbrowser-automation-and-safety-061, codexbrowser-in-app-browser-005, aside-agent-control-architecture-027",
+    "REA tools not used; direct reads of source and extracted copies"
+   ],
+   "corrections": "Firecrawl action execution happens only in the closed hosted fire-engine (chrome-cdp); the open-source playwright engine declares actions:false, so 'execute sequentially on one page' is not observable in source and self-hosted Firecrawl cannot run actions. Outputs are grouped into per-type arrays (screenshots, scrapes, javascriptReturns, pdfs), not one ordered per-action results array (an ordered array is a Verevon improvement, mark INF). The scrape executeJavascript action has no script-size cap; the 100,000-byte / 1-300 s limits belong to the separate hosted-browser /execute endpoint (Hangar), so do not attribute a script cap to the scrape action DSL. Aside always scroll-stitches with captureBeyondViewport:false (single tile when content fits the viewport); the 'captureBeyondViewport when within limit' branch is Codex/Firecrawl-style, so the merged mechanism blends sources and should say so. JPEG q80 and fresh-frame screencast are Codex-specific; Aside tiles are PNG and element shots default to webp.",
+   "prevalenceCorrect": true,
+   "caveats": [
+    "Firecrawl actions: SRC for schema/limits, but runtime behaviour lives in closed fire-engine (cloud-only)",
+    "Apify page actions are DOC-only and are declarative per-Actor options (Website Content Crawler, RAG Web Browser), not a general action DSL",
+    "Screenshot prevalence may be undercounted: Apify/Crawlee likely also offers screenshots (INF, not re-checked)",
+    "Firecrawl OpenAPI spec lists eight action types (no pdf): spec drift"
+   ],
+   "confidence": "high"
+  }
+ }
+}
