@@ -44,6 +44,8 @@ pub struct AppState {
     /// WS17.P2 owner and ACL check on `/v1/profiles*`: `off`, `observe` (logs, serves)
     /// or `enforce` (404 for a non-owner). See `crate::profile_guard`.
     pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
+    /// F-t2-068: whether `POST /v1/profiles/:id/clear-data` is served (`QUARRY_EDGE__PROFILE_CLEAR_DATA`).
+    pub profile_clear_data: bool,
     pub driver: Arc<dyn Driver>,
     pub drivers: DriverRegistry,
     /// Wave 7 — optional HTTP/3 driver. `Some` when the runtime was

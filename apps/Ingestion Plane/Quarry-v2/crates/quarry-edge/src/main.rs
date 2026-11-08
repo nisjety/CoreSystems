@@ -1833,6 +1833,7 @@ async fn run() -> anyhow::Result<()> {
         require_browser_grants,
         zdr_refuse_durable_resources: cfg.zdr_refuse_durable_resources,
         profile_owner_enforce: cfg.profile_owner_enforce,
+        profile_clear_data: cfg.profile_clear_data,
         org_erasables,
         driver: default_driver,
         drivers,

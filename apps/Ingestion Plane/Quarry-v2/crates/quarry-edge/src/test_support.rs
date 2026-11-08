@@ -105,6 +105,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         require_browser_grants: false,
         zdr_refuse_durable_resources: false,
         profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
+        profile_clear_data: false,
         org_erasables: Vec::new(),
         driver: static_driver,
         drivers,

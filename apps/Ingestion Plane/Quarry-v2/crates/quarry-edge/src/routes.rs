@@ -247,6 +247,12 @@ pub fn router(state: AppState) -> Router {
             "/v1/profiles/:id/restore_probe",
             post(crate::profile_routes::restore_probe),
         )
+        // F-t2-068: remove a stored profile's cookies, web storage and IndexedDB. Off unless
+        // QUARRY_EDGE__PROFILE_CLEAR_DATA is on (501); a dry run is the default.
+        .route(
+            "/v1/profiles/:id/clear-data",
+            post(crate::profile_routes::clear_profile_data),
+        )
         .route("/v1/audio", post(crate::audio_routes::audio))
         .route("/v1/search", post(crate::search_routes::search))
         .route("/v1/search/images", post(crate::search_routes::images))
@@ -2573,6 +2579,7 @@ mod tests {
             require_browser_grants: false,
             zdr_refuse_durable_resources: false,
             profile_owner_enforce: crate::profile_guard::OwnerEnforce::Observe,
+            profile_clear_data: false,
             org_erasables: Vec::new(),
             driver: static_driver,
             drivers,

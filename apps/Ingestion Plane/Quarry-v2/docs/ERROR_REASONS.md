@@ -350,3 +350,15 @@ Standard envelope, `error.details.reason` as below. A message never echoes docum
 | 504 | `TIMEOUT` | none | the parse took more than 15 seconds | the file is too slow to read; do not retry as is |
 
 A 200 may carry `warnings[]` (`document_has_no_text_layer`, `some_pages_have_no_text_layer`, `document_has_no_text`, `truncated_at_8mib`): they are not errors.
+
+## `POST /v1/profiles/:id/clear-data`: removing a stored profile's browsing data (F-t2-068)
+
+| status | code | `details.reason` | meaning | what to do |
+|---|---|---|---|---|
+| 403 | `FORBIDDEN` | none | a service principal never reaches a profile | use a person's token |
+| 404 | `NOT_FOUND` | none | no such profile, or not visible to the caller under `enforce` (a non-owner, and on a shared profile anyone but its owner) | check the id |
+| 409 | `CONFLICT` | `profile_in_use` | a live run (a browser session) holds this profile; its session would save the profile again when it closes | close the session, then clear |
+| 409 | `CONFLICT` | `profile_busy` (`retry_after_seconds`) | the profile was written while it was being cleared, on three attempts | retry |
+| 501 | `UNSUPPORTED` | `profile_clear_data_disabled` (`env`) | `QUARRY_EDGE__PROFILE_CLEAR_DATA` is off | ask the operator |
+
+A 200 with `dry_run: true` (the default) changes nothing. A ZDR organization is not refused: the route only erases what is stored.

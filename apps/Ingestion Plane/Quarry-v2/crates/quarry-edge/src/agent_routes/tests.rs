@@ -2682,3 +2682,98 @@ async fn projection_does_not_wait_for_a_running_step() {
         .expect("the projection serializes");
     assert_eq!(json["step"], serde_json::json!(entry.summary.step));
 }
+
+// ---- F-t2-068: clearing a profile that a live run holds
+
+#[tokio::test]
+async fn clear_data_is_refused_while_a_live_run_holds_the_profile_and_runs_once_it_closes() {
+    use crate::budget::RunClass::Interactive;
+    use crate::profile_guard::OwnerEnforce;
+    use crate::profile_routes::{clear_profile_data, ClearDataRequest};
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::{Extension, Json};
+    use quarry_browser::session::{
+        Cookie, ProfileMetadata, ProfileScope, SaveMeta, SessionSnapshot,
+    };
+
+    let mut state = swept_state(crate::run_limits::RunLimits::unlimited());
+    state.profile_clear_data = true;
+    state.profile_owner_enforce = OwnerEnforce::Enforce;
+    let profile: quarry_core::ids::kinds::ProfileKind = Id::new();
+    state
+        .profiles
+        .save_metadata(
+            "org",
+            &profile,
+            &ProfileMetadata {
+                name: None,
+                scope: ProfileScope::UserPrivate,
+                owner: Some("user".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let stored = SessionSnapshot {
+        cookies: vec![Cookie {
+            name: "sid".into(),
+            value: "v".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    state
+        .profiles
+        .save("org", &profile, &stored, &SaveMeta::now(Some("user".into())))
+        .await
+        .unwrap();
+
+    let (run_id, handle) = register(&state, "org", Interactive, T0).await;
+    handle.entry.lock().await.lease.profile_id = profile.clone();
+
+    let claims = crate::auth::Claims {
+        web_policy: None,
+        sub: "user".to_owned(),
+        iss: "test".to_owned(),
+        exp: i64::MAX,
+        org_id: "org".to_owned(),
+        user_id: "user".to_owned(),
+        principal_type: Some("user".to_owned()),
+        service_id: None,
+        nbf: None,
+        aud: None,
+        scopes: Vec::new(),
+        zdr: None,
+        key_id: None,
+        acting_user_id: None,
+    };
+    let clear = |dry_run: bool| {
+        clear_profile_data(
+            State(state.clone()),
+            Extension(claims.clone()),
+            Path(profile.to_string()),
+            Json(ClearDataRequest { dry_run }),
+        )
+    };
+
+    let (status, body) = clear(false).await.expect_err("a profile a live run holds is refused");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body.0.error.as_ref().unwrap().details.as_ref().unwrap()["reason"],
+        "profile_in_use"
+    );
+    let still = state.profiles.load("org", &profile).await.unwrap().unwrap();
+    assert_eq!(
+        still.cookies.len(),
+        1,
+        "the stored data is untouched while the run is open"
+    );
+
+    finish_run(&state, &run_id, handle, CloseReason::Explicit)
+        .await
+        .unwrap();
+    let cleared = clear(false).await.unwrap().0.data.unwrap();
+    assert!(cleared.cleared);
+    let after = state.profiles.load("org", &profile).await.unwrap().unwrap();
+    assert!(after.cookies.is_empty());
+}
