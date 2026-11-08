@@ -1,0 +1,440 @@
+{
+  "ws": "WS02",
+  "header_decisions": [
+    "DEC-18 (WS02 D1, billing) gates S3 enablement only; S3 can be built and merged with its flag off",
+    "DEC-28 (WS02 D3) gates no slice",
+    "DEC-06 (WS02 D4) gates the S6 Space behaviour",
+    "DEC-32 (WS02 D5) gates S6 full mode for waived runs (waived runs persist like Ask)",
+    "DEC-39 (WS02 D8) sets merge order for S3, S4, S9, S10 (train T2 order: S4, then S5, then S3)",
+    "Local decisions D2, D6, D7, D9, D10: D2 and D10 gate S6; D7 gates S10 enablement; D6 is S9 phase 2 (not designed); D9 is referenced by no slice row"
+  ],
+  "notes": "Sources: plan lines 382-422 (WS02 header; slice rows S1-S12 at lines 396-407) with Appendix B (lines 2253-2323) applied, and sections 4.2-4.6 read for tags, finals, migrations and ordering.\nFree to build now per the header: S1-S5, S9, S11; S6 and S7 build after S4 and S5; S8 is calendar-bound; S12 is unscheduled.\n\nBUILT (git log afb83928..HEAD plus greps; no WS02 build-ledger row exists):\n- S1: model-gateway half built in eb1db27a (sse_events.rs ChatEvent::Usage keys; test usage_carries_cache_tokens_and_omits_them_when_zero at sse_events.rs:1817; sse.rs). The SPA 'Prompt cache' metric already exists (ChatPanels.tsx:935-937, shows '<n> read', no '% of input', hidden when read+write is 0); chat-client.ts parses the cache keys (:1442, :1695). Missing: the pct text, ChatPanels.cache.test.tsx (absent), a chat-client usage test case, live evidence.\n- S4: built in 8cff6738 (proto) and 0736d692 (mp-contracts run_context.rs and run_context_posture.rs; session-core grpc.rs record_run_context at :5751 with test at :10028 and ZDR refusal; execution-core boundary; model-gateway grpc.rs stub; sse.rs; e2e test). RunContextState, RunContextPart and RunContextStatus sit in runs.proto:335-363 (the row says execution.proto). Residual (N7): RecordRunContext is in neither api/contracts/zdr-posture-matrix.json (+ .sha256) nor the zdr_refusal_inventory test files, and the N7 test name is not defined in this worktree (only a comment at durable_loop_contract.rs:4624); section 6.6 needs the matching row. No live evidence recorded.\n- NOT built (no symbols or files found): S2 (cost-core migrations end at 0010; no cache_telemetry.rs); S3 (no RunUsage message; no MODEL_GATEWAY_AGENT_USAGE_ENVELOPE); S5 (no prompt_tier.rs, render_tiered or prompt_tier_contract.rs); S6 (no model-gateway run_context.rs; no MODEL_GATEWAY_RUN_CONTEXT; eval cases 15-16 absent); S7 (no seed_messages); S8 (no WS02 ledger row); S9 (no prompt_tiers; no INFERENCE_ANTHROPIC_TIERED_SYSTEM); S10 (no cache_scope_key; no prompt_cache_key); S11 (no CompactionTx; no mp_gateway_compaction_total). S12: list_todos_by_plan exists (orchestration_store.rs:619) with no Volatile-tier wiring.\n\nAPPENDIX B APPLIED:\n- N1: S5 needs a rebuilt model-gateway and a flagged 3-turn proof; the row's 'no deploy needed' is overridden. Every runtime slice has needs_live_stack true.\n- N2: buf breaking is vacuous (baseline.binpb is 0 bytes). S3, S4, S9, S10 add WS12-S2 to depends_on; their proto evidence is a tag diff against git show HEAD:'apps/Model Plane/proto/model_plane/v1/<file>.proto'. K1-24: regenerate Go bindings with the buf Docker image (buf is not on the host).\n- N3: chat-client.ts is an S0 group-0F hot file (only ZDR or typed-refusal hunks land in S0); S1 rebases onto the owning session for any other hunk.\n- N4: RunContext field 5 is free and 6 is reserved for WS20; the 4.3 'reserved WS08 fallback' is superseded because WS08 keeps RunAgentRequest.attachments = 20. Finals: RunAgentRequest.run_context 18; RunAgentResponse.usage 9; InferRequest.prompt_tiers 18; InferRequest.cache_scope_key 19; InferRequest.reasoning_effort (WS11) 17.\n- N5: mp-contracts already has serde (derive, via workspace) and blake3 (workspace root Cargo.toml). sha2 is absent, but no S5 or S10 text needs it, so no Cargo change is needed for either.\n- N6: WS02 adds no session-core migration. S2 is cost-core 0011 with up and down files (4.4).\n- N8: render_tiered is NEW (prompt_context.rs:305 is the existing render_stable_prefix). openai.rs has no prompt_cache_key. The BFF injects inject_authored_instructions (ag_ui.rs:101) and inject_persona_instructions (:108), not org_instructions.\n- K1-10: the S6 space_scope skip waits on the Space session's memory_scope_key migration.\n- K1-14: the C2 target is the baseline hit rate recorded at WS02-S1.\n- K1-20: WS02 blocks WS05 through merged_tool_defs (S7).\n- B.4 anchors: row line numbers are HEAD-era and stale in this worktree (agentic_run_stream sse.rs:9841; build_usage_envelope :10661; authored_instructions_message :6400; load_context_assembly_messages :4833; fetch_chat_memory_context :5216; COMPACTION_SUMMARY_TIMEOUT :4599; merged_tool_defs agent.rs:875; run_rounds :1906). The file paths were checked and are correct.\n\nORDER NOT IN depends_on (plan 4.5-4.6): train T1 carries S1; T2 merges S4, then S5, then S3; T3 merges WS03-S6 first, then S6 and S7; T4 carries S2; T8 carries the S8 flag flips and proofs. S4-S7 are the serial agent.rs queue (lane C). S1, S3, S6 and S11 touch sse.rs (E2 queue). S9 and S10 are lane E1 (inference-core, runs free).\n\nBLOCKS and CONSUMES (4.2): WS02 blocks WS03 (S3 builder; S4 field order), WS05 (S7 merged_tool_defs), WS08 (S6), WS14 (S6), WS18 (S1, S4-S7), WS20 (S4 and S7 per WS20; S5 and S6 per the WS02 Blocks column), WS23, WS25 (params struct) and WS27 (S1, S3). It consumes WS01-S0, the WS07 memory mode and skip reason, the WS26 decision on redacting the Do goal, DEC-18 billing attribution and the DEC-06 Space audience predicate. Cycle breaker: S6 stamps SKIPPED_BY_POLICY(memory_off) once WS07 returns a typed reason, else UNAVAILABLE.\n\nZDR (plan): validate refuses ZDR runs with history or memory (instructions allowed); compose returns SKIPPED_BY_POLICY(zdr); run records hold enums and counts only; ZDR sends no cache_control (anthropic.rs:287) and no prompt_cache_key; ZDR envelopes are never persisted (cost-core cmd/main.go:492).\n\nPATHS: RS = apps/Model Plane/rust/services; crates = apps/Model Plane/rust/crates; FE = apps/Frontend Plane/verevonv3; cost-core = apps/Model Plane/go/services/cost-core; tool_loop.rs is in model-gateway/src. The action-surface test runs from the FE root. The row gives no folder for S2 analytics_cache_test.go or for the Go half of the S3 wire-parity golden; choose at implementation (not listed in files).\n\nEFFORT: header total 34-50 days; the row sums are 34-51 (S1 1-2, S2 4-6, S3 4-6, S4 3-5, S5 3-4, S6 5-7, S7 4-6, S8 2-3, S9 4-6, S10 2-3, S11 2-3). Rows kept as written; S12 is 0 days and optional.\n\nUNDETERMINED in the rows: staging OpenAI and Azure credentials (S2, S8); Azure api-version acceptance (S10, D7); whether anthropic_compaction_tests.rs compiles (S9); the todo producer (S12).",
+  "slices": [
+    {
+      "id": "WS02-S1",
+      "title": "Usage frame carries cache tokens",
+      "tag": "FINISH",
+      "summary": "Adds cache_read_tokens and cache_write_tokens (u32, written only when non-zero) to the ChatEvent::Usage SSE frame and sets them on the Ask sites; the agentic site stays 0 until WS02-S3. The SPA prompt-cache metric already exists; the model-gateway half is built (see notes).",
+      "planes": ["Model Plane", "Frontend Plane"],
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.cache.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts"
+      ],
+      "new_files": ["apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.cache.test.tsx"],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --lib usage_ (new test usage_carries_cache_tokens_and_omits_them_when_zero)",
+        "[cwd: apps/Frontend Plane/verevonv3] pnpm vitest run src/features/chat/components/ChatPanels.cache.test.tsx src/shared/api/chat-client.test.ts",
+        "[cwd: apps/Model Plane] python3 scripts/gen-sse-event-taxonomy.py --check"
+      ],
+      "dod": "Two consecutive long Anthropic turns (second within 5 min): the SSE usage frame carries the cache keys and the SPA metric shows the read figure with its percentage of input; zero-cache turns show no metric. Evidence: frame JSON and screenshot. To verify: tool-loop turns may report only the last round's cache legs; sum them if so."
+    },
+    {
+      "id": "WS02-S2",
+      "title": "Cache hit-rate view and miss reasons",
+      "tag": "FINISH",
+      "summary": "Adds cache-read and cache-creation totals and a closed-set cache_miss_reason (below_minimum, prefix_changed, ttl_expired, no_baseline, unexplained) to cost-core analytics (migration 0011) with a cache_breakdown in the analytics response; adds an advisory per-replica miss classifier in model-gateway (cache_telemetry.rs, digests in memory only); and adds a hit-rate tile with reasons in the Insights usage view.",
+      "planes": ["Model Plane", "Frontend Plane"],
+      "files": [
+        "apps/Model Plane/go/services/cost-core/internal/ledger/analytics.go",
+        "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go",
+        "apps/Model Plane/go/services/cost-core/internal/postgres/analytics.go",
+        "apps/Model Plane/go/services/cost-core/internal/postgres/store.go",
+        "apps/Model Plane/go/services/cost-core/internal/server/analytics.go",
+        "apps/Model Plane/go/services/cost-core/cmd/main.go",
+        "apps/Model Plane/go/services/cost-core/migrations/0011_cache_miss_reason.up.sql",
+        "apps/Model Plane/go/services/cost-core/migrations/0011_cache_miss_reason.down.sql",
+        "apps/Model Plane/go/services/cost-core/internal/ledger/ledger_test.go",
+        "apps/Model Plane/go/services/cost-core/internal/server/server_test.go",
+        "apps/Model Plane/go/services/cost-core/internal/postgres/store_integration_test.go",
+        "apps/Model Plane/go/services/cost-core/cmd/main_test.go",
+        "apps/Model Plane/rust/services/model-gateway/src/cache_telemetry.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/api/cost-client.ts",
+        "apps/Frontend Plane/verevonv3/src/features/insights/lib/usage-analytics.ts",
+        "apps/Frontend Plane/verevonv3/src/features/insights/lib/usage-analytics.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/insights/components/UsageAnalyticsSection.tsx"
+      ],
+      "new_files": [
+        "apps/Model Plane/go/services/cost-core/migrations/0011_cache_miss_reason.up.sql",
+        "apps/Model Plane/go/services/cost-core/migrations/0011_cache_miss_reason.down.sql",
+        "apps/Model Plane/rust/services/model-gateway/src/cache_telemetry.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "decisions": [],
+      "flag": "",
+      "migration": true,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "A provider credential on the evidence stack for the pinned openai thread (not determined by the row).",
+      "risk": ["money", "zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "[cwd: apps/Model Plane/go/services/cost-core] go test ./... (new analytics_cache_test.go; extends ledger_test.go, server_test.go, store_integration_test.go, cmd/main_test.go)",
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --lib cache_telemetry",
+        "[cwd: apps/Frontend Plane/verevonv3] pnpm vitest run src/features/insights/lib/usage-analytics.test.ts",
+        "[cwd: apps/Frontend Plane/verevonv3] node --test apps/gateway/scripts/action-surface-contract.test.mjs"
+      ],
+      "dod": "Insights shows hit rate per model, provider and day, with miss reasons. Hit rate = sum(cache_read) / sum(input_tokens), token-weighted, only where the provider reported cache activity, else 'No cache activity reported'; subscription basis excluded. Evidence: 6-turn threads on Anthropic and on a pinned openai route; GET /api/v1/cost/analytics?scope=organization JSON and a screenshot; baseline numbers recorded for S8 and S9 (C2 target)."
+    },
+    {
+      "id": "WS02-S3",
+      "title": "Do-round usage reaches the ledger",
+      "tag": "BUILD",
+      "summary": "Adds RunAgentResponse.usage = 9 (RunUsage) and sums a run's rounds, including delegated subagent rounds, in execution-core. The agentic gateway publishes one AGENT_USAGE usage envelope per run (keyed by request id, carrying run_id) for non-ZDR runs only, behind a default-off flag, and the agentic Usage frame carries real tokens instead of 0.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs",
+        "apps/Model Plane/go/gen/model_plane/v1/proto_wire_parity_execution_test.go",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS12-S2"],
+      "decisions": ["DEC-18", "DEC-39"],
+      "flag": "MODEL_GATEWAY_AGENT_USAGE_ENVELOPE (default off)",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "Owner ruling DEC-18 (billing of Do runs through cost_billing_outbox) before the flag is enabled; building and merging with the flag off needs none.",
+      "risk": ["money", "zdr", "audit"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p execution-core --lib (new a_run_reports_the_sum_of_its_rounds_including_delegated_ones, a_paused_run_reports_the_usage_of_its_invocation)",
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --test e2e_invoke_chain_test (new agentic_run_publishes_one_usage_envelope_with_run_id)",
+        "[cwd: apps/Model Plane/rust] cargo test -p mp-contracts --test proto_wire_parity_execution (Rust wire parity), plus the Go wire-parity golden proto_wire_parity_execution_test.go"
+      ],
+      "dod": "A Do run yields one ledger row with run_id, tokens and cache legs; GET /api/v1/cost/run?run_id= is non-zero; the frame shows real tokens; ledger row count is unchanged with the flag off. Evidence: /api/v1/cost/entries, /api/v1/cost/run and the frame. Deploy execution-core first, then the gateway; flag stays off until DEC-18. Proto additivity by tag diff (N2). Double count on resume is owned by WS03 and WS27."
+    },
+    {
+      "id": "WS02-S4",
+      "title": "Run-context contract",
+      "tag": "BUILD",
+      "summary": "Adds RunAgentRequest.run_context = 18 (RunContext: authored_instructions, history, memory_block, status), RunContextStatus with RunContextPart and RunContextState, and SessionCore.RecordRunContext; adds mp-contracts run_context.rs (bounds and validate) and a session-core RecordRunContext that merges status counts and enums into runs.metadata.run_context with no migration. The execution-core boundary validates and refuses a ZDR run that carries history or memory; no behaviour change until WS02-S6.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "apps/Model Plane/proto/model_plane/v1/runs.proto",
+        "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/run_context_posture.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs",
+        "apps/Model Plane/go/gen/model_plane/v1/proto_wire_parity_execution_test.go",
+        "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/run_context_posture.rs"
+      ],
+      "new_files_already_present": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/tests/run_context_posture.rs"
+      ],
+      "depends_on": ["WS01-S0", "WS12-S2"],
+      "decisions": ["DEC-39"],
+      "flag": "",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "authority"],
+      "effort_days_low": 3,
+      "effort_days_high": 5,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p mp-contracts (includes run_context_posture)",
+        "[cwd: apps/Model Plane/rust] cargo test -p session-core --lib record_run_context_merges_without_dropping_other_keys",
+        "[cwd: apps/Model Plane/rust] cargo test -p execution-core --lib a_zdr_run_with_history_is_refused_at_the_boundary",
+        "[cwd: apps/Model Plane/rust] cargo check --workspace --all-targets"
+      ],
+      "dod": "Built (see notes). Remaining: (1) N7: add RecordRunContext to the ZDR inventory (refused for ZDR and waived; status JSON holds no content) and add its row to api/contracts/zdr-posture-matrix.json with the .sha256 (section 6.6 gets the same row); (2) rebuild session-core, execution-core and model-gateway and capture a Do flow with the RecordRunContext call and the runs.metadata record (N1); (3) proto additivity by tag diff (N2) until WS12-S2 lands; (4) keep RunContext field 5 free and field 6 reserved for WS20 (N4)."
+    },
+    {
+      "id": "WS02-S5",
+      "title": "Prompt tier contract and CI order check",
+      "tag": "BUILD",
+      "summary": "Adds mp-contracts prompt_tier.rs (tiers Stable < Context < Conversation < Volatile < Current, PromptTierPlan, plan_of, blocks_of) and a render_tiered(order) next to the existing render_stable_prefix in prompt_context.rs (Legacy returns None, so output is byte-identical); under the flagged order the date notice moves to Volatile. An execution-core source-reading contract test fails CI when a Volatile block precedes Conversation or a slot has no tier.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/prompt_tier.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/prompt_tier_contract.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/prompt_tier.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/prompt_tier_contract.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo fmt --all -- --check",
+        "[cwd: apps/Model Plane/rust] cargo test -p mp-contracts",
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --lib prompt_context (new every_slot_has_a_tier_and_stable_order_never_decreases)",
+        "[cwd: apps/Model Plane/rust] cargo test -p execution-core --test prompt_tier_contract"
+      ],
+      "dod": "CI fails when Volatile precedes Conversation or an unlabelled slot appears. Overrides the row's 'no deploy needed' (Appendix B.1 N1): rebuild model-gateway, run a flagged 3-turn thread with MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER set, and show unchanged output and the date-notice position. The order gate is the existing MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER (deploy/docker-compose.yml:464)."
+    },
+    {
+      "id": "WS02-S6",
+      "title": "Gateway run-context composer and agentic wiring",
+      "tag": "BUILD",
+      "summary": "Adds model-gateway run_context.rs (RunContextMode Off, Instructions, Full; AuthoredLayers; compose) that builds, for a Do run, the same authored-instruction text an Ask turn uses plus bounded history (new apply_head_drop, no summariser call) and memory (400 ms; skipped for trivial prompts and Space-scoped runs); it stamps the status through RecordRunContext best-effort and threads Option<RunContext> through spawn_run_dispatch and build_run_agent_request. Off is byte-identical to today.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+        "apps/Model Plane/deploy/docker-compose.yml",
+        "apps/Model Plane/python/eval-lab-py/cases/run_context/15_do_run_remembers_thread_fact.yaml",
+        "apps/Model Plane/python/eval-lab-py/cases/run_context/16_do_run_follows_org_instruction.yaml",
+        "apps/Model Plane/python/eval-lab-py/tests/test_runner.py",
+        "apps/Model Plane/docs/decisions/ledger.md"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+        "apps/Model Plane/python/eval-lab-py/cases/run_context/15_do_run_remembers_thread_fact.yaml",
+        "apps/Model Plane/python/eval-lab-py/cases/run_context/16_do_run_follows_org_instruction.yaml"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS02-S4", "WS02-S5", "WS02-S7"],
+      "decisions": ["DEC-06", "DEC-32", "D2 (local)", "D10 (local)"],
+      "flag": "MODEL_GATEWAY_RUN_CONTEXT=off|instructions|full (default off, read once); MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS (default 8000, clamp 1000-40000)",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "Space-session migration memory_scope_key (Appendix B.2 K1-10) before the space_scope skip is stamped; WS26 decision on redacting the Do goal (sse.rs passes req.content unredacted on the agentic path); WS07 typed skip reason (stub first; until then stamp UNAVAILABLE).",
+      "risk": ["zdr", "authority", "policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --lib run_context (composes_the_same_instruction_text_as_an_ask_turn, precedence_is_platform_org_space_persona_agent, persona_off_thread_omits_persona, history_drops_the_current_user_turn, history_tail_respects_the_token_budget_and_leaves_an_honest_notice, memory_timeout_is_unavailable_not_included, trivial_prompt_skips_memory, space_scoped_run_skips_memory, pinned_route_gets_instructions_only, off_sends_no_field)",
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --test e2e_invoke_chain_test (new agentic_dispatch_carries_the_composed_run_context; flag-off byte-identical)",
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --lib the_assembled_prompt_is_not_a_function_of_the_question"
+      ],
+      "dod": "Staging with MODEL_GATEWAY_RUN_CONTEXT=full: a Do run on a thread with prior turns, an org instruction and persona answers consistently; runs.metadata.run_context shows states; off is byte-identical. Evidence: turn 1 (Ask) states a fact and sets an org instruction, turn 2 in Do asks about it; gateway log (statuses and counts), run record metadata, answer, run console. Status reasons: zdr, waived_default, space_scope, route_uncached, trivial_prompt, timeout, no_credential, error. Eval cases 15 and 16 added; test_runner count 14 updated (test_runner.py:31). Ledger entry: 'Do runs inherit the Ask run context; the two loops stay separate'. The pinned subscription route forces Instructions only. Staging rollout: instructions first, then full; prod only after S7 and the eval gate."
+    },
+    {
+      "id": "WS02-S7",
+      "title": "execution-core seeding and Do prefix stability",
+      "tag": "BUILD",
+      "summary": "Adds seed_messages to the execution-core runtime loop, ordering the seeded messages as: system compose_system_prompt (Stable); system authored instructions (Context, inherited by subagents); history (Conversation, root only); memory block (Volatile, root only); skills (Volatile, moved from index 1 only when run_context is present); then the user goal and approved plan (Current). merged_tool_defs sorts MCP and client tool segments by name, and one content-free log line records the seeding.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/prompt_tier_contract.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS02-S4", "WS02-S5", "WS02-S6"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p execution-core --lib (new seed_without_run_context_is_unchanged, seed_orders_instructions_history_memory_skills_goal, run_context_text_cannot_change_the_permission_posture, tool_list_order_is_deterministic_for_mcp_and_client_tools, run_context_text_is_never_logged; extends the subagent test subagent_inherits_instructions_but_not_history_or_memory)",
+        "[cwd: apps/Model Plane/rust] cargo test -p execution-core --test cross_service_loop_contract --test compaction_parity_contract"
+      ],
+      "dod": "The S6 evidence flow passes with the executor rebuilt and a delegating run; no content in logs. Confirm by test the interplay with clear_stale_tool_results (execution-core compaction_budget.rs:111). Resume re-seeding is WS03 (seed_messages must be callable from the continue path)."
+    },
+    {
+      "id": "WS02-S8",
+      "title": "Stable-prefix order measured on staging",
+      "tag": "FINISH",
+      "summary": "No code: pins the cache route to openai or azure-openai (otherwise CacheRoute::Other), runs flags-off baselines on staging (three threads of eight turns plus two Do runs), then sets MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER=1 (optionally MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET or MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY, one change per run), runs the eval parity check, and records a written A/B table and the owner decision in the decisions ledger.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/docs/decisions/ledger.md"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS02-S2", "WS02-S5"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "Staging OpenAI and Azure OpenAI credentials (not determined; the A/B needs both routes). Owner decision before the flag is set on any route.",
+      "risk": ["none"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "[cwd: apps/Model Plane/python/eval-lab-py] make selftest",
+        "[cwd: apps/Model Plane/python/eval-lab-py] EVAL_LIVE=1 make eval (flags off vs on, 3 reruns each)"
+      ],
+      "dod": "Written A/B table (hit rate, write share, eval pass rate) and the owner decision. Evidence: two cost/analytics JSON captures and two eval reports. Calendar-bound (2-3 d)."
+    },
+    {
+      "id": "WS02-S9",
+      "title": "Anthropic tiered system blocks",
+      "tag": "BUILD",
+      "summary": "Adds InferRequest.prompt_tiers = 18 (PromptTierPlan with stable and context message counts) and maps it in inference-core. The Anthropic provider sends ordered system blocks and marks cache_control on the Stable and Context tiers (at most four breakpoints; the ZDR gate stays the first statement and sends no cache_control); the gateway tool loop and the execution-core agent pass the plan. Gated by INFERENCE_ANTHROPIC_TIERED_SYSTEM.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+        "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS02-S2", "WS02-S5", "WS02-S7", "WS12-S2"],
+      "decisions": ["DEC-39"],
+      "flag": "INFERENCE_ANTHROPIC_TIERED_SYSTEM (default off)",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p inference-core --lib anthropic (new tiered_system_marks_stable_and_context_not_volatile, tiered_system_never_exceeds_four_breakpoints, no_tiers_is_byte_identical_to_today, below_minimum_prefix_marks_nothing, zdr_tiered_request_sends_no_cache_control_and_one_system_string; existing zdr_request_must_not_send_cache_control_anywhere_in_the_body and breakpoint_count_never_exceeds_anthropics_limit_of_four unchanged)"
+      ],
+      "dod": "Staging: two consecutive turns with a changed volatile block show cache_read_input_tokens covering Stable and Context (above 0 where it is 0 today). Evidence: S2 view before and after, and S1 frames. Wire parity: Rust and Go goldens for InferRequest tag 18, with tag-diff evidence (N2). Phase 2 (volatile into the message tail) is local decision D6, not designed. To verify: whether anthropic_compaction_tests.rs compiles under cargo test (native compaction negotiation at anthropic.rs:519-613)."
+    },
+    {
+      "id": "WS02-S10",
+      "title": "Provider cache scope key",
+      "tag": "BUILD",
+      "summary": "Adds cache_scope_key(org_id, thread_id) in mp-contracts prompt_tier.rs (first 32 hex characters of blake3 over the versioned domain string verevon.prompt-cache.v1 and length-prefixed ids; subagents append :sub) and InferRequest.cache_scope_key = 19; openai.rs sends prompt_cache_key only for verified providers and never under ZDR. This is not a response cache; cache.rs is unchanged.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/prompt_tier.rs",
+        "apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS02-S8", "WS12-S2"],
+      "decisions": ["DEC-39", "D7 (local)"],
+      "flag": "INFERENCE_OPENAI_PROMPT_CACHE_KEY (default off)",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "Azure OpenAI api-version acceptance of prompt_cache_key (local decision D7, not determined); Azure may reject the unknown parameter.",
+      "risk": ["zdr"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p inference-core --lib openai (new prompt_cache_key_sent_only_when_enabled_and_not_zdr, openai_zdr_body_has_no_prompt_cache_key)",
+        "[cwd: apps/Model Plane/rust] cargo test -p mp-contracts (cache_scope_key determinism and domain separation)"
+      ],
+      "dod": "S8 flow with the key on shows a non-decreasing hit rate against the best S8 run. Evidence: S2 view. Wire parity and tag diff per N2 (inference.proto tag 19). The N5 Cargo dependency (blake3) is already present."
+    },
+    {
+      "id": "WS02-S11",
+      "title": "Compaction begin, commit and abort bracket",
+      "tag": "BUILD",
+      "summary": "Adds a CompactionTx (begin, commit with summary digest, abort with reason) in model-gateway compaction.rs and brackets the head-summary callers in sse.rs; a timeout or failure aborts and leaves the existing dropped-history notice. An in-process guard reports begun-but-never-committed compactions older than the 6 s summary timeout, exposes mp_gateway_compaction_total{phase,outcome}, and records compaction_generation in head-summary metadata.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["audit"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "[cwd: apps/Model Plane/rust] cargo test -p model-gateway --lib compaction (new a_begun_but_never_committed_compaction_is_reported_unmatched, commit_after_abort_is_refused; existing budget tests unchanged)",
+        "[cwd: apps/Model Plane/rust] cargo test -p execution-core --test compaction_parity_contract"
+      ],
+      "dod": "The metric shows on /metrics; a forced summariser timeout shows abort and the honest marker. Evidence: both captured. The durable commit half is WS17 (DEC-29 area); per-replica state is WS04."
+    },
+    {
+      "id": "WS02-S12",
+      "title": "Todo recitation",
+      "tag": "BUILD",
+      "summary": "Not scheduled. Would recite the plan's todos in the Volatile prompt tier through the existing list_todos_by_plan (session-core orchestration_store.rs:619) once a model-facing todo source exists; neither loop has a todo tool today.",
+      "planes": ["Model Plane"],
+      "files": [
+        "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "needs_live_stack": false,
+      "needs_external": "A model-facing todo producer (WS14, WS24 or the WS03 todo source); none exists.",
+      "risk": ["none"],
+      "effort_days_low": 0,
+      "effort_days_high": 0,
+      "test_commands": [],
+      "dod": "None defined (row: Tests none, DoD none). Not scheduled; excluded from effort (4.7). Joins a train only after its producer exists (4.6)."
+    }
+  ]
+}

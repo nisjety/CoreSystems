@@ -48,6 +48,10 @@ export interface ScheduleDialogProps {
   readonly onClose: () => void
   readonly seedTitle: string
   readonly seedGoal: string
+  /** A copy with changes (EP-6-S1) keeps the goal editable; a chat request and a renewal keep it fixed. */
+  readonly goalEditable?: boolean
+  /** The cron expression the dialog starts from when it copies a schedule. Absent, the first preset is shown. */
+  readonly seedScheduleExpr?: string
   readonly threadOriginHint: 'composer' | 'message-action'
   readonly onCreated?: (id: string) => void
 }
@@ -57,6 +61,19 @@ function firstPresetId(): string {
   return first ? first.id : 'custom'
 }
 
+/** The preset that names this cron expression, or the custom preset when no preset does. */
+function presetIdFor(scheduleExpr: string | undefined): string {
+  const expr = scheduleExpr?.trim() ?? ''
+  if (!expr) return firstPresetId()
+  return SCHEDULE_PRESETS.find((preset) => preset.cronExpr === expr)?.id ?? 'custom'
+}
+
+/** The raw expression for the custom field: only one that no preset names. */
+function customExprFor(scheduleExpr: string | undefined): string {
+  const expr = scheduleExpr?.trim() ?? ''
+  return SCHEDULE_PRESETS.some((preset) => preset.cronExpr === expr) ? '' : expr
+}
+
 export function ScheduleDialog(props: ScheduleDialogProps) {
   const i18n = useI18n()
   const session = getSession()
@@ -64,8 +81,8 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
 
   const [name, setName] = createSignal(props.seedTitle)
   const [goal, setGoal] = createSignal(props.seedGoal)
-  const [presetId, setPresetId] = createSignal(firstPresetId())
-  const [customExpr, setCustomExpr] = createSignal('')
+  const [presetId, setPresetId] = createSignal(presetIdFor(props.seedScheduleExpr))
+  const [customExpr, setCustomExpr] = createSignal(customExprFor(props.seedScheduleExpr))
   const [timezoneAdvanced, setTimezoneAdvanced] = createSignal(false)
   const [timezone, setTimezone] = createSignal(DEFAULT_SCHEDULE_TIMEZONE)
   const [contractToolNames, setContractToolNames] = createSignal<string[]>([])
@@ -82,8 +99,8 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
   function reset(): void {
     setName(props.seedTitle)
     setGoal(props.seedGoal)
-    setPresetId(firstPresetId())
-    setCustomExpr('')
+    setPresetId(presetIdFor(props.seedScheduleExpr))
+    setCustomExpr(customExprFor(props.seedScheduleExpr))
     setTimezoneAdvanced(false)
     setTimezone(DEFAULT_SCHEDULE_TIMEZONE)
     setContractToolNames([])
@@ -177,7 +194,7 @@ export function ScheduleDialog(props: ScheduleDialogProps) {
           />
         </label>
 
-        <Show when={!props.seedGoal.trim()}>
+        <Show when={props.goalEditable || !props.seedGoal.trim()}>
           <label class="verevon-schedule-dialog__field">
             <span>{i18n.tr('Oppgave', 'Task')}</span>
             <textarea

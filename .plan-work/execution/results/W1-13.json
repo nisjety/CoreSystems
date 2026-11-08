@@ -1,0 +1,265 @@
+{
+ "batchId": "W1-13",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS04-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "apps/Model Plane/rust/services/session-core/migrations/0052_message_client_id.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0052_message_client_id.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/docs/sse-event-taxonomy.md",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/mid-run-input.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.send-receipts.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.follow-up.test.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core (full, non-ignored)",
+     "outcome": "562 passed, 0 failed, 193 ignored (includes send_receipt_tests: id shape, ZDR credential cannot reach append_message with a client id)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (with two temporary one-line mock-literal edits in browser_run.rs and grpc.rs, since reverted)",
+     "outcome": "2217 passed, 1 failed: sse_events::payload_contract::sse_event_payload_golden (expected, golden + pins not regenerated: they are outside my files). Includes 13 new http_routes receipt tests, 6 new queued_input tests, send_receipt_id test"
+    },
+    {
+     "command": "cargo test -q -p mp-events -p mp-contracts --all-targets",
+     "outcome": "all passed"
+    },
+    {
+     "command": "cargo check -q --workspace (non-test code)",
+     "outcome": "0 errors"
+    },
+    {
+     "command": "cargo test -q --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --bin verevon-gateway-rs queue",
+     "outcome": "3 passed (2 new)"
+    },
+    {
+     "command": "pnpm exec vitest run chat-client.test.ts mid-run-input.test.ts use-chat-controller.send-receipts.test.ts use-chat-controller.follow-up.test.ts ChatPanels.test.tsx chat-normalizers.test.ts",
+     "outcome": "6 files, 276 tests passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/chat src/shared/actions src/shared/api",
+     "outcome": "1950 passed, 3 failed in chat-event-contract.test.ts (reads 'ids' not in the vendored golden: same golden step as above), plus quarry-client.test.ts import failure (pre-existing, @quarry/client missing)"
+    },
+    {
+     "command": "pnpm typecheck",
+     "outcome": "no errors in my files (only pre-existing quarry-client and remote-core errors)"
+    },
+    {
+     "command": "pnpm exec eslint (my FE files)",
+     "outcome": "0 errors; no new warnings after untrack fix"
+    },
+    {
+     "command": "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+     "outcome": "up to date (27 events) after regeneration"
+    },
+    {
+     "command": "buf generate (local protoc-gen-go, scratch dir) then copy sessions.pb.go; go build ./... in go/gen",
+     "outcome": "only sessions.pb.go copied (browser.pb.go differs pre-existing, not copied); go build ok"
+    },
+    {
+     "command": "buf breaking 'apps/Model Plane/proto' --against baseline.binpb",
+     "outcome": "clean"
+    },
+    {
+     "command": "buf lint ratchet",
+     "outcome": "red from pre-existing debt of other slices (GetThreadGrant, tool_calls, ThreadAutonomy suffix); my new fields carry comments"
+    }
+   ],
+   "db_tests_written": [
+    "send_receipt_tests::a_duplicate_send_is_one_row_one_event_and_one_memory_extraction",
+    "send_receipt_tests::the_same_id_with_other_content_or_role_is_a_conflict_and_writes_nothing",
+    "send_receipt_tests::an_id_names_a_message_within_its_thread_and_a_send_without_one_is_never_deduplicated",
+    "send_receipt_tests::concurrent_duplicates_serialise_on_the_thread_lock"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/browser_run.rs:3486 and apps/Model Plane/rust/services/model-gateway/src/grpc.rs:3774: change `AppendMessageResponse { sequence: 1 }` to `AppendMessageResponse { sequence: 1, ..Default::default() }` (the model-gateway LIB TESTS do not compile without these two). Same one-token fix in apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs:1250, tests/usage_meter_contract.rs:279 (`mpv1::AppendMessageResponse`) and apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:9458 (`pb::AppendMessageResponse`).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs ~6907-6931 (the round-boundary drain): `let drained = state.queued_inputs.drain_receipted(request_id); let queued: Vec<String> = drained.iter().map(|m| m.text.clone()).collect();` (the rest of the block keeps using `queued`), and at the push: `events.push(if crate::queued_input::send_receipts_enabled() { ChatEvent::QueuedInputReceipted { messages: queued, ids: drained.iter().map(|m| m.client_message_id.clone()).collect() } } else { ChatEvent::QueuedInput { messages: queued } }).await;`. Without it the delivery event never carries ids and the SPA falls back to matching by text.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs ~1396: call `crate::session_flow::prepare_managed_run_authenticated_with_receipt(` instead of `prepare_managed_run_authenticated(` and add the last argument `crate::session_flow::send_receipt_id(crate::queued_input::send_receipts_enabled(), effective_zdr, req.regenerated, req.edited_resubmit, req.idempotency_key.as_deref())`; update the source-text test at sse.rs ~19876 (`the_execute_gate_runs_before_any_run_exists`) to search `prepare_managed_run_authenticated_with_receipt(`. Without it the streaming send path (the SPA's main path) names no message to the transcript.",
+    "Regenerate the SSE payload golden (red now, and the 3 chat-event-contract.test.ts failures follow from it): `cd 'apps/Model Plane/rust' && MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib sse_event_payload_golden` (writes apps/Model Plane/api/contracts/sse-event-payloads.json); refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256; copy both the json and its .sha256 to apps/Frontend Plane/verevonv3/src/shared/api/contracts/; update the digest pinned at scripts/tests/zdr-contract-sync.test.sh:147; then run `bash scripts/tests/zdr-contract-sync.test.sh` and `pnpm exec vitest run src/shared/api/chat-event-contract.test.ts`.",
+    "Run the DB harness for session-core (migration 0052 plus the 4 ignored tests in send_receipt_tests) through scripts/tests/session-core-db-tests.sh; update the harness count (+4).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (model-gateway environment): `MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-false}`; and the same default-off line in the .env.example that lists the other MODEL_GATEWAY_* switches. Deploy order: session-core (migration 0052) first, then model-gateway, then the BFF and frontend, then the switch.",
+    "Ledger entry (apps/Model Plane/docs/decisions/ledger.md): with MODEL_GATEWAY_SEND_RECEIPTS on, queued input is persist-then-enqueue (closes WS04 D3; the 2026-08-24 'persist before deliver' entry is now true behind the switch); the delivery event carries ids through a second ChatEvent variant QueuedInputReceipted (same queued_input name); AppendMessage dedupes on (thread_id, client_message_id), trimmed content equality. Add message receipts (owner: session-core) to capability-ownership-matrix.md if a row is wanted.",
+    "Live proof (not done, not faked): rebuild session-core, model-gateway, the BFF image and restart the frontend; with the switch on, queue after the final round boundary and show the strip 'resent as new message', one `messages` row via psql (client_message_id set), one answer; and a retried queue POST with the same client_message_id returns deduplicated:true with the same message_id."
+   ],
+   "deviations": [
+    "ChatEvent::QueuedInput was NOT given an `ids` field: a new field would not compile at the emitter in tool_loop.rs (not mine). I added a second variant ChatEvent::QueuedInputReceipted {messages, ids} that maps to the same `queued_input` event name (precedent: three variants map to `error`); with the switch off the old frame is byte-identical. The sse_events payload golden therefore gains an optional `ids` key.",
+    "prepare_managed_run_authenticated keeps its signature; the receipt rides on a new prepare_managed_run_authenticated_with_receipt (the old one delegates with None), because the call in sse.rs is not mine.",
+    "Edited use-chat-controller.follow-up.test.ts (not on the owned list, but a test beside the controller): its third case modelled 'run takes the message' by finishing the stream with no delivery event, which now (correctly) means leftover-and-resend; it now emits the delivery event first. mid-run-input.test.ts guards were updated, not deleted.",
+    "catalog-manifest.ts left unchanged on purpose: the plan says executionContractFor only changes when the owner issues the receipt, which happens at the S9 flip.",
+    "Peer-replica queue: the probe reply carries the thread but not the stream's conversation_only scope, so the first store is tried as an ordinary message and retried once as conversation-only on FAILED_PRECONDITION. The exact fix needs run_control.rs (not mine).",
+    "I temporarily added `..Default::default()` to two AppendMessageResponse mock literals (browser_run.rs, grpc.rs) to run the model-gateway lib tests, then reverted them: they are in lead_todo."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/run_control.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256",
+    "scripts/tests/zdr-contract-sync.test.sh",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Model-gateway lib tests do not compile in the real tree until the lead applies the AppendMessageResponse mock-literal fix at browser_run.rs:3486 and grpc.rs:3774 and in tests/e2e_invoke_chain_test.rs:1250 and tests/usage_meter_contract.rs:279 (add `..Default::default()`); execution-core agent.rs:9458 is already fixed in the tree.",
+     "Lead shared edits still unapplied: tool_loop.rs round-boundary drain (drain_receipted and emit QueuedInputReceipted when the switch is on) and sse.rs (switch the call to prepare_managed_run_authenticated_with_receipt with send_receipt_id, plus the source-text test at ~19876). Without them the streaming send path names no message to the transcript and the delivery frame carries no ids. I applied these exact edits in a scratch copy: the lib compiles and the 2214 lib tests pass.",
+     "Golden regeneration is still open: sse_events::payload_contract::sse_event_payload_golden fails in the real tree, and so do the vendored-copy and chat-event-contract tests. Regenerate sse-event-payloads.json and its .sha256, copy both into the SPA's src/shared/api/contracts, update the digest at scripts/tests/zdr-contract-sync.test.sh:147, then run zdr-contract-sync.test.sh. In the scratch copy the regenerated golden changed only additively (QueuedInputReceipted plus an optional `ids` key).",
+     "The 4 ignored real-Postgres session-core tests (send_receipt_tests) and migration 0052 are unrun. Run them through scripts/tests/session-core-db-tests.sh and update the harness count (+4).",
+     "Deploy and records still to do. Add `MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-false}` to docker-compose.yml and the .env.example, deploying in the order session-core, model-gateway, BFF and frontend, then the switch. Add the ledger entry and the capability-ownership-matrix row. The `docker-compose.yml` diff in the tree today is another slice's (EXECUTION_RESULT_HANDLES), not this one's.",
+     "Live proof is not done: queue after the final round boundary and show the strip 'resent as a new message', one `messages` row via psql, one answer, and a retried queue POST returning deduplicated:true with the same message_id."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The SPA now sends idempotency_key on every ordinary send whatever the gateway switch says, which activates the in-memory idempotency guard for the product (duplicate_in_flight, invalid_idempotency_key and a fail-closed 1,024-entry cap per replica, idempotency_registry.rs MAX_ENTRIES); the plan specifies it, but the 'switch off is byte-identical' claim does not hold for the stream path, so measure the in-flight claim count before this ships."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Peer-replica queue stores a message before it knows the stream's conversation_only scope (the probe reply carries only the thread): the first store is a guess retried once on FAILED_PRECONDITION; run_control.rs's Probe reply should carry conversation_only so the guess can go."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Persist-first leaves a stored row when the queue then refuses (429 Full, a bus 503): the message sits in the transcript undelivered; a resend with the same id dedupes, but a user who rewrites the text gets a second row; decide whether a refused or unavailable queue should be recorded as withdrawn (needs the WS17 marker) or accepted as is."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The end-of-run resend fires only on the live stream's done frame; if the queued_input delivery frame is lost (dropped connection, resume path, another tab) a delivered message is sent again as a new turn: one transcript row (same id) but a second answer."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Switch-on needs the sse_events payload golden, its .sha256 pins, the SPA vendored copy and the zdr-contract-sync digest regenerated, plus the tool_loop.rs and sse.rs call-ins (lead_todo); until then the new frame and the stream-path receipts do not exist."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test reaches a real Postgres or a rebuilt image: the four ignored session-core tests (duplicate = one row/event/memory, conflict, per-thread scope, concurrent duplicates) and the live proof are unrun; session-core's replay still runs the Space decision checks, which is untested for a scoped thread."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "append_user_message's AppendMessageRequest (the client_message_id plumb) has no unit seam: the request is built inline and only send_receipt_id is tested; a mock SessionCore capturing the request (as tests/e2e_invoke_chain_test.rs does) would pin it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "catalog-manifest.ts executionContractFor for chat.queue_invocation_input should become owner_operation_receipt/caller_supplied at the S9 flip, once the owner issues the receipt."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A 503 (bus could not say, or message not recorded) is shown as 'not delivered' with no automatic retry; a retry under the same id is safe (stored once, queued once) and could be offered or automatic."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "0052 builds a unique index on the hot messages table inside the migration transaction (blocks writes while it builds); on a large table use CREATE INDEX CONCURRENTLY in a no-transaction migration as 0055 plans."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The BFF queue dispatcher still passes threadId/spaceRef in camelCase while model-gateway only reads thread_id (pre-existing, not touched): the claimed-thread check is skipped for action-dispatched queue calls."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The SPA now sends idempotency_key on every ordinary send whatever the gateway switch says, which switches on the dormant in-memory idempotency guard for the product (duplicate_in_flight, invalid_idempotency_key, 1,024-entry fail-closed cap per replica); measure in-flight claim counts before the switch ships."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Peer-replica queue stores the message before it knows the stream's conversation_only scope (the probe reply carries only the thread), so the first store is a guess retried once on FAILED_PRECONDITION; run_control.rs's Probe reply should carry conversation_only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Persist-first leaves a stored, undelivered row when the queue then refuses (429 Full, a ThreadMismatch refusal, a bus 503), and a user who edits the text before resending gets a second row; decide whether such a message needs a withdrawn marker (WS17) or is accepted as is."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The end-of-run resend fires only on the live stream's done frame; if the queued_input delivery frame is lost (dropped connection, resume path, another tab) a delivered message is resent as a new turn, giving one transcript row (same id) but a second answer."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Switch-on is blocked until the golden and pins, the sse.rs and tool_loop.rs call-ins and the compose default-off line land; until then the new delivery frame and the stream-path receipts do not exist."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test captures the AppendMessageRequest that append_user_message builds, so the client_message_id plumb is untested beyond send_receipt_id; a mock SessionCore capturing the request, as tests/e2e_invoke_chain_test.rs does, would pin it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Replay of a duplicate on a Space-scoped thread runs the Space decision checks before the dedupe lookup; this is untested in real Postgres and a replayed content-bound decision could be refused as a replay."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Migration 0052 builds a unique index on the hot messages table inside the migration transaction, which blocks writes while it builds; a large table wants CREATE INDEX CONCURRENTLY in a no-transaction migration."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A 503 (bus could not say, or message not recorded) is shown as 'not delivered' with no retry, although a retry under the same id is safe; offer or automate it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "catalog-manifest.ts executionContractFor for chat.queue_invocation_input should become owner_operation_receipt at the S9 flip, once the owner issues the receipt."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "zdr_refusal_inventory fails on browser_run.rs:802 and 4 fixture-reading lib tests need the Frontend recordings folder; both are not from this slice (browser_run.rs is untouched)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The BFF queue dispatcher passes threadId/spaceRef in camelCase while model-gateway reads thread_id, so the claimed-thread check is skipped for action-dispatched queue calls (pre-existing)."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "zdr",
+    "audit"
+   ],
+   "notes": "Built end to end behind MODEL_GATEWAY_SEND_RECEIPTS (default off, strict parser, env read per call; off = the old enqueue-then-persist handler, same bodies via a shared queue_refusal mapping).\n\nProto (additive, tags 18 / 2 / 3), migration 0052 + revert, session-core dedupe: append_message_in_tx looks the id up under the thread lock after every authority check and before the INSERT; same role + trimmed content = first row's sequence and message_id with deduplicated=true (no event, no memory extraction); other content or role = ALREADY_EXISTS; malformed id = INVALID_ARGUMENT; the id is written by a separate UPDATE only when present, so a send without one runs the old INSERT. ZDR: authorize_operation already refuses a ZDR credential before any append; pinned by a trait-level test.\n\nGateway: queue_input_with_receipts does persist-then-enqueue (closes D3): bounds check, thread from the stream registration (local, or a bus probe), claimed-thread check, store under the id, then queue_input with the id as op_id (owner repeat-check). Answers carry client_message_id / persisted / message_id / deduplicated. Run ended before the store = 404 resend_as_new_turn persisted:false; between store and queue = 404 resend_as_new_turn persisted:true; unrecordable = 409 / 503 retryable / 403 and nothing delivered. QueuedInputRegistry now keeps (text, id) and offers drain_receipted. Unary /v1/invoke names its prompt via send_receipt_id; the stream path needs the sse.rs call-in below.\n\nFrontend: every ordinary send mints msg-<uuid> sent as idempotency_key (not for zdr, regenerate, edit-resubmit, no-user-append); mid-run messages carry client_message_id; delivery matched by id then text; run_ended and end-of-run leftovers (accepted, not delivered, on the live stream's done) are resent under the same id and shown as 'resent' (new tray state, i18n.tr label); strip entries survive the resending turn. Action contract gets clientMessageId, BFF dispatcher maps it, BFF tests pin that receipt fields survive the ended-race rewrite.\n\nStatus partial because the build is not green until the lead steps below are applied (golden regeneration, tool_loop emission, sse.rs call-in, two test-literal fixes); nothing was run against a database or a rebuilt image."
+  }
+ ]
+}

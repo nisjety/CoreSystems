@@ -1,0 +1,46 @@
+[
+ {
+  "key": "spa-stale-chunk-blank-page",
+  "rows": [],
+  "title": "spa-stale-chunk-blank-page",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/app/shell/AppShell.tsx",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/app/chunk-recovery.ts",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/app/chunk-recovery.test.ts",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/app/shell/AppShell.test.tsx",
+   "apps/Frontend Plane/verevonv3/tests/e2e/chunk-recovery.spec.ts"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "node_modules/.bin/vitest run src/app/chunk-recovery.test.ts src/app/shell --pool=threads (cwd apps/Frontend Plane/verevonv3)",
+    "outcome": "2 test files passed, 29 tests passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "node_modules/.bin/tsc -p tsconfig.app.json --noEmit (cwd apps/Frontend Plane/verevonv3)",
+    "outcome": "22 errors total, all pre-existing and unrelated: missing module '@quarry/client' and implicit-any in src/shared/api/quarry-client.ts, and a TS2352 in src/shared/api/schedule-contract.test.ts. Zero errors in chunk-recovery.ts, chunk-recovery.test.ts, AppShell.tsx or AppShell.test.tsx.",
+    "passed": true
+   },
+   {
+    "command": "playwright test --project=chunk-recovery (lead, production build on vite preview)",
+    "outcome": "3 passed",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The Playwright chunk-recovery project (tests/e2e/chunk-recovery.spec.ts) is the regression test of record and has not been run against a fresh production build yet. The third main-frame navigation the probe counted is still not identified. The coder suggests logging frame.url() on each framenavigated event.",
+   "The Errored boundary also wraps CoreShell. A route failure that is not a chunk failure therefore replaces the sidebar and chrome with one error line, and that line stays until a full reload because nothing resets it on navigation. This matches the brief, but the owner may want reset-on-navigation later.",
+   "chunkReloadStarted is module state that is never cleared. If location.reload() were somehow stubbed or ignored, every later route failure would render blank. In production the page is leaving, so this is acceptable.",
+   "With VITE_CHUNK_RECOVERY_DISABLED=true, a chunk failure still renders nothing and shows no notice. Before the fix the page was blank too, so this is no regression, but the switch-on path has no visible error.",
+   "The fallback calls console.error(error()) each time it runs. Route errors could in principle carry URLs or messages in the browser console. That stays on the client and is not persisted, so zero data retention is unaffected.",
+   "translateApiError reads only the error's code field, so the generic copy never shows raw error text. Verified in src/shared/i18n/errors.ts:215."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Playwright chunk-recovery (tests/e2e/chunk-recovery.spec.ts, not edited) is yours to run against a fresh production build. The notice tests should now pass. The third main-frame navigation the probe counted is not identified. /login is a top-level route (App.tsx:153), outside RequireAuth (App.tsx:165), so the replace redirects at App.tsx:58, :87 and :114 do not run on that visit. Suggest logging frame.url() per framenavigated to see whether it is a same-document history change. Conflicts resolved: the computed task said files-you-may-edit was none, so I used the packet's files and new_files list. The computed task said run pnpm, but the packet says never run pnpm, so I ran node_modules/.bin binaries directly. Line endings: .gitattributes pins *.ts and *.tsx to eol=lf, and the four files are LF (git ls-files --eol shows i/lf w/lf). I briefly wrote CRLF from a faulty count and corrected it.",
+  "summary": "Fixed the stale-chunk blank page (D1-809, D1-169). AppShell.tsx wraps the routed content (the Show with CoreShell or standalone children) in Errored, and StaleBuildNotice stays outside it. The fallback draws nothing for a chunk-load failure, so the notice shows. Any other failure gets the existing generic i18n copy via translateApiError with no new copy, and the error is logged to the console. chunk-recovery.ts keeps the reload logic unchanged. It gains an exported isChunkLoadError predicate (Chromium, Firefox and Safari dynamic-import wording, plus Vite's failed CSS preload message) and an exported chunkReloadStarted flag that is set only on the reload path. AppShell.test.tsx is new, with 5 tests that mount the real AppShell under a memory router at /login and /dashboard, with CoreShell and the session store stubbed. chunk-recovery.test.ts gains 7 tests. Decisions beyond the brief, for you to veto: (1) chunkReloadStarted is an addition. Without it the first-load TypeError from reading 'default' would flash the generic error copy until the reload commits. (2) The boundary also wraps CoreShell, as briefed, so a non-chunk route failure removes the sidebar too. The notice and the copy remain. (3) The error state persists until reload, with no reset on navigation. (4) With VITE_CHUNK_RECOVERY_DISABLED=true a chunk failure now renders nothing and shows no notice, where before it was blank too. No Playwright run was done here; that is yours. Lead, 2026-10-28: rebuilt (vite build, AuthPage-BXLPE-cR.js), served with vite preview :5177 and ran playwright --project=chunk-recovery: the notice now shows (\"En ny versjon er tilgjengelig...\"), two document loads (visit + one reload). The spec's navigation counter counted the router's same-document replace on boot (three framenavigated events for two loads), so it now counts main-frame document requests: 3 passed. Before the fix the same spec failed 3 of 3 on a blank page."
+ }
+]

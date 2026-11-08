@@ -1,0 +1,207 @@
+# Secure production override. Apply after docker-compose.yml.
+# Docker Compose v2.24.4+ is required for the !reset tag.
+x-build-metadata: &build-metadata
+  SOURCE_REVISION: ${SOURCE_REVISION:?SOURCE_REVISION is required}
+  BUILD_DATE: ${BUILD_DATE:?BUILD_DATE is required}
+x-hardened-runtime: &hardened-runtime
+  read_only: true
+  cap_drop: ["ALL"]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+
+services:
+  quarry-edge:
+    build:
+      args: *build-metadata
+    init: true
+    # Chromium keeps its own sandbox enabled, which is incompatible with
+    # no-new-privileges. The container still gets an immutable root filesystem
+    # and no ambient Linux capabilities; only bounded scratch space is writable.
+    read_only: true
+    cap_drop: ["ALL"]
+    tmpfs:
+      - /tmp:rw,nosuid,size=1g
+      - /dev/shm:rw,noexec,nosuid,size=512m
+      # Chromium's profile and crash directories (QUARRY_BROWSER_PROFILE_ROOT,
+      # /var/lib/quarry/chromium in the image). The root is read-only, so without
+      # this the edge cannot create them, and the mount must be owned by the
+      # image's non-root user (65532) or the launch directories are not writable.
+      - /var/lib/quarry/chromium:rw,nosuid,size=512m,uid=65532,gid=65532,mode=0700
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      QUARRY_EDGE_AUTH_DEV_BYPASS: "0"
+      QUARRY_BROWSER_NO_SANDBOX: "0"
+      # Chromium writes its config and NSS data under $HOME, which in the image
+      # is on the read-only root; it aborts at start-up when it cannot. Point
+      # them at the writable scratch mount. The cache dir stays on the existing
+      # index volume.
+      XDG_CONFIG_HOME: /var/lib/quarry/chromium/xdg-config
+      XDG_DATA_HOME: /var/lib/quarry/chromium/xdg-data
+      QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:?AUTH_CORE_URL is required}
+      QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:?QUARRY_SERVICE_API_KEY is required}
+      QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: "0"
+      QUARRY_EDGE__DATABASE_URL: postgres://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/quarry_edge?sslmode=disable
+      QUARRY_EDGE__DRAGONFLY_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
+      QUARRY_EDGE__REDIS_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
+      # Boot gates for ENVIRONMENT=production (crates/quarry-edge/src/main.rs, the
+      # durability gate): the edge refuses to start with an in-memory artifact
+      # store, without a database, or when the profile, receipt, frontier or event
+      # history store fell back to memory. The base file defaults the backend to
+      # memory, so this overlay sets the two keys it leaves out. The profile store
+      # (postgres) and the database URL are already set above and in the base file.
+      # `filesystem` writes under the volume below and is single-replica storage;
+      # set QUARRY_EDGE_ARTIFACT_BACKEND=s3 (and QUARRY_EDGE__S3_BUCKET) where
+      # more than one edge runs.
+      QUARRY_EDGE__ARTIFACT_BACKEND: ${QUARRY_EDGE_ARTIFACT_BACKEND:-filesystem}
+      QUARRY_EDGE__ARTIFACT_ROOT: /app/data/artifacts
+      QUARRY_EDGE__DURABLE_EVENT_HISTORY: "1"
+      # Production requires a BrowserBroker validation endpoint and cannot start
+      # without one. The gRPC address of the browser broker on inter-plane-bus,
+      # e.g. http://browser-broker:9095.
+      QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL: ${QUARRY_EDGE_BROWSER_GRANT_VALIDATOR_GRPC_URL:?QUARRY_EDGE_BROWSER_GRANT_VALIDATOR_GRPC_URL is required}
+    volumes:
+      - quarry-edge-artifacts:/app/data/artifacts
+  quarry-control:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
+      QUARRY_INTERNAL_HMAC_REQUIRED: "1"
+  quarry-orchestrator:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    environment:
+      RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
+      CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
+      QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
+  imports-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      DATABASE_URL: postgresql+asyncpg://ingestion_user:${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}@ingestion-postgres:5432/imports
+      INGESTION_SERVICE_API_KEY: ${IMPORTS_SERVICE_API_KEY:?IMPORTS_SERVICE_API_KEY is required}
+  integration-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      ORG_CORE_SERVICE_TOKEN: ${INTEGRATION_ORG_CORE_SERVICE_TOKEN:?INTEGRATION_ORG_CORE_SERVICE_TOKEN is required}
+      BILLING_CORE_SERVICE_TOKEN: ${INTEGRATION_BILLING_CORE_SERVICE_TOKEN:?INTEGRATION_BILLING_CORE_SERVICE_TOKEN is required}
+      AUDIT_CORE_SERVICE_TOKEN: ${INTEGRATION_AUDIT_CORE_SERVICE_TOKEN:?INTEGRATION_AUDIT_CORE_SERVICE_TOKEN is required}
+      INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+      # A public HTTPS origin is mandatory in production; integration-corev2
+      # validates the scheme and rejects loopback/HTTP before it can serve an
+      # OAuth callback. Do not inherit the development localhost fallback.
+      INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:?INTEGRATION_PUBLIC_BASE_URL must be the public HTTPS OAuth callback origin}
+  shipping-core:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      SHIPPING_SERVICE_API_KEY: ${SHIPPING_SERVICE_API_KEY:?SHIPPING_SERVICE_API_KEY is required}
+  integration-finspo-worker:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    stop_grace_period: 30s
+    environment:
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      INTEGRATION_SERVICE_API_KEY: ${INTEGRATION_SERVICE_API_KEY:?INTEGRATION_SERVICE_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  integration-email-worker:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    stop_grace_period: 30s
+    environment:
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  integration-webhook-normalizer:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      INTEGRATION_CREDENTIALS_ENCRYPTION_KEY: ${INTEGRATION_CREDENTIALS_ENCRYPTION_KEY:?INTEGRATION_CREDENTIALS_ENCRYPTION_KEY is required}
+  finspo-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+      AUTH_CORE_INTERNAL_API_KEY: ${AUTH_CORE_INTERNAL_API_KEY:?AUTH_CORE_INTERNAL_API_KEY is required}
+      FINSPO_SERVICE_API_KEY: ${FINSPO_SERVICE_API_KEY:?FINSPO_SERVICE_API_KEY is required}
+  anbud-api:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+  autocomplete-core:
+    <<: *hardened-runtime
+    build:
+      args: *build-metadata
+    init: true
+  connector-runtime-engine:
+    ports: !reset []
+    environment:
+      ENVIRONMENT: production
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY:?INTERNAL_API_KEY is required}
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}
+  dragonfly:
+    command:
+      - --requirepass=${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}
+      - --cache_mode=true
+      - --maxmemory=256mb
+      - --proactor_threads=1
+      - --dir=/data
+  temporal:
+    ports: !reset []
+  nats:
+    ports: !reset []
+  qdrant:
+    ports: !reset []
+  searxng:
+    ports: !reset []
+
+volumes:
+  quarry-edge-artifacts:

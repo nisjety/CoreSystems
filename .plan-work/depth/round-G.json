@@ -1,0 +1,23 @@
+{
+ "packets": [
+  {
+   "key": "mg-idempotency-renewal-survives-outage",
+   "rows": [
+    "D1-778"
+   ],
+   "title": "model-gateway: a Redis outage no longer ends the shared idempotency claim's renewal, and the two renewal tests pass",
+   "brief": "Context: apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs. Commit e05ace637 (D1-481, today) added keep_claim_alive (about line 516): every PENDING_TTL/3 it calls SharedClaimStore::renew and returns on the first `false`. renew (trait about line 388, the Redis implementation about line 667, the test fake about line 1050) returns false both when the claim is no longer this request's AND when the store cannot answer (an outage). So a Redis blip ends the renewal, the claim lapses at PENDING_TTL (120 s) while its stream still runs, and a duplicate send on another replica can start: the exact hole D1-481 was meant to close. Measured by the lead 2026-10-26: `cargo test -q -p model-gateway --lib idempotency_registry` fails 3 runs out of 3 with two tests: an_outage_does_not_end_the_renewal (line about 1389: 'the renewal in the outage did not end the loop', left 1 right 2) and the_renewal_stops_once_the_stream_ends_and_settle_takes_over (line about 1301). The Sonnet tester of e05ace637 reported a pass that cannot have been a run of these tests.\n\nDo: (1) Make renew tell 'renewed', 'lost to another owner or gone' and 'store unavailable' apart (a small enum, or Result<bool, _>; follow how this file's other SharedClaimStore methods report an outage, for example SharedClaimOutcome::Unavailable), in the trait, the Redis implementation and the fake. keep_claim_alive keeps looping on 'unavailable' (log it once per outage by operation only, never the key: the key holds org and user ids) and stops only on 'lost'. (2) Read the second failing test and decide from the code whether the test or the code is wrong (for example a missing run_ready_tasks() after an advance, so the renewal task has not been polled when the count is asserted, versus a real ordering defect between the stream end, the guard drop and settle). Fix whichever is wrong and say which in the summary, with the evidence. Do not weaken an assertion to make it pass: if a test's expectation is right, the code must meet it. (3) Keep every other test in the file passing and keep the switch semantics: renewal only spawns for a won shared claim (MODEL_GATEWAY_SHARED_IDEMPOTENCY=true); with the switch off nothing changes.\n\nTests: the whole module must pass several times in a row (run `cargo test -q -p model-gateway --lib idempotency_registry` three times), then the full `cargo test -q -p model-gateway --lib`. Before reporting, confirm the binary you ran was rebuilt from the edited file (cargo prints Compiling model-gateway; if not, touch the file). The file is CRLF: preserve it.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/idempotency_registry.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib idempotency_registry",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib idempotency_registry",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  }
+ ]
+}

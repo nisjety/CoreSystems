@@ -1,0 +1,370 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts
+index 7f2e4b1a5..b09f811d5 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts	
+@@ -1259,6 +1259,36 @@ describe('chat-client tool wiring', () => {
+     })
+   })
+ 
++  /** EP-4 S6: a server's question names the server only with a known origin and a label of 1 to 80 characters. */
++  it('reads an origin only for a known server origin with a label of 1 to 80 characters', async () => {
++    const item = { id: 'name', kind: 'text', prompt: 'Your name?' }
++    const frame = (index: number, fields: Record<string, string>) =>
++      `event: user_question\ndata: ${JSON.stringify({ question_id: `q_${index}`, items: [item], ...fields })}\n\n`
++    const fetchMock = vi.fn().mockResolvedValue(
++      sseResponse([
++        frame(0, { origin: 'mcp_elicitation', origin_label: 'Fixture server' }),
++        frame(1, { origin: 'model', origin_label: 'Fixture server' }),
++        frame(2, { origin: 'mcp_elicitation' }),
++        frame(3, { origin: 'mcp_elicitation', origin_label: '   ' }),
++        frame(4, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(81) }),
++        frame(5, { origin: 'mcp_elicitation', origin_label: 'x'.repeat(80) }),
++      ]),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const onUserQuestion = vi.fn()
++    await streamChat({ content: 'hi' }, { onUserQuestion })
++
++    expect(onUserQuestion.mock.calls.map(([event]) => [event.origin, event.originLabel])).toEqual([
++      ['mcp_elicitation', 'Fixture server'],
++      [undefined, undefined],
++      [undefined, undefined],
++      [undefined, undefined],
++      [undefined, undefined],
++      ['mcp_elicitation', 'x'.repeat(80)],
++    ])
++  })
++
+   /** plan-gate §2.1: the model's structured plan-mode plan. */
+   it('maps a plan_proposed event into onPlanProposed with its steps', async () => {
+     const fetchMock = vi.fn().mockResolvedValue(
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 9a9258382..6a5859802 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -1213,6 +1213,13 @@ export type ChatUserQuestionEvent = {
+   expiresAt?: string
+   items: ChatQuestionItem[]
+   requestId?: string
++  /**
++   * Who asked, when an MCP server did (EP-4 S6). Only a server's question carries it, and the card then names
++   * that server; a model question leaves both this and `originLabel` unset.
++   */
++  origin?: 'mcp_elicitation'
++  /** The asking server's display name, 1 to 80 characters. Set exactly with `origin`. */
++  originLabel?: string
+ }
+ 
+ /** The owner's answer to a question, one entry per item, or a skip (WS14 S4). */
+@@ -1708,6 +1715,16 @@ function normalizeQuestionItems(value: unknown): ChatQuestionItem[] {
+     .filter((item): item is ChatQuestionItem => item !== null)
+ }
+ 
++/**
++ * Who asked a `user_question` frame (EP-4 S6). The card names a server only for a known server origin with a
++ * label of 1 to 80 characters; any other frame reads as the model's question, as it did before.
++ */
++function questionOrigin(payload: Record<string, unknown>): Pick<ChatUserQuestionEvent, 'origin' | 'originLabel'> {
++  const label = str(payload.origin_label)?.trim()
++  if (payload.origin !== 'mcp_elicitation' || !label || [...label].length > 80) return {}
++  return { origin: 'mcp_elicitation', originLabel: label }
++}
++
+ function strOrJson(value: unknown): string | undefined {
+   if (typeof value === 'string') return value
+   if (value == null) return undefined
+@@ -2826,6 +2843,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
+           expiresAt: str(payload.expires_at) || undefined,
+           items,
+           requestId: str(payload.request_id),
++          ...questionOrigin(payload),
+         })
+       }
+       break
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx b/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx
+index 0996389be..bea46f45a 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx	
+@@ -169,4 +169,25 @@ describe('QuestionCard', () => {
+     expect(view.send().disabled).toBe(true)
+     expect(view.skip().disabled).toBe(true)
+   })
++
++  /** EP-4 S6: a question an MCP server sent names that server above the items and where the answer goes. */
++  it('names the asking server above the items and where the answer goes', () => {
++    const view = mount({ question: { origin: 'mcp_elicitation', originLabel: 'Fixture server' } })
++
++    expect(view.container.querySelector('.verevon-question-card__origin')?.textContent).toMatch(
++      /^(Spørsmål fra|Question from) Fixture server$/,
++    )
++    expect(view.container.querySelector('.verevon-question-card__notice')?.textContent).toMatch(
++      /^(Svaret sendes til|The answer goes to) Fixture server$/,
++    )
++  })
++
++  /** EP-4 S6: a model question names no server and keeps the card it always had. */
++  it('a model question shows no server line and no notice', () => {
++    const view = mount()
++
++    expect(view.container.querySelector('.verevon-question-card__origin')).toBeNull()
++    expect(view.container.querySelector('.verevon-question-card__notice')).toBeNull()
++    expect(view.container.textContent).not.toMatch(/Spørsmål fra|Svaret sendes til|Question from|The answer goes to/)
++  })
+ })
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx b/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx
+index 1d37f05c7..3bfd065fc 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx	
+@@ -28,6 +28,7 @@ function minutesAndSeconds(ms: number): string {
+  * The answer is not an approval: it goes out as the person's next message, and the run's next turn works
+  * from it. Each item is answered once, with its choices or, where the item allows it, the person's own words.
+  * Skipping sends nothing but the skip. The card asks for no credentials and says so.
++ * A question an MCP server sent names that server above the items and again where the answer goes (EP-4 S6).
+  */
+ export function QuestionCard(props: {
+   question: ChatUserQuestionEvent
+@@ -74,6 +75,9 @@ export function QuestionCard(props: {
+   }
+   const complete = () => props.question.items.every((item) => isAnswered(item, picked()[item.id]))
+   const locked = () => props.pending === true || expired()
++  // The server that asked, when an MCP server did (EP-4 S6): the card names it, and the answer goes back to it.
++  // A model question names nobody, so this is empty and the card reads as it always has.
++  const server = () => (props.question.origin === 'mcp_elicitation' ? (props.question.originLabel ?? '') : '')
+ 
+   const submit = () => {
+     if (locked() || !complete()) return
+@@ -99,6 +103,11 @@ export function QuestionCard(props: {
+           'Answer with the choices shown. Do not enter passwords, codes or card numbers here.',
+         )}
+       </p>
++      <Show when={server()}>
++        <p class="verevon-question-card__origin">
++          {i18n.tr(`Spørsmål fra ${server()}`, `Question from ${server()}`)}
++        </p>
++      </Show>
+       <For each={props.question.items}>
+         {(item) => (
+           <fieldset class="verevon-question-card__item">
+@@ -149,6 +158,11 @@ export function QuestionCard(props: {
+           </fieldset>
+         )}
+       </For>
++      <Show when={server()}>
++        <p class="verevon-question-card__notice">
++          {i18n.tr(`Svaret sendes til ${server()}`, `The answer goes to ${server()}`)}
++        </p>
++      </Show>
+       <Show when={countdown() !== undefined}>
+         <p class="verevon-question-card__countdown" role="timer">
+           {i18n.tr(
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index 85cf2fa28..e61b6ac37 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -196,6 +196,42 @@ mod stream_body_limit_tests {
+     }
+ }
+ 
++#[cfg(test)]
++mod run_question_origin_tests {
++    use super::run_question_value;
++    use mp_contracts::model_plane::v1::RunQuestion;
++
++    /// A model question reads as it always has: no origin keys, whether its origin is `model` or unset
++    /// (empty, as a session-core older than the column leaves it) (EP-4 S6).
++    #[test]
++    fn run_question_value_omits_model_origin() {
++        for origin in ["", "model"] {
++            let question = RunQuestion {
++                id: "q_model".into(),
++                origin: origin.into(),
++                ..Default::default()
++            };
++            let value = run_question_value(&question);
++            assert!(value.get("origin").is_none(), "origin {origin:?} must not reach the card");
++            assert!(value.get("origin_label").is_none());
++        }
++    }
++
++    /// A server's question names the server that asked, for the card's origin line and its notice.
++    #[test]
++    fn run_question_value_names_a_server_origin() {
++        let question = RunQuestion {
++            id: "q_server".into(),
++            origin: "mcp_elicitation".into(),
++            origin_label: "Fixture".into(),
++            ..Default::default()
++        };
++        let value = run_question_value(&question);
++        assert_eq!(value["origin"], "mcp_elicitation");
++        assert_eq!(value["origin_label"], "Fixture");
++    }
++}
++
+ /// Build the axum router without binding a socket. Useful for tests.
+ pub fn build_router(state: AppState, prom_handle: Option<PrometheusHandle>) -> Router {
+     let grpc_readiness = GrpcReadiness::new();
+@@ -1450,7 +1486,7 @@ fn question_state_token(state: i32) -> &'static str {
+ 
+ /// The question as the browser reads it. The owner's own org and user ids stay off the wire.
+ pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
+-    json!({
++    let mut value = json!({
+         "id": question.id,
+         "run_id": question.run_id,
+         "thread_id": question.thread_id,
+@@ -1477,7 +1513,15 @@ pub(crate) fn run_question_value(question: &RunQuestion) -> Value {
+             "text": answer.text,
+         })).collect::<Vec<_>>(),
+         "answered_message_id": empty_to_null(&question.answered_message_id),
+-    })
++    });
++    // A question the run's model asked keeps the shape the card has always read. Only a server's question
++    // names its origin, so the card can say who asked it (EP-4 S6).
++    let origin = question.origin.as_str();
++    if !origin.is_empty() && origin != mp_contracts::user_question::ORIGIN_MODEL {
++        value["origin"] = json!(origin);
++        value["origin_label"] = json!(question.origin_label);
++    }
++    value
+ }
+ 
+ /// The Verevon Proof Bundle for one run (roadmap P1.2). Read-only; the org is
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index 5d016efc8..ce3f7b825 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -14479,6 +14479,8 @@ fn agentic_run_stream(
+                     delivery: question.delivery,
+                     expires_at: fields["expires_at"].as_str().map(str::to_owned),
+                     items: fields["items"].clone(),
++                    origin: fields["origin"].as_str().map(str::to_owned),
++                    origin_label: fields["origin_label"].as_str().map(str::to_owned),
+                 };
+                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+             }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index 7e12dd93e..1408b72bc 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -464,6 +464,11 @@ pub enum ChatEvent {
+         delivery: String,
+         expires_at: Option<String>,
+         items: Value,
++        /// `mcp_elicitation` for a form an MCP server sent through the run (EP-4 S6). `None` is the run's
++        /// model, and the key is then left off the frame, so a model question reads as it always did.
++        origin: Option<String>,
++        /// The asking server's display name, set exactly when `origin` is (EP-4 S6).
++        origin_label: Option<String>,
+     },
+     /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
+     /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
+@@ -1060,13 +1065,25 @@ impl ChatEvent {
+                 delivery,
+                 expires_at,
+                 items,
+-            } => json!({
+-                "question_id": question_id,
+-                "delivery": delivery,
+-                "expires_at": expires_at,
+-                "items": items,
+-                "request_id": request_id,
+-            }),
++                origin,
++                origin_label,
++            } => {
++                let mut payload = json!({
++                    "question_id": question_id,
++                    "delivery": delivery,
++                    "expires_at": expires_at,
++                    "items": items,
++                    "request_id": request_id,
++                });
++                // The origin keys come only with a server's question, so a model question's frame is unchanged.
++                if let Some(origin) = origin {
++                    payload["origin"] = json!(origin);
++                }
++                if let Some(origin_label) = origin_label {
++                    payload["origin_label"] = json!(origin_label);
++                }
++                payload
++            }
+             ChatEvent::ResearchPlan {
+                 sub_queries,
+                 questions,
+@@ -4006,6 +4023,8 @@ mod payload_contract {
+                 delivery: s("next_turn"),
+                 expires_at: None,
+                 items: json!([]),
++                origin: None,
++                origin_label: None,
+             },
+             ChatEvent::UserQuestion {
+                 question_id: s("q_2"),
+@@ -4018,6 +4037,8 @@ mod payload_contract {
+                     "options": [{ "id": "bring", "label": "Bring", "description": null }],
+                     "allow_other": true,
+                 }]),
++                origin: Some(s("mcp_elicitation")),
++                origin_label: Some(s("Fixture server")),
+             },
+             ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
+             ChatEvent::ResearchPlan {
+@@ -4252,6 +4273,8 @@ mod payload_contract {
+             delivery: "next_turn".into(),
+             expires_at: Some("2026-11-02T10:00:00Z".into()),
+             items: json!([{ "id": "carrier", "kind": "single" }]),
++            origin: None,
++            origin_label: None,
+         };
+         assert_eq!(event.name(), "user_question");
+         assert!(
+@@ -4267,6 +4290,47 @@ mod payload_contract {
+         assert_eq!(payload["request_id"], "req-4");
+     }
+ 
++    /// A model question's frame has no origin key, so an older client and today's read it the same way
++    /// (EP-4 S6).
++    #[test]
++    fn user_question_without_origin_is_byte_identical() {
++        let event = ChatEvent::UserQuestion {
++            question_id: "q_abc".into(),
++            delivery: "next_turn".into(),
++            expires_at: None,
++            items: json!([]),
++            origin: None,
++            origin_label: None,
++        };
++        assert_eq!(
++            event.payload("req-5"),
++            json!({
++                "question_id": "q_abc",
++                "delivery": "next_turn",
++                "expires_at": null,
++                "items": [],
++                "request_id": "req-5",
++            })
++        );
++    }
++
++    /// A server's question carries the server's name, so the card can say who asked it (EP-4 S6).
++    #[test]
++    fn user_question_with_server_origin_carries_it() {
++        let event = ChatEvent::UserQuestion {
++            question_id: "q_srv".into(),
++            delivery: "resume".into(),
++            expires_at: None,
++            items: json!([]),
++            origin: Some("mcp_elicitation".into()),
++            origin_label: Some("Fixture server".into()),
++        };
++        let payload = event.payload("req-6");
++        assert_eq!(payload["question_id"], "q_srv");
++        assert_eq!(payload["origin"], "mcp_elicitation");
++        assert_eq!(payload["origin_label"], "Fixture server");
++    }
++
+     /// `research_plan` is a control event carrying the plan, the questions and the cap the card
+     /// enforces, and nothing else (EP-2 S5).
+     #[test]

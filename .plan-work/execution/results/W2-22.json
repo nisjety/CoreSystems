@@ -1,0 +1,402 @@
+{
+ "batchId": "W2-22",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS26-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/language.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/security_events.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/CONTENT_SAFETY.md"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 CRLF count on apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs (after edits)",
+     "outcome": "2354 CRLF, 2354 LF: every line CRLF, no mixed endings."
+    },
+    {
+     "command": "grep call sites in semantic_screening.rs (after edits)",
+     "outcome": "analyze_language(authorized_request(...)) at lines 478 (GrpcContentSafetyClassifier::classify, fn at 460) and 556 (GrpcInjectionClassifier::classify, fn at 538). first_language_result has no remaining references in the repo."
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib --no-run",
+     "outcome": "started in background; log at scratchpad w26s6-mg-libtest-build.log. Result NOT observed before this report, so no test in model-gateway was run and none is claimed as passing. Before this round the same build failed on two lines outside this slice's ownership: zdr_features.rs has no connector_scope in the InvokeRequest pattern (E0027), and the cfg(test) mock in model-gateway/src/grpc.rs:3521 lacks injection_json (E0063). Both were still present when grepped; the build may fail on them again."
+    },
+    {
+     "command": "arithmetic check of partial_coverage_is_not_a_clean_claim (by reasoning, not run)",
+     "outcome": "payload 40960+4096=45056 bytes; window = 32768 head + 50-byte note + 8192 tail = 41010 bytes. 41010 < 45056 and 41010 <= 40960+128, so both assertions hold. The old +1 payload gave a 41009-byte window over a 40961-byte payload, which is the reviewer's failure."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs: line 3521 (cfg(test) mock MockInferenceOk analyze_language LanguageAnalysisResult literal): after `content_safety_json: String::new(),` add `injection_json: String::new(),`. Still missing as of this round; the lib test target does not compile without it.",
+    "WS23-S4.code (same batch, not this slice): services/model-gateway/src/zdr_features.rs:208 InvokeRequest exhaustive destructuring must name `connector_scope: _,`. Still missing as of this round; model-gateway does not compile (E0027) without it, so run it before the model-gateway test commands.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, after CONTENT_SAFETY_SHADOW_SAMPLE_RATE (about line 308), add: CONTENT_SAFETY_SEMANTIC_INLINE: ${CONTENT_SAFETY_SEMANTIC_INLINE:-false}; CONTENT_SAFETY_MODE_DEFAULT: ${CONTENT_SAFETY_MODE_DEFAULT:-frame}; CONTENT_SAFETY_SEMANTIC_DEADLINE_MS: ${CONTENT_SAFETY_SEMANTIC_DEADLINE_MS:-2500}; CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN: ${CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN:-6}; CONTENT_SAFETY_INJECTION_MODEL: ${CONTENT_SAFETY_INJECTION_MODEL:-}.",
+    "buf generate for apps/Model Plane/proto/model_plane/v1/inference.proto: regenerates go/gen/model_plane/v1/inference.pb.go and python/mp-events-py/src/mp_events/_gen/model_plane/v1/inference_pb2.py. The only change is the additive tag 14 (injection_json).",
+    "After the grpc.rs line and the WS23 fix: cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib semantic_screening ; then cargo test -q -p model-gateway --lib moderation ; cargo test -q -p model-gateway --lib security_events ; cargo test -q -p model-gateway --lib zdr_posture ; then cargo test -q -p model-gateway --test e2e_invoke_chain_test.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: append a WS26-S6 entry recording the DEC-31 defaults as built (mode frame; CONTENT_SAFETY_SEMANTIC_INLINE off; deadline 2500 ms; 6 calls per tool loop; fail open; enforce never for ThirdPartyMcp) and the per-loop budget deviation.",
+    "Optional shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs: the CALL_SITES reason for (semantic_screening.rs, classify) still reads only 'derived content-safety pass'; it may also name the prompt-injection pass. The guard does not check the reason text, so this is documentation only.",
+    "Live proof and rebuild (lead, not run here): rebuild model-gateway and inference-core; set one test org to tighten on a fixture page with a paraphrased injection, CONTENT_SAFETY_SEMANTIC_INLINE=true for that deploy only. Capture the SSE stream, TOOL_RESULT_SEMANTIC_ENFORCED on mp.v1.security.<org> (needs the WS26-S1 NATS publish grant), and mp_gateway_injection_screen_total. A ZDR thread must show no inference-core AnalyzeLanguage call. Keep the switch false in shipped compose until the owner decides."
+   ],
+   "deviations": [
+    "Fix 2 kept a helper: the reviewer said drop the helper; instead first_language_result became authorized_request, which only builds the tonic request with the bearer metadata. The analyze_language call itself is in each classify, which is what the guard checks. Full inlining would duplicate the security-relevant bearer header in two places.",
+    "Fix 1 changed only the payload size (+4096) and added a one-line comment; the 128-byte window bound assertion is unchanged."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (cfg(test) mock literal at line 3521; shared edit above)",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (line 208 exhaustive InvokeRequest pattern; WS23-S4.code, not edited)",
+    "apps/Model Plane/deploy/docker-compose.yml (model-gateway switch lines; shared edit above)",
+    "apps/Model Plane/docs/decisions/ledger.md (lead)",
+    "go/gen/model_plane/v1/inference.pb.go and python _gen inference_pb2.py (regenerate with buf generate)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The model-gateway lib test target still does not compile, so none of the 10 named semantic_screening/moderation tests, the security_events tests, the zdr_posture guard or the e2e test has run. Three errors remain: (1) the grpc.rs:3513 MockInferenceOk LanguageAnalysisResult literal needs `injection_json: String::new(),`; this is a shared-edit caused by this slice's proto tag. (2) zdr_features.rs:208 needs `connector_scope: _,` (WS23-S4.code). (3) The normalize.rs:505 test literal needs connector_scope (WS23). After those, run: cargo test -p model-gateway --lib semantic_screening ; --lib moderation ; --lib security_events ; --lib zdr_posture ; --test e2e_invoke_chain_test.",
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: add the five model-gateway switch lines (CONTENT_SAFETY_SEMANTIC_INLINE default false, MODE_DEFAULT frame, DEADLINE_MS 2500, MAX_CALLS_PER_RUN 6, INJECTION_MODEL empty). They are not present yet.",
+     "buf generate for inference.proto tag 14: the Go inference.pb.go and the Python inference_pb2.py are not regenerated.",
+     "Ledger entry in docs/decisions/ledger.md recording the DEC-31 defaults as built and the per-tool-loop budget deviation.",
+     "Live proof (rebuild inference-core and model-gateway; org set to tighten/enforce on a paraphrased-injection fixture; SSE withheld stub, TOOL_RESULT_SEMANTIC_ENFORCED on NATS, the mp_gateway_injection_screen_total counter, classifier usage under screen:<run>; a ZDR session must show no AnalyzeLanguage call). This was not run."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The semantic_screening test module and the ZDR guard have still not compiled or run: the lib test target is blocked by the WS23 E0027 and the grpc.rs mock E0063 in files this slice does not own. Test bodies here were never type-checked."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Helper authorized_request keeps the bearer metadata in one place; if a future edit moves analyze_language into it, the ZDR guard fails at the same moment, so the guard is the regression signal."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Carried from round 1, unchanged: the 6-call cap is per tool loop; gateway deep research and forced web search pass no inference bearer so they never run the inline pass; enforce withholds any flagged final web or browser payload."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Every model-gateway test this row names is unexecuted. The lib test target fails with only the 3 errors above (none in the slice's owned files), so the test bodies type-check, but none has run, including the ZDR call-site guard."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "injection_defense_from_policies takes mode/fail_mode from the first enabled injection_defense row in priority-DESC order across org and 'global' rows. A future global row that outranks an org row would silently override that org's tighten/enforce opt-in. No such global row is seeded today."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "With inline on and enforce, a payload that only the deterministic scan flagged (no classifier call) is also withheld, as enforce_withholds_external_but_not_org_internal_or_mcp asserts. Switching an org to enforce therefore changes marker-hit handling too, not only semantic flags. This should be recorded in the ledger."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The call budget is per tool loop (run_tool_rounds_for_model_with_attachments), not per run. Gateway deep research and forced web search pass None/no inference bearer, so they never get the inline pass. This is the implementer's stated deviation from '6 calls/run'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "classify_within waits up to SCREENING_DEADLINE for a semaphore permit before starting the CONTENT_SAFETY_SEMANTIC_DEADLINE_MS classifier timeout. The worst-case added latency per external result is deadline + SCREENING_DEADLINE, not the configured deadline alone."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "zdr_posture.rs CALL_SITES reason for (semantic_screening.rs, classify) still names only the content-safety pass. It now also covers GrpcInjectionClassifier::classify; this is documentation only, since the guard does not check the reason."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Inline tighten/enforce must be live-proven with CONTENT_SAFETY_SEMANTIC_INLINE=true on one deploy before any org opts in. The proof covers paraphrased injection flagged/withheld, the NATS event (needs the WS26-S1 publish grant) and no AnalyzeLanguage call on a ZDR turn."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib --no-run (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "FAILED to compile, 3 errors, none in the slice's files except the grpc.rs mock: E0063 missing injection_json in the LanguageAnalysisResult literal at model-gateway/src/grpc.rs:3513 (the lead's pending shared-edit); E0063 missing connector_scope in InvokeRequest at normalize.rs:505 (test code, another slice); E0027 missing connector_scope in the InvokeRequest pattern at zdr_features.rs:208 (WS23 slice).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p model-gateway --lib semantic_screening / moderation / security_events / zdr_posture, and the named model-gateway tests",
+      "outcome": "Could not run: the model-gateway lib test target does not compile (see above). The ZDR guard, injection tests and partial_coverage_is_not_a_clean_claim are unverified.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p model-gateway --lib (non-test build)",
+      "outcome": "FAILED: single error E0027 at zdr_features.rs:208 (connector_scope, WS23). No error in the slice's files, but the library does not build until that line is fixed.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test e2e_invoke_chain_test",
+      "outcome": "Not run: depends on the model-gateway lib compiling, which fails.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib language",
+      "outcome": "PASS: 13 passed, 0 failed (558 filtered out). Includes prompt_injection_prompt_lists_categories, parses_prompt_injection_aliases, parses_prompt_injection_llm_result_into_json and azure_declines_prompt_injection_without_a_network_call.",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p inference-core",
+      "outcome": "PASS: compiles, with only a dead_code warning (build_request_body_with_context_management at line 1144, not part of this slice).",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "policy",
+    "zdr",
+    "money"
+   ],
+   "notes": "Round 2 fixes, both inside the owned file semantic_screening.rs. (1) Test partial_coverage_is_not_a_clean_claim now uses INJECTION_HEAD_BYTES + INJECTION_TAIL_BYTES + 4096 with a one-line why-comment. (2) The ZDR guard failure: the analyze_language call is back inside each classify impl (GrpcContentSafetyClassifier and GrpcInjectionClassifier), so zdr_posture's CALL_SITES entry (\"semantic_screening.rs\",\"classify\") names both. The helper first_language_result is removed; a metadata-only helper authorized_request(bearer, request) remains so the bearer header and its error mapping live in one place. No change to zdr_posture.rs. Round 1 content (injection pass, switch, proto tag 14, ledger, docs) is unchanged. Test-target compile and the ZDR guard, semantic_screening, moderation, security_events and e2e tests are NOT verified: the lead must apply the grpc.rs mock line and the WS23 zdr_features.rs fix, then run the commands in lead_todo. The build log is in the scratchpad (w26s6-mg-libtest-build.log) and will show the final result."
+  },
+  {
+   "id": "WS23-S4.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/zdr_mcp_golden.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: cargo clean -q -p model-gateway; cargo check -q -p model-gateway --lib --tests",
+     "outcome": "exit 101 with the three errors the review named: E0027 zdr_features.rs:208 (pattern lacks connector_scope; this is the lib failure), E0063 normalize.rs:505 (no connector_scope), E0063 grpc.rs:3513 (sibling WS26-S6 injection_json). No model-gateway test ran."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: cargo clean -q -p mp-contracts; cargo test -q -p mp-contracts --test proto_wire_parity_execution",
+     "outcome": "pass: 15 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib connection_outside_scope_is_refused (also a_connection_is_selected_only_when_the_request_names_it and a_run_reads_only_the_connections_its_request_selected)",
+     "outcome": "pass: 1 passed each"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test provider_read_contract; --test compaction_parity_contract; --test runtime_loop_test; --test zdr_mcp_golden",
+     "outcome": "pass: 5, 11, 9 and 3 passed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib",
+     "outcome": "pass: 1464 passed, 0 failed (302.44 s)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (CRLF, keep it): (a) invoke_field_names pattern: add `        connector_scope: _,` after `        retrieval_scope: _,` (line 223); (b) its vec!: add `        \"connector_scope\",` after `        \"retrieval_scope\",` (line 262); (c) FIELD_TREATMENTS: add `    (\"connector_scope\", refused_feature(\"connector_read\")),` after the `(\"retrieval_scope\", refused_feature(\"web_search\")),` row (line 103), before the regenerated row; (d) refusal(): before `    if !request.tools.is_empty() {` (line 329) add `    if request.connector_scope.as_ref().is_some_and(|ids| !ids.is_empty()) {`, `        return feature(\"connector_read\");`, `    }`. Items (a)-(c) sit beside retrieval_scope because InvokeRequest declares connector_scope there (http_routes.rs line 7910) and the file documents declaration order; the review's after-tools placement also passes the order test, but it breaks that documented order. Item (d) is what every_field_row_decides_what_its_treatment_says needs.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (CRLF, keep it; not in the review's list): in cases(), after the retrieval_scope \"auto\" row (ends line 136) and before `(\"regenerated\", ...)` (line 137), add `(\"connector_scope\", with(\"connector_scope\", json!([\"conn-1\"])), refused(\"connector_read\"))` and `(\"connector_scope\", with(\"connector_scope\", json!([])), None)`, wrapped as rustfmt wants. Without the first row, every_field_has_a_row_that_matches_its_treatment fails at line 293 (connector_scope has no row in the ZDR spec) once item 1c lands. Read from source; not run.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/normalize.rs (CRLF, keep it): in make_request (line 504), add `            connector_scope: None,` after `            retrieval_scope: None,` (line 524).",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc.rs (sibling WS26-S6, not this slice): line 3513, the LanguageAnalysisResult literal lacks injection_json (field 14, uncommitted in inference.proto). Its owner adds `injection_json: String::new(),`. It blocks only the lib-test target; the lib fails on item 1 first.",
+    "After items 1-4 land: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clean -q -p model-gateway, then cargo test -q -p model-gateway --lib with connector_scope_refused_in_space_zdr_and_web_only, connector_selection_is_deduplicated_and_bounded and a_selection_reaches_the_run_request_only_when_made (all in src/sse.rs), then the whole lib, then cargo test -q -p model-gateway --test zdr_feature_table. None of these has run.",
+    "Commit scope: zdr_features.rs, normalize.rs, tests/zdr_feature_table.rs and model-gateway src/grpc.rs are clean at HEAD, so after items 1-3 the first three carry only this slice's change, and the grpc.rs line belongs to WS26-S6's commit. The worktree also has uncommitted edits in model-gateway tool_loop.rs and tests/e2e_invoke_chain_test.rs that are not in this slice's files; I did not inspect them, so check their owner before committing.",
+    "Go bindings (not regenerated, owned by the Go gen tree): run buf generate in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto to refresh apps/Model Plane/go/gen/model_plane/v1/execution.pb.go with ConnectorScope and field 23; add a field-23 pin to the Go wire-parity test if that suite pins tags.",
+    "Persistence (not built): extend the RecordRunContext path (sessions.proto and the session-core handler that merges runs.metadata) to store connector_scope ids, called from execution-core only when the run is not zero-retention; give it an owner or a follow-up slice.",
+    "Ledger and register: record RunAgentRequest.connector_scope = 23 and ConnectorScope in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md; depth findings go in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/plans/model-plane-depth-register.md.",
+    "Live proof (lead, compose, not run here): rebuild execution-core and model-gateway, set PROVIDER_READ_TOOL_ENABLED=true on the proof stack, select connection A only, ask the model to read connection B; capture connection_not_in_scope plus one gateway refusal per typed code (zdr connector_read, scope_not_available_in_space, source_scope_conflict, connector_scope_invalid).",
+    "Pre-existing, not caused here: execution-core/tests/org_policy_characterisation.rs expects runtime_loop::execute_step_with_subagent( as the Do-loop dispatch; HEAD dispatches via execute_step_with_result_handles(. Its owner retargets the guard."
+   ],
+   "deviations": [
+    "No file was edited this round. Review items 1-3 are shared edits and a sibling line, so they are in lead_todo and not applied.",
+    "The review's list is incomplete: tests/zdr_feature_table.rs needs connector_scope case rows once FIELD_TREATMENTS gains the refused row. Handed back as lead_todo item 2.",
+    "Placement: the review asked for the zdr_features.rs rows after tools. This round recommends placing them beside retrieval_scope, matching the declaration order the file documents. Both pass the order test if the vec and the table agree.",
+    "Round 1, unchanged: conversation-only turns also refuse a connector selection as a source conflict; the S4 row named only zero retention, Space and a non-auto source filter.",
+    "Round 1, unchanged: do runs with an empty selection offer no connector read (K3-15 applied); the row's default-all-connections for Do was not built.",
+    "Round 1, unchanged: the default-deny also covers the direct ExecuteStep RPC, which S3 left able to read any connection; this tightens S3 behaviour.",
+    "Round 1, unchanged: one test file outside the owned list was edited, execution-core/tests/zdr_mcp_golden.rs (one expected-wiring string).",
+    "Round 1, unchanged: the persistence half (runs.metadata.connector_scope through RecordRunContext) is not implemented.",
+    "Round 1, unchanged: refusal codes beyond the ZDR feature key connector_read are this slice's choices."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (shared edit, four spots, lead_todo item 1)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/normalize.rs (shared edit, one literal line, lead_todo item 3)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (shared edit, two case rows, lead_todo item 2; not in the review's list)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc.rs (sibling WS26-S6 injection_json line, lead_todo item 4)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto and the session-core RecordRunContext handler (persistence of runs.metadata.connector_scope, not built)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/execution.pb.go (buf regeneration, not done)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs: model-gateway lib does not compile (E0027 at line 208, the exhaustive InvokeRequest pattern lacks connector_scope because http_routes.rs added the field). The lead must apply the shared edit: add `connector_scope: _,` to the invoke_field_names pattern, add \"connector_scope\" to its name vec (in the same declaration-order position, beside retrieval_scope), add a FIELD_TREATMENTS row `(\"connector_scope\", refused_feature(\"connector_read\"))`, and make refusal() return feature(\"connector_read\") when connector_scope is Some and non-empty. Keep CRLF.",
+     "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs: add the connector_scope case rows (non-empty selection refused with connector_read; empty selection None). Without them every_field_has_a_row_that_matches_its_treatment fails once the FIELD_TREATMENTS row lands. Keep CRLF.",
+     "apps/Model Plane/rust/services/model-gateway/src/normalize.rs: add `connector_scope: None,` to the InvokeRequest literal in make_request (around line 505, E0063). Without it the lib-test target does not compile.",
+     "Re-run after those edits, with a clean model-gateway target: `cargo test -q -p model-gateway --lib` (it must include connector_scope_refused_in_space_zdr_and_web_only, connector_selection_is_deduplicated_and_bounded and a_selection_reaches_the_run_request_only_when_made), then `--test zdr_feature_table`. The plan's named gateway test has never run. The lib-test target is also blocked by the sibling WS26-S6 line (grpc.rs:3513 is missing injection_json), so that line must land too, from its owner."
+    ],
+    "dod_gaps": [
+     "Persistence half of the row is not built: connector_scope ids stored in runs.metadata through RecordRunContext (sessions.proto plus the session-core handler), never under ZDR. Assign it to an owner or a follow-up slice.",
+     "Go bindings are not regenerated for RunAgentRequest field 23 / ConnectorScope (buf generate in apps/Model Plane/proto).",
+     "Live proof not run: with two connections, select A and ask the model to read B; capture connection_not_in_scope plus each gateway refusal code, on a rebuilt stack with PROVIDER_READ_TOOL_ENABLED on.",
+     "Ledger entry for RunAgentRequest.connector_scope = 23 and the ConnectorScope message, plus the depth-register findings."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "tests/zdr_feature_table.rs needs connector_scope case rows (lead_todo item 2). The review's four zdr_features.rs edits alone fail every_field_has_a_row_that_matches_its_treatment. Read from source, not run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No model-gateway test has run: connector_scope_refused_in_space_zdr_and_web_only, connector_selection_is_deduplicated_and_bounded, a_selection_reaches_the_run_request_only_when_made, and the zdr table. The crate does not build until items 1-4 land."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Connector ids are not persisted to runs.metadata.connector_scope. That needs sessions.proto and the session-core RecordRunContext handler, which this slice does not own. Never under ZDR."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An approval-resume request carries no selection, so a read tool offered in a paused Do snapshot is refused after resume. The selection must travel with the pause before paused Do runs get the read tool."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Stale-target trap: clean the touched package before trusting any result. The round-1 gateway success was stale, and a clean check disproved it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Refusal codes scope_not_available_in_space, connector_scope_invalid and source_scope_conflict are this slice's choices; only the connector_read family is in the plan. The owner should confirm, and the frontend copy (WS12/S6) needs entries."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The inline Ask path validates and refuses a selection but offers no connector read until WS23-S5, so a valid selection on an inline turn is accepted and ignored."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Not run: two connections, the model asked to read the unselected one, the refusal captured, on a rebuilt stack with PROVIDER_READ_TOOL_ENABLED on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The Go gen tree is not regenerated for field 23, and no Go wire-parity pin covers it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway checks a selection for shape and count only. Ownership is enforced by integration-corev2 at read time, so a foreign id fails at the provider boundary."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The connection-id rule exists twice (sse.rs is_connection_id and integration_tools is_connection_id); it belongs in mp-contracts."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The org_policy_characterisation guard fails at HEAD too (pre-existing; it expects execute_step_with_subagent( as the Do-loop dispatch). Retarget it to execute_step_with_result_handles."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An approval-resume (continue_run) request carries no connector selection, so a paused Do run that resumes offers or executes read_provider_action with an empty scope and is refused. The selection must travel with the pause snapshot before the read tool is switched on for Do runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Connector ids are never persisted to runs.metadata.connector_scope (the row's RecordRunContext path), so the audit and replay trail lacks the selection."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The refusal codes scope_not_available_in_space, source_scope_conflict and connector_scope_invalid, and the refusal of a selection in conversation-only turns, are the implementer's choices and go beyond the row. The owner should confirm them, and the frontend copy needs entries."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "An empty selection on a Do run now offers no connector read, and the direct ExecuteStep RPC (it passes &[]) can no longer read any connection. This tightens S3 behaviour against the row's default-all text; it is safe by default-deny but should be recorded in the ledger."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The inline Ask path validates and refuses a selection, but it never offers a connector read until WS23-S5, so a valid selection on an Ask turn is accepted and silently ignored."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway checks only the shape and count of a selection, not who owns each connection; ownership rests on integration-corev2 at read time."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "is_connection_id is duplicated between model-gateway sse.rs and execution-core integration_tools. It belongs in mp-contracts."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "execution-core/tests/zdr_mcp_golden.rs sits outside the owned list, though it is a test beside the change (one wiring string updated). It is acceptable, but the lead should know it is in this slice's commit."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo check -q -p model-gateway --lib --tests (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "FAIL, exit 101. Lib: E0027 zdr_features.rs:208 (InvokeRequest pattern lacks connector_scope). Lib test adds E0063 normalize.rs:505 (missing connector_scope) and E0063 grpc.rs:3513 (missing injection_json, sibling WS26-S6). No model-gateway test could run, so connector_scope_refused_in_space_zdr_and_web_only, the other sse.rs connector tests, the whole model-gateway lib and zdr_feature_table did not run.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p execution-core --lib --tests",
+      "outcome": "pass (only pre-existing warnings)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib connection_outside_scope_is_refused (also a_connection_is_selected_only_when_the_request_names_it and a_run_reads_only_the_connections_its_request_selected)",
+      "outcome": "pass, 1 passed each",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib (full)",
+      "outcome": "pass, 1464 passed, 0 failed (302.7 s)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test provider_read_contract / compaction_parity_contract / runtime_loop_test / zdr_mcp_golden",
+      "outcome": "pass: 5, 11, 9, 3 passed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p mp-contracts --test proto_wire_parity_execution",
+      "outcome": "pass, 15 passed",
+      "passed": true
+     },
+     {
+      "command": "proto additivity: git diff of execution.proto",
+      "outcome": "additive only: new field connector_scope = 23 on RunAgentRequest and new message ConnectorScope { repeated string connection_ids = 1 }; no removed or changed lines, and tag 23 is unused before. Pass.",
+      "passed": true
+     },
+     {
+      "command": "buf lint / buf breaking --against baseline.binpb (from apps/Model Plane/proto)",
+      "outcome": "buf lint exits 1 with 1656 lines of repo-wide missing-comment findings (pre-existing); none mention connector or ConnectorScope. buf breaking against baseline.binpb exits 0 with no output. Running buf from apps/Model Plane instead gives import-resolution errors (wrong root).",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "policy"
+   ],
+   "notes": "Round 2 made no file edits. The three required fixes are shared edits and a sibling line, so they are in lead_todo and not applied: zdr_features.rs, normalize.rs and model-gateway grpc.rs are unmodified in the worktree, and the cargo check above still shows the three errors. The review's list is also incomplete: tests/zdr_feature_table.rs needs connector_scope case rows once FIELD_TREATMENTS gains the refused row (read from source, not run). Execution-core is green after the clean builds (targeted tests, four integration targets, mp-contracts parity, full lib). Model-gateway is blocked, so its three connector tests and the zdr table test have not run. Round-1 code is unchanged: the read path refuses unselected connections, and the gateway refuses ZDR, Space, non-auto and conversation-only selections (as built in round 1, not re-run this round). Persistence and Go bindings are not built."
+  }
+ ]
+}

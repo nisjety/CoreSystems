@@ -1,0 +1,36 @@
+{
+  "name": "empty",
+  "seed": 1,
+  "input": {
+    "url": "",
+    "title": "",
+    "body": ""
+  },
+  "expected": [
+    {
+      "key": "audience",
+      "value": "internal",
+      "score": 0.92
+    },
+    {
+      "key": "language",
+      "value": "fr",
+      "score": 0.43
+    },
+    {
+      "key": "length",
+      "value": "short",
+      "score": 0.88
+    },
+    {
+      "key": "sentiment",
+      "value": "neutral",
+      "score": 0.68
+    },
+    {
+      "key": "topic",
+      "value": "operations",
+      "score": 0.17
+    }
+  ]
+}

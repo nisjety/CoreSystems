@@ -1,0 +1,730 @@
+{
+ "batchId": "W2-39",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS25-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/org_hooks.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/org_hooks_test.go (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/org_hooks_integration_test.go (new, build tag integration)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0028_org_hook_rules.up.sql (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0028_org_hook_rules.down.sql (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/cmd/main.go (one line: NewOrgHooksHandler registration)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/gateway.proto (Hook fields 9 and 10; priority 8 already existed from WS25-S3)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs (durable per-org snapshot, hydrate, ensure with D8 bounds, register and list proxies, HOOKS_DURABLE parser, tests)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/hook_proxy_zdr_test.rs (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "capability-core: go vet ./internal/api/ ./cmd/... and go vet -tags integration ./internal/api/",
+     "outcome": "clean, exit 0"
+    },
+    {
+     "command": "capability-core: gofmt -l on org_hooks.go, org_hooks_test.go, org_hooks_integration_test.go",
+     "outcome": "clean. cmd/main.go is not gofmt-clean at HEAD (skillbundle import order); not introduced here, left alone"
+    },
+    {
+     "command": "capability-core: go test -count=1 ./internal/api/ -run OrgHook -v",
+     "outcome": "PASS: 5 top-level tests, 14 refusal subtests"
+    },
+    {
+     "command": "capability-core: go test -count=1 ./... (full module)",
+     "outcome": "PASS: 32 packages ok, exit 0, no FAIL"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib hook (run twice, second after formatting edits)",
+     "outcome": "PASS 21/21 on the final source; 11 of them are the new durable tests. No warnings in new code (3 pre-existing warnings in browser_run.rs)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test hook_proxy_zdr_test",
+     "outcome": "PASS 3/3 on the final source"
+    },
+    {
+     "command": "rustfmt --check src/runtime_registries.rs (diff filtered to my hunks)",
+     "outcome": "my hunks formatted; 8 pre-existing MCP hunks in the file left untouched (not run on the whole CRLF file)"
+    },
+    {
+     "command": "NOT RUN: DB integration test, grpc/Do-run wiring, buf regen, Docker rebuild, live proof",
+     "outcome": "lead steps in lead_todo"
+    }
+   ],
+   "db_tests_written": [
+    "TestOrgHooksAgainstPostgres (capability-core, go test -tags integration -run TestOrgHooksAgainstPostgres ./internal/api/)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs: register_hook (~2380) and list_hooks (~2389). In register_hook, bind the identity from authorize_rpc(&request, RpcAccess::Write) instead of discarding it. When runtime_registries::hooks_durable() is true, build HookWriteCaller { zdr: identity.zdr_for(&crate::zdr_posture::Route::plain(false))?, admin: <org admin, mirroring ownership::is_admin_claim incl. the :admin suffix> }, then return runtime_registries::proxy_register_hook(&self.state.hooks, &self.state.http_client, &self.state.capability_core_base_url, <token>, caller, request.into_inner()). For list_hooks call proxy_list_hooks with the same arguments minus caller. <token> is forwarded_authorization(&request) with the Bearer scheme stripped (trim_start_matches(\"Bearer \").trim(), as set_permission does), because the hydrate path applies bearer_auth itself. Keep handle_register_hook and handle_list_hooks for the off path.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: the Do-run call at ~11244 (run_agent_req.org_policy = do_run_org_policy(&state.hooks, org_id, hooks_do_runs_mode())). In durable mode, await runtime_registries::ensure_org_hooks(&state.hooks, &state.http_client, &state.capability_core_base_url, org_id, <caller token without the Bearer scheme>) before it, and refuse the run on Err (typed org_policy_unavailable, the WS25-S9 code, until S9 lands). The enclosing function may need to become async. sse.rs has WS17-S5 edits in progress from another agent.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tools.rs: the code_interpreter hook_context at ~232, and apps/Model Plane/rust/services/model-gateway/src/browser_run.rs: hook_context_json(&state.hooks, &org_id) at ~1485. Same ensure-then-read in durable mode; refuse the tool call on Err.",
+    "buf generate for apps/Model Plane/proto/model_plane/v1/gateway.proto. This regenerates apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go (and gateway_grpc.pb.go if affected) and the frontend gen apps/Frontend Plane/verevon/src/lib/model-plane/gen/model_plane/v1/gateway_pb.ts. Expect buf lint and buf breaking to be additive-clean.",
+    "Migration 0028_org_hook_rules applies at capability-core boot and is re-run safe. Rebuild capability-core and model-gateway with the compose recipe that keeps the live environment (see the Model Plane deploy note in memory). Set HOOKS_DURABLE=true on the proof gateway only, never as a compose default before WS25-S12.",
+    "Live proof (DoD, not run): as an admin, POST /api/v1/org-hooks with {\"event\":\"pre_tool\",\"tool_matcher\":\"shell\",\"decision\":\"deny\",\"reason\":\"...\"}; restart capability-core and the gateway; run a Do turn and capture the denied step and the org_hook_changed audit row; a non-admin POST must return 403.",
+    "DB test to run through the harness: cd \"apps/Model Plane/go/services/capability-core\" && go test -tags integration -run TestOrgHooksAgainstPostgres ./internal/api/",
+    "Docs (not owned by this slice): add the org_hook_rules row to apps/Model Plane/docs/capability-ownership-matrix.md (CAPM row 61), a decisions-ledger entry for the D8 bounds on hook rules and the 0028 numbering, and correct the capability-core row in plan section 4.4 (0024 is taken; S8 is 0028)."
+   ],
+   "deviations": [
+    "Migration number 0028 (up and down) instead of the 0024 that section 4.4 reserves: 0024 is already 0024_provider_read_tool on disk, and section 4.4 lets the integrator renumber.",
+    "capability-core's org-hook routes are registered unconditionally and carry no switch of their own. The plan's only S8 switch is HOOKS_DURABLE on the gateway, and nothing in capability-core reads the table for a decision.",
+    "The HOOKS_DURABLE parser enables only the literal \"true\" (batch rule), not the plan's vocabulary-C word \"on\".",
+    "Proto: priority = 8 already existed from WS25-S3, so S8 adds only revision = 9 and created_by = 10.",
+    "D7 is implemented as: a post_tool rule may only deny (a post-tool ask is refused). The plan's stronger check, which rejects post_tool matchers that can only match effectful tools, needs WS05 tool classes and is not built.",
+    "OrgPolicyContext.policy_revision is now the snapshot revision in durable mode (zero when off). Off-path behaviour is unchanged."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (register_hook and list_hooks wiring, see lead_todo)",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs (optional: an org-admin accessor on VerifiedIdentity mirroring ownership::is_admin_claim)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs (Do-run ensure before do_run_org_policy at ~11244; WS17-S5 edits in progress from another agent)",
+    "apps/Model Plane/rust/services/model-gateway/src/tools.rs (ensure before hook_context_json at ~232)",
+    "apps/Model Plane/rust/services/model-gateway/src/browser_run.rs (ensure before hook_context_json at ~1485)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md, apps/Model Plane/docs/decisions/ledger.md, docs/plans/model-plane-chat-build-plan-2026-10-14.md (docs only, see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The gRPC RegisterHook/ListHooks dispatch in grpc.rs is not wired to proxy_register_hook/proxy_list_hooks (shared edit, see lead_todo). Until it lands, durable mode cannot be reached and the row's 'handle_register_hook/handle_list_hooks proxy' deliverable is only reachable from tests.",
+     "The Do-run (sse.rs), code_interpreter (tools.rs) and browser_run.rs paths must await ensure_org_hooks and refuse on Err before HOOKS_DURABLE can be turned on (shared edits).",
+     "buf generate, buf lint and buf breaking for gateway.proto Hook fields 9 and 10 have not been run, and the Go/TS gen is not regenerated.",
+     "TestOrgHooksAgainstPostgres has not been run through the DB harness.",
+     "The live proof has not been run: a rule created by curl survives restarts of capability-core and the gateway, a Do turn shows the denied step and the org_hook_changed audit row, and a non-admin write gets 403.",
+     "Docs: CAPM row 61, a ledger entry for the D8 bounds and the 0028 numbering, and the plan section 4.4 correction (0024 is taken, S8 is 0028)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Do runs, tool calls and browser runs read hook rules through the synchronous hook_context_json and do_run_org_policy. In durable mode a run that does not first await ensure_org_hooks reads no snapshot (empty context, which fails open) or one past its D8 bound. The refusal must be wired before HOOKS_DURABLE is switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Nothing routes gRPC RegisterHook or ListHooks to the durable proxies, because grpc.rs is not in this slice's ownership. Durable mode is unreachable from gRPC, so the DoD evidence cannot be produced until the shared edit lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The 200-rule cap is a count inside the insert statement, and registryDatabase has no transaction. Simultaneous admin creates can exceed the cap by the number of racing writers."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "capability-core's org-hook routes have no switch of their own, so an admin write while HOOKS_DURABLE is off is stored and not enforced. The owner may want a capability-core switch to keep the table dark until the gateway flips."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "D7 is partial: only the deny-only rule for post_tool is enforced at write time. The effectful-matcher rejection needs WS05 tool classes and is not built."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "In durable mode proxy_register_hook ignores a caller-supplied hook_id because capability-core assigns ids, while the in-memory path honours it. Confirm no caller depends on it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "When the post-write read-back fails, the org's snapshot is dropped, so its Do runs refuse until capability-core answers. That is the intended fail-closed shape; it needs tests with the WS25-S9 typed 503."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The rule-write audit row omits the tool matcher and the reason by design (content-free). WS06 forensics may need the matcher to reconstruct what a rule covered; the owner should confirm the trade-off."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TestOrgHooksAgainstPostgres (create, update and revoke chain, duplicate, 200 cap, org isolation, audit rows, ZDR refusal) is written but not run; it needs the DB harness."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "cmd/main.go was not gofmt-clean at HEAD (skillbundle import order). Not introduced here; left alone."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "runtime_registries.rs has pre-existing rustfmt hunks in the MCP code (around lines 470 and 2203-2602). Not touched."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "In durable mode, hook_context_json/do_run_org_policy fall back to the in-memory `inner` map (empty) for an org with no snapshot, so a Do run that does not first await ensure_org_hooks fails open; the ensure-and-refuse wiring in sse.rs/tools.rs/browser_run.rs must land before HOOKS_DURABLE=true."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "proxy_register_hook, proxy_list_hooks, ensure_org_hooks and hooks_durable have no production caller yet (grpc.rs is not owned by this slice), so the row's DoD evidence cannot be produced until the shared edit lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "proxy_register_hook reads back and, on failure, removes the snapshot under the request's caller-supplied req.org_id. If the grpc wiring does not bind org_id to the verified identity, an admin of org A who sends org_id=B makes the tenant check fail and evicts org B's snapshot, which loses B's stale-if-error cover. Bind or validate org_id against the identity in the grpc.rs wiring."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "hydrate_org_hooks accepts an answer whose org_id is empty (`!answer.org_id.is_empty() && ...`), so the foreign-tenant guard depends on capability-core always echoing org_id. It does today; a strict equality check would be safer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The 200-rule cap is a count subquery inside the insert with no lock or transaction, so concurrent admin creates can exceed the cap."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "capability-core's /api/v1/org-hooks routes have no switch of their own. Rules written while HOOKS_DURABLE is off are stored and bump org_agent_policy.revision (creating a defaults row if absent) but are not enforced."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "D7 is only partly met: post_tool is limited to deny, but the plan's rejection of post_tool matchers that can only match effectful tools needs WS05 tool classes and is not built."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "In durable mode a caller-supplied hook_id is ignored (capability-core assigns ohr_ ids), unlike the in-memory upsert path. Confirm no client relies on upsert-by-id."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The org_hook_changed audit diff omits tool_matcher and reason by design (content-free). The owner should confirm this suffices for WS06 forensics."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The HOOKS_DURABLE parser accepts only the literal \"true\" (batch rule), not the plan's vocab-C \"on\". The S12 compose flip must use \"true\"."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Migration number 0028 replaces the reserved 0024 (now 0024_provider_read_tool). This is correct but must be recorded in plan section 4.4."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway hook (CARGO_INCREMENTAL=0, target C:/dev/mp-target-w2)",
+      "outcome": "lib: 21 passed, 0 failed; hook-filtered integration binaries: 2 passed in one; all others 0 run; no failures",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --test hook_proxy_zdr_test",
+      "outcome": "3 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "capability-core: go build ./...",
+      "outcome": "ok, no output",
+      "passed": true
+     },
+     {
+      "command": "capability-core: go vet ./internal/api/ ./cmd/...",
+      "outcome": "clean",
+      "passed": true
+     },
+     {
+      "command": "capability-core: go vet -tags integration ./internal/api/",
+      "outcome": "clean (integration test compiles)",
+      "passed": true
+     },
+     {
+      "command": "capability-core: go test -count=1 ./internal/api/ -run OrgHook",
+      "outcome": "ok",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "audit",
+    "zdr"
+   ],
+   "notes": "WS25-S8 is built behind HOOKS_DURABLE (default off; only the literal \"true\" enables). capability-core: migration 0028 (number deviates, see deviations), org_hooks.go with GET/POST /api/v1/org-hooks and PUT/DELETE /api/v1/org-hooks/{id}. Writes are admin-only, ZDR-refused, and each is one SQL statement that changes the rule, bumps org_agent_policy.revision, and writes the history and content-free audit rows. Cap 200 active rules, duplicate (event, matcher, decision) via partial unique index, post_tool deny-only. gateway: Hook gains revision=9 and created_by=10; HookRegistry gets a per-org durable snapshot carrying the revision; hydrate_org_hooks mirrors hydrate_mcp_registry (a refused bearer leaves the snapshot, a foreign-tenant answer is refused); ensure_org_hooks applies the D8 TTL 30 s and stale bounds 900/120 s and fails closed past the bound; proxy_register_hook refuses ZDR and non-admin callers before sending, then reads the rules back; proxy_list_hooks. With the switch off, rules come from the in-memory registry and policy_revision stays 0, so the off path is unchanged. Status is partial because grpc.rs and the Do-run, tool and browser paths are not in this slice's ownership; the durable proxies are not reachable until the shared edits land. Nothing staged or committed. The worktree also holds WS17-S5 edits by another agent (audit.rs, lib.rs, moderation.rs, sse.rs, tool_loop.rs, e2e_invoke_chain_test.rs, untracked recall_conversations.rs). I did not touch them; my test runs compiled the tree as it stood."
+  },
+  {
+   "id": "WS17-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\recall_conversations.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\moderation.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\audit.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\lib.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\e2e_invoke_chain_test.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\tool-presentation.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\tool-presentation.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib recall_conversations",
+     "outcome": "11 passed, 0 failed (final text)"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "2619 passed, 0 failed, 4 ignored (final text; includes audit, tool_loop dispatch-arm coverage and sse-adjacent tests)"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test recall_frames",
+     "outcome": "1 passed, 0 failed (final text)"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test",
+     "outcome": "159 passed, 0 failed (final text; the whole invoke-chain target, including the MockMemory change)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 src/recall_conversations.rs",
+     "outcome": "clean. Edited tool_loop.rs, sse.rs and the e2e test carry pre-existing rustfmt hunks, none inside the lines this slice added (checked by line range)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/shared/chat-nodes/tool-presentation.test.ts (in apps/Frontend Plane/verevonv3)",
+     "outcome": "12 passed, 0 failed"
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js src/shared/chat-nodes/tool-presentation.ts src/shared/chat-nodes/tool-presentation.test.ts",
+     "outcome": "no findings"
+    },
+    {
+     "command": "NOT RUN: cargo test -p model-gateway --all-targets; cargo fmt --all -- --check (workspace); pnpm typecheck; pnpm lint; real-PG DB harness; docker and live proof",
+     "outcome": "not run; see lead_todo"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit crates/mp-content-safety/src/trust.rs: in TOOL_TRUST add `(\"recall_conversations\", TrustClass::PriorConversation),`; in the tests add `assert_eq!(TrustClass::classify(\"recall_conversations\"), TrustClass::PriorConversation);`. Then run `cargo test -p mp-content-safety` and check execution-core/tests/compaction_parity_contract.rs for TrustClass cases.",
+    "shared-edit services/model-gateway/src/prompt_context.rs line 415: `const CONDITIONAL_TOOLS: [&str; 4] = [\"reattach_context\", \"web_search\", \"skill_file\", \"recall_conversations\"];` and the doc comment above it. Then rerun the model-gateway lib suite (prompt_context tests pin this order).",
+    "Commit only this slice's files. apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs (758 uncommitted lines) and tests/hook_proxy_zdr_test.rs (untracked) are WS25-S8 work from another session in this worktree; they were present during my runs and are not mine.",
+    "Live proof (docker, lead-run; per Appendix B N1 this slice needs it): rebuild session-core and model-gateway, enable SESSION_CORE_MESSAGE_SEARCH_ENABLED (WS17-S3), and enable MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED only once WS07 S1 memory controls are live. Show a flagged turn with a tool round, provenance prior-conversation, a poisoned snippet framed and not obeyed, and the second user's chat absent.",
+    "Run the real-PG tests the plan names for the search this tool depends on (recall_excludes_waived_and_zdr_threads and the owner-scope tests) before the switch goes on.",
+    "Run `cargo test -p model-gateway --all-targets` and `cargo fmt --all -- --check` in CI or a clean target. Only the lib suite and the invoke-chain target were built here; pre-existing non-lib Windows failures are expected in other targets. hook_proxy_zdr_test.rs would be compiled by --all-targets and is WS25-S8's untracked file.",
+    "Keep the switch off in every deployment until the P1 depth items close."
+   ],
+   "deviations": [
+    "The offer gate also excludes web-only turns. The row does not name that, but memory prefetch is already skipped under web-only at sse.rs (memory_recall_status), so this follows precedent.",
+    "Appendix-era plan text says NEW TrustClass::PriorConversation in moderation.rs. The variant already exists in mp-content-safety. moderation.rs gains ToolProvenance::assess_as, which takes the trust class explicitly, since trust.rs is not owned. The recall arm and the e2e assert PriorConversation framing through that path.",
+    "Memory state is read through session-core GetMemoryControls (user-level use_allowed and reason) on the caller's credential, not by calling memory_control::resolve across crates. The thread-level memory mode is NOT covered; see depth P1.",
+    "Waived detection uses the data-plane mode string reject from mp_contracts::dataplane_posture rather than a typed flag, because dispatch_tool_with_cost has no waived bool.",
+    "The tool definition sits in builtin_tool_defs as the row says and is gated in sse.rs, so the dispatch-time offered check still rejects a non-offered call. err_outcome was made pub(crate) to reuse it.",
+    "product-acceptance-helpers.ts (owned) needed no change: its conversation_only allowlist already excludes recall_conversations.",
+    "Frontend: added to READ_TOOLS (the row's 91-96 range) so the card renders as a read, not a search."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-content-safety\\src\\trust.rs (add (\"recall_conversations\", TrustClass::PriorConversation) to TOOL_TRUST and one classify assertion; update the PriorConversation doc that says no tool maps to it)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\prompt_context.rs (add \"recall_conversations\" to CONDITIONAL_TOOLS at line 415, making the array [&str; 4], and its doc comment)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof (plan DoD evidence): rebuild session-core and model-gateway, turn SESSION_CORE_MESSAGE_SEARCH_ENABLED and MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED on in a test stack, and capture a transcript showing the tool round, provenance prior-conversation, a poisoned snippet that is not obeyed, and no chat from a second user.",
+     "Shared edits are owed outside the ownership set: crates/mp-content-safety/src/trust.rs needs (\"recall_conversations\", TrustClass::PriorConversation) in TOOL_TRUST plus a classify assertion, and services/model-gateway/src/prompt_context.rs needs \"recall_conversations\" in CONDITIONAL_TOOLS ([&str; 4]) and its doc comment.",
+     "Run cargo test -p model-gateway --all-targets and the workspace fmt gate in a clean target. runtime_registries.rs and hook_proxy_zdr_test.rs are WS25-S8 work in the same worktree, so commit this slice's files on their own.",
+     "Run the real-PG SearchMessages RECALL tests (waived/zdr exclusion, owner scope) before the switch goes on."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A thread the person set to memory off (threads.memory_mode='off') is not honoured by recall: the offer and the arm read only the user-level GetMemoryControls, and session-core RECALL does not check the current thread's mode. Close it (session-core WS17-S3/S5 owner) before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Name-keyed trust classification is missing: TrustClass::classify(\"recall_conversations\") returns OrgInternal until trust.rs maps the tool. The recall outcome is explicitly PriorConversation, but any other name-keyed path (parked-handle read-back, execution-core provenance) would frame it as org-internal. Fixed by the trust.rs shared edit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Prompt-cache prefix: when the tool is offered it sits among the stable tools because it is missing from CONDITIONAL_TOOLS, shifting later tool definitions on offered turns (cost, not correctness). Fixed by the prompt_context.rs shared edit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The sse.rs offer wiring is not tested in the real handler. The named unit test covers the predicate and conversation_tool_allowed; nothing proves a conversation_only or web_only invoke omits the tool, or that switch-off makes no GetMemoryControls call. Add e2e cases with features [tools, conversation_only] and the switch off."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No ZDR golden row was added to the live-only ZDR matrices. The arm-level test refuses zdr before any read, but the matrix does not yet name recall for ZDR credentials."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Screening is deterministic only: the WS26 semantic and inline pass used for web tools (assess_external_payload) is not applied to prior conversation. Decide whether it should be."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Flagged prior-conversation results are framed and delivered, not withheld (no Enforce handling). The plan reads as framed plus flagged; owner to confirm for this source."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Scope judgement: recall is offered under KnowledgeOnly (own data) and not WebOnly. Owner to confirm."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Waived detection reads the data-plane mode string \"reject\" through mp_contracts; a typed waived flag on the dispatch parameters would be clearer."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The memory-state read is one GetMemoryControls call per eligible turn while the switch is on. Cache it per turn if it shows in latency."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "ToolProvenance::assess_as can fold back into assess once trust.rs maps the tool."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The tool presentation uses the read intent with no count, because the envelope names matches hits. Consider a search intent with a hits count."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Appendix B N1 evidence is not run: no rebuilt images, no running stack, no flagged end-to-end turn. Lead to run per the lead_todo steps."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "`pnpm exec` in apps/Frontend Plane/verevonv3 tried a dependency install and failed with ENOENT under apps/Frontend Plane/Ingestion Plane/Quarry-v2/sdks/typescript. I ran vitest and eslint through node directly and did not run pnpm typecheck or pnpm lint."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "C: has about 7 GB free after the builds. Check before the next batch, per the stored memory guidance."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Shared worktree: runtime_registries.rs (758 uncommitted lines) and tests/hook_proxy_zdr_test.rs (untracked) belong to WS25-S8 and compiled into my lib runs. Commit this slice's files separately."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Recall reads only the user-level GetMemoryControls (use_allowed/reason). It ignores a thread-level memory_mode='off', and it does not use the plan's D5 consumer memory_control::resolve, so a thread or org state that resolve would refuse can still allow recall."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "TrustClass::classify(\"recall_conversations\") still returns OrgInternal until trust.rs maps it. The recall arm frames the result correctly through assess_as(PriorConversation), but any path that classifies by name (parked-handle read-back, execution-core provenance) would frame recalled text as org-internal."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The sse.rs offer gate has no handler-level test. Nothing proves that a conversation_only, web_only, zdr or switch-off invoke leaves recall_conversations out of the offered tool set, or that switch-off makes no GetMemoryControls call."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No golden rows for recall were added to the live-only ZDR matrices (zdr_posture_matrix.rs, zdr_feature_table.rs, zdr_refusal_inventory.rs) that the WS17 ZDR clause names."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "recall_conversations is missing from CONDITIONAL_TOOLS, so on turns that offer it, it sits among the stable tool definitions and shifts the prompt-cache prefix (cost only)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Flagged prior-conversation hits are framed and delivered, not withheld. Recall is offered under KnowledgeOnly but not WebOnly. The owner should confirm both, along with whether the WS26 semantic screen should apply to this source."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Waived detection in the dispatch arm compares data_plane_mode with the string \"reject\" from data_plane_zdr_mode(false, true). A typed waived flag on the dispatch parameters would be less fragile."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "While the switch is on, every tool-enabled turn makes one GetMemoryControls call at offer time, even when the model never calls recall."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "There is no runtime evidence yet: no rebuilt images, no flagged end-to-end turn, and no check that a second user's chat never appears."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "C: has 4.6 GB free after these builds. Free space before the next batch."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway --lib recall_conversations",
+      "outcome": "11 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --all-targets (CARGO_INCREMENTAL=0, target C:/dev/mp-target-w2)",
+      "outcome": "All test targets ok, 0 failed: lib 2619 passed/4 ignored; e2e_invoke_chain_test 159 passed; every other target ok. Compiled; only pre-existing unused-result warnings.",
+      "passed": true
+     },
+     {
+      "command": "cargo fmt --all -- --check",
+      "outcome": "Reports about 4288 diff hunks workspace-wide, mostly in files this slice did not touch, so not clean. Hunks exist in lib.rs (lines 1-96, likely CRLF-related) and moderation.rs:1163, both owned files. The implementer said the added lines were clean by range, and recall_conversations.rs passes rustfmt --check. Lead should confirm whether the lib.rs and moderation.rs hunks are pre-existing; the repo-wide fmt gate was already failing.",
+      "passed": false
+     },
+     {
+      "command": "pnpm typecheck (run as tsc6 -p tsconfig.app.json --noEmit)",
+      "outcome": "Fails with errors in 3 files, none touched by this slice: quarry-client.ts (21), WorkspaceSettingsPage.tsx (1), schedule-contract.test.ts (1). No errors in tool-presentation.ts or its test. These match the known pre-existing typecheck failures.",
+      "passed": false
+     },
+     {
+      "command": "pnpm lint (eslint src/shared/chat-nodes)",
+      "outcome": "0 errors, 4 warnings, all in other files (registry.live.test.ts and similar); tool-presentation files are clean.",
+      "passed": true
+     },
+     {
+      "command": "vitest run src/shared/chat-nodes/tool-presentation.test.ts --pool=threads",
+      "outcome": "12 passed, 0 failed",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "policy",
+    "audit"
+   ],
+   "notes": "WS17-S5 is built and dark. The gateway gains a read-only recall_conversations tool: a SearchMessages RECALL call (origin chat, the current thread excluded, no Space), a memory-state gate read through GetMemoryControls, and refusals for zdr, waived and disabled. Every refusal is an unavailable JSON answer, never an empty list. Matches are screened as PriorConversation over the untruncated text, framed as untrusted, and rendered within 5 hits, 300 chars per snippet and 4000 chars serialized. The offer in sse.rs happens only when the switch MODEL_GATEWAY_RECALL_CONVERSATIONS_ENABLED is the literal true, the turn has tools, is not conversation-only, web-only, zdr or waived, and memory allows recall. The switch is read first, so off makes no memory read. No proto or migration changes. Git status before the work showed no partial WS17-S5 edits. Runtime proof (docker, flagged turn) is not run."
+  },
+  {
+   "id": "WS21-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser_sites.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/BrowserSitesSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/BrowserSitesSection.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgBrowserPolicySection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgBrowserPolicySection.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.site-consent.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --bin verevon-gateway-rs browser_sites (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0), first run before removing one unused test import",
+     "outcome": "13 passed, 0 failed (all browser_sites unit tests incl. wiremock-driven route tests). Second run after the import fix was started in background (task bfevtoghw) and its result was NOT seen: unverified."
+    },
+    {
+     "command": "cargo test --manifest-path <gateway Cargo.toml> --all-targets --no-run",
+     "outcome": "exit 0; all gateway test targets compiled (before the final import-only edit)."
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run BrowserSitesSection.test.tsx OrgBrowserPolicySection.test.tsx ChatMessages.site-consent.test.tsx (pnpm exec blocked by a pnpm deps-status install error, so the local vitest binary was used)",
+     "outcome": "3 files, 17 tests passed (5 + 6 + 6)."
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/settings src/shared/actions",
+     "outcome": "35 files passed, 318 tests passed, 1 failed: WorkspaceSettingsPage.negative-render.test.tsx 'renders no fabricated security/integration posture on the browser-sites section'. Cause: settings-sections.ts now lists browser-sites and org-browser-policy but WorkspaceSettingsPage.tsx (not owned) has no Match for them, so the page falls back to default content. Clears once the shared edit below is applied."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on BrowserSitesSection.tsx, OrgBrowserPolicySection.tsx, both section test files, settings-sections.ts, ChatMessages.site-consent.test.tsx",
+     "outcome": "0 errors; BrowserSitesSection.tsx has 2 solid/reactivity warnings."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js ChatMessages.tsx",
+     "outcome": "0 errors, 10 warnings. HEAD baseline checked via stdin: 37 errors, 10 warnings; the new block adds no lint errors."
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (run before the final handler edits)",
+     "outcome": "Only expected errors: WorkspaceSettingsPage.tsx(206,7) TS2739 for the two new section ids (shared edit), plus pre-existing quarry-client.ts (@quarry/client not built) and schedule-contract.test.ts TS2352 that are not mine. A final re-run (task bejcol6wp, log scratchpad/tsc6-app-final.log) was not seen: unverified."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx: (1) add imports BrowserSitesSection from '@/features/settings/components/BrowserSitesSection' and OrgBrowserPolicySection from '@/features/settings/components/OrgBrowserPolicySection'; (2) in the Record map near line 243 (next to 'model-access': []) add 'browser-sites': [] and 'org-browser-policy': []; (3) near the model-access Match (~line 506) add <Match when={props.section === 'browser-sites'}><BrowserSitesSection /></Match> and <Match when={props.section === 'org-browser-policy'}><OrgBrowserPolicySection /></Match>. Effect: clears TS2739 and the failing negative-render test.",
+    "After the shared edit: re-run node node_modules/vitest/vitest.mjs run src/features/settings src/shared/actions, then the typecheck (node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit, after build:quarry-client). The quarry-client and schedule-contract errors are pre-existing.",
+    "Gateway: run the full cargo test --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --all-targets with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0. Only the browser_sites filter was run; the second run after the import fix is unverified.",
+    "Cross-plane, before the consent card can ever render (model plane and SPA, not owned): (a) apps/Model Plane/api/contracts/approval-causes.json + mp-contracts approval_cause.rs add browser_site_consent (and its pin); (b) model-gateway http_routes.rs approval_cause_value projects host and max_level; (c) execution-core browser_session.rs raises the cause when open gets an ask (S5b site-consent part is not in the code); (d) SPA approval-copy.ts APPROVAL_CAUSE_CODES and causeCodeOf, orchestration-client.ts normalizeApprovalCause (host, maxLevel), and ApprovalRequests (ChatMessages.tsx ~line 2214) renders BrowserSiteConsentCard for that code.",
+    "Remember path (needs the cross-plane step above): orchestration.rs DecideBody accepts remember read|act only for an approve on a browser_site_consent approval; the BFF reads host and max_level from the approval record (model-gateway GET), clamps the level to the cap, then PUTs the pref to org-core with the current revision. orchestration-client.ts decideApproval must send remember.",
+    "Live panel: ChatLiveRunPanel.tsx bound to browser_session_opened.quarry_run_id is not built. Decide the browser-session-id to quarry_run_id mapping for the frame and takeover routes (browser.rs 416-431) first, and take K3-21 (QRY F-t2-013 phase 1) into account.",
+    "Action registry: add the six contracts (browser_site.list/set/remove/explain, browser_site_policy.get/set) to action-registry.ts only together with model-access.ts rows (shared) and the admission golden regeneration and vendored copies (cross-plane). Not done in this batch.",
+    "Playwright: write tests/e2e/chat-do-browser.spec.ts and extend browser-workspace-zdr.spec.ts; run the live proof on a rebuilt stack with BROWSER_DO_ENABLED=true (lead-run, never by the agent).",
+    "Audit: K3-11 names the WS06 event browser_site_pref_changed (host and level only) as an S6 dependency; the BFF emits no audit event for pref writes or policy writes yet."
+   ],
+   "deviations": [
+    "action-registry.ts not edited: ActionId derives from actionRegistry and MODEL_ACCESS (model-access.ts, not owned) is an exhaustive Record, so new ids need model-access rows and the admission golden plus vendored copies regenerated (cross-plane).",
+    "Gateway remember decide hook (orchestration.rs) not built: model-gateway approval projection emits no host or max level and the cause vocabulary has no browser_site_consent, so the hook would be inert.",
+    "ChatLiveRunPanel.tsx, chat-client.ts and chat-normalizers.ts not changed: no browser_session_opened producer exists and the frame and takeover routes are keyed by browser session id; quarry_run_id binding needs a decided mapping.",
+    "The consent card BrowserSiteConsentCard is exported and tested but not mounted in ApprovalRequests (needs the cause vocabulary and normalizer changes, which are not owned).",
+    "SPA client functions for browser sites live in BrowserSitesSection.tsx (no client module in the ownership list).",
+    "Gateway site routes are merged in browser.rs classed_routes (owned), not in main.rs; they are absent when BROWSER_DO_ENABLED is not 'true' (read at router build), so the 404 is an absent route rather than a JSON envelope."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx (Record entries and Match branches for the two new section ids)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts is owned but its six new contracts also need apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts rows and the admission golden (src/shared/api/contracts/agent-action-admission.json) with its .sha256 pin and vendored copies (not done)",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts (APPROVAL_CAUSE_CODES, causeCodeOf) for browser_site_consent",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts (normalizeApprovalCause host and maxLevel; decideApproval remember body)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (approval_cause_value host and max_level projection)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs and apps/Model Plane/api/contracts/approval-causes.json (browser_site_consent code)",
+    "apps/Model Plane/rust/services/execution-core/src/browser_session.rs (raise the consent cause on ask; S5b site-consent part is missing)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx and chat-client.ts, chat-normalizers.ts (live panel) are owned but blocked on the browser_session_opened producer and the route-key decision"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Apply the WorkspaceSettingsPage.tsx shared edit (imports, 'browser-sites'/'org-browser-policy' Record keys near line 243, two Match branches near line 506). Until then typecheck fails with TS2739 at line 206, which I reproduced, and the negative-render test fails for 'browser-sites', as the implementer reported.",
+     "The cross-plane cause vocabulary is not built: grep finds no browser_site_consent anywhere in apps. Once WS21-S5b's consent part and WS13 land, mount BrowserSiteConsentCard in ApprovalRequests and build the orchestration.rs remember hook (host from the approval record only), with its gateway test.",
+     "Bind the live panel (ChatLiveRunPanel.tsx, chat-client.ts, chat-normalizers.ts) to browser_session_opened.quarry_run_id. Two things block it: no producer exists yet, and the browser-session-id to quarry_run_id mapping for the frame/takeover routes has to be decided first (K3-21 / QRY F-t2-013 phase 1).",
+     "Register the six browser_site / browser_site_policy contracts in action-registry.ts. This has to land together with MODEL_ACCESS rows in model-access.ts (an exhaustive Record<ActionId,...> at line 90, so the registry edit alone breaks typecheck), plus the admission golden regeneration and its vendored copies.",
+     "Playwright: write tests/e2e/chat-do-browser.spec.ts and extend browser-workspace-zdr.spec.ts.",
+     "Live proof on a rebuilt stack with BROWSER_DO_ENABLED=true and VITE_BROWSER_SITES=true: card in nb and en, remember writes the pref, admin block fails the next open with no card, and a network capture shows no host sent by the client. Lead-run, after quarryv2 merges."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The consent card and the remember path cannot run end to end: browser_site_consent is absent from the closed approval cause vocabulary (approval-causes.json, mp-contracts approval_cause.rs, SPA approval-copy.ts APPROVAL_CAUSE_CODES); the SPA causeCodeOf maps unknown codes to unclassified_gate, and model-gateway projects no host or max level."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The gateway remember decide hook in orchestration.rs is not built, so 'host from approval record only' and the remembered-choice write have no test; the decide body does not yet accept a remember field."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The settings sections are unreachable and typecheck fails until WorkspaceSettingsPage.tsx gets the two ids and Match branches (shared edit); negative-render test fails for browser-sites until then."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The live run panel is not bound to browser_session_opened: no execution-core producer exists, and the existing frame and takeover routes are keyed by browser session id, so the quarry_run_id mapping is undecided."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Pref writes and policy writes emit no WS06 audit event (browser_site_pref_changed, host and level only), which K3-11 lists as an S6 dependency."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Action registry contracts are not registered; registering them needs model-access.ts rows and the admission golden plus vendored copies regenerated, a cross-plane change for the lead to decide on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No Playwright specs written (chat-do-browser.spec.ts, browser-workspace-zdr extension) and no live proof: rebuilt images and a BROWSER_DO_ENABLED stack are needed to prove admin-block, remember and no-client-host."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Duplicated helpers: require_active_org, require_org_admin, actor_for (private in domains/orgs/shared.rs) and the strict BROWSER_DO_ENABLED parser (private in chat/shared.rs) are copied into browser_sites.rs; make them pub(crate) and reuse."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The SPA site-policy client functions live in BrowserSitesSection.tsx because no client module was in the ownership list; move them to a shared api client when allowed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "ZDR: the BFF site routes do not refuse under ZDR; the card cannot appear under ZDR because no consent cause can be raised there. Owner should confirm no refusal is needed for pref writes (they hold hostnames and levels only)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "BrowserSitesSection.tsx carries two solid/reactivity lint warnings (handleForget, handleAddChoice); they do not block lint."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Three parts of the row are not built: the action-registry contracts ('FIRST'), the orchestration.rs remember-on-decide hook, and the ChatLiveRunPanel binding. BrowserSiteConsentCard is exported but mounted nowhere, so today it is reachable only from its test. All four are blocked by unbuilt dependencies (cause vocabulary, browser_session_opened producer) or by shared files outside the ownership set; the switch cannot be turned on until they land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Pending shared edit to WorkspaceSettingsPage.tsx. Without it, tsc6 -p tsconfig.app.json reports TS2739 at line 206 (missing 'browser-sites' and 'org-browser-policy'), and src/features/settings has one failing negative-render test."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "K3-11 requires a WS06 audit event browser_site_pref_changed (host and level only) as an S6 dependency. browser_sites.rs emits no audit event for pref writes, pref deletes or policy writes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The implementer handed back the action-registry/model-access change as a prose lead_todo, not as exact 'shared-edit <file>: <lines>' text, so the lead still has to write the six contracts and their MODEL_ACCESS rows."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "settings-sections.ts registers 'browser-sites' and 'org-browser-policy' with no flag gate. With VITE_BROWSER_SITES off, /settings/browser-sites still resolves to a page with a header and an empty body (the sidebar list is separate and unchanged), so the off state is not quite invisible."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's gateway test 'host from approval' has no counterpart, because the remember hook does not exist. The admin-only and own-prefs gateway tests exist and pass (13 browser_sites tests)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "browser_sites.rs re-implements require_active_org, require_org_admin and actor_for (logic matches orgs/shared.rs); make the orgs/shared.rs ones pub(crate) and reuse them."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "BrowserSitesSection.tsx holds the SPA client functions (requestJson calls) and carries two solid/reactivity lint warnings, at lines 215 and 223; move the client to src/shared/api when ownership allows."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The BFF site routes do not refuse under ZDR. The bodies hold only hostnames and levels, and no consent cause can be raised under ZDR, but the owner should confirm that no refusal is wanted."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test gateway Cargo.toml --all-targets (CARGO_INCREMENTAL=0, target C:/dev/mp-target-w2)",
+      "outcome": "pass: 1068 passed, 0 failed, 1 ignored in the main bin, plus 1, 7, 13, 3 and 1 passed in the other targets. This includes the 13 browser_sites tests and compiles every touched gateway module.",
+      "passed": true
+     },
+     {
+      "command": "vitest run BrowserSitesSection.test.tsx OrgBrowserPolicySection.test.tsx ChatMessages.site-consent.test.tsx (run as node node_modules/vitest/vitest.mjs, because pnpm exec is blocked)",
+      "outcome": "pass: 3 files, 17 tests passed.",
+      "passed": true
+     },
+     {
+      "command": "pnpm typecheck (run as tsc6 -p tsconfig.app.json --noEmit, because the script's pnpm build steps cannot run)",
+      "outcome": "fail: WorkspaceSettingsPage.tsx(206,7) TS2739. The Record is missing 'browser-sites' and 'org-browser-policy', which settings-sections.ts added. WorkspaceSettingsPage.tsx is not an owned file, so this is a pending shared edit. The other errors are in quarry-client.ts, where @quarry/client is not built; they were already there before this slice.",
+      "passed": false
+     },
+     {
+      "command": "eslint over src/features/settings, ChatMessages.tsx and apps/gateway (instead of pnpm lint, which runs eslint . on the whole repo)",
+      "outcome": "No output with 'problems' or 'error'. I read this as no errors in the touched areas, but I only grepped the output, so it is not a verified clean pass.",
+      "passed": true
+     },
+     {
+      "command": "vitest run src/features/settings (regression check on neighbouring tests)",
+      "outcome": "fail: 1 failed, 142 passed. WorkspaceSettingsPage.negative-render.test.tsx 'renders no fabricated security/integration posture on the \"browser-sites\" section' fails. WorkspaceSettingsPage.tsx has no Match for the new section ids, so it renders the default content. The same shared edit clears both this failure and the typecheck error.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "WAVE-MODE PARTIAL. Built: (1) gateway browser_sites.rs (new, CRLF): org-admin GET/PUT of the org site policy (require_active_org + owner/admin role, forwarded via proxy_json to org-core /api/v1/organizations/:id/browser-sites); member GET /me, PUT/DELETE /me/{host}, GET explain?host=; strict body validation (unknown fields refused, expected_revision required, mode/rule/level enums, rules<=500, notes<=200, host charset, 64 KB cap) before anything reaches org-core; routes exist only when BROWSER_DO_ENABLED is literally 'true' (read once when classed_routes is built, so they are absent when off), merged into browser.rs classed_routes so the session layer applies. (2) SPA: BrowserSitesSection.tsx (member list/set/forget/explain; client functions live here because no client module is in the ownership list) and OrgBrowserPolicySection.tsx (admin draft + save from expected_revision; 409 keeps the draft unsaved), both shown only when VITE_BROWSER_SITES === 'true'; nb default with en via tr. (3) settings-sections.ts: ids browser-sites and org-browser-policy. (4) ChatMessages.tsx: exported browserSiteConsentChoices (never more than the admin ceiling; empty under ZDR), browserSiteConsentLabel, BrowserSiteConsentCard (nb+en). NOT MOUNTED, see lead_todo.\n\nDEVIATIONS: (a) action-registry.ts NOT edited. Reason: ActionId is derived from actionRegistry and MODEL_ACCESS in model-access.ts (not owned) is an exhaustive Record, so new ids need model-access rows, plus the admission golden and its vendored copies would need regeneration (cross-plane). I did not verify whether the golden test would fail at runtime. (b) gateway remember decide hook (orchestration.rs) NOT built: the model-gateway approval projection (http_routes.rs approval_cause_value, ~line 7322-7348) emits no host or max level, and the closed cause vocabulary (apps/Model Plane/api/contracts/approval-causes.json, mp-contracts approval_cause.rs) has no browser_site_consent; building it would be inert. (c) ChatLiveRunPanel.tsx and chat-client.ts/chat-normalizers.ts NOT changed: no producer of browser_session_opened exists (grep of execution-core browser_events.rs finds none), and the existing frame/takeover routes key on browser session ids, so the quarry_run_id binding needs a decided mapping. (d) Playwright specs not written (depth/live). (e) Live proof not run: no rebuilt images, no BROWSER_DO_ENABLED stack.\n\nWORKTREE NOTE: src/shared/chat-nodes/tool-presentation.ts and its test show as modified in git status. I did not touch them; WS17-S5 in this batch owns those files.\n\nDISK: C: had about 5.5 GB free at the end; the gateway test binary rebuild is incremental."
+  }
+ ]
+}

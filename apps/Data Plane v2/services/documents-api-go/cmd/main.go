@@ -289,6 +289,8 @@ func main() {
 		read.Get("/", docHandler.List)
 		// WS14-S4 share routes. The static "shared-with-me" wins over {documentID}.
 		read.Get("/shared-with-me", docHandler.SharedWithMe)
+		// The chat library (F-t3-080): a filtered view by metadata origin, text left out of every page.
+		read.Get("/library", docHandler.Library)
 		read.Get("/{documentID}/shares", docHandler.ListShares)
 		write.Post("/{documentID}/shares", docHandler.CreateShare)
 		write.Delete("/{documentID}/shares/{subjectID}", docHandler.DeleteShare)

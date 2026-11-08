@@ -1,0 +1,1012 @@
+{
+ "outcomes": [
+  {
+   "unit": "s8-3",
+   "impl": {
+    "summary": "S8-3 is built: the SPA continue contract is park-aware and nothing is wired to it (no caller, no UI). Tests were written first and failed for the right reason, and I broke production code seven ways to confirm they go red. Vitest, tsc -b and eslint show no new failures against the pre-edit baselines, and the BFF vocabulary parity test is green. Only the four files this unit owns changed, with their line endings preserved.\n\n**Contract (`chat-run-continue-contract.ts`)**\n- Header: regime P (the resume of a parked run) is added, the regime-3 sentence names its one exception, and the SPENT_ONLY doc names the park guard.\n- New exports: `CHAT_RUN_CONTINUE_PARK_EFFECT` ({approvalSpent:'no', follow:true}), `ChatRunContinueParkEffect`, `ChatRunContinueParkFailure`, `ChatRunContinueRunStaysParked`, `CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES`, `CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES`.\n- Readers, one per park frame shape:\n  - `chatRunContinueParkRefusalOf(frame)` reads a `park_continue === true` frame whose code is in the 25-token tuple and which has no `approval_spent` key at all, whatever its value.\n  - `chatRunContinueParkDispatchUnavailableOf(frame, parkStream)` reads the bare `agent_dispatch_unavailable`, and only when the caller says the stream is a park stream. It returns `runStaysParked: 'unknown'`.\n  - `chatRunContinueParkFailureOf(frame, options?: {parkStream?: boolean})` is the single entry point that composes both.\n- `runStaysParked` is 'no' for not_resumable and park_not_restorable, 'unknown' for continue_outcome_unknown, continue_in_progress and agent_dispatch_unavailable, and 'yes' otherwise.\n- The regime-1 and regime-2 readers, both spent readers and `chatRunContinueSpentConnected` now return null when the frame has `park_continue === true`. Only an exact `true` counts as the marker.\n\n**Registry (`action-registry.ts`)**\n- `approvalId` is now `z.string().min(1).optional()`, so `{runId, claimToken}` parses and an empty `approvalId` is still refused.\n- The `chat.run.continue` description gains the park form: omit approvalId, nothing is spent, `park_continue true` never says `approval_spent`, the three park refusals, follow the run, and when the run stays parked.\n\n**Tests added**\n- 17 in `chat-run-continue-contract.test.ts`: one reader per frame shape, the runStaysParked table, the regimes staying disjoint, vocabulary closure, and the header wording. A bare `continue_unreachable` or `continue_outcome_unknown` without `park_continue` is read by no guard, with or without the stream context.\n- 1 in `action-registry.test.ts`.\n\n**Verification** (node tools from node_modules/.bin, no pnpm install; baselines recorded before any edit)\n\n| Check | Before | After |\n|---|---|---|\n| Vitest, full | 9 failed in 7 files, 3579 tests | 8 failed in 6 files, 3597 tests |\n| tsc -b | 34 errors | 34 errors, same set |\n| eslint | 1 error, 191 warnings | same, identical row set |\n| BFF `continue_error_vocabulary` | not run | 6 passed |\n\n- The vitest failing set after is the baseline minus ChatPanels `RunPlanPanel > keeps the last plan on screen while a refresh runs`, which flaked green on the second run. I added no failures.\n- The recorded vitest baseline was 7 failing tests in 5 files, but a clean run on this tree shows 9 in 7 files. The extra failures include `run-console-client.test.ts > handles every event name the gateway maps`, which is most likely a side effect of S8-2 adding run_parked/run_resumed to the gateway taxonomy before the SPA maps them (S8-8). I did not investigate further.\n- Mutation checks, all red and the contract restored byte for byte (cmp identical):\n  - regime-2 reader without the marker check;\n  - regime-1 reader without the marker check;\n  - park reader accepting `approval_spent`;\n  - park reader accepting a non-exact marker;\n  - bare reader ignoring the stream context;\n  - park reader trusting any code;\n  - not_resumable dropped from the NOT_PARKED list.\n\nNothing in this unit is DB-backed, so there is nothing written but not run. No transient locks were hit.",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.test.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+    ],
+    "tests_added": [
+     "chat-run-continue-contract.test.ts: 'the park effect (regime P...)' (2 tests)",
+     "chat-run-continue-contract.test.ts: 'chatRunContinueParkRefusalOf (the frames of a park continue)' (6 tests)",
+     "chat-run-continue-contract.test.ts: 'chatRunContinueParkDispatchUnavailableOf (the bare frame of a park stream)' (4 tests)",
+     "chat-run-continue-contract.test.ts: 'the park regime against the other regimes' (5 tests)",
+     "action-registry.test.ts: 'lets a parked run be continued with no approval: approvalId is optional, never blank, and the description says what the park form is'"
+    ],
+    "commands_run": [
+     {
+      "command": "vitest run (full) before edits",
+      "outcome": "9 failed in 7 files, 3570 passed of 3579. Failing set recorded."
+     },
+     {
+      "command": "tsc -b before edits",
+      "outcome": "34 errors."
+     },
+     {
+      "command": "eslint . before edits (json output)",
+      "outcome": "1 error (chat-client.ts no-unused-vars), 191 warnings."
+     },
+     {
+      "command": "vitest run on the two owned test files before implementing",
+      "outcome": "16 failed, for the right reason (missing functions and exports, missing header text, schema still requiring approvalId)."
+     },
+     {
+      "command": "vitest run on the contract, action-registry and orchestration-client tests after implementing",
+      "outcome": "106 passed."
+     },
+     {
+      "command": "mutation script over chat-run-continue-contract.ts (7 mutations), then cmp",
+      "outcome": "each mutation failed 1 to 3 tests; file restored, cmp identical."
+     },
+     {
+      "command": "tsc -b after edits",
+      "outcome": "34 errors, identical set to before."
+     },
+     {
+      "command": "eslint . after edits",
+      "outcome": "1 error and 191 warnings, identical rows to before."
+     },
+     {
+      "command": "vitest run (full) after edits",
+      "outcome": "8 failed in 6 files, 3589 passed of 3597. The failing set is the baseline minus one flaky ChatPanels test."
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --test continue_error_vocabulary",
+      "outcome": "6 passed (the BFF reads the contract file by source scan)."
+     }
+    ],
+    "deviations": [
+     "Names beyond the design: the design names CHAT_RUN_CONTINUE_PARK_EFFECT and chatRunContinueParkFailureOf. It also says that reader is the only reader of both marked frames and the bare agent_dispatch_unavailable, but its signature takes one argument and the bare frame has no marker. To read the bare frame only on a park stream I added an optional second argument, `options?: {parkStream?: boolean}`. I also exported the two shape-specific readers it composes (chatRunContinueParkRefusalOf, chatRunContinueParkDispatchUnavailableOf), to meet 'one reader per park frame shape', and the two code-list consts and the types.",
+     "The park effect uses the design's field names `{approvalSpent:'no', follow:true}`, not the committed `followRun` and `retryable`. The park failure result is `{regime:'park', code, approvalSpent:'no', follow:true, runStaysParked}`.",
+     "A marked frame that also carries `approval_spent`, with any value, is read by no guard at all. The park gateway never sends the key, and the design says 'never approval_spent'. This is fail-closed and the design does not spell it out.",
+     "chatRunContinueSpentConnected also returns null for a connected frame marked park_continue. The design only names the error-frame readers, but 'the other readers return null for park_continue' covers it, and the committed connected frame never carries the marker.",
+     "action-registry.test.ts is CRLF in the working tree even though the eol attribute says lf. I preserved CRLF there (234 CRLF = 234 LF after the edit). The other three files are LF and stayed LF.",
+     "The recorded vitest baseline (7 failing in 5 files) did not match this tree, which showed 9 failing in 7 files (see summary). I diffed against my own before-run, not the recorded numbers.",
+     "`eslint -f unix` is not available in this eslint version, so I used json output and compared rule/message rows."
+    ],
+    "blockers": [],
+    "deferred_files": [
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row to add, for the lead)",
+      "content": "WS03 S8-3 (SPA continue contract): built on the local branch, uncommitted, Frontend Plane only. chat-run-continue-contract.ts gains regime P in the header. It adds CHAT_RUN_CONTINUE_PARK_EFFECT {approvalSpent:'no', follow:true}, the two code lists CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES and CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES, and three readers: chatRunContinueParkRefusalOf (the park_continue-marked frames), chatRunContinueParkDispatchUnavailableOf (the bare agent_dispatch_unavailable, only when the caller says the stream is a park stream) and chatRunContinueParkFailureOf (the single entry point). runStaysParked: 'no' for not_resumable and park_not_restorable, 'unknown' for continue_outcome_unknown, continue_in_progress and agent_dispatch_unavailable, 'yes' otherwise. Every regime-1 and regime-2 reader, both spent readers and the spent connected reader return null for a frame with park_continue === true; a marked frame that carries approval_spent in any form is read by no guard. action-registry.ts: chat.run.continue approvalId is now optional (never blank) and the description gains the park form. Tests: 18 added (17 in the contract test, 1 in action-registry.test.ts). Vitest, tsc -b and eslint show no failures beyond the pre-edit baselines, and the BFF continue_error_vocabulary parity test is green at 25. No caller and no UI: S8-8 adds chat-client onRunParked, run-park.ts and orchestration-client continueParkedRun, which should call chatRunContinueParkFailureOf(frame, {parkStream: true}) on a park stream."
+     },
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (addendum text for S8-9, for the lead)",
+      "content": "S8-3 (SPA contract, display-only, behaviour-free): the park continue is read by one guard family only. A failure frame of a park continue carries park_continue: true exactly, a code from the closed 25-token tuple, and never approval_spent. The guard reads it as nothing spent, follow the run, with runStaysParked no, unknown or yes by code. The bare agent_dispatch_unavailable of a park stream has no marker, so it is read as a park failure only when the caller says the stream is a park stream (the SPA knows from the request it sent). It reads unknown and follow, and nothing is terminalized. The approval-regime guards are null for a marked frame, so a park frame can never be read as a spent approval. A marked frame that also says approval_spent contradicts itself and is read by no guard. chat.run.continue's approvalId is optional in the action contract, and the wire's empty approval id for the park form is the client's to write (S8-8), never a caller's input."
+     }
+    ],
+    "names_for_later_units": [
+     "chat-run-continue-contract.ts: CHAT_RUN_CONTINUE_PARK_EFFECT, CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES, CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES; types ChatRunContinueParkEffect, ChatRunContinueParkFailure, ChatRunContinueRunStaysParked",
+     "chat-run-continue-contract.ts readers: chatRunContinueParkRefusalOf(frame), chatRunContinueParkDispatchUnavailableOf(frame, parkStream: boolean), chatRunContinueParkFailureOf(frame, options?: {parkStream?: boolean})",
+     "Park failure result shape: {regime:'park', code, approvalSpent:'no', follow:true, runStaysParked:'yes'|'no'|'unknown'}",
+     "S8-8 caller contract: on a stream started by continueParkedRun, read each error frame with chatRunContinueParkFailureOf(frame, {parkStream: true}). On an approval continuation never pass parkStream.",
+     "action-registry chat.run.continue input: {runId, approvalId?: string (min 1), claimToken}",
+     "vitest failing set is recorded at <scratchpad>/s83/vitest_before.log: ChatPanels RunPlanPanel (flaky), use-chat-controller.zdr-refusal, SupportPage, chat-client.zdr-refusal (x4), http.zdr-refusal (x2), quarry-client, run-console-client 'handles every event name the gateway maps' (likely S8-2 taxonomy drift; S8-8 should look)."
+    ]
+   },
+   "impls": [
+    {
+     "summary": "S8-3 is built: the SPA continue contract is park-aware and nothing is wired to it (no caller, no UI). Tests were written first and failed for the right reason, and I broke production code seven ways to confirm they go red. Vitest, tsc -b and eslint show no new failures against the pre-edit baselines, and the BFF vocabulary parity test is green. Only the four files this unit owns changed, with their line endings preserved.\n\n**Contract (`chat-run-continue-contract.ts`)**\n- Header: regime P (the resume of a parked run) is added, the regime-3 sentence names its one exception, and the SPENT_ONLY doc names the park guard.\n- New exports: `CHAT_RUN_CONTINUE_PARK_EFFECT` ({approvalSpent:'no', follow:true}), `ChatRunContinueParkEffect`, `ChatRunContinueParkFailure`, `ChatRunContinueRunStaysParked`, `CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES`, `CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES`.\n- Readers, one per park frame shape:\n  - `chatRunContinueParkRefusalOf(frame)` reads a `park_continue === true` frame whose code is in the 25-token tuple and which has no `approval_spent` key at all, whatever its value.\n  - `chatRunContinueParkDispatchUnavailableOf(frame, parkStream)` reads the bare `agent_dispatch_unavailable`, and only when the caller says the stream is a park stream. It returns `runStaysParked: 'unknown'`.\n  - `chatRunContinueParkFailureOf(frame, options?: {parkStream?: boolean})` is the single entry point that composes both.\n- `runStaysParked` is 'no' for not_resumable and park_not_restorable, 'unknown' for continue_outcome_unknown, continue_in_progress and agent_dispatch_unavailable, and 'yes' otherwise.\n- The regime-1 and regime-2 readers, both spent readers and `chatRunContinueSpentConnected` now return null when the frame has `park_continue === true`. Only an exact `true` counts as the marker.\n\n**Registry (`action-registry.ts`)**\n- `approvalId` is now `z.string().min(1).optional()`, so `{runId, claimToken}` parses and an empty `approvalId` is still refused.\n- The `chat.run.continue` description gains the park form: omit approvalId, nothing is spent, `park_continue true` never says `approval_spent`, the three park refusals, follow the run, and when the run stays parked.\n\n**Tests added**\n- 17 in `chat-run-continue-contract.test.ts`: one reader per frame shape, the runStaysParked table, the regimes staying disjoint, vocabulary closure, and the header wording. A bare `continue_unreachable` or `continue_outcome_unknown` without `park_continue` is read by no guard, with or without the stream context.\n- 1 in `action-registry.test.ts`.\n\n**Verification** (node tools from node_modules/.bin, no pnpm install; baselines recorded before any edit)\n\n| Check | Before | After |\n|---|---|---|\n| Vitest, full | 9 failed in 7 files, 3579 tests | 8 failed in 6 files, 3597 tests |\n| tsc -b | 34 errors | 34 errors, same set |\n| eslint | 1 error, 191 warnings | same, identical row set |\n| BFF `continue_error_vocabulary` | not run | 6 passed |\n\n- The vitest failing set after is the baseline minus ChatPanels `RunPlanPanel > keeps the last plan on screen while a refresh runs`, which flaked green on the second run. I added no failures.\n- The recorded vitest baseline was 7 failing tests in 5 files, but a clean run on this tree shows 9 in 7 files. The extra failures include `run-console-client.test.ts > handles every event name the gateway maps`, which is most likely a side effect of S8-2 adding run_parked/run_resumed to the gateway taxonomy before the SPA maps them (S8-8). I did not investigate further.\n- Mutation checks, all red and the contract restored byte for byte (cmp identical):\n  - regime-2 reader without the marker check;\n  - regime-1 reader without the marker check;\n  - park reader accepting `approval_spent`;\n  - park reader accepting a non-exact marker;\n  - bare reader ignoring the stream context;\n  - park reader trusting any code;\n  - not_resumable dropped from the NOT_PARKED list.\n\nNothing in this unit is DB-backed, so there is nothing written but not run. No transient locks were hit.",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.test.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+     ],
+     "tests_added": [
+      "chat-run-continue-contract.test.ts: 'the park effect (regime P...)' (2 tests)",
+      "chat-run-continue-contract.test.ts: 'chatRunContinueParkRefusalOf (the frames of a park continue)' (6 tests)",
+      "chat-run-continue-contract.test.ts: 'chatRunContinueParkDispatchUnavailableOf (the bare frame of a park stream)' (4 tests)",
+      "chat-run-continue-contract.test.ts: 'the park regime against the other regimes' (5 tests)",
+      "action-registry.test.ts: 'lets a parked run be continued with no approval: approvalId is optional, never blank, and the description says what the park form is'"
+     ],
+     "commands_run": [
+      {
+       "command": "vitest run (full) before edits",
+       "outcome": "9 failed in 7 files, 3570 passed of 3579. Failing set recorded."
+      },
+      {
+       "command": "tsc -b before edits",
+       "outcome": "34 errors."
+      },
+      {
+       "command": "eslint . before edits (json output)",
+       "outcome": "1 error (chat-client.ts no-unused-vars), 191 warnings."
+      },
+      {
+       "command": "vitest run on the two owned test files before implementing",
+       "outcome": "16 failed, for the right reason (missing functions and exports, missing header text, schema still requiring approvalId)."
+      },
+      {
+       "command": "vitest run on the contract, action-registry and orchestration-client tests after implementing",
+       "outcome": "106 passed."
+      },
+      {
+       "command": "mutation script over chat-run-continue-contract.ts (7 mutations), then cmp",
+       "outcome": "each mutation failed 1 to 3 tests; file restored, cmp identical."
+      },
+      {
+       "command": "tsc -b after edits",
+       "outcome": "34 errors, identical set to before."
+      },
+      {
+       "command": "eslint . after edits",
+       "outcome": "1 error and 191 warnings, identical rows to before."
+      },
+      {
+       "command": "vitest run (full) after edits",
+       "outcome": "8 failed in 6 files, 3589 passed of 3597. The failing set is the baseline minus one flaky ChatPanels test."
+      },
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --test continue_error_vocabulary",
+       "outcome": "6 passed (the BFF reads the contract file by source scan)."
+      }
+     ],
+     "deviations": [
+      "Names beyond the design: the design names CHAT_RUN_CONTINUE_PARK_EFFECT and chatRunContinueParkFailureOf. It also says that reader is the only reader of both marked frames and the bare agent_dispatch_unavailable, but its signature takes one argument and the bare frame has no marker. To read the bare frame only on a park stream I added an optional second argument, `options?: {parkStream?: boolean}`. I also exported the two shape-specific readers it composes (chatRunContinueParkRefusalOf, chatRunContinueParkDispatchUnavailableOf), to meet 'one reader per park frame shape', and the two code-list consts and the types.",
+      "The park effect uses the design's field names `{approvalSpent:'no', follow:true}`, not the committed `followRun` and `retryable`. The park failure result is `{regime:'park', code, approvalSpent:'no', follow:true, runStaysParked}`.",
+      "A marked frame that also carries `approval_spent`, with any value, is read by no guard at all. The park gateway never sends the key, and the design says 'never approval_spent'. This is fail-closed and the design does not spell it out.",
+      "chatRunContinueSpentConnected also returns null for a connected frame marked park_continue. The design only names the error-frame readers, but 'the other readers return null for park_continue' covers it, and the committed connected frame never carries the marker.",
+      "action-registry.test.ts is CRLF in the working tree even though the eol attribute says lf. I preserved CRLF there (234 CRLF = 234 LF after the edit). The other three files are LF and stayed LF.",
+      "The recorded vitest baseline (7 failing in 5 files) did not match this tree, which showed 9 failing in 7 files (see summary). I diffed against my own before-run, not the recorded numbers.",
+      "`eslint -f unix` is not available in this eslint version, so I used json output and compared rule/message rows."
+     ],
+     "blockers": [],
+     "deferred_files": [
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row to add, for the lead)",
+       "content": "WS03 S8-3 (SPA continue contract): built on the local branch, uncommitted, Frontend Plane only. chat-run-continue-contract.ts gains regime P in the header. It adds CHAT_RUN_CONTINUE_PARK_EFFECT {approvalSpent:'no', follow:true}, the two code lists CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES and CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES, and three readers: chatRunContinueParkRefusalOf (the park_continue-marked frames), chatRunContinueParkDispatchUnavailableOf (the bare agent_dispatch_unavailable, only when the caller says the stream is a park stream) and chatRunContinueParkFailureOf (the single entry point). runStaysParked: 'no' for not_resumable and park_not_restorable, 'unknown' for continue_outcome_unknown, continue_in_progress and agent_dispatch_unavailable, 'yes' otherwise. Every regime-1 and regime-2 reader, both spent readers and the spent connected reader return null for a frame with park_continue === true; a marked frame that carries approval_spent in any form is read by no guard. action-registry.ts: chat.run.continue approvalId is now optional (never blank) and the description gains the park form. Tests: 18 added (17 in the contract test, 1 in action-registry.test.ts). Vitest, tsc -b and eslint show no failures beyond the pre-edit baselines, and the BFF continue_error_vocabulary parity test is green at 25. No caller and no UI: S8-8 adds chat-client onRunParked, run-park.ts and orchestration-client continueParkedRun, which should call chatRunContinueParkFailureOf(frame, {parkStream: true}) on a park stream."
+      },
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (addendum text for S8-9, for the lead)",
+       "content": "S8-3 (SPA contract, display-only, behaviour-free): the park continue is read by one guard family only. A failure frame of a park continue carries park_continue: true exactly, a code from the closed 25-token tuple, and never approval_spent. The guard reads it as nothing spent, follow the run, with runStaysParked no, unknown or yes by code. The bare agent_dispatch_unavailable of a park stream has no marker, so it is read as a park failure only when the caller says the stream is a park stream (the SPA knows from the request it sent). It reads unknown and follow, and nothing is terminalized. The approval-regime guards are null for a marked frame, so a park frame can never be read as a spent approval. A marked frame that also says approval_spent contradicts itself and is read by no guard. chat.run.continue's approvalId is optional in the action contract, and the wire's empty approval id for the park form is the client's to write (S8-8), never a caller's input."
+      }
+     ],
+     "names_for_later_units": [
+      "chat-run-continue-contract.ts: CHAT_RUN_CONTINUE_PARK_EFFECT, CHAT_RUN_CONTINUE_PARK_NOT_PARKED_CODES, CHAT_RUN_CONTINUE_PARK_UNKNOWN_CODES; types ChatRunContinueParkEffect, ChatRunContinueParkFailure, ChatRunContinueRunStaysParked",
+      "chat-run-continue-contract.ts readers: chatRunContinueParkRefusalOf(frame), chatRunContinueParkDispatchUnavailableOf(frame, parkStream: boolean), chatRunContinueParkFailureOf(frame, options?: {parkStream?: boolean})",
+      "Park failure result shape: {regime:'park', code, approvalSpent:'no', follow:true, runStaysParked:'yes'|'no'|'unknown'}",
+      "S8-8 caller contract: on a stream started by continueParkedRun, read each error frame with chatRunContinueParkFailureOf(frame, {parkStream: true}). On an approval continuation never pass parkStream.",
+      "action-registry chat.run.continue input: {runId, approvalId?: string (min 1), claimToken}",
+      "vitest failing set is recorded at <scratchpad>/s83/vitest_before.log: ChatPanels RunPlanPanel (flaky), use-chat-controller.zdr-refusal, SupportPage, chat-client.zdr-refusal (x4), http.zdr-refusal (x2), quarry-client, run-console-client 'handles every event name the gateway maps' (likely S8-2 taxonomy drift; S8-8 should look)."
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "The park marker can downgrade a frame that says approval_spent: true to 'read by no guard', which falls into regime 3, where a retry with a new token is permitted. Before this change the same frame was read as regime 1 (spent, final, never retried). That is a fail-open change for a contradictory frame. The implementer chose this on purpose and the design does not ask for it.",
+       "evidence": "The regime-1 readers (chatRunContinueFrameRefusalOf, chatRunContinueSpentRunEndOf, chatRunContinueSpentSubscriptionFailureOf, chatRunContinueSpentConnected) now add `|| isParkMarked(record)`. chatRunContinueParkRefusalOf refuses any frame with `'approval_spent' in record`. So `{code:'continue_unreachable', approval_spent:true, park_continue:true}` and `{ok:true, approval_spent:true, park_continue:true}` are read by nobody. The test 'never reads a frame that carries approval_spent ... it is read by nobody' and the header sentence 'is read by no guard' pin this. The header also defines regime 3 as the frames every guard returns null for, with 'a retry with a new token is what the committed rules permit'. S8-7 has not been built yet, so nothing yet guarantees the gateway never emits marker plus approval_spent.",
+       "suggested_fix": "Keep the stronger claim winning: a frame with approval_spent === true is never downgraded by park_continue. Either drop the marker check from the approval_spent === true readers, or read the contradictory frame as spent or unknown with follow:true and never retryable. If the null is kept, make the header and test say plainly that a contradictory frame must be treated as spend-unknown, not as regime 3."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "runStaysParked is 'yes' for resume_checkpoint_unavailable, but the design's own failure matrix says a cancel during a park resume, before the fence, returns resume_checkpoint_unavailable for a run that has been cancelled and is no longer parked. The table in the design binds this ('yes' otherwise), so this is a known weakness and not a deviation. A UI that trusts 'yes' could keep offering Resume on a cancelled run.",
+       "evidence": "runStaysParkedAfter returns 'no' only for not_resumable and park_not_restorable and 'unknown' only for the three in-flight or unknown codes. The failure_matrix row 'Cancel during a park resume: before the fence, the fence gets run_ended, which gives resume_checkpoint_unavailable with nothing dispatched'.",
+       "suggested_fix": "Document on the type or in the header that 'yes' means only 'nothing in this refusal ends the park', and that the run read is the arbiter. Or make resume_checkpoint_unavailable 'unknown'. The second option needs a decision from the lead, because the design binds the table."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract.ts",
+       "issue": "The park reader accepts all 25 tuple codes, including approval-only codes that a park continue cannot produce (continuation_already_consumed, approval_not_granted, approval_expired, approval_not_resumable, approval_action_mismatch and so on). They are read as 'stays parked: yes'. It is harmless because it says follow the run, but the closed vocabulary is wider than what a park can emit. The park stream's other unmarked terminal frames (agent_run_failed, agent_run_state_unknown, agent_dispatch_rejected and so on) and the park continue's HTTP-level refusals are read by no park guard. chatRunContinueHttpRefusalOf would read a park's 409 not_resumable as 'spend unknown'.",
+       "evidence": "chatRunContinueParkRefusalOf uses isFrameRefusalCode over the whole tuple. The test 'reads every one of the 25 codes with the marker' requires every code to be read.",
+       "suggested_fix": "No change needed now, since the design says the tuple is the vocabulary. S8-8 must handle the HTTP surface and the unmarked terminal frames of a park stream explicitly, and S8-7 must pin which tokens a park can emit."
+      }
+     ],
+     "checked": [
+      "Read the full diff of all four owned files (git diff) and the surrounding contract code",
+      "Read the S8-A design (s8a-v2.json) entries for S8-3: file_changes, tests, steps, approach section 7 and the failure matrix",
+      "Checked that the regime-1 and regime-2 readers and chatRunContinueSpentConnected return null for park_continue === true, and that the marker needs exactly true",
+      "Checked that a bare continue_unreachable or continue_outcome_unknown without the marker is read by no guard, with or without the stream context",
+      "Checked that the bare agent_dispatch_unavailable is read only with parkStream === true and without either marker, and that a frame with approval_spent is never read by the park readers",
+      "Checked that the park result has a shape of its own (no retryable or followRun) and that runStaysParked matches the design table",
+      "Checked the registry change: approvalId is optional with min(1), so an empty id is refused; the wire's empty id is not a caller input; risk, requiresApproval and model-ineligibility unchanged; description matches the design",
+      "Confirmed no caller exists: orchestration-client.ts still takes approvalId: string and only the old readers are used, and no other file references the contract",
+      "Measured line endings with python3 against HEAD: three files are LF, action-registry.test.ts is CRLF and consistent (234 CRLF = 234 LF), and no mixed endings",
+      "Ran vitest on src/shared/actions and orchestration-client.test.ts: 9 files, 141 tests passed",
+      "Ran the BFF cargo test continue_error_vocabulary: 6 passed",
+      "Checked the CI workflow path filters that reference chat-run-continue-contract*",
+      "No DB-backed tests are involved, and no docker was run"
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": false,
+    "results": [
+     {
+      "command": "cd \"apps/Frontend Plane/verevonv3\" && node_modules/.bin/vitest run src/shared/actions/chat-run-continue-contract.test.ts src/shared/actions/action-registry.test.ts",
+      "outcome": "exit 0. Test Files 2 passed (2). These are the only two touched Frontend test files (git status lists no other Frontend test). No test was written or changed in this verify run, and no DB-backed test is in this command. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s8-3-vitest-targeted.log",
+      "passed": "83 of 83 tests (74 in chat-run-continue-contract.test.ts, 9 in action-registry.test.ts)"
+     },
+     {
+      "command": "node_modules/.bin/vitest run (full suite)",
+      "outcome": "exit 1 in 183.7 s. Test Files 6 failed | 316 passed (322). Tests 8 failed | 3589 passed (3597). The baseline set reproduces exactly: 7 zdr-refusal tests in 3 files plus 2 suites that fail at load, which is 7 tests in 5 files. One failure is beyond the baseline, in run-console-client.test.ts (see failures). Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s8-3-vitest-full.log",
+      "passed": "3589 of 3597 tests. Failing: 8 tests in 6 files, against baseline 7 in 5."
+     },
+     {
+      "command": "node_modules/.bin/tsc -b",
+      "outcome": "exit 1. 34 error TS lines, equal to baseline: RemoteSupportPage.tsx 12 (cannot resolve @verevon/remote-core), quarry-client.ts 21 (cannot resolve @quarry/client), chat-client.ts 1 (TS6133 'failureFeature' is declared but never read, line 957). No error in an s8-3 file. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s8-3-tsc.log",
+      "passed": "34 errors, baseline 34"
+     },
+     {
+      "command": "node_modules/.bin/eslint .",
+      "outcome": "exit 1. Summary: 192 problems (1 error, 191 warnings), equal to baseline. The single error is chat-client.ts line 957 col 10, 'failureFeature' is defined but never used. This is the same defect as the tsc TS6133. No finding in an s8-3 file. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s8-3-eslint.log",
+      "passed": "1 error and 191 warnings, baseline 1 and 191"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (run from apps/Frontend Plane/verevonv3)",
+      "outcome": "exit 0. No build error, no LNK1104 and no transient failure, so no retry was needed. Passing: unit tests in src/main.rs, tests/continue_error_vocabulary.rs (this test reads the working-tree chat-run-continue-contract.ts), tests/sse_relay_no_allowlist.rs and tests/ssrf_forward_not_fetch.rs. The one ignored test is onboarding::crawl_preview::stream_e2e::dump_crawl_preview_stream, a diagnostic dump and not DB-backed. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s8-3-gateway-cargo.log",
+      "passed": "657 passed, 0 failed, 1 ignored (647 + 6 + 3 + 1)"
+     },
+     {
+      "command": "EXTRA, not in the requested list: node --test apps/gateway/scripts/security-coverage-gate.test.mjs apps/gateway/scripts/action-surface-contract.test.mjs apps/gateway/scripts/product-truth-contract.test.mjs apps/gateway/scripts/zdr-seed-test-org.test.mjs (the node half of pnpm test; read-only scripts)",
+      "outcome": "exit 1. Fails: action-surface-contract.test.mjs, 'every registered action has exactly one live gateway dispatcher contract'. The registry has 170 ids and handlers.rs has 168 dispatcher literals. Only chat.run.continue (added in 74260949, WS03 S3) and chat.execute_approved_plan (added in 5b28196e, WS14 S2a) are in the registry without a dispatcher. The s8-3 registry diff changes no id line and handlers.rs is unmodified, so this fails on the committed tree too. Log: C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\s8-3-node-contracts.log",
+      "passed": "25 of 26 tests"
+     }
+    ],
+    "failures": [
+     "Verdict: the s8-3 tests and the s8-3 files are green in every check. The run is not all green only because the full vitest run has one failure beyond the baseline, and it is not caused by the s8-3 diff. Nothing was edited, and no git write or docker command was run.",
+     "NEW vitest failure beyond the baseline: src/shared/api/run-console-client.test.ts > orchestration event coverage > 'handles every event name the gateway maps'. Message: 'these orchestration events are emitted by the gateway and have no case in run-console-client.ts ... run_parked, run_resumed'. Cause: committed f5ff99e8 (WS03 S8-2) added RunParked and RunResumed to model-gateway/src/sse.rs orchestration_event_to_sse (lines 10624-10625) without a matching case in run-console-client.ts. sse.rs, run-console-client.ts and the test are unmodified in the working tree, so the outcome is the same on the committed tree. No unit of this round owns run-console-client.ts. The sse.rs comment at lines 10802-10805 says the run console reads the raw orchestration events, so the expected fix is case handling in run-console-client.ts, not an allowlist. Not edited (verify mode).",
+     "Baseline vitest failures, reproduced and pre-existing (not from s8-3): chat-client.zdr-refusal.test.ts (4 tests), http.zdr-refusal.test.ts (2 tests) and use-chat-controller.zdr-refusal.test.ts (1 test) all miss the zero-retention 'feature' value. chat-client.ts failureFeature (line 957) is defined but never called, the same defect as the eslint error and tsc TS6133. quarry-client.test.ts and SupportPage.test.tsx fail at load (cannot resolve @quarry/client and @verevon/remote-core).",
+     "EXTRA node contract failure, pre-existing on the committed tree: action-surface-contract.test.mjs fails because chat.run.continue and chat.execute_approved_plan have no dispatcher literal in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs. They were committed in 74260949 and 5b28196e, before s8-3. This also makes the node half of pnpm test red on the committed tree."
+    ]
+   }
+  },
+  {
+   "unit": "s8-4",
+   "impl": {
+    "summary": "S8-4 (session-core store and worker) is built and green on the host. Everything is behind two default-off switches, and with both off the store, claim and worker are byte-identical to the committed behaviour. The 12 DB tests were written but not run (they need the disposable-Postgres harness).\n\nWhat changed:\n- loop_checkpoint.rs: park_ttl_seconds() (default 86400, clamped 60..2592000), `Saved{seq, park_accepted}` and the park rules in `save`. The rules run only under park_recovery_active(), before any DB access, in the design's order: park_reason_reserved, park_not_at_round_boundary, park_limit_reached, park_ref_mismatch, park_until_beyond_ttl. CLAIM_PARK_SQL and `park_claim_refusal` (park_not_due, claim_held for a live lease of any token, else not_claimable) apply to an empty pause_ref only. The committed claim and save statement texts are untouched.\n- terminalization.rs: PARK_RECOVERY_ENV, park_recovery_enabled() with a thread-local test override, park_recovery_active() = loop_checkpoint::enabled() && park_recovery_enabled(). The worker's spare sits after the has_pending_approval spare and before apply_managed_terminal_outcome. PARK_SPARE_HORIZON_SQL and PARK_SPARE_SQL are verbatim from the design. Metrics: mp_session_managed_terminalizations_spared_parked_total and mp_session_managed_parks_expired_total.\n- grpc.rs: save_loop_checkpoint_inner echoes saved.park_accepted instead of the S8-2 literal false.\n- run_service_grpc.rs: tests only. Cancel needed no production change (cancel_run already purges in its own transaction, P9).\n- Compose rows on session-core (SESSION_CORE_PARK_RECOVERY_ENABLED default false, SESSION_CORE_PARK_TTL_SECONDS default 86400) and the switch_table row in durable_loop_contract.rs.\n\nTest results:\n- session-core `--bins` baseline: 510 passed, 150 ignored. After: 519 passed, 162 ignored. Nine new non-ignored tests, all passing; twelve new #[ignore] DB tests.\n- durable_loop_contract: 26 passed. It was green at 24 after my edits, then 24 passed / 2 failed on one rerun while s8-5 was mid-edit, then 26 passed on the next two runs. I did not capture the two failures' names. cross_service_loop_contract: 3 passed.\n\nMutation checks (my own files, restored with cp and checked with cmp):\n- Save gate forced to `if false`: save_asks_the_park_rules_before_the_store_and_only_under_park_recovery went red.\n- `ttl / 2` changed to `ttl * 2`: a_park_that_obeys... and save_asks... both went red.\n- `updated_at = now()` added to CLAIM_PARK_SQL: the_park_claim_statement_never_touches_the_parks_age went red.\n- grpc.rs echo replaced by a literal true: the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal went red.\n- Worker gate replaced by `if true`: the_park_spare_follows_the_approval_spare_and_precedes_the_terminal_write went red.\n\nCommitted #[ignore] loop_checkpoint and park-seeding tests: re-read, expected to stay green under the harness (it scrubs SESSION_CORE_*_ENABLED, so park recovery is off). With it off, `save` skips the park rules and the empty-ref claim is the committed statement, which an empty ref never matched. The amended seed_fold changes only kind \"park\" folds (round_in_flight cleared, pending Park under the given ref, parks=1). No committed test reads a park fold's content beyond state, reason and resumable. `save_round`, `save_fence_at` and seed_fold map `.seq` from Saved, so their signatures are unchanged. The lead should still run them.",
+    "files_changed": [
+     "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+     "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+     "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+     "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+     "apps/Model Plane/deploy/docker-compose.yml",
+     "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+    ],
+    "tests_added": [
+     "loop_checkpoint::tests::the_park_wait_is_a_day_by_default_and_is_clamped",
+     "loop_checkpoint::tests::a_park_that_obeys_the_park_rules_is_accepted_and_each_rule_refuses_with_its_own_token",
+     "loop_checkpoint::tests::save_asks_the_park_rules_before_the_store_and_only_under_park_recovery",
+     "loop_checkpoint::tests::the_park_claim_statement_never_touches_the_parks_age",
+     "loop_checkpoint::tests::the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal",
+     "loop_checkpoint::tests::a_park_seed_fold_is_park_shaped_and_obeys_the_park_rules_for_its_own_reference",
+     "terminalization::tests::park_recovery_is_off_by_default_and_active_only_with_the_store_on",
+     "terminalization::tests::the_park_spare_follows_the_approval_spare_and_precedes_the_terminal_write",
+     "run_service_grpc::tests::a_park_row_reads_the_same_whatever_the_park_switch_says",
+     "WRITTEN, NOT RUN (DB, #[ignore]): loop_checkpoint::tests::db::loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery",
+     "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_a_park_save_is_refused_for_a_zdr_or_waived_run (Park StoreProof)",
+     "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_an_empty_ref_claims_only_a_due_park",
+     "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_a_non_empty_ref_claim_is_the_committed_statement",
+     "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_the_committed_park_seeding_tests_pass_through_the_amended_seed_fold",
+     "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_the_save_rpc_echoes_park_accepted_from_the_store",
+     "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::a_parked_fold_is_spared_until_the_ttl_then_terminalized_once",
+     "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::park_recovery_off_is_the_committed_worker",
+     "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::an_active_or_paused_fold_is_never_spared_by_the_park_branch",
+     "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::a_claim_racing_the_worker_never_double_terminalizes",
+     "WRITTEN, NOT RUN: run_service_grpc::tests::cancel_purges_a_parked_fold_and_the_worker_supersedes_its_obligation (P9)",
+     "WRITTEN, NOT RUN: run_service_grpc::tests::cancel_during_a_park_resume_ends_the_run_and_its_fence_is_refused (P9)"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -q -p session-core --bins (baseline, before edits)",
+      "outcome": "510 passed, 0 failed, 150 ignored"
+     },
+     {
+      "command": "cargo test -q -p session-core --bins (after)",
+      "outcome": "519 passed, 0 failed, 162 ignored"
+     },
+     {
+      "command": "cargo test -q -p session-core --bins -- park the_park_spare park_recovery a_park_seed loop_checkpoint::tests",
+      "outcome": "all new unit tests pass (31 passed, 32 ignored in that filter)"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract",
+      "outcome": "first run 24 passed after my compose and switch_table edits; one later run 24 passed / 2 failed while s8-5 was mid-edit (I did not capture which tests); the next two runs 26 passed, 0 failed (final result)"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test cross_service_loop_contract",
+      "outcome": "3 passed"
+     },
+     {
+      "command": "mutation checks (5 production mutations, each restored with cp and verified with cmp)",
+      "outcome": "each named unit test went red for the right reason; all files restored byte for byte"
+     },
+     {
+      "command": "cargo check -p session-core --tests",
+      "outcome": "clean, no warnings"
+     }
+    ],
+    "deviations": [
+     "PARK_SPARE_HORIZON_SQL and PARK_SPARE_SQL are verbatim from the design. To count mp_session_managed_parks_expired_total without altering the horizon SQL, I added a third statement, PARK_HELD_SQL (an EXISTS on a kind='park', state IN ('parked','resuming') row). It runs only when park recovery is active and the horizon query returned nothing. This is one extra primary-key read per recovery pass; the alternative was adding a column to the horizon SQL.",
+     "The design's DB test names say `db::...` for the run_service_grpc tests; I placed them in run_service_grpc's existing tests module under the exact names given (path run_service_grpc::tests::...). The `park` and `run_service_grpc` harness filters select them.",
+     "Additions beyond the named tests: loop_checkpoint_the_save_rpc_echoes_park_accepted_from_the_store (DB) and the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal (unit), because the design lists grpc.rs echoing park_accepted but names no test for it. Also a source-guard test for the worker spare (position, gate, SQL predicates), with meta-mutations.",
+     "Tests-first order: the park rules, Saved and CLAIM_PARK_SQL were implemented before their tests, so I did not watch the tests start red. I made up for it with the five mutation checks above, each going red for the right reason.",
+     "A save with the park rules active does not require park_until to be in the future, only at most now + ttl/2. credential_window and reauth_required parks legitimately carry park_until = now, which can already be in the past by save time.",
+     "Transient: one durable_loop_contract run showed 2 failures while s8-5 was mid-edit; the next two runs were green at 26 tests (the extra tests came from s8-5). I did not capture the two failing names, so what I can say is that two later runs were green, not what failed. No LNK1104 or build-lock failures beyond ordinary 'Blocking waiting for file lock' waits."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "session-core terminalization.rs: park_recovery_enabled(), park_recovery_active(), PARK_RECOVERY_ENV (const, read once via switch_from), park_test_switch::Forced::set(bool) (cfg(test) thread-local override), PARK_SPARE_HORIZON_SQL, PARK_SPARE_SQL, PARK_HELD_SQL, spare_parked_run(tx, run_id, ttl_secs)",
+     "session-core loop_checkpoint.rs: park_ttl_seconds() -> i64, park_ttl_from(Option<&str>), struct Saved{seq: i64, park_accepted: bool} (save returns Result<Saved, Status>), validate_park_save(..), CLAIM_PARK_SQL, park_claim_refusal(tx, run_id)",
+     "Store literals S8-6 pins: claim refusal failed_precondition 'park_not_due'; aborted 'loop_checkpoint_claim_held'; failed_precondition 'loop_checkpoint_not_claimable'; save refusals invalid_argument 'park_reason_reserved' | 'park_not_at_round_boundary' | 'park_ref_mismatch', failed_precondition 'park_limit_reached' | 'park_until_beyond_ttl'; the park ref format is mp_contracts::loop_fold::park_ref(run_id, n) = 'park:{run_id}:{n}'",
+     "test_support::park_fold_for(run_id, pause_ref, parks) builds a park-shaped fold; seed_fold(.., \"park\", ..) now uses it (round_in_flight cleared, pending Park under the given ref, parks=1)",
+     "Park StoreProof for S8-7's store_proofs(): (SESSION_CHECKPOINT, \"loop_checkpoint_a_park_save_is_refused_for_a_zdr_or_waived_run\"); S8-7 can also name loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery and loop_checkpoint_an_empty_ref_claims_only_a_due_park",
+     "SaveLoopCheckpointResponse.park_accepted is true only for a park save accepted under park_recovery_active(); false for every other save and for every save with park recovery off",
+     "Compose: session-core SESSION_CORE_PARK_RECOVERY_ENABLED ${...:-false} and SESSION_CORE_PARK_TTL_SECONDS ${...:-86400}; switch_table row ('session-core', const PARK_RECOVERY_ENV in terminalization.rs)",
+     "Metrics: mp_session_managed_terminalizations_spared_parked_total, mp_session_managed_parks_expired_total"
+    ],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (addendum text for the 2026-10-18 durable-loop entry, S8-4)",
+      "content": "S8-4 (WS03 S8-A, session-core store and worker), built 2026-10-19, behind SESSION_CORE_PARK_RECOVERY_ENABLED (default off) and SESSION_CORE_PARK_TTL_SECONDS (default 86400, clamped 60..2592000):\n- park_recovery_active() = loop_checkpoint::enabled() && park_recovery_enabled(); it is not coupled to the S8-0 approval-expiry switch.\n- SaveLoopCheckpoint: with it active, a kind 'park' save is checked before the run row is locked or anything is written. In order: crash_interrupted is refused (invalid_argument park_reason_reserved); no call in flight and a pending Park under the save's own pause_ref (else invalid_argument park_not_at_round_boundary); parks <= 5 (else failed_precondition park_limit_reached); parks >= 1 and pause_ref == park:{run}:{parks} (else invalid_argument park_ref_mismatch); park_until <= now + ttl/2 (else failed_precondition park_until_beyond_ttl). Only then do the unchanged run_owner_tx (the ZDR/waiver refusal), the seq CAS and the upsert run. The response echoes park_accepted = true for exactly this path and false for every other save, including a park stored under the committed rules while the switch is off.\n- ClaimLoopCheckpoint: with it active, an EMPTY pause_ref claims the run's current due parked fold (CLAIM_PARK_SQL: kind 'park', state parked, or resuming with a lapsed lease, and park_until <= now). It never takes a paused fold and does not touch updated_at, which is the park's age and the anchor of its wait. With no row: failed_precondition park_not_due for a claimable park whose park_until has not come; aborted loop_checkpoint_claim_held for a live lease of ANY token; else loop_checkpoint_not_claimable. A non-empty pause_ref and every call with the switch off use the committed statement.\n- Recovery worker: after the pending-approval spare and before apply_managed_terminal_outcome, a run whose fold is a park (parked or resuming) and whose updated_at + TTL is still in the future is spared. Its obligation goes back to open, due at LEAST(updated_at + TTL, now + 900 s), lease cleared. After the TTL it falls through to the unchanged outcome_unknown receipt path, which purges the fold. Active, paused and closed folds take the committed path. Metrics: mp_session_managed_terminalizations_spared_parked_total and mp_session_managed_parks_expired_total.\n- Cancel (P9) needed no change: cancel_run purges the fold, sets the status and writes RUN_CANCELLED in one transaction, the next worker pass supersedes the obligation, and a later fence or claim gets loop_checkpoint_run_ended. DB tests pin this.\n- Rollback: kill order (b) in the S8-A design: executor parking off first, then park recovery off (every park is then terminalized within ~15 minutes; empty-ref claims are not_claimable).\nVerification status: unit tests, guards and mutation checks green on the host; the 12 DB-backed tests are written and need the disposable-Postgres harness."
+     },
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row, S8-4)",
+      "content": "WS03 S8-A / S8-4 - session-core store and worker: built, uncommitted. SESSION_CORE_PARK_RECOVERY_ENABLED and SESSION_CORE_PARK_TTL_SECONDS (compose rows, default off / 86400); loop_checkpoint.rs park validations, Saved{seq, park_accepted} and CLAIM_PARK_SQL with the park_not_due / claim_held diagnosis; grpc.rs echoes park_accepted; terminalization.rs worker spare of a parked or live-claimed fold until updated_at + TTL, then the unchanged outcome_unknown path; durable_loop_contract switch_table row. Verified on the host: session-core --bins 519 passed (baseline 510), the five mutation checks, durable_loop_contract 26 passed, cross_service_loop_contract 3 passed. NOT RUN: 12 DB tests (loop_checkpoint db x6, terminalization::park_recovery_db_tests x4, run_service_grpc P9 x2), which the lead runs through scripts/tests/session-core-db-tests.sh. Commit S8-4 before S8-6 and S8-7."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "S8-4 (session-core store and worker) is built and green on the host. Everything is behind two default-off switches, and with both off the store, claim and worker are byte-identical to the committed behaviour. The 12 DB tests were written but not run (they need the disposable-Postgres harness).\n\nWhat changed:\n- loop_checkpoint.rs: park_ttl_seconds() (default 86400, clamped 60..2592000), `Saved{seq, park_accepted}` and the park rules in `save`. The rules run only under park_recovery_active(), before any DB access, in the design's order: park_reason_reserved, park_not_at_round_boundary, park_limit_reached, park_ref_mismatch, park_until_beyond_ttl. CLAIM_PARK_SQL and `park_claim_refusal` (park_not_due, claim_held for a live lease of any token, else not_claimable) apply to an empty pause_ref only. The committed claim and save statement texts are untouched.\n- terminalization.rs: PARK_RECOVERY_ENV, park_recovery_enabled() with a thread-local test override, park_recovery_active() = loop_checkpoint::enabled() && park_recovery_enabled(). The worker's spare sits after the has_pending_approval spare and before apply_managed_terminal_outcome. PARK_SPARE_HORIZON_SQL and PARK_SPARE_SQL are verbatim from the design. Metrics: mp_session_managed_terminalizations_spared_parked_total and mp_session_managed_parks_expired_total.\n- grpc.rs: save_loop_checkpoint_inner echoes saved.park_accepted instead of the S8-2 literal false.\n- run_service_grpc.rs: tests only. Cancel needed no production change (cancel_run already purges in its own transaction, P9).\n- Compose rows on session-core (SESSION_CORE_PARK_RECOVERY_ENABLED default false, SESSION_CORE_PARK_TTL_SECONDS default 86400) and the switch_table row in durable_loop_contract.rs.\n\nTest results:\n- session-core `--bins` baseline: 510 passed, 150 ignored. After: 519 passed, 162 ignored. Nine new non-ignored tests, all passing; twelve new #[ignore] DB tests.\n- durable_loop_contract: 26 passed. It was green at 24 after my edits, then 24 passed / 2 failed on one rerun while s8-5 was mid-edit, then 26 passed on the next two runs. I did not capture the two failures' names. cross_service_loop_contract: 3 passed.\n\nMutation checks (my own files, restored with cp and checked with cmp):\n- Save gate forced to `if false`: save_asks_the_park_rules_before_the_store_and_only_under_park_recovery went red.\n- `ttl / 2` changed to `ttl * 2`: a_park_that_obeys... and save_asks... both went red.\n- `updated_at = now()` added to CLAIM_PARK_SQL: the_park_claim_statement_never_touches_the_parks_age went red.\n- grpc.rs echo replaced by a literal true: the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal went red.\n- Worker gate replaced by `if true`: the_park_spare_follows_the_approval_spare_and_precedes_the_terminal_write went red.\n\nCommitted #[ignore] loop_checkpoint and park-seeding tests: re-read, expected to stay green under the harness (it scrubs SESSION_CORE_*_ENABLED, so park recovery is off). With it off, `save` skips the park rules and the empty-ref claim is the committed statement, which an empty ref never matched. The amended seed_fold changes only kind \"park\" folds (round_in_flight cleared, pending Park under the given ref, parks=1). No committed test reads a park fold's content beyond state, reason and resumable. `save_round`, `save_fence_at` and seed_fold map `.seq` from Saved, so their signatures are unchanged. The lead should still run them.",
+     "files_changed": [
+      "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+      "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+      "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+      "apps/Model Plane/deploy/docker-compose.yml",
+      "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+     ],
+     "tests_added": [
+      "loop_checkpoint::tests::the_park_wait_is_a_day_by_default_and_is_clamped",
+      "loop_checkpoint::tests::a_park_that_obeys_the_park_rules_is_accepted_and_each_rule_refuses_with_its_own_token",
+      "loop_checkpoint::tests::save_asks_the_park_rules_before_the_store_and_only_under_park_recovery",
+      "loop_checkpoint::tests::the_park_claim_statement_never_touches_the_parks_age",
+      "loop_checkpoint::tests::the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal",
+      "loop_checkpoint::tests::a_park_seed_fold_is_park_shaped_and_obeys_the_park_rules_for_its_own_reference",
+      "terminalization::tests::park_recovery_is_off_by_default_and_active_only_with_the_store_on",
+      "terminalization::tests::the_park_spare_follows_the_approval_spare_and_precedes_the_terminal_write",
+      "run_service_grpc::tests::a_park_row_reads_the_same_whatever_the_park_switch_says",
+      "WRITTEN, NOT RUN (DB, #[ignore]): loop_checkpoint::tests::db::loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery",
+      "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_a_park_save_is_refused_for_a_zdr_or_waived_run (Park StoreProof)",
+      "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_an_empty_ref_claims_only_a_due_park",
+      "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_a_non_empty_ref_claim_is_the_committed_statement",
+      "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_the_committed_park_seeding_tests_pass_through_the_amended_seed_fold",
+      "WRITTEN, NOT RUN: loop_checkpoint::tests::db::loop_checkpoint_the_save_rpc_echoes_park_accepted_from_the_store",
+      "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::a_parked_fold_is_spared_until_the_ttl_then_terminalized_once",
+      "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::park_recovery_off_is_the_committed_worker",
+      "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::an_active_or_paused_fold_is_never_spared_by_the_park_branch",
+      "WRITTEN, NOT RUN: terminalization::park_recovery_db_tests::a_claim_racing_the_worker_never_double_terminalizes",
+      "WRITTEN, NOT RUN: run_service_grpc::tests::cancel_purges_a_parked_fold_and_the_worker_supersedes_its_obligation (P9)",
+      "WRITTEN, NOT RUN: run_service_grpc::tests::cancel_during_a_park_resume_ends_the_run_and_its_fence_is_refused (P9)"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -q -p session-core --bins (baseline, before edits)",
+       "outcome": "510 passed, 0 failed, 150 ignored"
+      },
+      {
+       "command": "cargo test -q -p session-core --bins (after)",
+       "outcome": "519 passed, 0 failed, 162 ignored"
+      },
+      {
+       "command": "cargo test -q -p session-core --bins -- park the_park_spare park_recovery a_park_seed loop_checkpoint::tests",
+       "outcome": "all new unit tests pass (31 passed, 32 ignored in that filter)"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract",
+       "outcome": "first run 24 passed after my compose and switch_table edits; one later run 24 passed / 2 failed while s8-5 was mid-edit (I did not capture which tests); the next two runs 26 passed, 0 failed (final result)"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test cross_service_loop_contract",
+       "outcome": "3 passed"
+      },
+      {
+       "command": "mutation checks (5 production mutations, each restored with cp and verified with cmp)",
+       "outcome": "each named unit test went red for the right reason; all files restored byte for byte"
+      },
+      {
+       "command": "cargo check -p session-core --tests",
+       "outcome": "clean, no warnings"
+      }
+     ],
+     "deviations": [
+      "PARK_SPARE_HORIZON_SQL and PARK_SPARE_SQL are verbatim from the design. To count mp_session_managed_parks_expired_total without altering the horizon SQL, I added a third statement, PARK_HELD_SQL (an EXISTS on a kind='park', state IN ('parked','resuming') row). It runs only when park recovery is active and the horizon query returned nothing. This is one extra primary-key read per recovery pass; the alternative was adding a column to the horizon SQL.",
+      "The design's DB test names say `db::...` for the run_service_grpc tests; I placed them in run_service_grpc's existing tests module under the exact names given (path run_service_grpc::tests::...). The `park` and `run_service_grpc` harness filters select them.",
+      "Additions beyond the named tests: loop_checkpoint_the_save_rpc_echoes_park_accepted_from_the_store (DB) and the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal (unit), because the design lists grpc.rs echoing park_accepted but names no test for it. Also a source-guard test for the worker spare (position, gate, SQL predicates), with meta-mutations.",
+      "Tests-first order: the park rules, Saved and CLAIM_PARK_SQL were implemented before their tests, so I did not watch the tests start red. I made up for it with the five mutation checks above, each going red for the right reason.",
+      "A save with the park rules active does not require park_until to be in the future, only at most now + ttl/2. credential_window and reauth_required parks legitimately carry park_until = now, which can already be in the past by save time.",
+      "Transient: one durable_loop_contract run showed 2 failures while s8-5 was mid-edit; the next two runs were green at 26 tests (the extra tests came from s8-5). I did not capture the two failing names, so what I can say is that two later runs were green, not what failed. No LNK1104 or build-lock failures beyond ordinary 'Blocking waiting for file lock' waits."
+     ],
+     "blockers": [],
+     "names_for_later_units": [
+      "session-core terminalization.rs: park_recovery_enabled(), park_recovery_active(), PARK_RECOVERY_ENV (const, read once via switch_from), park_test_switch::Forced::set(bool) (cfg(test) thread-local override), PARK_SPARE_HORIZON_SQL, PARK_SPARE_SQL, PARK_HELD_SQL, spare_parked_run(tx, run_id, ttl_secs)",
+      "session-core loop_checkpoint.rs: park_ttl_seconds() -> i64, park_ttl_from(Option<&str>), struct Saved{seq: i64, park_accepted: bool} (save returns Result<Saved, Status>), validate_park_save(..), CLAIM_PARK_SQL, park_claim_refusal(tx, run_id)",
+      "Store literals S8-6 pins: claim refusal failed_precondition 'park_not_due'; aborted 'loop_checkpoint_claim_held'; failed_precondition 'loop_checkpoint_not_claimable'; save refusals invalid_argument 'park_reason_reserved' | 'park_not_at_round_boundary' | 'park_ref_mismatch', failed_precondition 'park_limit_reached' | 'park_until_beyond_ttl'; the park ref format is mp_contracts::loop_fold::park_ref(run_id, n) = 'park:{run_id}:{n}'",
+      "test_support::park_fold_for(run_id, pause_ref, parks) builds a park-shaped fold; seed_fold(.., \"park\", ..) now uses it (round_in_flight cleared, pending Park under the given ref, parks=1)",
+      "Park StoreProof for S8-7's store_proofs(): (SESSION_CHECKPOINT, \"loop_checkpoint_a_park_save_is_refused_for_a_zdr_or_waived_run\"); S8-7 can also name loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery and loop_checkpoint_an_empty_ref_claims_only_a_due_park",
+      "SaveLoopCheckpointResponse.park_accepted is true only for a park save accepted under park_recovery_active(); false for every other save and for every save with park recovery off",
+      "Compose: session-core SESSION_CORE_PARK_RECOVERY_ENABLED ${...:-false} and SESSION_CORE_PARK_TTL_SECONDS ${...:-86400}; switch_table row ('session-core', const PARK_RECOVERY_ENV in terminalization.rs)",
+      "Metrics: mp_session_managed_terminalizations_spared_parked_total, mp_session_managed_parks_expired_total"
+     ],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (addendum text for the 2026-10-18 durable-loop entry, S8-4)",
+       "content": "S8-4 (WS03 S8-A, session-core store and worker), built 2026-10-19, behind SESSION_CORE_PARK_RECOVERY_ENABLED (default off) and SESSION_CORE_PARK_TTL_SECONDS (default 86400, clamped 60..2592000):\n- park_recovery_active() = loop_checkpoint::enabled() && park_recovery_enabled(); it is not coupled to the S8-0 approval-expiry switch.\n- SaveLoopCheckpoint: with it active, a kind 'park' save is checked before the run row is locked or anything is written. In order: crash_interrupted is refused (invalid_argument park_reason_reserved); no call in flight and a pending Park under the save's own pause_ref (else invalid_argument park_not_at_round_boundary); parks <= 5 (else failed_precondition park_limit_reached); parks >= 1 and pause_ref == park:{run}:{parks} (else invalid_argument park_ref_mismatch); park_until <= now + ttl/2 (else failed_precondition park_until_beyond_ttl). Only then do the unchanged run_owner_tx (the ZDR/waiver refusal), the seq CAS and the upsert run. The response echoes park_accepted = true for exactly this path and false for every other save, including a park stored under the committed rules while the switch is off.\n- ClaimLoopCheckpoint: with it active, an EMPTY pause_ref claims the run's current due parked fold (CLAIM_PARK_SQL: kind 'park', state parked, or resuming with a lapsed lease, and park_until <= now). It never takes a paused fold and does not touch updated_at, which is the park's age and the anchor of its wait. With no row: failed_precondition park_not_due for a claimable park whose park_until has not come; aborted loop_checkpoint_claim_held for a live lease of ANY token; else loop_checkpoint_not_claimable. A non-empty pause_ref and every call with the switch off use the committed statement.\n- Recovery worker: after the pending-approval spare and before apply_managed_terminal_outcome, a run whose fold is a park (parked or resuming) and whose updated_at + TTL is still in the future is spared. Its obligation goes back to open, due at LEAST(updated_at + TTL, now + 900 s), lease cleared. After the TTL it falls through to the unchanged outcome_unknown receipt path, which purges the fold. Active, paused and closed folds take the committed path. Metrics: mp_session_managed_terminalizations_spared_parked_total and mp_session_managed_parks_expired_total.\n- Cancel (P9) needed no change: cancel_run purges the fold, sets the status and writes RUN_CANCELLED in one transaction, the next worker pass supersedes the obligation, and a later fence or claim gets loop_checkpoint_run_ended. DB tests pin this.\n- Rollback: kill order (b) in the S8-A design: executor parking off first, then park recovery off (every park is then terminalized within ~15 minutes; empty-ref claims are not_claimable).\nVerification status: unit tests, guards and mutation checks green on the host; the 12 DB-backed tests are written and need the disposable-Postgres harness."
+      },
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row, S8-4)",
+       "content": "WS03 S8-A / S8-4 - session-core store and worker: built, uncommitted. SESSION_CORE_PARK_RECOVERY_ENABLED and SESSION_CORE_PARK_TTL_SECONDS (compose rows, default off / 86400); loop_checkpoint.rs park validations, Saved{seq, park_accepted} and CLAIM_PARK_SQL with the park_not_due / claim_held diagnosis; grpc.rs echoes park_accepted; terminalization.rs worker spare of a parked or live-claimed fold until updated_at + TTL, then the unchanged outcome_unknown path; durable_loop_contract switch_table row. Verified on the host: session-core --bins 519 passed (baseline 510), the five mutation checks, durable_loop_contract 26 passed, cross_service_loop_contract 3 passed. NOT RUN: 12 DB tests (loop_checkpoint db x6, terminalization::park_recovery_db_tests x4, run_service_grpc P9 x2), which the lead runs through scripts/tests/session-core-db-tests.sh. Commit S8-4 before S8-6 and S8-7."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "Under park recovery, a claim that names the park's own reference (pause_ref = park:{run_id}:{n}, which anyone can work out from the run id) skips CLAIM_PARK_SQL. It takes the committed statement, which ignores park_until (so park_not_due is bypassed) and sets updated_at = now(). updated_at is the anchor of the TTL. A caller holding the claim RPC (owner or service with session:write) can re-claim every time the 120 s lease lapses. Each re-claim resets the anchor and hands back the plaintext fold, so the park never reaches its TTL and the worker spares it forever. The invariant 'terminalized through the unmodified path after updated_at + TTL' then does not hold.",
+       "evidence": "In claim(): `let park_claim = pause_ref.is_empty() && crate::terminalization::park_recovery_active();`. With a non-empty ref it runs the committed UPDATE: `... updated_at = now() WHERE run_id = $1 AND pause_ref = $4 AND (state IN ('paused', 'parked') OR (state = 'resuming' AND claim_expires_at < now()))`. That UPDATE has no kind or park_until predicate. The worker's PARK_SPARE_HORIZON_SQL anchors on `updated_at + make_interval(secs => $2) > now()`. Your own DB test loop_checkpoint_a_non_empty_ref_claim_is_the_committed_statement asserts the behaviour: 'the committed statement does not read park_until', and updated_at > aged. The design says a non-empty ref uses the committed statement, so this is a gap the design itself sanctions. No executor caller uses a park ref today (S7 claims {run_id}:{step_id}, S8-6 claims \"\").",
+       "suggested_fix": "Lead decision. Keep the committed SQL text byte-identical and add a pre-check that runs only while park_recovery_active(). Before the committed branch, refuse with loop_checkpoint_not_claimable, or route to CLAIM_PARK_SQL, any non-empty pause_ref when the run's current row is kind = 'park'. A read of kind under the existing lock is enough. Alternatively, record in the ledger that a non-empty-ref claim of a park is an unguarded authority, as a follow-up."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+       "issue": "Neither the park claim nor the park resume's fence renews the managed obligation. A spared park's obligation stays open with deadline_at = horizon. If a resume claims and fences after the horizon has passed but before its first heartbeat, the next worker pass sees an ACTIVE fold. The park branch does not spare it, and the run is terminalized outcome_unknown while the resumed executor is alive. The window is small (between the fence and the loop-top heartbeat, and only after the horizon has passed), but it ends a run the worker does not own.",
+       "evidence": "PARK_SPARE_SQL sets `deadline_at = $2, next_attempt_at = $2` (the horizon, at most now + 900 s). CLAIM_PARK_SQL touches only run_loop_checkpoints. After save_fence the row is kind pre_effect, state active, so PARK_SPARE_HORIZON_SQL (`kind = 'park' AND state IN ('parked','resuming')`) returns no row. The worker then falls through to apply_managed_terminal_outcome. heartbeat_managed_run_inner is what renews the deadline, and it runs at the loop top after fence_parked.",
+       "suggested_fix": "Follow-up (S8-6 or a later step): have the park resume heartbeat before or right after the fence, or have a won park claim push the obligation's deadline to now + MANAGED_DEADLINE_SECS in the claim transaction. Pin it with a DB test: claim, fence, then a worker pass with the obligation due must not terminalize."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "park_ttl_from falls back to the one-day default for a value that does not fit in i64 (for example '99999999999999999999'). The design asks for the value to be clamped to [60, 2592000], so an oversized wait should become 30 days, not 1 day. A unit test pins this fallback as intended. Also, park_ttl_seconds() reads the environment on every call, and a TTL that changes between a park's save and the worker's pass can end a park before its park_until has come.",
+       "evidence": "`value.and_then(|text| text.trim().parse::<i64>().ok()).map_or(PARK_TTL_DEFAULT_SECONDS, ...)`. The test the_park_wait_is_a_day_by_default_and_is_clamped asserts park_ttl_from(Some(\"99999999999999999999\")) == 86_400.",
+       "suggested_fix": "Either clamp an all-digit value that overflows to PARK_TTL_MAX_SECONDS, or record the fallback as intended in the ledger addendum. Note in the compose comment that lowering the TTL ends parks under the new wait."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "The store's park cap (MAX_PARKS_PER_RUN) and the park ref check rely only on the count inside the fold the writer sent (parks_in(fold)), never on the run's stored history. A writer whose count restarts at 1 passes every rule on every park. Each park save also resets updated_at, so neither the cap nor the TTL then bounds how long a run can stay parked. The rule is a consistency check, not a cap.",
+       "evidence": "validate_park_save: `let parks = parks_in(fold); if parks > MAX_PARKS_PER_RUN {..} if parks == 0 || input.pause_ref != park_ref(run_id, parks) {..}`. Nothing compares this count with the current row. The fence turns the row into pre_effect and clears pause_ref, so the previous count is not kept in a plaintext column.",
+       "suggested_fix": "Accept it and document it as writer-trusted in the ledger addendum. Or keep a plaintext park counter column in a later migration, which S8-A explicitly avoids, so this would be a follow-up."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "No non-DB test guards that save() reports park_accepted = false when park recovery is off, or for a non-park kind. A mutation such as `let mut park_accepted = true;`, or setting it outside the gated block, passes all 519 host tests. Only the unrun DB tests (validated_and_echoed_only_under_park_recovery, the_save_rpc_echoes_park_accepted_from_the_store) would catch it. A true echo from a store with the switch off is exactly the failure the design's 'parking upgrades a failure' invariant depends on.",
+       "evidence": "The unit tests cover only the grpc.rs echo text (the_save_rpc_echoes_the_stores_park_answer_and_never_a_literal), and the pre-store refusals use a lazy pool. The happy and off paths need a database. The implementers' five mutation checks did not include this one.",
+       "suggested_fix": "Add a source guard over save(): park_accepted is initialised false and assigned true exactly once, inside `if crate::terminalization::park_recovery_active() {` and after the validate_park_save(..)? call. Or factor the decision into a pure fn (kind, active, validation result) -> bool with a truth-table test."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "I could not establish the behaviour of the new SQL and the 12 DB-backed tests (CLAIM_PARK_SQL, park_claim_refusal, PARK_SPARE_HORIZON_SQL with FOR UPDATE, PARK_SPARE_SQL, PARK_HELD_SQL, P9). They are written, not run. I read them closely: the bind types follow committed patterns (make_interval(secs => f64)), the helper semantics match (claim_columns, save_fence_at, seed_run with zdr_waived waiver columns, end_run_without_purge), and there is no trigger on run_loop_checkpoints that would move updated_at. These requirements are unverified until the lead runs the harness.",
+       "evidence": "cargo test -p session-core --bins: 519 passed, 162 ignored. The new #[ignore] tests sit in loop_checkpoint::tests::db, terminalization::park_recovery_db_tests and run_service_grpc::tests.",
+       "suggested_fix": "Lead: DATABASE_URL=<scratch> cargo test -p session-core --bin session-core park loop_checkpoint run_service_grpc -- --ignored --test-threads=1, before committing S8-4."
+      }
+     ],
+     "checked": [
+      "Read the s8a-v2.json design in full (slice, summary, approach, file_changes, interfaces, tests, steps, risks, invariants, failure_matrix, amendments) and the redteam checklist",
+      "git diff for all 6 unit files; the line endings are consistent within each file (loop_checkpoint.rs and durable_loop_contract.rs are LF in the working tree, as other untouched session-core files such as tool_ledger.rs and orchestration_grpc.rs are; terminalization.rs, grpc.rs, run_service_grpc.rs and docker-compose.yml are CRLF throughout)",
+      "Switches off, behaviour byte-identical: the committed claim and save SQL literals are unchanged (only the wrapping moved); park_recovery_active() is a pure env read; park_accepted is false on every off path; the worker branch is gated; the switch reads are compiled-out thread-local overrides in production",
+      "save(): the park rules run after the committed field checks (park_until is still required) and before run_owner_tx or any write, in the design's order; the tokens and codes match the design; park_accepted is returned only after commit",
+      "claim(): the empty-ref park claim comes after run_owner_tx (ZDR and zdr_waived refused, since retention_class != persistent) and after the ended check; CLAIM_PARK_SQL matches the design and leaves updated_at alone; the no-row diagnosis gives park_not_due / claim_held (any token) / not_claimable with nothing written (the transaction is dropped); the committed open, check_fold and CHECKPOINT_RESTORED follow",
+      "grpc.rs: save_loop_checkpoint_inner echoes saved.park_accepted; claim_loop_checkpoint_inner is unchanged and passes an empty pause_ref through",
+      "Worker: the spare comes after the lease check, the terminal-status supersede and the has_pending_approval spare, and before apply_managed_terminal_outcome; the lease is verified under the obligation lock before PARK_SPARE_SQL; lock order runs > obligation > fold matches save, claim and cancel (no deadlock); the horizon SQL and the spare SQL are verbatim from the design; the attempts counter has no escalation cap, so repeated spares are safe; no new log lines, metrics carry no labels",
+      "Heartbeat renews an open, past-due obligation, so a resumed run can heartbeat after a spare",
+      "Cancel (P9): cancel_run purges the fold in its own transaction, and the supersede happens on the next pass; the DB tests' assertions match the code",
+      "RunDetail of a park row: row_to_detail does not read the switch; park_reason stays owner-or-service",
+      "Compose rows are on the session-core service (default false and 86400); the switch_table row reads PARK_RECOVERY_ENV from terminalization.rs",
+      "The committed #[ignore] park-seeding tests (appr_1 references) still pass through the amended seed_fold with park recovery off, read through",
+      "cargo test -q -p session-core --bins: 519 passed, 0 failed, 162 ignored (matches the report)",
+      "cargo test -q -p execution-core --test durable_loop_contract --test cross_service_loop_contract: 26 + 3 passed",
+      "Did NOT run the DB-backed tests (they need the disposable-Postgres harness), docker, or any mutation"
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "Nothing outside the unrun DB tests pins that save() asks the park rules, and sets park_accepted, only under park_recovery_active(). The test named save_asks_the_park_rules_before_the_store_and_only_under_park_recovery proves only the 'before the store' half. Its 'Off' half just asserts that park_recovery_active() is false for two forced switch combinations and never calls save with the switch off. The claim gate has a source guard (the_park_claim_statement_never_touches_the_parks_age asserts the `let park_claim = ...` text) and the worker gate has park_spare_violations, but the save gate has neither. This is the invariant 'with every switch off the store is byte-identical and never echoes park_accepted', so the executor's protection against an old or switched-off store rests on this gate.",
+       "evidence": "`if crate::terminalization::park_recovery_active() { if let Some(until) = input.park_until { validate_park_save(..)?; park_accepted = true; } }` at about line 337. In the test, the lines after the `a wait as long as the park's whole life` case only call `drop(_park); Forced::set(false); assert!(!park_recovery_active())`. Mutating the gate to `if true` leaves every runnable test green. The unit cases force the switch on anyway, and only the #[ignore] DB tests (loop_checkpoint_a_park_save_is_validated_and_echoed_only_under_park_recovery, ..._save_rpc_echoes_park_accepted_from_the_store) exercise off. The implementer's mutation check covered only `if false`, which goes red. `if true` was not tried.",
+       "suggested_fix": "Add a non-DB guard for the save gate, in the style of the claim and worker guards: assert that `park_accepted = true;` and the `validate_park_save(` call sit inside `if crate::terminalization::park_recovery_active() {` and appear once. Add a meta-mutation row (gate replaced by `if true`) that must flag. Or drive save() through a lazy pool with the switch OFF and assert that the failure is a store connect error, not a park_* refusal, for a fold that violates the rules."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "Twelve DB tests were written but not run (Park StoreProof save test, empty-ref claim, non-empty-ref claim, save-RPC echo, seed_fold pass-through, four park_recovery_db_tests, two P9 cancel tests, plus one more). I could not establish that they are green. I also could not establish that the committed #[ignore] loop_checkpoint and park-seeding tests stay green. Static reading found no defect: types and tokens match the code, and cargo check and clippy show no new errors. The SQL type binding in PARK_SPARE_HORIZON_SQL and PARK_SPARE_SQL (f64 into make_interval, timestamptz into DateTime<Utc>) is exercised only by these DB tests. Environment sensitivity: the harness env scrub matches SESSION_CORE_.*_ENABLED, so SESSION_CORE_PARK_TTL_SECONDS is NOT scrubbed. The DB tests assume the default, e.g. park_until = now+3600 must be at most ttl/2, parked(.., ttl-120) and `assert!(ttl > 600)`. A shell that exports a small value would fail them for no product reason.",
+       "evidence": "scripts/tests/session-core-db-tests.sh: the scrub regex is `^(SESSION_CORE_.*_ENABLED|EXECUTION_.*|AGENT_CONTINUE_.*|NATS_.*|...)$`. The unit test the_park_wait_is_a_day_by_default_and_is_clamped guards on `std::env::var_os(PARK_TTL_ENV).is_none()`, but the DB tests read park_ttl_seconds() without any guard.",
+       "suggested_fix": "The lead must run the harness with loop_checkpoint, park_recovery, run_service_grpc and terminalization filters before committing S8-4. Optionally have the DB tests force the TTL, or add SESSION_CORE_PARK_TTL_SECONDS to the harness scrub (that file is outside this unit; deferred note only)."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/loop_checkpoint.rs",
+       "issue": "Test gap for the one deliberate departure from the literal reading of the design. validate_park_save accepts a park_until at or before now, because credential_window and reauth_required parks carry park_until = now. No test passes a past or zero park_until. park_rules() is only ever called with positive offsets, and the DB tests use now+3600 or more. A later 'tightening' to require a future park_until would break credential_window and reauth_required parks (executor park_until_for gives now) and no test would notice.",
+       "evidence": "park_rules(.., until_after_secs, ..) is called with 3600, 43_199, 43_260, 999_999 and 60. No negative or zero case exists. The deviation is reported in the implementer report, but it is not pinned.",
+       "suggested_fix": "Add a case: park_rules(run, 1, &ref_n(1), ParkReason::CredentialWindow, 0 and -5, keep) must be Ok."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs",
+       "issue": "a_park_row_reads_the_same_whatever_the_park_switch_says is vacuous with respect to its title. row_to_detail never reads park_recovery_active, so the on and off comparison cannot fail. The test still pins useful projection values for parked, resuming and closed states and for owner versus peer viewers, so keep it, but the switch half adds nothing. Also, resumable stays true for a park under park recovery OFF. The empty-ref claim then answers not_claimable, so a RunDetail can read resumable for a park the store will not hand out. That is design-accepted, but it is not stated in the test.",
+       "evidence": "let _park = park_test_switch::Forced::set(on); wraps only calls to row_to_detail(row, true, viewer), whose body (lines 443-482) has no reference to the switch.",
+       "suggested_fix": "Rename the test to what it pins (a park row's projection by state and viewer). Optionally add a source guard that row_to_detail names no park-recovery switch."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+       "issue": "TTL expiry exists only through the managed-run obligation. The spare and the after-TTL terminalization both live in recover_claimed_terminalization, which is keyed on managed_run_terminalization_outbox. A run that has a park fold but no obligation row (runs inserted by the plain start_run path in grpc.rs have no outbox row) would never be spared or ended by this worker. The park would stay non-terminal and resumable forever, past the TTL. The design does not address this, and S8-4 cannot fix it alone. The executor's park gate (S8-5) or the gateway should only park managed runs, or the TTL needs a second anchor.",
+       "evidence": "Only terminalization.rs:662 (start_managed_run), orchestration_store.rs:2685 and retention_receipt.rs:1555 insert obligation rows. The grpc.rs:3343 `INSERT INTO runs` path inserts none. Neither claim_due_recovery nor the spare ever sees such a run.",
+       "suggested_fix": "Confirm that every run the executor can park carries an obligation. Pin that with a park-time check in S8-5/S8-6, or in the S8-4 save rules (refuse a park when the run has no obligation row)."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+       "issue": "Deviation: PARK_HELD_SQL is an extra primary-key read, run on every recovery pass that is not spared, only to feed the parks_expired metric. It is gated by park_recovery_active(), so it is byte-identical with the switch off, but it is extra production surface not in the design. The deviation is declared. It is acceptable. Listed for the record.",
+       "evidence": "let mut park_ran_out = false; if park_recovery_active() { if spare_parked_run(..).await? { .. return Ok(false); } park_ran_out = sqlx::query_scalar(PARK_HELD_SQL)...}",
+       "suggested_fix": "None required. Alternatively return the expired flag from the horizon query (a second column) to avoid the extra read."
+      }
+     ],
+     "checked": [
+      "git diff of loop_checkpoint.rs, terminalization.rs, grpc.rs, run_service_grpc.rs, docker-compose.yml and the S8-4 hunks of durable_loop_contract.rs, read completely, against the s8a-v2 design sections (approach 3, interfaces, tests, steps, invariants, failure_matrix, file_changes)",
+      "Ran cargo test -p session-core --bins: 519 passed, 0 failed, 162 ignored. The numbers match the report: baseline 510, nine new unit tests, twelve new ignored DB tests",
+      "Ran cargo test -p execution-core --test durable_loop_contract --test cross_service_loop_contract: 26 passed, 3 passed. The 26 includes s8-5's tests, and the full run took 165 s",
+      "Ran cargo check --workspace --all-targets: clean for this unit. The only warning is an unused import in s8-5's park.rs. Ran clippy on session-core: no new lint on a changed line that is not pre-existing pedantic noise",
+      "Grepped every caller of loop_checkpoint::save (grpc.rs, terminalization test), every constructor and consumer of Saved, SaveInput and Claimed, and every seed_fold('park') user. No struct-literal or trait-double breakage across crates. Protos and the Go bindings are untouched by this unit",
+      "Diffed all deleted lines: only the intended signature, return and grpc literal changes, the claim statement's re-indentation (its SQL string literal is unchanged) and the seed_fold helper. No existing test weakened, renamed or deleted. The committed save, claim and close statement texts are unchanged",
+      "Compose rows are on the session-core service, default false and 86400, and the switch_table row is present. Line endings are consistent per file: CRLF for terminalization, grpc, run_service_grpc and compose, LF for loop_checkpoint and durable_loop_contract. No mixed endings",
+      "Statically re-read the claim path: run_owner_tx, then the ended check, then CLAIM_PARK_SQL, then the diagnosis. Confirmed that the empty-ref claim reaches the store (grpc.rs does not reject it), that closed or paused or active rows are never claimed, and that updated_at is untouched. Confirmed the save order: park rules, then run_owner_tx (the ZDR/waiver refusal), then the CAS and upsert",
+      "Checked column types: updated_at, park_until, deadline_at and claim_expires_at are timestamptz, so the DateTime<Utc> decode of the horizon query is sound. purge_run is unconditional, so the 'store off' worker-off DB test expectation of a purged fold holds. cancel_run purges in the same transaction as the status and the receipt (P9 holds without a production change). RUN_TERMINAL is the correct event name in the cancel assertions",
+      "Lock order in the worker spare (runs, then obligation, then fold with FOR UPDATE) matches claim and save (runs, then fold). tool_ledger sweep_once only reads state = 'parked', so a claimed (resuming) park is untouched",
+      "Harness scrub regex checked: park recovery is off in the DB harness. The committed ignored tests therefore take the committed paths. Re-read them statically and found nothing that depends on the old golden-fold shape of a seeded park. They are expected to stay green, but not run"
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p session-core --bins (cwd C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust)",
+      "outcome": "EXIT=0. Only the session_core binary unit-test target ran (src/main.rs): test result ok, finished in 8.60s after an 8.79s incremental build with no compiler warnings. No tests were written or changed by this unit. The 162 #[ignore] tests (DB-backed ones need DATABASE_URL) were not run here. Logs are in C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ as s8-4-1-session-core-bins.log",
+      "passed": "519 passed; 0 failed; 162 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "EXIT=0. tests/durable_loop_contract.rs: test result ok, finished in 105.28s after a 49.76s build. The build compiled the execution-core lib, which emitted 3 non-test warnings (listed under the check row). Log: s8-4-2-execution-core-durable-loop.log in the same scratchpad folder.",
+      "passed": "26 passed; 0 failed; 0 ignored"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "outcome": "EXIT=0. Unit tests in src/lib.rs: 120 passed. Integration tests: grounding_replay 1, loop_fold_golden 12, proto_wire_parity 3, proto_wire_parity_execution 8, run_context_posture 1, zdr_retention_matrix 5. Doc-tests mp_contracts: 2. All ok, no warnings. Log: s8-4-3-mp-contracts.log in the same scratchpad folder.",
+      "passed": "152 passed; 0 failed; 0 ignored (120 unit + 30 integration + 2 doc-tests)"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "EXIT=0, no errors, Finished dev profile in 1m 13s. Warnings only, none fatal. session-core bin (2): services/session-core/src/auth.rs:73 method provider never used; services/session-core/src/terminalization.rs:697 start_managed_run_inner never used. All callers of start_managed_run_inner are test code, so the warning is most likely pre-existing, but no HEAD build was run to confirm. The session-core warnings appear only in the non-test bin build, which is why the session-core test run above shows none. execution-core lib (3): services/execution-core/src/capability_policy.rs:181 unreachable else clause; services/execution-core/src/approval_delivery_worker.rs:744 verification_result_for never used; services/execution-core/src/runtime_loop/resume.rs:559 decision_closer never used. Paths are relative to apps/Model Plane/rust. No source edits by this unit. Log: s8-4-4-workspace-check.log.",
+      "passed": "n/a (check only, no tests run)"
+     }
+    ],
+    "failures": []
+   }
+  },
+  {
+   "unit": "s8-5",
+   "impl": {
+    "summary": "S8-5 (the execution-core park WRITE) is built and green on the host. With EXECUTION_LOOP_PARKING_ENABLED off, runtime behaviour is unchanged: the existing lib tests are the proof, 1080 before and 1109 after, 29 new.\n\nWhat now exists:\n- park.rs (new): the whole pure half of the design, plus try_park, parked_response and publish_run_parked. try_park is the only caller of save_park, and it closes a stray park row after an unaccepted or ambiguous save.\n- fold.rs: SaveKind::Park, the private park_rpc, ParkSaveError and FoldWriter::save_park (one RPC at the expected seq, no probe, no tombstone, no call when the writer is inactive; the seq moves only on an accepted park). save_rpc, classify_status, SaveError, Snapshot and build_fold are untouched.\n- agent.rs:\n  - base_tool_defs and merged_tool_defs_with_sources. merged_tool_defs is now a wrapper over merged_tool_defs_with_sources, in the same order as before.\n  - offered_tools: derivability by request kind. A fresh request is derivable only if nothing was appended and the server view was readable; an approval continuation, segment or loop, is never derivable.\n  - run_agent_with_offered and run_agent_with_route_parkable (with the `derivable` flag), and LoopContext.tools_derivable (root: `derivable && resumed.is_none()`, child: false).\n  - ParkGate, ParkPoint and park_at_boundary. run_rounds decides run_parkable once, before the loop, then parks from three sites: a latched refusal, the deadline, and a failed pinned round.\n  - RoundsOutcome::Parked returns from run_agent_with_route_parkable before finalize and before the lease release, with no append and no receipt.\n- Compose row (default false, CRLF kept) and the switch_table row.\n- park_writer_violations guard with its own mutation test.\n\nDecisions the lead should know:\n- DB-backed #[ignore] tests: none written or run by me.\n- Park StoreProof entry NOT filled here; S8-7 does that.\n- Resume half (S8-6) not built.\n- Seeded counters: `parks_so_far` is a literal 0 in run_rounds, and SeedKind::Parked is not yet derived from a seed.\n- S8-6's check_park_fold must read the park keys through lf::parks_in and the other readers, not the EXT_ consts, because the guard allows the consts only inside park_fold.\n\nVerification: one-off mutations in park.rs, fold.rs and agent.rs each turned the intended tests red, and all three files were restored byte for byte (cmp).",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (NEW)",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (CRLF kept)",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (shared; my hunks: the EXECUTOR_PARK const, one switch_table row, park_writer_violations and one_parking_parser_violations, and two new tests)",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml (shared; my hunk: one execution-core row, CRLF kept)"
+    ],
+    "tests_added": [
+     "park.rs: the_decision_table_is_closed, park_until_defaults, parking_active_needs_the_resume_switches, run_parkable_refuses_every_excluded_run, parkable_needs_a_writer_a_round_left_and_a_park_to_spare, the_park_fold_is_a_round_boundary_fold_naming_its_park_and_route, a_parked_response_is_parked_with_its_reason_and_due_time_and_nothing_else, only_the_park_mode_is_a_park_resume, a_stop_that_may_not_park_makes_no_call",
+     "fold.rs: a_park_is_its_own_save_kind_with_the_park_word_and_the_gated_timeout, save_park_is_one_rpc_at_the_expected_seq_with_no_probe, a_park_save_without_park_accepted_is_not_accepted, a_content_refused_park_is_an_error_never_a_tombstone, a_park_on_a_writer_that_is_off_or_failed_makes_no_call",
+     "agent.rs: merged_tool_defs_with_sources_reports_derivability, the_offer_is_derivable_only_for_a_fresh_request_with_no_added_tools, loop_park_a_pinned_usage_limit_parks_with_resets_at, loop_park_a_parked_run_returns_before_finalize, loop_park_a_credential_deadline_parks_at_the_loop_top, loop_park_a_latched_child_refusal_parks_the_root_at_its_next_loop_top, loop_park_wall_clock_and_bad_request_never_park, loop_park_the_other_failed_round_reasons_park_with_their_own_due_times, loop_park_with_parking_off_no_park_call_is_made_and_folds_are_byte_identical, loop_park_every_park_write_failure_falls_back_to_the_committed_failure, loop_park_a_run_with_client_or_mcp_tools_never_parks, loop_park_an_approval_continuation_never_parks, loop_park_a_zdr_or_waived_pinned_run_never_parks, loop_park_an_unpinned_run_keeps_the_committed_failure, loop_park_repeat_parks_carry_the_count_and_stop_at_five (driven through try_park directly)",
+     "durable_loop_contract.rs: the_park_is_written_by_one_function_from_three_stops_and_returns_before_finalize, the_park_writer_guard_goes_red_when_the_code_it_guards_regresses (about 45 mutation rows). The existing every_durable_loop_switch_is_set_on_the_services_that_read_it_and_defaults_off now also covers the new compose and switch_table row."
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -q -p execution-core --lib (baseline, before any edit)",
+      "outcome": "The run hung on executor::tests::a_hung_child_is_killed_at_the_timeout (pre-existing, Windows). I killed the test process and reran with --skip a_hung_child_is_killed_at_the_timeout: 1080 passed."
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract --test cross_service_loop_contract --test runtime_loop_test --test loop_fold_zdr_matrix --test scrub_checkpoint_test (baseline)",
+      "outcome": "All ok. Test counts, in cargo's output order: 3, 24, 7, 9, 8."
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib -- runtime_loop::park runtime_loop::fold",
+      "outcome": "44 passed after fixing one test that needed a tokio runtime."
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib -- loop_park_ merged_tool_defs_with_sources the_offer_is (before the park sites were wired)",
+      "outcome": "7 failed with status \"failed\" instead of \"parked\", 8 passed; the failures are the right reason."
+     },
+     {
+      "command": "same, after wiring the three sites in run_rounds",
+      "outcome": "15 passed. Then loop_park_an_approval_continuation_never_parks was reworked to use an expired credential deadline as its stop; it passes."
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib -- --skip a_hung_child_is_killed_at_the_timeout (final)",
+      "outcome": "1109 passed (1080 baseline + 29 new), 0 failed."
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract --test cross_service_loop_contract (final)",
+      "outcome": "3 passed and 26 passed (baseline 3 and 24). That includes the two new tests and the switch/compose test with the new row."
+     },
+     {
+      "command": "cargo test -q -p execution-core --test runtime_loop_test --test loop_fold_zdr_matrix --test scrub_checkpoint_test --test autonomy_ladder_contract --test browser_agent_e2e --test compaction_parity_contract --test slo --test subscription_refusal_contract --test zdr_refusal_inventory",
+      "outcome": "All ok (7, 9, 8, 4, 11 plus 2 ignored, 11, 4, 4, 2)."
+     },
+     {
+      "command": "cargo clippy -p execution-core --lib --tests, filtered to my files",
+      "outcome": "Fixed what it flagged in park.rs and fold.rs (identical match arm, a cast, an elidable lifetime, a doc backtick) and the is_none_or suggestion in the guard; nothing is left in my new park.rs/fold.rs code, and the many pre-existing clippy warnings elsewhere were left alone."
+     },
+     {
+      "command": "Mutation checks with cp and cmp restore: park.rs (wall clock parks, no close after NotAccepted, parks cap removed); agent.rs (Parked arm falls into finalize, site C stop wrong, tools_derivable forced true); fold.rs (an unaccepted park treated as taken)",
+      "outcome": "Each broke the intended tests (decision table, parkable, repeat parks, write-failure fallback, returns-before-finalize, client/MCP tools, a_park_save_without_park_accepted_is_not_accepted). All three files restored byte for byte (cmp)."
+     },
+     {
+      "command": "LNK1104 on the durable_loop_contract executable",
+      "outcome": "It hit three times because another unit was running that exe. I waited until the process was gone, then reran: green. That is inside the five-retry allowance."
+     }
+    ],
+    "deviations": [
+     "try_park takes a small ParkSite (run id, session channel and bearer, the route's model and connection id, and the child ceiling) instead of `ctx`, because LoopContext is private to agent.rs. agent.rs lends the loop's locals through ParkGate, ParkPoint and park_at_boundary, the only caller of try_park.",
+     "run_agent_with_offered and run_agent_with_route_parkable omit the `park: Option<ParkClaimed>` parameter, because ParkClaimed belongs to S8-6. S8-6 adds it. `derivable` is the last parameter of run_agent_with_route_parkable.",
+     "base_tool_defs is a plain fn, not async: it awaits nothing, and clippy flags unused_async.",
+     "Added an offered_tools(req, policy) helper in agent.rs that run_agent now calls. It makes derivability by request kind testable.",
+     "run_agent_with_tools and run_agent_with_route are now #[cfg(test)] wrappers (the production entry is run_agent_with_offered), with explicit tool sets that are never derivable. PARK_MODE, is_park_resume and SeedKind::Parked carry scoped allow(dead_code) with a reason until S8-6 uses them.",
+     "The child mapping of RoundsOutcome::Parked is an Err like Exhausted (\"stopped without reaching an answer\"), not Exhausted's exact text.",
+     "FoldWriter::expected_seq lost its #[cfg(test)], because try_park needs it to close `expected + 1` after an ambiguous save.",
+     "FoldWriter gained a private park_with (an RPC seam, like fence_with) under save_park so the one-RPC rule is testable without gRPC.",
+     "The mutation rows for park_writer_violations are in their own test, the_park_writer_guard_goes_red_when_the_code_it_guards_regresses, not inside every_guard_goes_red_when_the_code_it_guards_regresses, whose rows stay untouched. The parking switch's one-parser check is a separate fn, one_parking_parser_violations, with its own rows (including a rogue reader in the gateway's sse.rs).",
+     "The Park StoreProof entry was NOT filled, as the design says (S8-7). My S8-5 tests tagged for it are run_parkable_refuses_every_excluded_run (park.rs) and loop_park_a_zdr_or_waived_pinned_run_never_parks (agent.rs).",
+     "loop_park_an_approval_continuation_never_parks uses an already-spent credential deadline as the stop. In this harness a pinned approval continuation cannot reach inference, because the seeded InferResponse fails the route guard, so a usage limit never happens there. The same stop parks a fresh run (a control inside the test).",
+     "loop_park_repeat_parks_carry_the_count_and_stop_at_five drives try_park directly with parks_so_far 0 to 5, because the loop's count is seeded only by the S8-6 park resume (it is a literal 0 in run_rounds until then).",
+     "I used a python3 text replace once on agent.rs (the run_agent head, LF preserved), before applying rule 6 strictly. Every other edit to an existing file used the Edit tool.",
+     "The baseline hang on executor::tests::a_hung_child_is_killed_at_the_timeout is pre-existing on Windows; it is skipped identically before and after, so the baseline is 1080 and the final count is 1109."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "park.rs, S8-5 names: parking_active, park_resume_active, ParkSwitch (test override), PARK_MODE, PARKED_STATUS, SeedKind {Fresh, Segment, InPlace, Parked}, StaticFacts, run_parkable, ParkFacts, parkable, ParkStop {LatchedRefusal, Deadline, FailedRound}, park_reason_for, park_until_for, ParkSite, ParkedRun {reason, park_ref, seq, park_until}, park_fold, try_park, parked_response, is_park_resume",
+     "fold.rs: SaveKind::Park, ParkSaveError {Save, NotAccepted{seq}}, FoldWriter::save_park, expected_seq (production now)",
+     "agent.rs: OfferedTools {defs, derivable}, offered_tools, base_tool_defs, merged_tool_defs_with_sources, run_agent_with_offered, run_agent_with_route_parkable, LoopContext.tools_derivable, ParkGate {run_parkable, parks_so_far (literal 0)}, ParkPoint, park_at_boundary, RoundsOutcome::Parked(ParkedRun), and the test helpers drive_park, drive_park_with, ParkKnobs, ParkShape, park_attempts, the_park, Recorder.park_unaccepted, run_parked_events, LoopSave.park_reason, LoopSave.park_until",
+     "durable_loop_contract.rs: EXECUTOR_PARK, park_writer_violations, one_parking_parser_violations",
+     "S8-6 must: add the `park: Option<ParkClaimed>` parameter to run_agent_with_offered and run_agent_with_route_parkable; add RoundSeed::Parked, so the exhaustive `match &seed` that computes seed_kind in run_rounds will not compile until it maps it to SeedKind::Parked; seed ParkGate.parks_so_far from the claimed fold, replacing the literal 0; read the park keys through lf::parks_in, route_model_in, route_connection_in and child_ceiling_in only, because park_writer_violations allows the EXT_ consts only inside park_fold (a check_park_fold naming them would be flagged); keep exactly one `park::run_parkable(` call in run_rounds, before the loop, and exactly one FoldWriter::seeded( and one save_fence( in agent.rs, since the S7b guards count them",
+     "S8-7: fill the Park StoreProof entry and remove the exemption, naming run_parkable_refuses_every_excluded_run (park.rs) and loop_park_a_zdr_or_waived_pinned_run_never_parks (agent.rs); LOOP_PARKING_ENV already has the execution-core switch_table row, and S8-7 adds the model-gateway row"
+    ],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (addendum text for the 2026-10-16 durable-loop entry, S8-5; the lead applies it)",
+      "content": "S8-5 (WS03 S8-A, the executor park write, built 2026-10-19, local branch model-plane, uncommitted, default off):\n- EXECUTION_LOOP_PARKING_ENABLED (execution-core, default false) lets a pinned, persistent, root Do run that meets a typed recoverable stop save a fold of kind `park` through its fenced writer and return RunAgentResponse.status \"parked\" (park_reason, resets_at = the due time, no failure_code, no answer) instead of finalizing. It is written only when parking_active() = the parking switch AND park_resume_active() = EXECUTION_LOOP_RESUME_ENABLED AND AGENT_CONTINUE_AFTER_APPROVAL_ENABLED AND EXECUTION_LOOP_CHECKPOINT_ENABLED AND EXECUTION_EFFECT_LEDGER_ENABLED (a park nothing can resume is never written). A park RESUME is never gated by the parking switch.\n- What parks (park::run_parkable, decided once when the loop starts): depth 0, not zero-retention, not waived, no Space, a DERIVABLE tool set (base tools plus the server-resolved view: no client tool, no MCP tool appended, resolver readable), no approval release, seed fresh (or a park resume), route pinned with a connection id and a model. Never an approval continuation (its tools are the snapshot's), never a delegated child.\n- Decision table (park::park_reason_for): latched usage limit -> provider_exhausted, latched reauth -> reauth_required; the credential deadline -> credential_window (the wall clock never parks); a failed pinned round: usage limit -> provider_exhausted, rate_limited WITH retry_after_ms -> provider_exhausted, upstream_unavailable -> upstream_unavailable, reauth -> reauth_required; bad_request, prompt_too_long, route_unavailable, an untyped failure and a throttle with no wait keep the committed return. The failed round stays charged. crash_interrupted is never written by the executor.\n- Due time (park_until_for): provider_exhausted = resets_at, else now + retry_after_ms, else now + 300 s; upstream_unavailable = now + hint, else now + 60 s; credential_window and reauth_required = now. A hint is clamped to 30 days; session-core refuses a due time beyond TTL/2, which is the committed outcome.\n- Parking upgrades a failure and is never a new way to fail: a park that session-core stores without park_accepted, or whose save may have committed (an ambiguous failure), is followed by a best-effort CloseLoopCheckpoint (reason park_not_taken, at the stored seq or expected + 1) and the run takes its committed typed failure; every other park-write error takes it with no close. At most MAX_PARKS_PER_RUN (5) parks; the count rides in the fold (EXT_PARKS) with the route model, the connection id and the child ceiling, written only by park::park_fold.\n- A parked run returns from run_agent_with_route_parkable BEFORE finalize: no assistant message, no terminal receipt, no plan transition past EXECUTING, no sandbox lease release. The executor publishes RunParked{run_id} best effort (ids only).\n- The park save is one RPC at the expected seq (no probe, no tombstone: a content refusal is an error), through FoldWriter::save_park; park_writer_violations (durable_loop_contract) holds: one save_park call in try_park behind parkable and park_reason_for, a private park_rpc, the three stops in the loop's order through park_at_boundary, the run's own facts feeding run_parkable, returns-before-finalize, derivability by request kind, one parser for the parking switch, and the resume switches in parking_active.\n- Not built here (S8-6): the park resume, enforce_resume's park mode, the ParkClaimed parameter, RoundSeed::Parked, fence_parked. Do not deploy an execution-core image between S8-5 and S8-6."
+     },
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row, S8-5; the lead applies it)",
+      "content": "WS03 S8-A S8-5 | execution-core park write | built 2026-10-19 on local branch model-plane, uncommitted: runtime_loop/park.rs (new), fold.rs (SaveKind::Park, park_rpc, ParkSaveError, FoldWriter::save_park), agent.rs (OfferedTools, offered_tools, base_tool_defs, merged_tool_defs_with_sources, run_agent_with_offered, run_agent_with_route_parkable, LoopContext.tools_derivable, park_at_boundary and the three park sites, RoundsOutcome::Parked before finalize), compose EXECUTION_LOOP_PARKING_ENABLED (default false), switch_table row, park_writer_violations. Verified: execution-core lib 1109 passed (baseline 1080, one pre-existing Windows hang skipped), durable_loop_contract 26, cross_service_loop_contract 3, all other execution-core integration tests green; no DB-backed tests in this step. Resume half (S8-6) and the gateway/BFF/SPA (S8-7, S8-8) not built; do not deploy an execution-core image before S8-6."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "S8-5 (the execution-core park WRITE) is built and green on the host. With EXECUTION_LOOP_PARKING_ENABLED off, runtime behaviour is unchanged: the existing lib tests are the proof, 1080 before and 1109 after, 29 new.\n\nWhat now exists:\n- park.rs (new): the whole pure half of the design, plus try_park, parked_response and publish_run_parked. try_park is the only caller of save_park, and it closes a stray park row after an unaccepted or ambiguous save.\n- fold.rs: SaveKind::Park, the private park_rpc, ParkSaveError and FoldWriter::save_park (one RPC at the expected seq, no probe, no tombstone, no call when the writer is inactive; the seq moves only on an accepted park). save_rpc, classify_status, SaveError, Snapshot and build_fold are untouched.\n- agent.rs:\n  - base_tool_defs and merged_tool_defs_with_sources. merged_tool_defs is now a wrapper over merged_tool_defs_with_sources, in the same order as before.\n  - offered_tools: derivability by request kind. A fresh request is derivable only if nothing was appended and the server view was readable; an approval continuation, segment or loop, is never derivable.\n  - run_agent_with_offered and run_agent_with_route_parkable (with the `derivable` flag), and LoopContext.tools_derivable (root: `derivable && resumed.is_none()`, child: false).\n  - ParkGate, ParkPoint and park_at_boundary. run_rounds decides run_parkable once, before the loop, then parks from three sites: a latched refusal, the deadline, and a failed pinned round.\n  - RoundsOutcome::Parked returns from run_agent_with_route_parkable before finalize and before the lease release, with no append and no receipt.\n- Compose row (default false, CRLF kept) and the switch_table row.\n- park_writer_violations guard with its own mutation test.\n\nDecisions the lead should know:\n- DB-backed #[ignore] tests: none written or run by me.\n- Park StoreProof entry NOT filled here; S8-7 does that.\n- Resume half (S8-6) not built.\n- Seeded counters: `parks_so_far` is a literal 0 in run_rounds, and SeedKind::Parked is not yet derived from a seed.\n- S8-6's check_park_fold must read the park keys through lf::parks_in and the other readers, not the EXT_ consts, because the guard allows the consts only inside park_fold.\n\nVerification: one-off mutations in park.rs, fold.rs and agent.rs each turned the intended tests red, and all three files were restored byte for byte (cmp).",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (NEW)",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs (CRLF kept)",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (shared; my hunks: the EXECUTOR_PARK const, one switch_table row, park_writer_violations and one_parking_parser_violations, and two new tests)",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml (shared; my hunk: one execution-core row, CRLF kept)"
+     ],
+     "tests_added": [
+      "park.rs: the_decision_table_is_closed, park_until_defaults, parking_active_needs_the_resume_switches, run_parkable_refuses_every_excluded_run, parkable_needs_a_writer_a_round_left_and_a_park_to_spare, the_park_fold_is_a_round_boundary_fold_naming_its_park_and_route, a_parked_response_is_parked_with_its_reason_and_due_time_and_nothing_else, only_the_park_mode_is_a_park_resume, a_stop_that_may_not_park_makes_no_call",
+      "fold.rs: a_park_is_its_own_save_kind_with_the_park_word_and_the_gated_timeout, save_park_is_one_rpc_at_the_expected_seq_with_no_probe, a_park_save_without_park_accepted_is_not_accepted, a_content_refused_park_is_an_error_never_a_tombstone, a_park_on_a_writer_that_is_off_or_failed_makes_no_call",
+      "agent.rs: merged_tool_defs_with_sources_reports_derivability, the_offer_is_derivable_only_for_a_fresh_request_with_no_added_tools, loop_park_a_pinned_usage_limit_parks_with_resets_at, loop_park_a_parked_run_returns_before_finalize, loop_park_a_credential_deadline_parks_at_the_loop_top, loop_park_a_latched_child_refusal_parks_the_root_at_its_next_loop_top, loop_park_wall_clock_and_bad_request_never_park, loop_park_the_other_failed_round_reasons_park_with_their_own_due_times, loop_park_with_parking_off_no_park_call_is_made_and_folds_are_byte_identical, loop_park_every_park_write_failure_falls_back_to_the_committed_failure, loop_park_a_run_with_client_or_mcp_tools_never_parks, loop_park_an_approval_continuation_never_parks, loop_park_a_zdr_or_waived_pinned_run_never_parks, loop_park_an_unpinned_run_keeps_the_committed_failure, loop_park_repeat_parks_carry_the_count_and_stop_at_five (driven through try_park directly)",
+      "durable_loop_contract.rs: the_park_is_written_by_one_function_from_three_stops_and_returns_before_finalize, the_park_writer_guard_goes_red_when_the_code_it_guards_regresses (about 45 mutation rows). The existing every_durable_loop_switch_is_set_on_the_services_that_read_it_and_defaults_off now also covers the new compose and switch_table row."
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -q -p execution-core --lib (baseline, before any edit)",
+       "outcome": "The run hung on executor::tests::a_hung_child_is_killed_at_the_timeout (pre-existing, Windows). I killed the test process and reran with --skip a_hung_child_is_killed_at_the_timeout: 1080 passed."
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract --test cross_service_loop_contract --test runtime_loop_test --test loop_fold_zdr_matrix --test scrub_checkpoint_test (baseline)",
+       "outcome": "All ok. Test counts, in cargo's output order: 3, 24, 7, 9, 8."
+      },
+      {
+       "command": "cargo test -q -p execution-core --lib -- runtime_loop::park runtime_loop::fold",
+       "outcome": "44 passed after fixing one test that needed a tokio runtime."
+      },
+      {
+       "command": "cargo test -q -p execution-core --lib -- loop_park_ merged_tool_defs_with_sources the_offer_is (before the park sites were wired)",
+       "outcome": "7 failed with status \"failed\" instead of \"parked\", 8 passed; the failures are the right reason."
+      },
+      {
+       "command": "same, after wiring the three sites in run_rounds",
+       "outcome": "15 passed. Then loop_park_an_approval_continuation_never_parks was reworked to use an expired credential deadline as its stop; it passes."
+      },
+      {
+       "command": "cargo test -q -p execution-core --lib -- --skip a_hung_child_is_killed_at_the_timeout (final)",
+       "outcome": "1109 passed (1080 baseline + 29 new), 0 failed."
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract --test cross_service_loop_contract (final)",
+       "outcome": "3 passed and 26 passed (baseline 3 and 24). That includes the two new tests and the switch/compose test with the new row."
+      },
+      {
+       "command": "cargo test -q -p execution-core --test runtime_loop_test --test loop_fold_zdr_matrix --test scrub_checkpoint_test --test autonomy_ladder_contract --test browser_agent_e2e --test compaction_parity_contract --test slo --test subscription_refusal_contract --test zdr_refusal_inventory",
+       "outcome": "All ok (7, 9, 8, 4, 11 plus 2 ignored, 11, 4, 4, 2)."
+      },
+      {
+       "command": "cargo clippy -p execution-core --lib --tests, filtered to my files",
+       "outcome": "Fixed what it flagged in park.rs and fold.rs (identical match arm, a cast, an elidable lifetime, a doc backtick) and the is_none_or suggestion in the guard; nothing is left in my new park.rs/fold.rs code, and the many pre-existing clippy warnings elsewhere were left alone."
+      },
+      {
+       "command": "Mutation checks with cp and cmp restore: park.rs (wall clock parks, no close after NotAccepted, parks cap removed); agent.rs (Parked arm falls into finalize, site C stop wrong, tools_derivable forced true); fold.rs (an unaccepted park treated as taken)",
+       "outcome": "Each broke the intended tests (decision table, parkable, repeat parks, write-failure fallback, returns-before-finalize, client/MCP tools, a_park_save_without_park_accepted_is_not_accepted). All three files restored byte for byte (cmp)."
+      },
+      {
+       "command": "LNK1104 on the durable_loop_contract executable",
+       "outcome": "It hit three times because another unit was running that exe. I waited until the process was gone, then reran: green. That is inside the five-retry allowance."
+      }
+     ],
+     "deviations": [
+      "try_park takes a small ParkSite (run id, session channel and bearer, the route's model and connection id, and the child ceiling) instead of `ctx`, because LoopContext is private to agent.rs. agent.rs lends the loop's locals through ParkGate, ParkPoint and park_at_boundary, the only caller of try_park.",
+      "run_agent_with_offered and run_agent_with_route_parkable omit the `park: Option<ParkClaimed>` parameter, because ParkClaimed belongs to S8-6. S8-6 adds it. `derivable` is the last parameter of run_agent_with_route_parkable.",
+      "base_tool_defs is a plain fn, not async: it awaits nothing, and clippy flags unused_async.",
+      "Added an offered_tools(req, policy) helper in agent.rs that run_agent now calls. It makes derivability by request kind testable.",
+      "run_agent_with_tools and run_agent_with_route are now #[cfg(test)] wrappers (the production entry is run_agent_with_offered), with explicit tool sets that are never derivable. PARK_MODE, is_park_resume and SeedKind::Parked carry scoped allow(dead_code) with a reason until S8-6 uses them.",
+      "The child mapping of RoundsOutcome::Parked is an Err like Exhausted (\"stopped without reaching an answer\"), not Exhausted's exact text.",
+      "FoldWriter::expected_seq lost its #[cfg(test)], because try_park needs it to close `expected + 1` after an ambiguous save.",
+      "FoldWriter gained a private park_with (an RPC seam, like fence_with) under save_park so the one-RPC rule is testable without gRPC.",
+      "The mutation rows for park_writer_violations are in their own test, the_park_writer_guard_goes_red_when_the_code_it_guards_regresses, not inside every_guard_goes_red_when_the_code_it_guards_regresses, whose rows stay untouched. The parking switch's one-parser check is a separate fn, one_parking_parser_violations, with its own rows (including a rogue reader in the gateway's sse.rs).",
+      "The Park StoreProof entry was NOT filled, as the design says (S8-7). My S8-5 tests tagged for it are run_parkable_refuses_every_excluded_run (park.rs) and loop_park_a_zdr_or_waived_pinned_run_never_parks (agent.rs).",
+      "loop_park_an_approval_continuation_never_parks uses an already-spent credential deadline as the stop. In this harness a pinned approval continuation cannot reach inference, because the seeded InferResponse fails the route guard, so a usage limit never happens there. The same stop parks a fresh run (a control inside the test).",
+      "loop_park_repeat_parks_carry_the_count_and_stop_at_five drives try_park directly with parks_so_far 0 to 5, because the loop's count is seeded only by the S8-6 park resume (it is a literal 0 in run_rounds until then).",
+      "I used a python3 text replace once on agent.rs (the run_agent head, LF preserved), before applying rule 6 strictly. Every other edit to an existing file used the Edit tool.",
+      "The baseline hang on executor::tests::a_hung_child_is_killed_at_the_timeout is pre-existing on Windows; it is skipped identically before and after, so the baseline is 1080 and the final count is 1109."
+     ],
+     "blockers": [],
+     "names_for_later_units": [
+      "park.rs, S8-5 names: parking_active, park_resume_active, ParkSwitch (test override), PARK_MODE, PARKED_STATUS, SeedKind {Fresh, Segment, InPlace, Parked}, StaticFacts, run_parkable, ParkFacts, parkable, ParkStop {LatchedRefusal, Deadline, FailedRound}, park_reason_for, park_until_for, ParkSite, ParkedRun {reason, park_ref, seq, park_until}, park_fold, try_park, parked_response, is_park_resume",
+      "fold.rs: SaveKind::Park, ParkSaveError {Save, NotAccepted{seq}}, FoldWriter::save_park, expected_seq (production now)",
+      "agent.rs: OfferedTools {defs, derivable}, offered_tools, base_tool_defs, merged_tool_defs_with_sources, run_agent_with_offered, run_agent_with_route_parkable, LoopContext.tools_derivable, ParkGate {run_parkable, parks_so_far (literal 0)}, ParkPoint, park_at_boundary, RoundsOutcome::Parked(ParkedRun), and the test helpers drive_park, drive_park_with, ParkKnobs, ParkShape, park_attempts, the_park, Recorder.park_unaccepted, run_parked_events, LoopSave.park_reason, LoopSave.park_until",
+      "durable_loop_contract.rs: EXECUTOR_PARK, park_writer_violations, one_parking_parser_violations",
+      "S8-6 must: add the `park: Option<ParkClaimed>` parameter to run_agent_with_offered and run_agent_with_route_parkable; add RoundSeed::Parked, so the exhaustive `match &seed` that computes seed_kind in run_rounds will not compile until it maps it to SeedKind::Parked; seed ParkGate.parks_so_far from the claimed fold, replacing the literal 0; read the park keys through lf::parks_in, route_model_in, route_connection_in and child_ceiling_in only, because park_writer_violations allows the EXT_ consts only inside park_fold (a check_park_fold naming them would be flagged); keep exactly one `park::run_parkable(` call in run_rounds, before the loop, and exactly one FoldWriter::seeded( and one save_fence( in agent.rs, since the S7b guards count them",
+      "S8-7: fill the Park StoreProof entry and remove the exemption, naming run_parkable_refuses_every_excluded_run (park.rs) and loop_park_a_zdr_or_waived_pinned_run_never_parks (agent.rs); LOOP_PARKING_ENV already has the execution-core switch_table row, and S8-7 adds the model-gateway row"
+     ],
+     "deferred_files": [
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (addendum text for the 2026-10-16 durable-loop entry, S8-5; the lead applies it)",
+       "content": "S8-5 (WS03 S8-A, the executor park write, built 2026-10-19, local branch model-plane, uncommitted, default off):\n- EXECUTION_LOOP_PARKING_ENABLED (execution-core, default false) lets a pinned, persistent, root Do run that meets a typed recoverable stop save a fold of kind `park` through its fenced writer and return RunAgentResponse.status \"parked\" (park_reason, resets_at = the due time, no failure_code, no answer) instead of finalizing. It is written only when parking_active() = the parking switch AND park_resume_active() = EXECUTION_LOOP_RESUME_ENABLED AND AGENT_CONTINUE_AFTER_APPROVAL_ENABLED AND EXECUTION_LOOP_CHECKPOINT_ENABLED AND EXECUTION_EFFECT_LEDGER_ENABLED (a park nothing can resume is never written). A park RESUME is never gated by the parking switch.\n- What parks (park::run_parkable, decided once when the loop starts): depth 0, not zero-retention, not waived, no Space, a DERIVABLE tool set (base tools plus the server-resolved view: no client tool, no MCP tool appended, resolver readable), no approval release, seed fresh (or a park resume), route pinned with a connection id and a model. Never an approval continuation (its tools are the snapshot's), never a delegated child.\n- Decision table (park::park_reason_for): latched usage limit -> provider_exhausted, latched reauth -> reauth_required; the credential deadline -> credential_window (the wall clock never parks); a failed pinned round: usage limit -> provider_exhausted, rate_limited WITH retry_after_ms -> provider_exhausted, upstream_unavailable -> upstream_unavailable, reauth -> reauth_required; bad_request, prompt_too_long, route_unavailable, an untyped failure and a throttle with no wait keep the committed return. The failed round stays charged. crash_interrupted is never written by the executor.\n- Due time (park_until_for): provider_exhausted = resets_at, else now + retry_after_ms, else now + 300 s; upstream_unavailable = now + hint, else now + 60 s; credential_window and reauth_required = now. A hint is clamped to 30 days; session-core refuses a due time beyond TTL/2, which is the committed outcome.\n- Parking upgrades a failure and is never a new way to fail: a park that session-core stores without park_accepted, or whose save may have committed (an ambiguous failure), is followed by a best-effort CloseLoopCheckpoint (reason park_not_taken, at the stored seq or expected + 1) and the run takes its committed typed failure; every other park-write error takes it with no close. At most MAX_PARKS_PER_RUN (5) parks; the count rides in the fold (EXT_PARKS) with the route model, the connection id and the child ceiling, written only by park::park_fold.\n- A parked run returns from run_agent_with_route_parkable BEFORE finalize: no assistant message, no terminal receipt, no plan transition past EXECUTING, no sandbox lease release. The executor publishes RunParked{run_id} best effort (ids only).\n- The park save is one RPC at the expected seq (no probe, no tombstone: a content refusal is an error), through FoldWriter::save_park; park_writer_violations (durable_loop_contract) holds: one save_park call in try_park behind parkable and park_reason_for, a private park_rpc, the three stops in the loop's order through park_at_boundary, the run's own facts feeding run_parkable, returns-before-finalize, derivability by request kind, one parser for the parking switch, and the resume switches in parking_active.\n- Not built here (S8-6): the park resume, enforce_resume's park mode, the ParkClaimed parameter, RoundSeed::Parked, fence_parked. Do not deploy an execution-core image between S8-5 and S8-6."
+      },
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row, S8-5; the lead applies it)",
+       "content": "WS03 S8-A S8-5 | execution-core park write | built 2026-10-19 on local branch model-plane, uncommitted: runtime_loop/park.rs (new), fold.rs (SaveKind::Park, park_rpc, ParkSaveError, FoldWriter::save_park), agent.rs (OfferedTools, offered_tools, base_tool_defs, merged_tool_defs_with_sources, run_agent_with_offered, run_agent_with_route_parkable, LoopContext.tools_derivable, park_at_boundary and the three park sites, RoundsOutcome::Parked before finalize), compose EXECUTION_LOOP_PARKING_ENABLED (default false), switch_table row, park_writer_violations. Verified: execution-core lib 1109 passed (baseline 1080, one pre-existing Windows hang skipped), durable_loop_contract 26, cross_service_loop_contract 3, all other execution-core integration tests green; no DB-backed tests in this step. Resume half (S8-6) and the gateway/BFF/SPA (S8-7, S8-8) not built; do not deploy an execution-core image before S8-6."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "Inside the loop the park cap is never enforced. ParkGate.parks_so_far is a literal 0 in run_rounds, so every park the loop writes has n=1 and pause_ref park:{run}:1. session-core S8-4 only refuses n > MAX_PARKS_PER_RUN, so it never sees a count above 1. The cap therefore depends entirely on S8-6 seeding the count from the claimed fold, and nothing forces S8-6 to do that. Adding RoundSeed::Parked only forces the seed_kind match to change, not parks_so_far. A credential_window park charges no round (rounds_used is unchanged at site B), so if S8-6 resumes without seeding, park-resume-park can repeat until the TTL, bounded neither by the cap nor by max_rounds.",
+       "evidence": "run_rounds: `let park_gate = ParkGate { run_parkable: ..., parks_so_far: 0, };`. loop_park_repeat_parks_carry_the_count_and_stop_at_five drives try_park directly with parks_so_far 0..5 and never goes through the loop. park_writer_violations has no row tying parks_so_far to the seed.",
+       "suggested_fix": "Add a durable_loop_contract tripwire: once a RoundSeed::Parked variant exists in agent.rs, `parks_so_far: 0` must not appear in the ParkGate literal (it must be derived from the seed through lf::parks_in), with a mutation row. Or record it as a binding S8-6 obligation in the ledger addendum, plus a lib test that a park resume seeded with parks=5 cannot park again."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/deploy/docker-compose.yml",
+       "issue": "Turning EXECUTION_LOOP_PARKING_ENABLED on in an image that has S8-5 but not S8-6 writes accepted parks that no executor can resume. enforce_resume still refuses mode \"park\", so each such run is held until the 24 h park TTL and then ends outcome_unknown. That is a park nothing can resume. Only a compose comment and the 'do not deploy between S8-5 and S8-6' rule prevent it. park_resume_active() checks switches only, not whether the resume code exists.",
+       "evidence": "park.rs park_resume_active() = loop_resume_enabled && continue_enabled && checkpoint_enabled && ledger_enabled. grpc.rs enforce_resume (unchanged) accepts only \"segment\" | \"loop\". The compose comment says \"the resume ships in a later step: do not turn this on before it is deployed\".",
+       "suggested_fix": "Until S8-6 lands, make the failure mode structural: for example a `const PARK_RESUME_BUILT: bool = false;` in park.rs that parking_active() requires, which S8-6 flips with a guard row. Or keep S8-5 and S8-6 in one commit, so no image can carry the write without the resume."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "There is a narrow window in which an ambiguous park save can leave a run parked after the user has seen it fail. The save commits and is accepted, the response is lost, the best-effort close at expected+1 also fails (session-core is plausibly still unreachable), and finalize then partly succeeds: the reply is appended but the receipt fails. The run is then spared until the park TTL rather than the 15 min deadline, and a later park continue would resume a run whose failure reply is already in the thread. The design's failure matrix assumes 'a late commit is purged by the terminal transition', which only holds if the receipt is written.",
+       "evidence": "try_park: `Err(ParkSaveError::Save(SaveError::Unavailable { ambiguous: true })) => { close_stray_park(site, expected.saturating_add(1)).await; None }`. close_stray_park is best effort, with no retry and no outcome. The agent.rs fallback then runs finalize.",
+       "suggested_fix": "Accept and document this in the ledger addendum, or after an ambiguous park make the committed fallback's finalize the authoritative close (purge at the receipt) and add a test for that ordering."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "park_writer_violations leaves several facts unpinned. It checks seven StaticFacts fields but not `seed: seed_kind`, `connection_id_present` or `model_present`. Its run_parkable needles omit facts.connection_id_present and facts.model_present. It does not check that each site's park call comes before that site's committed `return Ok(RoundsResult{ outcome: InferFailed/OutOfTime ..})`. Lib tests cover these today, but the guard comment claims the guard holds 'the run's own facts feeding run_parkable'.",
+       "evidence": "The StaticFacts field list in park_writer_violations has 7 entries (depth, zdr, waived, space, tools_derivable, holds_release, pinned). The run_parkable needles end at \"facts.pinned\".",
+       "suggested_fix": "Add rows for `seed:seed_kind,`, `connection_id_present:!ctx.route.subscription_connection_id().is_empty(),` and `model_present:!ctx.route.model().is_empty(),`, the two missing run_parkable needles, and an order check: within each site, ParkStop::X( comes before the next `outcome: RoundsOutcome::InferFailed`/`OutOfTime`."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "loop_park_an_approval_continuation_never_parks drives only a stage-1 \"segment\" continuation, which is excluded three ways (holds_release, SeedKind::Segment and tools_derivable). No loop-level test isolates the tools_derivable exclusion, and no test covers the in-place \"loop\" continuation. The amended rule (the snapshot's tools are never derivable) is pinned only by the source guard.",
+       "evidence": "The test builds AgentResume{mode:\"segment\"} and passes derivable=true. run_parkable would already refuse it on holds_release and seed alone.",
+       "suggested_fix": "Add a pure test that run_parkable is false when only tools_derivable=false, from a context built by run_agent_with_route_parkable with a resumed segment. Or drive an in-place loop continuation to a credential-deadline stop and assert there are no park attempts."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+       "issue": "publish_run_parked awaits RecordOrchestrationEvent with no timeout before the parked response is returned. A hung session-core therefore delays the RunAgent reply, though the park is already durable. This matches publish_plan_transition, which is also untimed, so it is consistent rather than new.",
+       "evidence": "publish_run_parked: `.record_orchestration_event(request).await` with no tokio::time::timeout. close_rpc, by contrast, uses GATED_SAVE_TIMEOUT.",
+       "suggested_fix": "Wrap the publish in tokio::time::timeout(fold::GATED_SAVE_TIMEOUT, ..) and log a closed token on elapse."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "Space is tested two ways. StaticFacts uses `!req.space_id.is_empty()`, while offered_tools/base_tool_defs use `!req.space_id.trim().is_empty()`. With a whitespace-only space_id the run is treated as a Space run for parking but not for tools. This is fail-safe (no park), but inconsistent.",
+       "evidence": "run_rounds StaticFacts `space: !req.space_id.is_empty()`; offered_tools `let space_scoped = !req.space_id.trim().is_empty();`.",
+       "suggested_fix": "Leave it (it is conservative), or note in a comment that the stricter test is deliberate."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+       "issue": "Process: the implementer reports one python3 text replace on agent.rs, which breaks hard rule 6 (edits only with the Edit tool). The file is LF in the working tree, like other untouched LF files such as resume.rs, and the diff shows no change that is only line endings, so no harm is visible.",
+       "evidence": "Implementer deviations: 'I used a python3 text replace once on agent.rs (the run_agent head, LF preserved)'. agent.rs has 0 CRLF and 21782 LF; `git diff --ignore-cr-at-eol --stat` gives the same 1680+/35- as the plain diff.",
+       "suggested_fix": "None needed beyond recording it."
+      }
+     ],
+     "checked": [
+      "Read park.rs whole: switches (parking_active needs all four resume switches; the parking switch has one strict parser), run_parkable/parkable, the closed decision table (complete against all 7 subscription_refusal codes; WallClock, bad_request, prompt_too_long, route_unavailable and a throttle with no hint never park; CrashInterrupted never produced), park_until_for (clamped hint), park_fold (the 4 keys only on a park fold), try_park (one save_park; close after NotAccepted at seq and after an ambiguous failure at expected+1; no close otherwise), parked_response, publish_run_parked (ids only), is_park_resume",
+      "fold.rs: SaveKind::Park with the gated timeout; park_rpc private, sends park_reason and park_until, reads park_accepted; save_park/park_with make one RPC with no probe and no tombstone, run fit() first (a content refusal is an error), make no call when inactive, and move the tracker only on accepted; save_rpc, classify_status, SaveError, Snapshot and build_fold unchanged in the diff",
+      "session-core close(): seq mismatch gives stale, so the expected+1 close after an ambiguous save cannot close the wrong row; save refuses ended runs (loop_checkpoint_run_ended)",
+      "agent.rs: offered_tools (a resume is never derivable), merged_tool_defs_with_sources (same order and warn as committed; derivable = nothing appended && resolver Ok), run_agent_with_offered/run_agent_with_route_parkable bodies unchanged apart from the derivable plumbing, tools_derivable = derivable && resumed.is_none() (root) and false (child), run_parkable read once before the while loop from the run's own facts, the three sites after the committed checks and before the committed returns, site C keeps the failed round charged and its history at the boundary, Parked returns before finalize and the sandbox lease release, the child mapping",
+      "Switches off: run_parkable is false, so park_at_boundary returns at its first line with no RPC; the fresh tool path is behaviourally identical; cargo check (non-test build) is clean",
+      "ZDR and waived: excluded in run_parkable and by the writer gate; the test asserts zero fold saves of any kind",
+      "No credentials or claim tokens in the park fold extensions or logs; fit() scrubs the park fold; log fields are ids, counts and closed tokens",
+      "Gateway (committed) handling of status \"parked\": classify_agentic_run_outcome gives Unknown, so RUN_DISPATCH_DEGRADED and agent_run_state_unknown, with no terminalize",
+      "Line endings: compose CRLF kept (row under execution-core); mod.rs CRLF; agent.rs, fold.rs, park.rs and durable_loop_contract.rs LF, consistent with untouched LF files",
+      "durable_loop_contract: park_writer_violations, one_parking_parser_violations, the switch_table row and its mutation rows read",
+      "Ran: cargo check -q -p execution-core (ok); cargo test -p execution-core --lib --skip a_hung_child_is_killed_at_the_timeout (1109 passed); the filtered park/fold/loop_park lib tests (59 passed); --test durable_loop_contract --test cross_service_loop_contract (3 and 26 passed). No docker, no DB tests, no edits."
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (park_at_boundary, ParkFacts construction) and tests/durable_loop_contract.rs",
+       "issue": "The design condition 'a resume would have a round left' (rounds_executed + delegated_rounds < max_rounds) is pinned only by the pure parkable() unit test. No loop-level test drives any of the three park sites at or past the round budget, and park_writer_violations does not check how park_at_boundary builds ParkFacts.rounds_used / max_rounds.",
+       "evidence": "In the loop_park_* tests no case uses a budget small enough to be spent at a stop: the grep shows only pinned_with_rounds(8) for the child fan-out test, and its stop happens with rounds to spare. A mutation such as `rounds_used: 0` or passing the wrong budget variable in park_at_boundary would leave every test and every guard row green. Site C is the only site where rounds_used can equal max_rounds, because the failed round is already charged. A failed last round would then park a run whose resume has no round to run.",
+       "suggested_fix": "Add loop-level tests with a small budget: a usage limit on the last allowed round (e.g. pinned_with_rounds(1) or 2) must keep the committed failure and make no park call, and a case where delegated_rounds consume the budget. Add a park_writer_violations row asserting `rounds_used: point.rounds_executed.saturating_add(point.delegated_rounds)` and `max_rounds,` in park_at_boundary, with a mutation row."
+      },
+      {
+       "severity": "medium",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (parking_active, park_resume_active); deploy/docker-compose.yml",
+       "issue": "The park write is gated only by the in-place approval resume switches (loop resume, continue, checkpoint, ledger), not by whether a park RESUME exists. An S8-5-only execution-core image with those switches on and EXECUTION_LOOP_PARKING_ENABLED=true plus a park-aware session-core writes accepted parks that nothing can resume until the TTL ends them outcome_unknown.",
+       "evidence": "park_resume_active() reads loop_resume_enabled(), continue_enabled(), checkpoint_enabled() and ledger_enabled(). enforce_resume still refuses mode 'park' until S8-6, and the claim path for an empty pause_ref is not built here. The only protection is prose: a compose comment and the implementer's 'do not deploy an execution-core image between S8-5 and S8-6'. The design accepts this ordering and the switch defaults to off, so this is a deploy-order dependency rather than a code defect. It is still a stranded-run hazard that no test or guard encodes.",
+       "suggested_fix": "Optional hardening until S8-6 lands: make parking_active() also require a const or marker that S8-6 flips (or fail the build or test if the switch row is enabled without the resume half), or have the lead record the 'do not flip' constraint in the build ledger. At minimum keep it in the deferred ledger text."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (park_writer_violations, StaticFacts check)",
+       "issue": "The guard that ties StaticFacts to the run's own facts checks depth, zdr, waived, space, tools_derivable, holds_release and pinned, but not seed, connection_id_present or model_present. Mutating `seed: seed_kind` to SeedKind::Fresh would stay green.",
+       "evidence": "The fields list in the guard has seven entries. The run_parkable body check requires `SeedKind::Fresh|SeedKind::Parked` but nothing requires the loop to feed it `seed: seed_kind`. The mutation rows cover only the seven checked fields. Approval continuations remain protected by the holds_release and tools_derivable gates, so this is defence in depth only.",
+       "suggested_fix": "Add `seed:seed_kind`, `connection_id_present:!ctx.route.subscription_connection_id().is_empty()` and `model_present:!ctx.route.model().is_empty()` to the field list, with mutation rows."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (loop_park_an_approval_continuation_never_parks, loop_park_a_zdr_or_waived_pinned_run_never_parks)",
+       "issue": "These two negative tests are redundantly guarded, so they do not pin the individual run_parkable clauses they are named for. Each passes if one of the several gates is removed.",
+       "evidence": "The continuation is excluded three ways: tools_derivable is false because a resume is present, holds_release is true, and the seed is Segment. The ZDR and waived runs have an inactive writer, so parkable() is false regardless of the zdr/waived clauses. The pure run_parkable test does pin each clause, so coverage exists, but the loop-level tests would not catch a single clause being dropped.",
+       "suggested_fix": "Either accept this and say so, or add a variant that isolates one clause. For ZDR, drive try_park or park_at_boundary with an active writer and a run_parkable that is false."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/deploy/docker-compose.yml (execution-core EXECUTION_LOOP_PARKING_ENABLED comment)",
+       "issue": "The comment says model-gateway reads the same name to ACCEPT the park form of /continue. That is not true of the committed tree.",
+       "evidence": "A grep for loop_parking_enabled and EXECUTION_LOOP_PARKING across the Model Plane finds readers only in mp-contracts and execution-core park.rs. The gateway row and reader belong to S8-7.",
+       "suggested_fix": "Reword to 'model-gateway will read (S8-7)', or drop the sentence until S8-7."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs (publish_run_parked, authenticated)",
+       "issue": "publish_run_parked awaits RecordOrchestrationEvent with no timeout after the park is already durable, and re-implements the Bearer-request helper that already exists privately in agent.rs as authenticated_session_request.",
+       "evidence": "The session channel from lazy_bounded_channel sets only a connect timeout. A stalled session-core after a successful park save would hold the RunAgent response. The behaviour matches publish_plan_transition, so it is no worse than the committed pattern. park.rs adds a second private copy of the helper.",
+       "suggested_fix": "Wrap the publish in tokio::time::timeout, since it is best effort, and reuse one helper."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/{park.rs,fold.rs,agent.rs}, tests/durable_loop_contract.rs",
+       "issue": "The new code adds rustfmt diffs, and CI runs `cargo fmt --all -- --check`. park.rs is new and unformatted. The new hunks add diffs on top of a baseline that is already not rustfmt-clean.",
+       "evidence": "rustfmt --check diff-block counts, HEAD vs now: fold.rs 14 to 26, agent.rs 249 to 289, durable_loop_contract.rs 60 to 84. park.rs also has diffs, e.g. the cfg_attr lines, the RATE_LIMITED arm and the three-way match arm.",
+       "suggested_fix": "Format park.rs (new file). For the existing files the lead should decide whether to format the unit's hunks, since the instruction was to wrap by hand."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs (the_park_writer_guard_goes_red_when_the_code_it_guards_regresses)",
+       "issue": "The new mutation test takes more than 60 seconds, and the run finished at about 94 s together with the existing meta-test. It re-parses the 21k-line agent.rs for about 45 rows.",
+       "evidence": "cargo test output: 'has been running for over 60 seconds' for the new test, and `26 passed; finished in 93.91s` for the file.",
+       "suggested_fix": "Cache the cleaned Code objects across rows if possible, or accept the cost."
+      },
+      {
+       "severity": "low",
+       "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (offered_tools vs StaticFacts.space)",
+       "issue": "Space detection is inconsistent. offered_tools uses `!req.space_id.trim().is_empty()`, while StaticFacts and writer_gate use `!req.space_id.is_empty()`. A whitespace-only space_id is therefore treated as 'not Space' for the tool offer and as 'Space' for the park decision.",
+       "evidence": "merged_tool_defs got the trimmed form before this unit and still does. The park gate uses the untrimmed form, matching the committed writer_gate. The failure direction is safe: such a run never parks.",
+       "suggested_fix": "None required. Optionally note it."
+      }
+     ],
+     "checked": [
+      "Read park.rs in full and the fold.rs and agent.rs diffs, line by line, against the s8a-v2 design (steps, interfaces, approach sections 4, invariants, failure_matrix, amendments).",
+      "Ran cargo test -p execution-core --lib: 1109 passed with the pre-existing hung-child test skipped. Ran the 30 park-related lib tests, durable_loop_contract (26 passed) and cross_service_loop_contract (3 passed). cargo check --lib/--bins shows only 3 warnings, in files not touched by this unit.",
+      "No existing test was deleted, renamed or weakened: the git diff has no removed test lines. The only removals are the merged_tool_defs head and run_agent's call, replaced by wrappers with identical bodies, plus park_accepted: false in the MockSession response.",
+      "Byte-identity with every switch off: offered_tools calls the same functions in the same order for fresh and resume requests. run_parkable short-circuits on the parking switch. The park sites fall through to the committed returns, and parked_response is reached only through RoundsOutcome::Parked.",
+      "All three park sites (latched refusal, credential deadline, failed pinned round) sit after the route.is_stopped check, run only at the round boundary, and charge the failed round. Each returns before finalize and before the sandbox lease release. The match on RoundsOutcome is total, including the child mapping.",
+      "ZDR, waived, Space and delegated runs: the writer_gate facts equal the StaticFacts facts, and parkable() also requires an active writer. save_park makes no call when the writer is inactive and never degrades a refused park to a tombstone.",
+      "Close semantics against session-core's close(): NotAccepted closes at the stored seq, an ambiguous save closes at expected+1, and nothing is closed for a plain failure. 'park_not_taken' is the reason session-core's own tests use. Every park-write failure ends in the committed typed failure.",
+      "Derivability: nothing_appended is computed after the MCP and client appends and before the resolver, and a resolver Err makes the set non-derivable. Approval continuations are never derivable (`derivable && resumed.is_none()`), and delegated children are always false.",
+      "Cross-crate breakage: no new public types or trait changes, and every LoopContext constructor (root and child) is updated. Line endings were measured per file with python3: agent.rs, fold.rs, park.rs and the contract test are LF, mod.rs and docker-compose.yml are CRLF, all consistent with HEAD.",
+      "The compose row sits on the execution-core service with default false. The switch_table row is covered by the switch test. The shared files carry the other unit's rows without conflict.",
+      "The rustfmt baseline was compared against HEAD for fold.rs, agent.rs and the contract test."
+     ]
+    }
+   ],
+   "blocking": [],
+   "fix": null,
+   "rereview": null,
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p execution-core --lib (cwd apps/Model Plane/rust)",
+      "outcome": "EXIT 0. test result: ok. 1110 passed; 0 failed; 0 ignored; finished in 300.19s. Includes all 9 runtime_loop::park::tests (all ok) and 27 park-named lib tests in total (all ok). Passed on the first run, no retry.",
+      "passed": "1110 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "EXIT 0. test result: ok. 26 passed; 0 failed; 0 ignored; finished in 86.52s. Includes the_park_is_written_by_one_function_from_three_stops_and_returns_before_finalize, the_park_writer_guard_goes_red_when_the_code_it_guards_regresses and every_guard_goes_red_when_the_code_it_guards_regresses (all ok). Passed on the first run, no retry.",
+      "passed": "26 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p mp-contracts",
+      "outcome": "EXIT 0. Eight result lines, all ok: unit tests in src/lib.rs 120; grounding_replay 1; loop_fold_golden 12; proto_wire_parity 3; proto_wire_parity_execution 8; run_context_posture 1; zdr_retention_matrix 5; doc-tests mp_contracts 2. Passed on the first run, no retry.",
+      "passed": "152 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "EXIT 0, zero errors. Finished dev profile in 1.16s with no Checking lines, so cargo found the units fresh and replayed their cached warnings. Five warnings, none in the s8-5 files (park.rs, mod.rs, fold.rs, agent.rs): (1) execution-core src/capability_policy.rs:181:57 unreachable else clause; (2) execution-core src/approval_delivery_worker.rs:744 verification_result_for never used; (3) execution-core src/runtime_loop/resume.rs:559 decision_closer never used; (4) session-core src/auth.rs:73 ZdrWaiver::provider never used; (5) session-core src/terminalization.rs:697 start_managed_run_inner never used. Warning 1 is in a file unchanged against HEAD, so it predates the round. Warnings 2, 3 and 4 are also in unchanged files and name symbols whose only HEAD callers are in test modules, so they predate the round. Warning 5 is in terminalization.rs, which s8-4 modified (the line moved from 694 to 697); its only HEAD callers are also in test modules, so it appears pre-existing as well.",
+      "passed": "no errors; 5 warnings"
+     },
+     {
+      "command": "edit and retry audit",
+      "outcome": "This unit edited nothing and wrote no tests. git status shows the same changed-file set as at session start (13 modified, 2 untracked). Only read-only git commands were run (status, grep, show, diff --quiet). No docker was used. No command needed a retry: no LNK1104 and no mid-edit build failure. Not covered by these runs: DB-backed session-core tests, which were not in this command set. None of the four runs skipped a test: each binary reports 0 ignored.",
+      "passed": "n/a"
+     },
+     {
+      "command": "log files in scratchpad",
+      "outcome": "C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ holds the four full cargo logs: s8-5-1-execution-core-lib.log, s8-5-2-durable-loop-contract.log, s8-5-3-mp-contracts.log, s8-5-4-workspace-check.log.",
+      "passed": "n/a"
+     }
+    ],
+    "failures": []
+   }
+  }
+ ],
+ "failedUnits": []
+}

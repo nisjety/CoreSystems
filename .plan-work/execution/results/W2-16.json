@@ -1,0 +1,501 @@
+{
+ "batchId": "W2-16",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS17-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0055_message_search_index.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0055_message_search_index.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/message_search.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions_grpc.pb.go",
+    "apps/Model Plane/rust/services/model-gateway/src/thread_search_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/search.rs",
+    "apps/Model Plane/scripts/tests/history-foundation-proof.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core message_search",
+     "outcome": "ok: 10 passed, 0 failed, 3 ignored (the DB tests need DATABASE_URL and were not run)"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "ok: 610 passed, 0 failed, 217 ignored"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --lib",
+     "outcome": "FAILS with exactly one error, E0609 no field message_search_client on AppState at thread_search_routes.rs:110. state.rs is not applied yet (lead). model-gateway tests were not run because the crate does not build."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs (CRLF file, keep CRLF): (1) add `message_search_client::MessageSearchClient` to the `use mp_contracts::model_plane::v1::{...}` import list; (2) in `pub struct AppState`, after `pub session_client: SessionCoreClient<Channel>,` add a doc comment (Session Core's MessageSearch service on the session endpoint, WS17 S3) and `pub message_search_client: MessageSearchClient<Channel>,`; (3) in `AppState::new()`, before `session_client: SessionCoreClient::new(session_channel),` add `message_search_client: MessageSearchClient::new(session_channel.clone()),`; (4) in `from_env()`, after `let session_client = SessionCoreClient::new(Self::lazy_channel(\"SESSION_CORE_URL\", \"SESSION_CORE_ADDR\", \"http://localhost:9091\")?);` add `let message_search_client = MessageSearchClient::new(Self::lazy_channel(\"SESSION_CORE_URL\", \"SESSION_CORE_ADDR\", \"http://localhost:9091\")?);`; (5) in BOTH from_env branches, next to `state.session_client = session_client;` (the NATS branch near line 767 and the in-memory branch near line 818), add `state.message_search_client = message_search_client;`. Then run `cd 'apps/Model Plane/rust' && cargo test -p model-gateway --lib thread_search` and `cargo test -p model-gateway --all-targets` (CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core service environment add `SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}` next to the SESSION_CORE_SCHEDULED_RESULT_PERSIST line.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add row `Conversation search index (SearchMessages, migration 0055) | owner: session-core (MessageSearch service) | model-gateway: UI route and RECALL caller; BFF: relay only, origin fixed to chat`.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: append the search half of DEC-29 and DEC-32 as decided: expression GIN in session-core; SearchMessages as a separate MessageSearch service (not a SessionCore RPC) so mocks stay source-compatible; the switch gates the query path only; UI includes waived threads; RECALL excludes zero-retention and waived threads and refuses zero-retention credentials; the 4.3 row is recorded as the MessageSearch service, not SessionCore.",
+    "Regenerate apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py with the protobuf 7.35.1 Python generator (not installed here). Until then Python consumers lack SearchMessagesRequest, SearchHit and SearchPurpose.",
+    "Run the three ignored DB tests against a disposable Postgres: `cd 'apps/Model Plane/rust' && DATABASE_URL=<disposable> cargo test -p session-core --bin session-core search_ -- --ignored --test-threads=1`. They have never run; the seed_waived_run insert may need adjusting to the runs constraints.",
+    "After state.rs lands, rebuild session-core and model-gateway with the switch off (byte-identical behaviour), then with SESSION_CORE_MESSAGE_SEARCH_ENABLED=true run `bash 'apps/Model Plane/scripts/tests/history-foundation-proof.sh'` against the rebuilt stack with the BFF rebuilt, and run EXPLAIN (ANALYZE, BUFFERS) on a 100k-message, 20-tenant corpus for the GIN bitmap scan and the p95 under 150 ms gate."
+   ],
+   "deviations": [],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The lead must apply the state.rs hand-back (MessageSearchClient import, struct field, AppState::new, from_env, and the assignment in both from_env branches). Until then model-gateway does not compile (E0609 at thread_search_routes.rs:110). After applying, run `cargo test -p model-gateway --all-targets`. I did not run model-gateway tests, so the MG route and 503 mapping tests are unverified.",
+     "The lead must apply the docker-compose env line for SESSION_CORE_MESSAGE_SEARCH_ENABLED (default false), plus the capability-ownership-matrix row and the decisions ledger entries for DEC-29 and DEC-32 as the implementer listed.",
+     "Run the three ignored DB tests against a disposable Postgres: `DATABASE_URL=<disposable> cargo test -p session-core --bin session-core search_ -- --ignored --test-threads=1`.",
+     "Measure EXPLAIN (ANALYZE, BUFFERS) on a 100k-message, 20-tenant corpus for the GIN bitmap scan and p95 under 150 ms, and capture the rebuilt-stack proof run with the switch on.",
+     "Regenerate the Python sessions_pb2.py stub with the protobuf 7.35.1 generator.",
+     "`cargo fmt --all -- --check` fails repo-wide at HEAD too (grpc.rs has 147 pre-existing diffs, identical at HEAD). The new files are fmt-clean, so the failure is not introduced by this slice."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The lead's original state.rs hand-back omitted the from-env branch assignments; without `state.message_search_client = message_search_client;` in both from_env branches the env-configured Session Core endpoint is dropped and search points at localhost:9091. Corrected in lead_todo."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway tests (thread_search routes, 503 mapping through axum) cannot run until state.rs is applied; the reviewer fix is unverified at test level."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The SearchMessages SQL has never been executed against Postgres; the three ignored DB tests are unrun."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF and MG cannot re-check origin on hits because SearchHit carries no origin field; origin=chat is enforced only by the SQL filter."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No Space audience test (space_search_obeys_audience_ceiling) and missing plan tests: search_after_delete_thread_finds_nothing, org_erase_removes_hits, prefix_matches_typing, copied_rows_excluded_unless_thread_scoped."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "EXPLAIN gate (GIN bitmap scan, p95 under 150 ms on 100k messages / 20 tenants) not measured; the candidate CTE sorts matches before the 200 cap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "CREATE INDEX CONCURRENTLY IF NOT EXISTS leaves an INVALID index on failure that IF NOT EXISTS keeps; recovery is a manual drop-and-rerun."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "No ZDR golden-matrix row for SearchMessages in the live-only ZDR matrix files."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "buf lint flags SEARCH_PURPOSE_UI zero-value naming and the MessageSearch service suffix; kept deliberately."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "cargo fmt --check fails on grpc.rs with pre-existing diffs unrelated to this slice; the new files are rustfmt-clean."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Check whether HEALTH_SERVICE_NAMES in grpc.rs should list MessageSearch."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The EXPLAIN gate is not measured: no GIN bitmap-scan evidence and no p95 under 150 ms on a 100k-message, 20-tenant corpus. The GIN index has no org key, so a common token scans other tenants before the owner filter applies; this must be measured before the switch is turned on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The three ignored DB tests (search_returns_only_the_owners_threads, search_never_returns_another_orgs_rows, search_recall_excludes_threads_with_waived_runs) have never run against Postgres, so the search SQL and the seed inserts are unverified at runtime."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The plan row puts SearchMessages on SessionCore in grpc.rs, but the implementation is a new MessageSearch service in message_search.rs wired in serve(). The rationale (mocks stay source-compatible) is sound, but the lead must record it in the ledger and the 4.3 row before merge."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Plan tests are missing: space_search_obeys_audience_ceiling, search_after_delete_thread_finds_nothing, org_erase_removes_hits, prefix_matches_typing. The recall test also does not cover zero-retention threads."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "CREATE INDEX CONCURRENTLY IF NOT EXISTS keeps an INVALID index after a failed build, and sqlx would then record the migration as applied. Search would silently run unindexed until an operator drops the index; the header documents the manual recovery, but nothing detects it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "No ZDR golden-matrix row for SearchMessages exists in the live-only zdr_posture_matrix, zdr_feature_table or zdr_refusal_inventory files."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The Python stub apps/Model Plane/python/mp-events-py/.../sessions_pb2.py is not regenerated and has no SearchMessages symbols, so Python consumers cannot see the new messages yet."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The implementer's hand-back says state.rs is CRLF (999 CRLF lines). It is not: HEAD and the worktree copy are both LF with zero CR lines, so the lead must keep LF. Also the from_env anchor `let session_client = SessionCoreClient::new(Self::lazy_channel(` spans several lines in the file, so the anchor text in lead_todo does not match verbatim."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The MG route accepts the origin parameter from the query string and only the BFF pins it to chat. This does not widen access because the search is still owner-scoped, but the plan's statement that the BFF fixes origin is the only enforcement."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "search_messages returns Status::internal with the raw database error text, and the warn! log records the same error. A tsquery error could echo a query fragment, though build_prefix_tsquery keeps words alphanumeric."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "buf lint adds two findings on the new proto block: the MessageSearch service name lacks the Service suffix, and SEARCH_PURPOSE_UI is the zero value without UNSPECIFIED. Both are deliberate and match the plan's UI=0 enum, but they add to the pre-existing buf lint debt."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The MG archive_filter helper returns the untyped {\"error\": \"...\"} body, not the typed envelope the repo convention names. It copies the existing list_threads pattern, so it is consistent with the local code."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The implementer's follow-up asks whether HEALTH_SERVICE_NAMES in grpc.rs should list MessageSearch; this is unchecked."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The proof script runs EXPLAIN on the content index but does not assert a bitmap scan, so the EXPLAIN check is informational only."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "zdr"
+   ],
+   "notes": "Round 2 (reviewer fix 1) made no edits in my ownership. state.rs is shared and is the lead's to apply, so I did not touch it. Verified against the current file: the only model-gateway compile error is the missing AppState field, and session-core's unit suite is green (610 passed). The hand-back lines in lead_todo are corrected below: the from-env constructor assigns its clients onto the state in two branches (around state.rs:767 for the NATS branch and :818 for the in-memory branch), so the new field must be assigned in both, or the env URL is silently dropped and the search client falls back to localhost:9091. state.rs is CRLF (999 CRLF, 999 LF lines); the lead must keep CRLF. Migration and proto status are unchanged from round 1: the three DB tests have still never run against Postgres, and the Python stub is still not regenerated."
+  },
+  {
+   "id": "WS24-S1",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib workspace_hydrate",
+     "outcome": "ok, 10 passed, 0 failed (includes redaction_is_idempotent_over_fixture_corpus, would_redact_is_false_for_clean_and_binary_content, unchanged_hydrated_file_is_never_reuploaded, content_version_equals_cas_put_hash)"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib",
+     "outcome": "ok, exit 0; no warnings from the three edited files (pre-existing warnings only in other files)"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib sandbox_lease (and the agent test an_unsaved_workspace_is_named_in_the_summary_after_the_answer)",
+     "outcome": "NOT RUN: lib test target fails to compile with two E0046 errors in files I do not own (capability_policy.rs:2588 MockCapabilityCore and mcp_gateway.rs:1212 StandIn miss list_skill_bundles, get_skill_bundle_manifest, get_skill_blob). Cause is the uncommitted capabilities.proto change (57 insertions, not in HEAD) from a concurrent slice; not caused by this slice. Retried several times; still blocked."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Re-run once the concurrent WS19-S6 work stubs the three skill-bundle RPCs in the execution-core test mocks (capability_policy.rs MockCapabilityCore ~line 2588 and mcp_gateway.rs StandIn ~line 1212): cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib sandbox_lease, then cargo test -q -p execution-core --lib an_unsaved_workspace_is_named_in_the_summary. Expect all new tests named above to pass; if a_credential_failure... fails, check that release_sandbox_lease_if_any returns Some for a run with a hydrated workspace.",
+    "Rebuild exec-core and run the DoD proof (lead only): Space Do run where a file is written through code_interpreter with the CAS upload stopped; expect the run summary to end with 'Workspace changes were not saved.' and workspace_upload_failed_total to increment. Not run by this slice.",
+    "Decide whether the not-saved notice should also be persisted to the thread (requires a second AppendMessage or changing finalize ordering, outside this slice)."
+   ],
+   "deviations": [
+    "Outcome returned from release_sandbox_lease_if_any rather than stored in StateStore via record_workspace_outcome: the CancelRun caller (grpc.rs, not owned) would never read a stored entry, so it would leak one per cancelled run; state.rs untouched.",
+    "diff_and_upload keeps its own single redact call instead of calling content_version, to avoid scrubbing each file twice; content_version computes the identical digest and a test asserts equality with the uploaded hash.",
+    "Notice is appended to response.final_output after finalize has persisted the answer, so the thread copy does not carry the notice; the gateway streams final_output to the user, which is where the run summary is seen."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Test gate not run: `cargo test -q -p execution-core --lib workspace_hydrate sandbox_lease` cannot compile in the current tree because of two E0046 errors (capability_policy.rs:2588 MockCapabilityCore and mcp_gateway.rs:1212 StandIn miss list_skill_bundles, get_skill_bundle_manifest and get_skill_blob) from WS19-S6's uncommitted capabilities.proto change. Re-run both the workspace_hydrate/sandbox_lease filter and `an_unsaved_workspace_is_named_in_the_summary_after_the_answer` once those stubs land; the sandbox_lease success/failure tests and the agent test have never passed in this tree.",
+     "Live proof (lead, docker, not run by this verifier): a Space Do run that writes a file through code_interpreter with the CAS upload stopped; expect the streamed answer to end with 'Workspace changes were not saved.' and workspace_upload_failed_total to increment.",
+     "Dependency bookkeeping: WS24-S0 ledger entries are still not in apps/Model Plane/docs/decisions/ledger.md (depth register D2-335), a shared edit the lead must apply."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The 'Workspace changes were not saved.' notice is added to RunAgentResponse.final_output after finalize has already persisted the assistant answer, so the durable thread copy does not carry it; only the streamed reply does. Owner decision needed before the flag-on path is trusted as an honest record."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When the sandbox-manager credential fails at release, the workspace directory is still left on disk (pre-existing behaviour, now reported as unsaved); plaintext Space content therefore persists on the host until restart."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers the success path where SnapshotSandbox accepts a non-empty changed set (uploaded=true, snapshot_recorded=true); it needs a gRPC mock of sandbox-manager."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Redaction idempotence is proven only over one sample per pattern plus one combined string, not over a real workspace corpus."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "CancelRun in grpc.rs discards the returned WorkspaceUploadOutcome, so a cancelled run's unsaved workspace is counted but never told to the user; a later slice that owns grpc.rs may surface it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "settle_workspace_outcome's signature in sandbox_lease.rs is longer than 100 columns and was not rustfmt-checked because the file is CRLF; wrap it when the file is next touched."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The 'Workspace changes were not saved.' line is appended to response.final_output after finalize has persisted the answer (agent.rs ~1865), so the durable thread copy lacks it while the streamed answer (model-gateway sse.rs:11232) carries it; the owner must decide whether the flag-on path needs a second persist or a finalize reorder."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The row's record_workspace_outcome in state.rs was not built; the outcome is returned from release_sandbox_lease_if_any instead (state.rs untouched), which serves the agent.rs caller, but the CancelRun caller at grpc.rs:1582 discards it, so a cancelled run's unsaved workspace is counted yet never told to the user; accept the deviation and record it on the plan row."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "diff_and_upload still computes sha256_digest(&redacted) instead of calling content_version as the row requires, so content_version and would_redact have no non-test caller and the digest rule exists twice in workspace_hydrate.rs; content_version_equals_cas_put_hash guards equality, so this is a wiring gap rather than a correctness bug."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The notice fires on every uploaded=false outcome, including a credential failure where no diff ran, so a run that changed nothing can be told its changes were not saved; the row says 'when changes were made', so this over-reports in the unknown state (agent.rs ~1864, sandbox_lease.rs credential branch)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On the credential-failure path the hydrated plaintext Space workspace directory is left on disk until restart (pre-existing behaviour, now reported as unsaved), so Space content stays on host disk after a failed release."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the success path where SnapshotSandbox accepts a non-empty changed set (uploaded=true and snapshot_recorded=true), which needs a sandbox-manager gRPC mock."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "redaction_is_idempotent_over_fixture_corpus uses one sample per pattern plus one combined string, which covers the nine string and two capture patterns in scrub.rs but no real workspace content."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "New lines are not rustfmt-clean: the settle_workspace_outcome signature in sandbox_lease.rs exceeds 100 columns and several new assert and baseline lines in the workspace_hydrate.rs and sandbox_lease.rs tests show rustfmt diffs."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "zdr"
+   ],
+   "notes": "Built: content_version(raw) = sha256 of redacted bytes (equals the CAS put hash, asserted by test) and would_redact(raw) in workspace_hydrate.rs; release_sandbox_lease_if_any and upload_and_discard_workspace now return Option/WorkspaceUploadOutcome { changed, uploaded, snapshot_recorded, error } in sandbox_lease.rs; every not-saved path (CAS refused, diff error, SnapshotSandbox failure, CAS not configured, credential failure with a hydrated workspace) goes through settle_workspace_outcome, which increments workspace_upload_failed_total and logs once; agent.rs run_agent_with_route_parkable appends \"Workspace changes were not saved.\" to response.final_output after release when uploaded is false. Flag: none, counters only, no persistence, no proto or migration. Deviations: (1) the outcome is returned from release_sandbox_lease_if_any instead of stored via a new state.rs record_workspace_outcome, because the CancelRun caller in grpc.rs (not owned) would never read a stored entry and it would leak per cancelled run; state.rs is unchanged. (2) diff_and_upload still hashes the redacted bytes itself rather than calling content_version, to avoid scrubbing every file twice; content_version computes the same digest. (3) The counter name is workspace_upload_failed_total exactly as the plan row writes it, without the execution_core_ prefix used by some other counters. Unit tests written and in place: redaction_is_idempotent_over_fixture_corpus, unchanged_hydrated_file_is_never_reuploaded, content_version_equals_cas_put_hash (passing); a_failed_workspace_upload_is_reported_as_not_saved, a_failed_snapshot_is_reported_as_not_saved_with_the_changed_count, an_unchanged_workspace_is_saved_without_a_snapshot, a_credential_failure_with_a_workspace_reports_the_changes_as_not_saved (written, NOT yet run), an_unsaved_workspace_is_named_in_the_summary_after_the_answer in agent.rs tests (written, NOT yet run). Not verified: the remaining exec-core lib tests and a full --lib run.\""
+  },
+  {
+   "id": "WS19-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\capabilities.proto",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0021_skill_bundles.up.sql",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0021_skill_bundles.down.sql",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\manifest.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\validate.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\store.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\validate_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\skillbundle\\store_integration_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\api\\registry_apis.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\api\\registry_apis_bundle_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\server\\server.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\server\\server_test.go"
+   ],
+   "tests_run": [
+    {
+     "command": "gofmt -e -l and gofmt -d on LF copies of internal/server/server.go and server_test.go (copies in scratchpad; the worktree files are CRLF)",
+     "outcome": "clean, no diff"
+    },
+    {
+     "command": "go vet -overlay <scratch overlay of buf-regenerated capabilities.pb.go and capabilities_grpc.pb.go> ./internal/server/ (CGO_ENABLED=0, GOFLAGS unset)",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "go test -count=1 -overlay <same> -run 'TestSkillBundleReadRPCsAreFlagGatedAndMapTheStore|TestInMemoryGRPCMethodsRequireVerifiedIdentity|TestSkillPromotionRPCs' -v ./internal/server/",
+     "outcome": "PASS: new flag-off and mapping test; identity test including the three new bundle RPC cases (list skill bundles, get skill bundle manifest, get skill blob); PromoteSkill test"
+    },
+    {
+     "command": "go vet -overlay <same> ./... and go test -count=1 -overlay <same> ./... in apps/Model Plane/go/services/capability-core",
+     "outcome": "vet exit 0; every package ok (internal/server and internal/skillbundle included)"
+    },
+    {
+     "command": "go vet -overlay <same plus a scratch copy of cmd/main.go with the proposed shared-edit lines> ./cmd/",
+     "outcome": "exit 0: the proposed main.go wiring compiles against the new store and handler"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "buf regenerate apps/Model Plane/proto/model_plane/v1/capabilities.proto into apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go and capabilities_grpc.pb.go (go-only template, native buf 1.72, protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2). Then run go vet ./... and go test ./... in apps/Model Plane/go/services/capability-core with GOFLAGS unset. The in-tree build cannot compile before this.",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: add the import \"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle\" after the internal/api import; after the line `api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)` add `api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)`; replace the line `capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore)` with `capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).` followed by a new line `\\t\\tWithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv))`. The chained form compiles under the overlay check.",
+    "Run the DB integration tests (lead only, Docker): cd \"apps/Model Plane/go/services/capability-core\" && go test -tags integration -count=1 -run 'TestStoreRoundTripsReplacesAndDeletesAnOrgsBundle|TestStoreListIsScopedToTheOrgAndTheRequestedSkills' ./internal/skillbundle/. This still proves the pgx [][]byte to bytea[] binding, which has not run yet.",
+    "Migration 0021 applies on the next boot. SKILL_BUNDLES_ENABLED stays unset (off) in every compose file."
+   ],
+   "deviations": [
+    "WithSkillBundles takes the already-parsed enabled bool instead of reading SKILL_BUNDLES_ENABLED itself, so the strict parser stays in one place (api.SkillBundlesAPIFromLookup).",
+    "The RPC reads are gated by org identity and the switch only, with no admin check, as the fix brief specified. The HTTP GET is admin-only. This is a P1 depth finding, not fixed here."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go (buf regeneration: messages for the three RPCs)",
+    "apps/Model Plane/go/gen/model_plane/v1/capabilities_grpc.pb.go (buf regeneration: ListSkillBundles, GetSkillBundleManifest, GetSkillBlob on the service)",
+    "apps/Model Plane/go/services/capability-core/cmd/main.go (shared edit below)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead, no docker needed: buf-regenerate apps/Model Plane/proto/model_plane/v1/capabilities.proto into apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go and capabilities_grpc.pb.go. In-tree, `go vet ./...` in capability-core fails in internal/server (undefined mpv1.ListSkillBundlesRequest and the other new types); it passes only through an overlay of regenerated bindings. I verified that overlay (buf 1.72, protoc-gen-go v1.36.12, protoc-gen-go-grpc v1.6.2) into the scratchpad, with go vet exit 0 and go test ./... all ok.",
+     "Lead: apply the cmd/main.go shared edit from the implementer's lead_todo (import skillbundle; add api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux); chain .WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)) onto capSrv). Until then the bundle routes are not mounted and the RPC reads are off. The exact edit compiled under the overlay.",
+     "Lead (Docker): run `go test -tags integration -count=1 -run 'TestStoreRoundTripsReplacesAndDeletesAnOrgsBundle|TestStoreListIsScopedToTheOrgAndTheRequestedSkills' ./internal/skillbundle/` against Postgres. This proves the pgx [][]byte to bytea[] binding, the advisory lock and the cascade. The file compiles under `go vet -tags integration`.",
+     "Live proof (rebuilt capability-core, flag on in a test stack only): upload a sample bundle, read the manifest and each blob with matching digests, cross-org 404, and the registry_audit_log row, as the DoD evidence requires. Migration 0021 is applied on boot by docker-entrypoint.sh through psql ON_ERROR_STOP and has not been run.",
+     "Owner decision on the ZDR posture of bundle uploads, and on the RPC read authority (finding 1), before the switch is enabled anywhere."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "GetSkillBundleManifest and GetSkillBlob gate on org identity and the switch only, with no admin check, unlike the HTTP GET. Any authenticated principal of the org that can call the RPC can read every bundle body the org stores, including scripts, and bundles of user-scoped or unshared skills. Decide and add the scope, owner and sharing rules (or an admin or workload check) before S7 enables any read."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The two Postgres integration tests in store_integration_test.go have still not run (Docker is lead-only), so the transaction, bytea[] binding and advisory lock remain unproven against Postgres."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Flag-on RPC behaviour is tested only against a fake reader (skillBundleReaderStub); the real skillbundle.Store read path runs only in the integration tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RPC store failures return a fixed Internal message and are not logged (server.go has no slog import), so a DB outage on the read path is invisible in logs. The HTTP handlers do log. Add a log line at the mapping point when S7 wires the reads."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Carried over from the prior round: the ZDR posture of a bundle upload is still undecided (no refusal at rest per the slice row; org_agent_policy refuses writes under ZDR). The owner must confirm before the switch is enabled for a ZDR org."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Carried over: deleting a skill in SkillsHandler.delete does not delete its bundle, and Put does no agent_skills existence check, so orphan bundles can be created and remain stored after the skill is gone."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Carried over: case-insensitive path collisions (SKILL.md vs skill.md) are not refused; the S8 mount needs a case-fold check before it writes to disk."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Carried over: audit still goes to registry_audit_log rather than the WS06 hash-chained emitter; re-point the two write sites when WS06-S2 ships."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "AuthorizeGRPC (apps/Model Plane/go/services/capability-core/internal/authz/authz.go, final branch) admits every user principal to any method without a rule, so ListSkillBundles, GetSkillBundleManifest and GetSkillBlob return all bundle bodies, including scripts, to any org member, while the HTTP GET of the same data is admin-only. This is latent behind the default-off switch, but the DoD live proof turns the switch on; add an explicit method rule (for example service principals with read scope, which is the S7 gateway path) and a test before enabling. authz.go is outside the owned set, so this needs the lead or a follow-up slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "ZDR posture of a bundle upload is still unconfirmed by the owner: the code and the plan's clause refuse nothing at rest, so the owner should confirm that before SKILL_BUNDLES_ENABLED is switched on for a ZDR org."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "validPath in internal/skillbundle/validate.go iterates runes, so a zip entry name with invalid UTF-8 (legacy CP437 names) passes as U+FFFD, reaches the TEXT column, and Postgres rejects it, giving a 500 'database unavailable' instead of a closed refusal; add a utf8.ValidString check and a unit case."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The buf lint ratchet (.github/workflows/buf.yml, scripts/gates/buf-lint-ratchet.py) reports 31 new findings in capabilities.proto against the committed baseline: the new messages and fields lack comments, and GetSkillBundleManifest returns SkillBundleManifest, which fails RPC_RESPONSE_STANDARD_NAME. CI will fail until these are commented or the response is wrapped in GetSkillBundleManifestResponse."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers HTTP cross-org isolation or the delete cascade of a bundle (only the Postgres integration test does, and it has not run); the flag-on RPC path is tested only against a stub reader."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Put does not check agent_skills existence and SkillsHandler.delete does not remove the skill's bundle, so orphan bundles can be created and stay stored; reads key on a matched skill so they stay inert, but the data is retained."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Case-insensitive path collisions (SKILL.md versus skill.md, or two names differing by case) are not refused; the S8 mount must add a case-fold check before it writes to disk."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RPC store failures return the fixed Internal message but are not logged, because server.go has no slog import, so a database outage on the read path is invisible in logs while the HTTP handlers do log."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Audit rows go to registry_audit_log with action skill_bundle.uploaded/deleted rather than through the WS06 hash-chained emitter that the row names; re-point the two write sites when WS06-S2 ships."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No test uploads a zero-byte file; the blob INSERT binds the file body as bytea[] and relies on io.ReadAll returning a non-nil empty slice, so a future change that yields nil would hit the NOT NULL constraint."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Parse counts directory entries against MaxFiles (len(reader.File) > 256 before directories are skipped), so a 256-file bundle that also stores directory entries is refused as too_many_files."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ListSkillBundles accepts an unbounded skill_ids list that is passed straight into the SQL array; a length cap would match the other list inputs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "gofmt reports a pre-existing misalignment in mcpServerRow in registry_apis.go (present at HEAD, outside this slice's hunks); it is not caused by this change."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "audit",
+    "zdr"
+   ],
+   "notes": "Fix round for the reviewer's finding: the three read RPCs now exist in internal/server/server.go, so the proto no longer answers Unimplemented once the generated code is regenerated. ListSkillBundles, GetSkillBundleManifest and GetSkillBlob each call verifiedOrganizationID first (unauthenticated refused before the switch is read), then answer an empty list or codes.NotFound while the switch is off, and map skillbundle.Summary, Manifest and blob to the new messages. The Server gets a skillBundles field (narrow interface skillBundleReader, which *skillbundle.Store satisfies) and skillBundlesEnabled, set by WithSkillBundles(store, enabled). The switch is parsed once by api.SkillBundlesAPIFromLookup and passed in, so server.go reads no env var. Store failures map to a fixed Internal message via skillBundleErr, so SQL text never reaches the caller. In-tree compile is still blocked until the lead regenerates the gen files and applies the main.go shared edit; both were verified only through a go build overlay in the scratchpad, and the worktree gen files and cmd/main.go were not touched. Regeneration used buf 1.72 with local protoc-gen-go v1.36.12 and protoc-gen-go-grpc v1.6.2, the versions in the current gen headers. Earlier slice work (proto additivity, migration 0021, skillbundle package, HTTP routes behind SKILL_BUNDLES_ENABLED, admin-only writes) is unchanged in this round."
+  }
+ ]
+}

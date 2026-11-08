@@ -1,0 +1,43 @@
+{
+  "packets": [
+    {
+      "key": "mg-aux-models-configurable",
+      "rows": [
+        "D1-807"
+      ],
+      "title": "model-gateway: the title, follow-up and verification-judge calls take their model from configuration, so an Anthropic-only chain can serve them",
+      "severity": "high",
+      "cwd": "apps/Model Plane/rust",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "tests": [
+        "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib aux_model",
+        "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib title",
+        "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib follow_up",
+        "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --all-targets",
+        "bash \"apps/Model Plane/scripts/tests/compose-env-passthrough-test.sh\"   (only if such a compose test exists; find the compose env tests under apps/Model Plane/scripts/tests/ and run the one that covers model-gateway's environment)"
+      ],
+      "brief": "Measured live by the lead 2026-10-27 (register D1-807) on the dev stack, whose inference chain serves only Anthropic (claude-sonnet-5-5 via the owner's key): every turn's thread title, follow-up chips and the low-confidence verification judgement fail with \"all providers exhausted after 0 attempts\" (gateway debug lines \"thread title inference failed; keeping the preview title\" and \"follow-up suggestion inference failed; skipping chips\"; turn_timing phases title and follow_ups outcome error on every turn). The models are constants in apps/Model Plane/rust/services/model-gateway/src/sse.rs: `TITLE_MODEL` (~:8615), `FOLLOW_UPS_MODEL` (~:8643) and `VERIFICATION_JUDGE_MODEL` (~:8670), all \"gpt-4o-mini\", used at ~:8708, ~:8825, ~:8859 and ~:8912. Deep research already reads `DEEP_RESEARCH_PLAN_MODEL` (deep_research.rs ~:3090, compose ~:687), so it needs no code change.\n\nDo (sse.rs is LF; measure and keep each file's line endings):\n(1) One operator setting, `MODEL_GATEWAY_AUX_MODEL`, for all three calls (they share one pinned-model posture, per the comments there). Unset or empty means today's model, \"gpt-4o-mini\", so every deployment that does not set it is byte-identical. Resolve it ONCE per process (a `std::sync::OnceLock` read on first use, or at boot if the surrounding code has a config struct for such values; look at how the file reads its other switches and follow that), never per call from tests: put the resolution in a small pure function `fn aux_model_from(value: Option<&str>) -> String` (trimmed; empty is unset) with unit tests, and have the accessor call it with the env value. The three call sites and the `model = ...` log field use the accessor. Keep the three constants' doc comments accurate (they describe the default now).\n(2) apps/Model Plane/deploy/docker-compose.yml, model-gateway's environment: `MODEL_GATEWAY_AUX_MODEL: ${MODEL_GATEWAY_AUX_MODEL:-}` next to the gateway's other model settings, with a one-line comment (set it to a model the inference chain serves, for example claude-haiku-5-5 on an Anthropic-only chain). If a compose test pins model-gateway's environment keys (search apps/Model Plane/scripts/tests for one that reads deploy/docker-compose.yml), update it.\n(3) Tests: `aux_model_from` (None, empty, whitespace, a value); and a test that the three requests are built with the resolved model, at the seam the file already offers for these calls (find their existing tests by grepping TITLE_MODEL / FOLLOW_UPS_MODEL / VERIFICATION_JUDGE_MODEL in the test modules; if they assert the model name, keep them passing with the default).\nDo not change which calls are made, their budgets, timeouts or prompts, and do not touch deep_research.rs. ZDR: nothing new is logged beyond the model name. Keep the final report short and call the structured output before you stop."
+    },
+    {
+      "key": "auth-core-postgres-specs-schema",
+      "rows": [],
+      "title": "auth-core: the GDPR erasure and membership audit Postgres specs build the schema the service really runs, so the lifecycle harness can pass step 1",
+      "severity": "medium",
+      "cwd": "apps/Control Plane/auth-core",
+      "files": [
+        "apps/Control Plane/auth-core/src/auth/gdpr-outbox-erasure.postgres.spec.ts",
+        "apps/Control Plane/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts"
+      ],
+      "new_files": [],
+      "tests": [
+        "node_modules/.bin/tsc -p tsconfig.json --noEmit   (from apps/Control Plane/auth-core; report errors in other files as pre-existing, do not fix them)",
+        "node_modules/.bin/jest --runInBand src/auth/gdpr-outbox-erasure.postgres.spec.ts src/auth/membership-audit-outbox.postgres.spec.ts   (without TEST_DATABASE_URL these skip or fail fast at setup; report which; the lead runs them on a disposable Postgres)"
+      ],
+      "brief": "Measured by the lead 2026-10-27 (register D1-805): apps/Control Plane/scripts/run-isolated-control-lifecycle-e2e.sh stops at step 1/8 on two auth-core Postgres specs, run against a disposable postgres:16-alpine with TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID:\n- src/auth/gdpr-outbox-erasure.postgres.spec.ts: all 6 tests fail at setup with ENOENT on migrations/init_better_auth.sql (spec ~:32 lists it, ~:48 reads it). That file was deleted on 2026-09-23 in commit 932b30d26 (\"consolidate Verevon product readiness\"); auth-core/migrations now starts at 014_normalized_identity_email.sql and the Better Auth base schema lives elsewhere (look at auth-core/drizzle/*.sql, docker-entrypoint.sh, package.json scripts and any migrate script under src/ or scripts/ to find what production applies, in order).\n- src/auth/membership-audit-outbox.postgres.spec.ts: 2 tests (\"flushes a dead-lettered row whose timestamps arrive as strings\", \"retries a failing row no sooner than its exponential backoff\") fail with PostgresError column \"claim_token\" of relation \"organization_membership_audit_outbox\" does not exist. The column is added by migrations/025_gdpr_outbox_publish_fence.sql (ADD COLUMN IF NOT EXISTS claim_token), which the spec's migration list (~:134-141) does not apply.\n\nDo (CRLF/LF: measure each file and keep it; these files may be CRLF):\n(1) gdpr-outbox-erasure: build the base schema the way the service does now (the same files, in the same order, that production applies before migrations/0xx), instead of the deleted file. Do NOT restore init_better_auth.sql into migrations/ (that would be applied by production too). If the base schema is only produced by a tool the spec cannot run (for example drizzle-kit at runtime), read the committed SQL that tool produced (drizzle/*.sql) in order. If nothing committed produces the tables the spec needs, stop and report exactly which tables and columns are missing rather than inventing DDL.\n(2) membership-audit-outbox: apply the migrations the outbox code now depends on, in numeric order, so the schema matches production for the tables under test (at least 023 and 025 if their DDL touches organization_membership_audit_outbox; check 020, 023, 024, 025, 026 and apply what the outbox and its triggers need, without skipping a migration between two you apply unless it is independent).\n(3) Keep every assertion as it is; this is setup only. If a test then fails for a reason that is not setup, report it with the line, do not change the assertion.\nThe lead runs both specs and the lifecycle script on a disposable Postgres. Keep the final report short and call the structured output before you stop."
+    }
+  ]
+}

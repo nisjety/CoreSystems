@@ -10,8 +10,10 @@ import {
   updateCronSchedule,
   type CronSchedule,
 } from '@/shared/api/cron-client'
+import { listOrganizationMembers } from '@/shared/api/organization-client'
 import { cronExprToLabel, SCHEDULE_PRESETS } from '@/shared/api/schedule-from-chat'
 import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
+import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
 import { ScheduleDialog } from '@/features/chat/components/ScheduleDialog'
 import { chatThreadHref } from '@/features/chat/lib/chat-thread-deep-link'
 import { selectChatThread } from '@/features/chat/lib/chat-thread-history'
@@ -38,8 +40,10 @@ import {
  * chat panel and Settings already made, and every row action calls the same cron-client
  * functions, so the WS20 guards exist in one place.
  *
- * - `mine` is the signed-in person's own schedules. `org` is every schedule in the org, for the
- *   Settings page, where pause and delete are open to an admin and nothing else is offered.
+ * - `mine` is the signed-in person's own schedules, asked of the server with `creator=self` and kept
+ *   to the person's own rows here too. `org` is every schedule in the org, for the Settings page,
+ *   where pause and delete are open to an admin and nothing else is offered; an admin also sees who
+ *   made each schedule, from the org's member list.
  * - `compact` is the chat mount: the first `limit` rows, no filter tabs, no edits. Its "See
  *   results" stays on screen, disabled, while the results flag is off, as the chat always showed it.
  * - The full hub offers Run now (EP-6-S3) to the schedule's creator, when the server reports
@@ -178,6 +182,15 @@ function runNowMessage(err: unknown, tr: Tr): string {
   return messageFor(err, tr, { no: 'Kunne ikke kjøre planen nå.', en: 'Could not run the schedule now.' })
 }
 
+/**
+ * A fresh request id for one press of Run now (EP-6-S2). `randomUUID` exists only in a secure context, and
+ * the hub is also served over plain http, where calling it would throw before the press showed anything.
+ */
+function newRunNowRequestId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 // Closed tokens from cron_fires and the run's outcome. A token outside this
 // list is shown as-is rather than guessed at.
 function fireTokenLabel(token: string, i18n: ReturnType<typeof useI18n>): string {
@@ -270,6 +283,9 @@ function ScheduleFires(props: { orgId: string; cronId: string; revision: number 
                         </a>
                       )}
                     </Show>
+                    <Show when={fire.status === 'completed' ? fire.run_id : null}>
+                      {(runId) => <ResultFeedback runId={runId()} />}
+                    </Show>
                   </li>
                 )}
               </For>
@@ -293,8 +309,8 @@ export function AutomationsList(props: AutomationsListProps) {
   // Pause and delete belong to the creator and, on the Settings page, to an org admin. Renew and copy are the creator's alone.
   const canManage = () => props.scope === 'mine' || isAdmin()
 
-  // capability-core still returns every schedule in the org, goal text included (D2-121). A `mine`
-  // list shows only the signed-in person's own, a client filter until the server offers creator=self.
+  // The org list still carries every schedule's goal text (D2-121; open decision OD-7). A `mine` list asks for
+  // creator=self, so no other member's schedule reaches this browser, and keeps the same rows here as a guard.
   // The same answer carries the server's feature flags, which the hub reads for Run now.
   const [listing, { refetch }] = createResource(
     () => {
@@ -305,7 +321,7 @@ export function AutomationsList(props: AutomationsListProps) {
       return key
     },
     (key) =>
-      listCronSchedules(key.org).then((result) => ({
+      (key.scope === 'mine' ? listCronSchedules(key.org, { creator: 'self' }) : listCronSchedules(key.org)).then((result) => ({
         schedules:
           key.scope === 'org'
             ? result.schedules
@@ -315,6 +331,23 @@ export function AutomationsList(props: AutomationsListProps) {
   )
   const schedules = () => listing()?.schedules
   const runNow = () => listing()?.runNow === true
+
+  // On the Settings page an admin sees who made each schedule. The names come from the org's member list, read
+  // only for an admin: a member never asks for it and sees no creator name.
+  const [members] = createResource(
+    () => (props.scope === 'org' && isAdmin() && orgId() ? orgId() : undefined),
+    (org) => listOrganizationMembers(org),
+  )
+  const creatorNames = createMemo(() => {
+    const names = new Map<string, string>()
+    if (members.error) return names
+    for (const member of members() ?? []) {
+      if (member.name) names.set(member.userId, member.name)
+    }
+    return names
+  })
+  const creatorNameOf = (schedule: CronSchedule): string | undefined =>
+    schedule.creator_subject_id ? creatorNames().get(schedule.creator_subject_id) : undefined
 
   const [filter, setFilter] = createSignal<AutomationFilter>('active')
   const [busyId, setBusyId] = createSignal<string | null>(null)
@@ -419,7 +452,7 @@ export function AutomationsList(props: AutomationsListProps) {
   const handleRunNow = async (schedule: CronSchedule) => {
     const org = orgId()
     if (!org || busyId()) return
-    const requestId = runNowRequests.get(schedule.id) ?? crypto.randomUUID()
+    const requestId = runNowRequests.get(schedule.id) ?? newRunNowRequestId()
     setBusyId(schedule.id)
     setActionError(null)
     setNotice(null)
@@ -563,6 +596,13 @@ export function AutomationsList(props: AutomationsListProps) {
                               <span>
                                 <code>{workflowTypeOf(scheduleOf())}</code>
                               </span>
+                              <Show when={props.scope === 'org' ? creatorNameOf(scheduleOf()) : undefined}>
+                                {(name) => (
+                                  <span>
+                                    {i18n.tr('laget av', 'created by')} {name()}
+                                  </span>
+                                )}
+                              </Show>
                               <Show when={scheduleOf().last_fire_at}>
                                 {(last) => (
                                   <span>
@@ -741,6 +781,8 @@ export function AutomationsList(props: AutomationsListProps) {
           <ScheduleDialog
             seedTitle={copyNameOf(target().name, i18n.tr)}
             seedGoal={goalOf(target())}
+            goalEditable
+            seedScheduleExpr={target().schedule_expr}
             threadOriginHint="composer"
             onClose={() => setCopying(null)}
             onCreated={() => void refetch()}

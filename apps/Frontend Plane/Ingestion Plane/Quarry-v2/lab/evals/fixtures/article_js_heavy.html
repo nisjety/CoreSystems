@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JS-Heavy Page: Dynamic Content</title>
+    <meta property="og:title" content="Dynamic Content Test">
+    <meta property="og:description" content="Tests extraction of pages with JS-injected content">
+</head>
+<body>
+    <div id="app">
+        <nav class="sidebar">
+            <ul>
+                <li><a href="/dashboard">Dashboard</a></li>
+                <li><a href="/settings">Settings</a></li>
+                <li><a href="/profile">Profile</a></li>
+            </ul>
+        </nav>
+        <main id="content">
+            <h1>Dynamic Content Rendering</h1>
+            <p>This paragraph is in the static HTML and should always be extracted.</p>
+            <div id="dynamic-section">
+                <h2>Server-Rendered Section</h2>
+                <p>Modern web applications increasingly rely on JavaScript frameworks to render content. For static scraping, only the server-rendered HTML is available. This test verifies that the static extraction pipeline handles mixed static/dynamic pages gracefully.</p>
+                <p>The scraper should extract this content even though the page structure suggests a single-page application. Key indicators include the app root div, sidebar navigation, and script tags.</p>
+            </div>
+            <noscript>
+                <p>This page requires JavaScript for full functionality.</p>
+            </noscript>
+        </main>
+    </div>
+    <script>
+        document.getElementById('dynamic-section').innerHTML += '<p>This was injected by JS and should NOT appear in static extraction.</p>';
+    </script>
+    <script src="/app.bundle.js"></script>
+    <script src="/vendor.bundle.js"></script>
+</body>
+</html>

@@ -63,7 +63,12 @@ impl ApprovalPreviewView {
     /// among them, integration round B C-B4): every field empty.
     #[must_use]
     pub fn no_descriptor() -> Self {
-        Self::bare(PreviewKind::NoDescriptor, String::new(), String::new(), String::new())
+        Self::bare(
+            PreviewKind::NoDescriptor,
+            String::new(),
+            String::new(),
+            String::new(),
+        )
     }
 
     fn bare(kind: PreviewKind, provider: String, operation: String, connection_id: String) -> Self {
@@ -186,9 +191,19 @@ mod tests {
         assert_eq!(view.provider, "google");
         assert_eq!(view.operation, "gmail.send");
         assert_eq!(view.connection_id, "conn-1");
-        assert_eq!(view.to, recipients, "no recipient is cut, unlike the 10 the reason names");
-        assert_eq!(view.subject, "S".repeat(400), "the subject is trimmed, never shortened");
-        assert_eq!(view.body_text, body_text, "the body is whole, line breaks kept");
+        assert_eq!(
+            view.to, recipients,
+            "no recipient is cut, unlike the 10 the reason names"
+        );
+        assert_eq!(
+            view.subject,
+            "S".repeat(400),
+            "the subject is trimmed, never shortened"
+        );
+        assert_eq!(
+            view.body_text, body_text,
+            "the body is whole, line breaks kept"
+        );
         assert!(!view.has_html && !view.is_reply && !view.raw_only);
         assert_eq!(view.editable_fields, vec!["to", "subject", "body_text"]);
     }
@@ -212,7 +227,10 @@ mod tests {
         assert_eq!(view.provider, "microsoft");
         assert_eq!(view.to, vec!["a@example.com", "b@example.com"]);
         assert!(view.has_html);
-        assert_eq!(view.body_text, "Text", "the formatted body is flagged, never shown");
+        assert_eq!(
+            view.body_text, "Text",
+            "the formatted body is flagged, never shown"
+        );
     }
 
     #[test]
@@ -236,8 +254,10 @@ mod tests {
             )
         );
 
-        let not_a_provider_call =
-            preview_from_input("delete_records", &json!({ "operation": "mail.send", "id": "r-1" }));
+        let not_a_provider_call = preview_from_input(
+            "delete_records",
+            &json!({ "operation": "mail.send", "id": "r-1" }),
+        );
         assert_eq!(not_a_provider_call.kind, PreviewKind::Other);
         assert!(not_a_provider_call.operation.is_empty());
         assert!(not_a_provider_call.connection_id.is_empty());
@@ -258,7 +278,10 @@ mod tests {
         assert!(view.raw_only);
         assert!(view.is_reply);
         assert!(view.to.is_empty() && view.subject.is_empty() && view.body_text.is_empty());
-        assert!(view.editable_fields.is_empty(), "a raw draft is preview-only");
+        assert!(
+            view.editable_fields.is_empty(),
+            "a raw draft is preview-only"
+        );
     }
 
     #[test]

@@ -1,0 +1,1497 @@
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs
+new file mode 100644
+index 000000000..732b8c6ae
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs	
+@@ -0,0 +1,883 @@
++//! `/v1/agent/*`: the Agent API read and control routes (Wave 3 EP-12 S5, decisions D4, D6, D12).
++//!
++//! An API key reads and controls its own runs here: one run, its live events, a cancel, and a
++//! key-owned thread's runs and messages. Every route forwards the key's own `aud=session-core`
++//! bearer (`VerifiedApiKeySessionBearer`, verified by `auth::require_auth`) and never a header the
++//! caller chose; Session Core binds every call to the threads and runs the key owns (EP-12 S4),
++//! so a run or thread of anyone else reads as not found.
++//!
++//! The routes are for keys only (D4: people use the chat routes). The route policy admits a key
++//! here only while `MODEL_GATEWAY_AGENT_API` is on and only with scope `agent:runs`; the handlers
++//! check both again, and refuse a zero-retention key before any upstream call (D6), because a ZDR
++//! run keeps no durable row to read. While the switch is off the routes are not merged at all, so
++//! every answer is what it was before.
++//!
++//! Every success is `{data}` (a list adds cursor `meta` and `links`); every error is the typed
++//! envelope `{error:{code,message,details}}` with `details` an object, in the closed vocabulary of
++//! `api/contracts/agent-api-v1.json`.
++
++use axum::{
++    extract::{rejection::QueryRejection, Path, Query, State},
++    http::{HeaderMap, StatusCode},
++    response::{IntoResponse, Response},
++    routing::{get, post},
++    Extension, Json, Router,
++};
++use mp_contracts::model_plane::v1::{
++    CancelRunRequest, GetRunRequest, ListConversationRequest, ListRunsRequest, RunDetail,
++};
++use mp_contracts::zdr_refusal::Refusal;
++use serde_json::{json, Map, Value};
++
++use crate::auth::{Claims, VerifiedApiKeySessionBearer, API_KEY_SCOPE_AGENT_RUNS};
++use crate::http_routes::{
++    authenticated_session_request, run_detail_value, timestamp_to_rfc3339, HttpJsonError,
++};
++use crate::state::AppState;
++use crate::zdr_posture::{self, Route, TurnPosture};
++
++/// The gateway's switch for the Agent API. Opt-in: only the word `true` enables it. The route
++/// policy reads it at each call; the router reads it once, when it is built.
++pub const ENABLED_ENV: &str = "MODEL_GATEWAY_AGENT_API";
++
++/// The ZDR feature key a refusal names (`zdr-refusals.json`, EP-12 D6).
++const ZDR_FEATURE: &str = "agent_api";
++
++/// The page size when a list names none, and the most it may name (`agent-api-v1.json` limits).
++const PAGE_LIMIT_DEFAULT: u32 = 20;
++const PAGE_LIMIT_MAX: u32 = 100;
++
++/// The longest run id, thread id or cursor a caller may send (`agent-api-v1.json` limits).
++const MAX_ID_CHARS: usize = 128;
++
++/// What a key's cancel records as its reason on the durable `RUN_CANCELLED` event.
++const CANCEL_REASON: &str = "api_key_requested";
++
++/// The only roles a key reads in a thread: the turns it sent and the answers.
++const MESSAGE_ROLES: &[&str] = &["user", "assistant"];
++
++/// Whether the Agent API is on in this process.
++#[must_use]
++pub fn enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// The five routes, merged into the authed router only while `enabled` (the switch) is on.
++pub(crate) fn router(enabled: bool) -> Router<AppState> {
++    if !enabled {
++        return Router::new();
++    }
++    Router::new()
++        .route("/v1/agent/runs/:run_id", get(get_run))
++        .route("/v1/agent/runs/:run_id/events", get(run_events))
++        .route("/v1/agent/runs/:run_id/cancel", post(cancel_run))
++        .route("/v1/agent/threads/:thread_id/runs", get(list_thread_runs))
++        .route(
++            "/v1/agent/threads/:thread_id/messages",
++            get(list_thread_messages),
++        )
++}
++
++/// The refusal of a key without `agent:runs`. The route policy answers it before any handler,
++/// and the handlers answer it again.
++pub(crate) fn scope_missing() -> HttpJsonError {
++    envelope(
++        StatusCode::FORBIDDEN,
++        "agent_api_scope_missing",
++        "the API key does not hold the permission this route needs",
++        json!({ "scope": API_KEY_SCOPE_AGENT_RUNS }),
++    )
++}
++
++/// `GET /v1/agent/runs/:run_id`: one run the key owns, as `{data:{run}}`.
++async fn get_run(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
++    Path(run_id): Path<String>,
++) -> Result<Json<Value>, HttpJsonError> {
++    let bearer = admit(&claims, bearer)?;
++    let run_id = path_id(&run_id, "run_id")?;
++    let run = fetch_run(&state, &bearer, &run_id).await?;
++    Ok(Json(json!({ "data": { "run": run_value(&run) } })))
++}
++
++/// `GET /v1/agent/runs/:run_id/events`: the run's live events, from the run-events stream the
++/// chat routes use. The run is read first, under the key's own bearer, so a run the key does not
++/// own is a typed `run_not_found` and no stream is opened for it. The stream itself carries the
++/// same bearer, and Session Core checks the owner again when it opens the stream.
++async fn run_events(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
++    Path(run_id): Path<String>,
++    headers: HeaderMap,
++) -> Result<Response, HttpJsonError> {
++    let bearer = admit(&claims, bearer)?;
++    let run_id = path_id(&run_id, "run_id")?;
++    fetch_run(&state, &bearer, &run_id).await?;
++    Ok(crate::sse::run_events_sse(
++        State(state),
++        Path(run_id),
++        headers,
++        Extension(claims),
++        bearer.as_session_bearer(),
++    )
++    .await
++    .into_response())
++}
++
++/// `POST /v1/agent/runs/:run_id/cancel`: Session Core's authoritative cancel. Its transaction
++/// decides ownership and terminal state, and its `RUN_CANCELLED` event id is the receipt.
++async fn cancel_run(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
++    Path(run_id): Path<String>,
++) -> Result<Json<Value>, HttpJsonError> {
++    let bearer = admit(&claims, bearer)?;
++    let run_id = path_id(&run_id, "run_id")?;
++    let cancellation = state
++        .run_client
++        .clone()
++        .cancel_run(session_request(
++            CancelRunRequest {
++                run_id: run_id.clone(),
++                reason: CANCEL_REASON.to_owned(),
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| upstream_error(&error, Missing::Run))?
++        .into_inner();
++    let status = if cancellation.cancelled {
++        "cancelled"
++    } else {
++        "already_terminal"
++    };
++    Ok(Json(json!({
++        "data": {
++            "run_id": run_id,
++            "status": status,
++            "cancelled": cancellation.cancelled,
++            "receipt_id": cancellation.receipt_id,
++        }
++    })))
++}
++
++/// `GET /v1/agent/threads/:thread_id/runs?after&limit`: one page of a key-owned thread's runs,
++/// through the unchanged `ListRuns` (D12). The cursor is the last run id of the page.
++async fn list_thread_runs(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
++    Path(thread_id): Path<String>,
++    query: Result<Query<Vec<(String, String)>>, QueryRejection>,
++) -> Result<Json<Value>, HttpJsonError> {
++    let bearer = admit(&claims, bearer)?;
++    let thread_id = path_id(&thread_id, "thread_id")?;
++    let page = PageQuery::parse(query, "after")?;
++    let response = state
++        .run_client
++        .clone()
++        .list_runs(session_request(
++            ListRunsRequest {
++                thread_id: thread_id.clone(),
++                after_run_id: page.cursor.clone().unwrap_or_default(),
++                limit: page.limit,
++                ..Default::default()
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| upstream_error(&error, Missing::Thread))?
++        .into_inner();
++    let next_cursor = response
++        .has_more
++        .then(|| response.runs.last().map(|run| run.run_id.clone()))
++        .flatten();
++    let runs = response.runs.iter().map(run_value).collect::<Vec<_>>();
++    Ok(Json(page_body(
++        runs,
++        response.has_more,
++        next_cursor.as_deref(),
++        &format!("/threads/{thread_id}/runs"),
++        "after",
++        page.limit,
++    )))
++}
++
++/// `GET /v1/agent/threads/:thread_id/messages?before&limit`: one page of a key-owned thread's
++/// active branch, newest page first, user and assistant turns only. No human post is asked for.
++/// The cursor is the oldest turn of the page as Session Core returned it, so a turn of another
++/// role at the page edge never makes the next page skip or repeat a turn.
++async fn list_thread_messages(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
++    Path(thread_id): Path<String>,
++    query: Result<Query<Vec<(String, String)>>, QueryRejection>,
++) -> Result<Json<Value>, HttpJsonError> {
++    let bearer = admit(&claims, bearer)?;
++    let thread_id = path_id(&thread_id, "thread_id")?;
++    let page = PageQuery::parse(query, "before")?;
++    let response = state
++        .session_client
++        .clone()
++        .list_conversation(session_request(
++            ListConversationRequest {
++                org_id: claims.org_id.clone(),
++                thread_id: thread_id.clone(),
++                include_inactive: false,
++                limit: page.limit,
++                before_message_id: page.cursor.clone().unwrap_or_default(),
++                include_human_posts: false,
++                ..Default::default()
++            },
++            &bearer,
++        )?)
++        .await
++        .map_err(|error| upstream_error(&error, Missing::Thread))?
++        .into_inner();
++    let next_cursor = response
++        .has_more
++        .then(|| {
++            response
++                .messages
++                .first()
++                .map(|message| message.message_id.clone())
++        })
++        .flatten();
++    let messages = response
++        .messages
++        .into_iter()
++        .filter(|message| MESSAGE_ROLES.contains(&message.role.as_str()))
++        .map(|message| {
++            let created_at = Some(timestamp_to_rfc3339(message.created_at))
++                .filter(|at| !at.is_empty())
++                .map_or(Value::Null, Value::String);
++            json!({
++                "message_id": message.message_id,
++                "role": message.role,
++                "content": message.content,
++                "created_at": created_at,
++            })
++        })
++        .collect::<Vec<_>>();
++    Ok(Json(page_body(
++        messages,
++        response.has_more,
++        next_cursor.as_deref(),
++        &format!("/threads/{thread_id}/messages"),
++        "before",
++        page.limit,
++    )))
++}
++
++/// The gate every route passes before anything else: the caller is a key (D4), it holds
++/// `agent:runs`, its retention posture is persistent (D6), and its own session bearer came with
++/// it. The ZDR refusal comes before the bearer check, so no upstream call is ever made for a ZDR
++/// key whatever else it sent.
++fn admit(
++    claims: &Claims,
++    bearer: Option<Extension<VerifiedApiKeySessionBearer>>,
++) -> Result<VerifiedApiKeySessionBearer, HttpJsonError> {
++    if claims.api_key_id().is_none() {
++        return Err(api_key_invalid());
++    }
++    if !claims.has_scope(API_KEY_SCOPE_AGENT_RUNS) {
++        return Err(scope_missing());
++    }
++    zdr_gate(claims)?;
++    bearer
++        .map(|Extension(bearer)| bearer)
++        .ok_or_else(api_key_invalid)
++}
++
++/// D6: only a persistent posture is admitted. A ZDR key, and a posture the resolver cannot decide
++/// or refuses, is the `agent_api` feature refusal (fail closed).
++fn zdr_gate(claims: &Claims) -> Result<(), HttpJsonError> {
++    match zdr_posture::decide_for(claims, &Route::plain(false)) {
++        Ok(TurnPosture::Persistent) => Ok(()),
++        _ => Err(zdr_refused()),
++    }
++}
++
++/// The ZDR refusal in the Agent API's envelope: the catalogue code, status and sentence, with the
++/// feature under `details` as the public contract has it.
++fn zdr_refused() -> HttpJsonError {
++    let refusal = Refusal::feature_not_supported(ZDR_FEATURE);
++    envelope(
++        zdr_posture::http_status(&refusal),
++        refusal.code(),
++        &refusal.message(),
++        json!({ "feature": ZDR_FEATURE }),
++    )
++}
++
++/// A credential that is not a usable key: not a key at all, or a key without its session bearer.
++fn api_key_invalid() -> HttpJsonError {
++    envelope(
++        StatusCode::UNAUTHORIZED,
++        "api_key_invalid",
++        "a valid API key is required",
++        json!({}),
++    )
++}
++
++/// A path id as Session Core writes them: 1 to 128 ASCII letters, digits, `-` or `_`. Anything
++/// else is refused here, so it never reaches Session Core or a `links.next` value.
++fn path_id(raw: &str, field: &str) -> Result<String, HttpJsonError> {
++    if is_id(raw) {
++        Ok(raw.to_owned())
++    } else {
++        Err(invalid_request(field))
++    }
++}
++
++fn is_id(raw: &str) -> bool {
++    (1..=MAX_ID_CHARS).contains(&raw.len())
++        && raw
++            .bytes()
++            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
++}
++
++/// The query of a list route: the cursor under its one name and `limit`. The names are a closed
++/// set: an unknown or repeated name, a malformed query, a cursor that is not an id or a limit
++/// outside 1 to 100 is `invalid_request` naming the value.
++#[derive(Debug, PartialEq, Eq)]
++struct PageQuery {
++    cursor: Option<String>,
++    limit: u32,
++}
++
++impl PageQuery {
++    fn parse(
++        query: Result<Query<Vec<(String, String)>>, QueryRejection>,
++        cursor_name: &str,
++    ) -> Result<Self, HttpJsonError> {
++        let Ok(Query(pairs)) = query else {
++            return Err(invalid_request("query"));
++        };
++        let mut cursor = None;
++        let mut limit = None;
++        for (name, value) in pairs {
++            if name == cursor_name && cursor.is_none() {
++                if !is_id(&value) {
++                    return Err(invalid_request(cursor_name));
++                }
++                cursor = Some(value);
++            } else if name == "limit" && limit.is_none() {
++                let parsed = value
++                    .parse::<u32>()
++                    .ok()
++                    .filter(|limit| (1..=PAGE_LIMIT_MAX).contains(limit))
++                    .ok_or_else(|| invalid_request("limit"))?;
++                limit = Some(parsed);
++            } else {
++                return Err(invalid_request(&name));
++            }
++        }
++        Ok(Self {
++            cursor,
++            limit: limit.unwrap_or(PAGE_LIMIT_DEFAULT),
++        })
++    }
++}
++
++/// A list body: `{data, meta:{has_more,next_cursor}, links:{next}}`. `links.next` is the same
++/// request with the next cursor, relative to the API root, and null on the last page. The path
++/// and cursor were checked as ids, so they need no escaping.
++fn page_body(
++    data: Vec<Value>,
++    has_more: bool,
++    next_cursor: Option<&str>,
++    path: &str,
++    cursor_name: &str,
++    limit: u32,
++) -> Value {
++    let next = next_cursor.map(|cursor| format!("{path}?{cursor_name}={cursor}&limit={limit}"));
++    json!({
++        "data": data,
++        "meta": { "has_more": has_more, "next_cursor": next_cursor },
++        "links": { "next": next },
++    })
++}
++
++/// The public run: the fields of `agent-api-v1.json`'s `Run`, taken from the projection the chat
++/// routes serve (`run_detail_value`), and of its metadata only `origin` and `api_key_id`. Every
++/// other key the run read model carries stays inside the platform.
++fn run_value(run: &RunDetail) -> Value {
++    const RUN_FIELDS: &[&str] = &[
++        "run_id",
++        "thread_id",
++        "parent_run_id",
++        "status",
++        "error",
++        "input_tokens",
++        "output_tokens",
++        "created_at",
++        "updated_at",
++    ];
++    const METADATA_FIELDS: &[&str] = &["origin", "api_key_id"];
++    let full = run_detail_value(run);
++    let mut public = Map::new();
++    for field in RUN_FIELDS {
++        public.insert((*field).to_owned(), full[*field].clone());
++    }
++    let metadata = METADATA_FIELDS
++        .iter()
++        .filter_map(|field| {
++            full["metadata"][*field]
++                .as_str()
++                .map(|value| ((*field).to_owned(), json!(value)))
++        })
++        .collect::<Map<_, _>>();
++    public.insert("metadata".to_owned(), Value::Object(metadata));
++    Value::Object(public)
++}
++
++/// The run read under the key's own bearer.
++async fn fetch_run(
++    state: &AppState,
++    bearer: &VerifiedApiKeySessionBearer,
++    run_id: &str,
++) -> Result<RunDetail, HttpJsonError> {
++    state
++        .run_client
++        .clone()
++        .get_run(session_request(
++            GetRunRequest {
++                run_id: run_id.to_owned(),
++            },
++            bearer,
++        )?)
++        .await
++        .map(tonic::Response::into_inner)
++        .map_err(|error| upstream_error(&error, Missing::Run))
++}
++
++/// A Session Core request carrying the key's session bearer.
++fn session_request<T>(
++    value: T,
++    bearer: &VerifiedApiKeySessionBearer,
++) -> Result<tonic::Request<T>, HttpJsonError> {
++    authenticated_session_request(value, &bearer.as_session_bearer()).map_err(|_| internal_error())
++}
++
++/// Which id a not-found answer names.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Missing {
++    Run,
++    Thread,
++}
++
++/// Session Core's refusals in the Agent API's vocabulary. A run or thread the key does not own
++/// reads as one that does not exist. A ZDR refusal from upstream is the `agent_api` refusal.
++fn upstream_error(error: &tonic::Status, missing: Missing) -> HttpJsonError {
++    if Refusal::from_status(error).is_some() {
++        return zdr_refused();
++    }
++    match error.code() {
++        tonic::Code::NotFound | tonic::Code::PermissionDenied => match missing {
++            Missing::Run => envelope(
++                StatusCode::NOT_FOUND,
++                "run_not_found",
++                "run not found",
++                json!({}),
++            ),
++            Missing::Thread => envelope(
++                StatusCode::NOT_FOUND,
++                "thread_not_found",
++                "thread not found",
++                json!({}),
++            ),
++        },
++        tonic::Code::InvalidArgument => invalid_request(match missing {
++            Missing::Run => "run_id",
++            Missing::Thread => "thread_id",
++        }),
++        tonic::Code::Unauthenticated => api_key_invalid(),
++        tonic::Code::Unavailable
++        | tonic::Code::DeadlineExceeded
++        | tonic::Code::ResourceExhausted => envelope(
++            StatusCode::SERVICE_UNAVAILABLE,
++            "upstream_unavailable",
++            "a dependency is unavailable; try again",
++            json!({}),
++        ),
++        _ => internal_error(),
++    }
++}
++
++fn invalid_request(field: &str) -> HttpJsonError {
++    envelope(
++        StatusCode::BAD_REQUEST,
++        "invalid_request",
++        "the request is not valid",
++        json!({ "field": field }),
++    )
++}
++
++fn internal_error() -> HttpJsonError {
++    envelope(
++        StatusCode::INTERNAL_SERVER_ERROR,
++        "internal_error",
++        "the gateway failed unexpectedly",
++        json!({}),
++    )
++}
++
++/// A typed error body: `{error:{code,message,details}}`, with `details` always an object.
++fn envelope(status: StatusCode, code: &str, message: &str, details: Value) -> HttpJsonError {
++    (
++        status,
++        Json(json!({ "error": { "code": code, "message": message, "details": details } })),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use axum::{body::Body, http::Request as HttpRequest, middleware};
++    use tower::ServiceExt;
++
++    fn key_claims(scopes: &[&str], zdr: bool) -> Claims {
++        serde_json::from_value(json!({
++            "sub": "apikey:key-1",
++            "iss": "auth-core",
++            "exp": 4_102_444_800_i64,
++            "org_id": "org-a",
++            "zdr": zdr,
++            "principal_type": "api_key",
++            "key_id": "key-1",
++            "acting_user_id": "user-a",
++            "scopes": scopes,
++        }))
++        .expect("an api key token decodes")
++    }
++
++    fn user_claims() -> Claims {
++        serde_json::from_value(json!({
++            "sub": "user-a",
++            "user_id": "user-a",
++            "iss": "auth-core",
++            "exp": 4_102_444_800_i64,
++            "org_id": "org-a",
++            "zdr": false,
++            "scopes": [API_KEY_SCOPE_AGENT_RUNS],
++        }))
++        .expect("a user token decodes")
++    }
++
++    fn key_bearer() -> Option<Extension<VerifiedApiKeySessionBearer>> {
++        Some(Extension(VerifiedApiKeySessionBearer::for_test("key-session-token")))
++    }
++
++    /// Every route's concrete path and method, as a caller sends them.
++    const ROUTES: &[(&str, &str)] = &[
++        ("GET", "/v1/agent/runs/run-1"),
++        ("GET", "/v1/agent/runs/run-1/events"),
++        ("POST", "/v1/agent/runs/run-1/cancel"),
++        ("GET", "/v1/agent/threads/thread-1/runs"),
++        ("GET", "/v1/agent/threads/thread-1/messages"),
++    ];
++
++    /// A state whose Session Core clients point at a closed local port (not the default, where a
++    /// developer's Session Core may be listening), so a request that reached Session Core answers
++    /// `upstream_unavailable`.
++    fn unreachable_state() -> AppState {
++        use mp_contracts::model_plane::v1::{
++            run_service_client::RunServiceClient, session_core_client::SessionCoreClient,
++        };
++        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1")
++            .connect_timeout(std::time::Duration::from_secs(2))
++            .connect_lazy();
++        let mut state = AppState::new();
++        state.run_client = RunServiceClient::new(channel.clone());
++        state.session_client = SessionCoreClient::new(channel);
++        state
++    }
++
++    /// The router as production layers it, minus the JWT check: `claims` and the key's session
++    /// bearer stand in for what `require_auth` inserts.
++    fn app(enabled: bool, claims: Claims, with_bearer: bool) -> Router {
++        let router = router(enabled).layer(middleware::from_fn(
++            crate::auth::authorize_principal_route,
++        ));
++        let router = if with_bearer {
++            router.layer(Extension(VerifiedApiKeySessionBearer::for_test(
++                "key-session-token",
++            )))
++        } else {
++            router
++        };
++        router.layer(Extension(claims)).with_state(unreachable_state())
++    }
++
++    async fn send(router: Router, method: &str, path: &str) -> (StatusCode, Value) {
++        let response = router
++            .oneshot(
++                HttpRequest::builder()
++                    .method(method)
++                    .uri(path)
++                    .body(Body::empty())
++                    .unwrap(),
++            )
++            .await
++            .unwrap();
++        let status = response.status();
++        let body = axum::body::to_bytes(response.into_body(), 1 << 16)
++            .await
++            .unwrap();
++        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
++    }
++
++    fn assert_typed(body: &Value, code: &str) {
++        assert_eq!(body["error"]["code"], code, "{body}");
++        assert!(body["error"]["message"].is_string(), "{body}");
++        assert!(body["error"]["details"].is_object(), "details is an object: {body}");
++    }
++
++    #[tokio::test]
++    async fn switch_off_routes_are_absent() {
++        for (method, path) in ROUTES {
++            let (status, _) = send(
++                app(false, key_claims(&[API_KEY_SCOPE_AGENT_RUNS], false), true),
++                method,
++                path,
++            )
++            .await;
++            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
++        }
++    }
++
++    #[test]
++    fn api_key_needs_agent_runs_scope() {
++        let error = admit(&key_claims(&["browser:agent"], false), key_bearer())
++            .expect_err("a key without agent:runs is refused");
++        assert_eq!(error.0, StatusCode::FORBIDDEN);
++        assert_typed(&error.1, "agent_api_scope_missing");
++        assert_eq!(error.1["error"]["details"]["scope"], API_KEY_SCOPE_AGENT_RUNS);
++        assert!(admit(&key_claims(&[API_KEY_SCOPE_AGENT_RUNS], false), key_bearer()).is_ok());
++    }
++
++    #[tokio::test]
++    #[serial_test::serial]
++    async fn zdr_key_is_refused_before_upstream() {
++        // The route policy reads the process switch, so it is set for this test. The handlers'
++        // clients reach nothing: a request that got past the gate would answer
++        // `upstream_unavailable`, so the 412 proves no upstream call was made.
++        std::env::set_var(ENABLED_ENV, "true");
++        for (method, path) in ROUTES {
++            let (status, body) = send(
++                app(true, key_claims(&[API_KEY_SCOPE_AGENT_RUNS], true), true),
++                method,
++                path,
++            )
++            .await;
++            assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{method} {path}");
++            assert_typed(&body, "zdr_feature_not_supported");
++        }
++        // The same key, persistent: past the gate, so it reaches the (absent) upstream.
++        let (status, body) = send(
++            app(true, key_claims(&[API_KEY_SCOPE_AGENT_RUNS], false), true),
++            "GET",
++            "/v1/agent/runs/run-1",
++        )
++        .await;
++        std::env::remove_var(ENABLED_ENV);
++        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
++        assert_typed(&body, "upstream_unavailable");
++        let error = admit(&key_claims(&[API_KEY_SCOPE_AGENT_RUNS], true), key_bearer())
++            .expect_err("a ZDR key is refused");
++        assert_eq!(error.0, StatusCode::PRECONDITION_FAILED);
++        assert_typed(&error.1, "zdr_feature_not_supported");
++        assert_eq!(error.1["error"]["details"]["feature"], ZDR_FEATURE);
++        // Even without its session bearer, the ZDR answer comes first.
++        let error = admit(&key_claims(&[API_KEY_SCOPE_AGENT_RUNS], true), None)
++            .expect_err("a ZDR key is refused");
++        assert_typed(&error.1, "zdr_feature_not_supported");
++    }
++
++    #[test]
++    fn session_bearer_must_match_the_key() {
++        // `require_auth` inserts the key's session bearer only after binding it to the same key,
++        // org and posture (auth::tests); a key that arrives without one is refused here.
++        let error = admit(&key_claims(&[API_KEY_SCOPE_AGENT_RUNS], false), None)
++            .expect_err("no key session bearer");
++        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
++        assert_typed(&error.1, "api_key_invalid");
++    }
++
++    #[tokio::test]
++    async fn user_principal_cannot_use_agent_routes() {
++        let error = admit(&user_claims(), key_bearer()).expect_err("a person is not a key");
++        assert_eq!(error.0, StatusCode::UNAUTHORIZED);
++        assert_typed(&error.1, "api_key_invalid");
++        // Through the router too: a person passes the route policy and the handler refuses it
++        // before any upstream call.
++        for (method, path) in ROUTES {
++            let (status, body) = send(app(true, user_claims(), false), method, path).await;
++            assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path}");
++            assert_typed(&body, "api_key_invalid");
++        }
++    }
++
++    #[test]
++    fn errors_are_typed_envelopes() {
++        let status = |code: tonic::Code| tonic::Status::new(code, "upstream text");
++        use tonic::Code;
++        use Missing::{Run, Thread};
++        for (code, missing, http, typed) in [
++            (Code::NotFound, Run, StatusCode::NOT_FOUND, "run_not_found"),
++            (Code::PermissionDenied, Run, StatusCode::NOT_FOUND, "run_not_found"),
++            (Code::NotFound, Thread, StatusCode::NOT_FOUND, "thread_not_found"),
++            (Code::PermissionDenied, Thread, StatusCode::NOT_FOUND, "thread_not_found"),
++            (Code::InvalidArgument, Run, StatusCode::BAD_REQUEST, "invalid_request"),
++            (Code::Unauthenticated, Run, StatusCode::UNAUTHORIZED, "api_key_invalid"),
++            (Code::Unavailable, Thread, StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable"),
++            (Code::DeadlineExceeded, Run, StatusCode::SERVICE_UNAVAILABLE, "upstream_unavailable"),
++            (Code::Internal, Run, StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
++        ] {
++            let (got, body) = upstream_error(&status(code), missing);
++            assert_eq!(got, http, "{code:?}");
++            assert_typed(&body, typed);
++            assert!(
++                !body.to_string().contains("upstream text"),
++                "an upstream message never reaches the caller"
++            );
++        }
++        let refusal = Refusal::feature_not_supported(ZDR_FEATURE)
++            .grpc_status(tonic::Code::FailedPrecondition);
++        let (got, body) = upstream_error(&refusal, Missing::Run);
++        assert_eq!(got, StatusCode::PRECONDITION_FAILED);
++        assert_typed(&body, "zdr_feature_not_supported");
++
++        // The local refusals as well.
++        for (error, code) in [
++            (scope_missing(), "agent_api_scope_missing"),
++            (api_key_invalid(), "api_key_invalid"),
++            (zdr_refused(), "zdr_feature_not_supported"),
++            (invalid_request("limit"), "invalid_request"),
++            (internal_error(), "internal_error"),
++        ] {
++            assert_typed(&error.1, code);
++        }
++    }
++
++    #[test]
++    fn path_ids_and_page_queries_are_closed() {
++        assert_eq!(path_id("run_01-AB", "run_id").unwrap(), "run_01-AB");
++        for bad in ["", "run.1", "run 1", "a/b", "run%2F1", &"r".repeat(129)] {
++            let error = path_id(bad, "run_id").expect_err(bad);
++            assert_typed(&error.1, "invalid_request");
++            assert_eq!(error.1["error"]["details"]["field"], "run_id");
++        }
++
++        let parse = |pairs: &[(&str, &str)]| {
++            PageQuery::parse(
++                Ok(Query(
++                    pairs
++                        .iter()
++                        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
++                        .collect(),
++                )),
++                "after",
++            )
++        };
++        assert_eq!(
++            parse(&[]).unwrap(),
++            PageQuery { cursor: None, limit: PAGE_LIMIT_DEFAULT }
++        );
++        assert_eq!(
++            parse(&[("after", "run-9"), ("limit", "100")]).unwrap(),
++            PageQuery { cursor: Some("run-9".to_owned()), limit: 100 }
++        );
++        for (pairs, field) in [
++            (vec![("limit", "0")], "limit"),
++            (vec![("limit", "101")], "limit"),
++            (vec![("limit", "ten")], "limit"),
++            (vec![("after", "a.b")], "after"),
++            (vec![("before", "run-9")], "before"),
++            (vec![("status", "running")], "status"),
++            (vec![("after", "a"), ("after", "b")], "after"),
++            (vec![("limit", "5"), ("limit", "6")], "limit"),
++        ] {
++            let error = parse(&pairs).expect_err(field);
++            assert_typed(&error.1, "invalid_request");
++            assert_eq!(error.1["error"]["details"]["field"], field, "{pairs:?}");
++        }
++    }
++
++    #[test]
++    fn page_bodies_carry_meta_and_links() {
++        let last = page_body(vec![json!(1)], false, None, "/threads/t1/runs", "after", 20);
++        assert_eq!(last["meta"], json!({ "has_more": false, "next_cursor": null }));
++        assert_eq!(last["links"], json!({ "next": null }));
++        let more = page_body(Vec::new(), true, Some("m-1"), "/threads/t1/messages", "before", 5);
++        assert_eq!(more["data"], json!([]));
++        assert_eq!(more["meta"]["next_cursor"], "m-1");
++        assert_eq!(more["links"]["next"], "/threads/t1/messages?before=m-1&limit=5");
++    }
++
++    #[test]
++    fn run_projection_matches_run_detail_value() {
++        let run = RunDetail {
++            run_id: "run-1".to_owned(),
++            thread_id: "thread-1".to_owned(),
++            status: "completed".to_owned(),
++            goal: "a goal the public run does not carry".to_owned(),
++            final_output: "the answer is read from the thread".to_owned(),
++            error: String::new(),
++            input_tokens: 12,
++            output_tokens: 34,
++            created_at: Some(prost_types::Timestamp { seconds: 1_700_000_000, nanos: 0 }),
++            metadata: Some(prost_types::Struct {
++                fields: [
++                    ("origin", "api"),
++                    ("api_key_id", "key-1"),
++                    ("api_key_owner", "user-a"),
++                    ("retention_receipt", "r-1"),
++                ]
++                .into_iter()
++                .map(|(key, value)| {
++                    (
++                        key.to_owned(),
++                        prost_types::Value {
++                            kind: Some(prost_types::value::Kind::StringValue(value.to_owned())),
++                        },
++                    )
++                })
++                .collect(),
++            }),
++            ..Default::default()
++        };
++        let full = run_detail_value(&run);
++        let public = run_value(&run);
++        let keys: Vec<&String> = public.as_object().unwrap().keys().collect();
++        assert_eq!(keys.len(), 10, "the contract's Run fields and nothing else: {keys:?}");
++        for field in [
++            "run_id",
++            "thread_id",
++            "parent_run_id",
++            "status",
++            "error",
++            "input_tokens",
++            "output_tokens",
++            "created_at",
++            "updated_at",
++        ] {
++            assert_eq!(public[field], full[field], "{field}");
++        }
++        assert_eq!(
++            public["metadata"],
++            json!({ "origin": "api", "api_key_id": "key-1" }),
++            "the key owner and every other stamp stay inside"
++        );
++        assert!(public.get("goal").is_none() && public.get("final_output").is_none());
++
++        let bare = run_value(&RunDetail::default());
++        assert_eq!(bare["metadata"], json!({}), "no metadata is an empty object, not null");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/auth.rs b/apps/Model Plane/rust/services/model-gateway/src/auth.rs
+index cc42a38ae..fe2e9a996 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/auth.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/auth.rs	
+@@ -145,7 +145,8 @@ enum PrincipalKind {
+     User,
+     Service,
+     /// INNH-10: an API key exchanged by Auth Core for a short-lived token. Admitted ONLY on the
+-    /// key-grant routes ([`API_KEY_ROUTES`]); refused on every other route by
++    /// key-grant routes ([`API_KEY_ROUTES`]) and, while its switch is on, the Agent API routes
++    /// ([`AGENT_API_KEY_ROUTES`], EP-12 S5); refused on every other route by
+     /// [`authorize_principal_route`] and on the gRPC surface by `grpc_auth`.
+     ApiKey,
+ }
+@@ -176,6 +177,67 @@ fn api_key_route_allowed(method: &str, path: &str) -> bool {
+     }
+ }
+ 
++/// EP-12 S5: the scope an `api_key` principal needs on the Agent API routes (D3, D4). The
++/// key-grant routes keep `browser:agent`; neither scope opens the other's routes.
++pub(crate) const API_KEY_SCOPE_AGENT_RUNS: &str = "agent:runs";
++
++/// EP-12 S5: the Agent API routes an `api_key` principal reaches while `MODEL_GATEWAY_AGENT_API`
++/// is on, as `(method, axum path)`. Off, [`API_KEY_ROUTES`] is the whole allow-list.
++pub const AGENT_API_KEY_ROUTES: &[(&str, &str)] = &[
++    ("GET", "/v1/agent/runs/:run_id"),
++    ("GET", "/v1/agent/runs/:run_id/events"),
++    ("POST", "/v1/agent/runs/:run_id/cancel"),
++    ("GET", "/v1/agent/threads/:thread_id/runs"),
++    ("GET", "/v1/agent/threads/:thread_id/messages"),
++];
++
++/// The one downstream header a key may send, and only on an Agent API route: its own
++/// `aud=session-core` bearer.
++const API_KEY_SESSION_HEADER: &str = "x-session-authorization";
++
++/// Whether `method path` (a concrete request path) is one of [`AGENT_API_KEY_ROUTES`]. An id is
++/// one non-empty path segment; the handler validates its characters.
++fn agent_api_route(method: &str, path: &str) -> bool {
++    AGENT_API_KEY_ROUTES
++        .iter()
++        .any(|(route_method, pattern)| *route_method == method && path_matches(pattern, path))
++}
++
++/// Whether `path` fills `pattern` segment for segment, a `:name` segment taking any one
++/// non-empty segment. A trailing slash is one more (empty) segment, so it never matches.
++fn path_matches(pattern: &str, path: &str) -> bool {
++    let mut patterns = pattern.split('/');
++    let mut segments = path.split('/');
++    loop {
++        match (patterns.next(), segments.next()) {
++            (None, None) => return true,
++            (Some(expected), Some(segment)) => {
++                let fits = if expected.starts_with(':') {
++                    !segment.is_empty()
++                } else {
++                    expected == segment
++                };
++                if !fits {
++                    return false;
++                }
++            }
++            _ => return false,
++        }
++    }
++}
++
++/// The scope a key needs for `method path`, or `None` when no key may reach it. The Agent API
++/// routes exist for a key only while `agent_api` (the switch) is on.
++fn api_key_route_scope(method: &str, path: &str, agent_api: bool) -> Option<&'static str> {
++    if api_key_route_allowed(method, path) {
++        Some(API_KEY_SCOPE_BROWSER_AGENT)
++    } else if agent_api && agent_api_route(method, path) {
++        Some(API_KEY_SCOPE_AGENT_RUNS)
++    } else {
++        None
++    }
++}
++
+ /// A key id as the broker accepts it: 1 to 128 bytes of printable, non-space ASCII.
+ fn valid_api_key_id(key_id: &str) -> bool {
+     (1..=MAX_API_KEY_ID_LEN).contains(&key_id.len())
+@@ -350,6 +412,38 @@ impl fmt::Debug for VerifiedApiKeyBrowserBearer {
+     }
+ }
+ 
++/// EP-12 S5: the independently verified `aud=session-core` bearer of an `api_key` principal.
++/// Accepted only from `x-session-authorization`, only on an Agent API route while the switch is
++/// on, exactly once, and only as the same key as the ingress token (same `sub`, `org_id`,
++/// `key_id`, `acting_user_id` and retention posture) holding `agent:runs`. A distinct type from
++/// [`VerifiedSessionBearer`] on purpose: no user route can extract a key's session bearer.
++#[derive(Clone)]
++pub struct VerifiedApiKeySessionBearer(Arc<str>);
++
++impl VerifiedApiKeySessionBearer {
++    fn new(token: &str) -> Self {
++        Self(Arc::from(token))
++    }
++
++    /// The key's bearer as the session credential the shared Session Core request helpers and
++    /// the run-events stream forward. Only an Agent API handler holds a key bearer, and Session
++    /// Core binds every call it carries to the key's own threads and runs.
++    pub(crate) fn as_session_bearer(&self) -> VerifiedSessionBearer {
++        VerifiedSessionBearer::new(&self.0)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn for_test(token: &str) -> Self {
++        Self::new(token)
++    }
++}
++
++impl fmt::Debug for VerifiedApiKeySessionBearer {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str("VerifiedApiKeySessionBearer([REDACTED])")
++    }
++}
++
+ #[axum::async_trait]
+ impl<S> FromRequestParts<S> for VerifiedApiKeyBrowserBearer
+ where
+@@ -1218,6 +1312,46 @@ async fn verify_delegated_api_key_browser_bearer(
+     Ok(Some(VerifiedApiKeyBrowserBearer::new(&token)))
+ }
+ 
++/// EP-12 S5: verify the `aud=session-core` bearer of an `api_key` principal on an Agent API route
++/// (the caller checks the route and the switch). Exactly one header: a repeated one is a 403, so
++/// no proxy can pick a different value than the one verified. The bearer must be the same key as
++/// the ingress token and hold `agent:runs`; a different retention posture is the typed
++/// `zdr_posture_mismatch`. Anything else is a 403.
++async fn verify_delegated_api_key_session_bearer(
++    headers: &HeaderMap,
++    model_claims: &Claims,
++) -> Result<Option<VerifiedApiKeySessionBearer>, AuthRejection> {
++    match headers.get_all(API_KEY_SESSION_HEADER).iter().count() {
++        0 => return Ok(None),
++        1 => {}
++        _ => return Err(StatusCode::FORBIDDEN.into()),
++    }
++    let Some((token, claims)) = decode_delegated_bearer(
++        headers,
++        API_KEY_SESSION_HEADER,
++        "SESSION_CORE_AUTH_AUDIENCE",
++        "session-core",
++    )
++    .await?
++    else {
++        return Ok(None);
++    };
++    if claims.principal_kind() != Ok(PrincipalKind::ApiKey)
++        || claims.sub != model_claims.sub
++        || claims.org_id != model_claims.org_id
++        || claims.key_id != model_claims.key_id
++        || claims.acting_user_id != model_claims.acting_user_id
++        || !claims.has_scope(API_KEY_SCOPE_AGENT_RUNS)
++    {
++        return Err(StatusCode::FORBIDDEN.into());
++    }
++    if claims.zdr != model_claims.zdr || claims.zdr_waiver != model_claims.zdr_waiver {
++        warn!("delegated api key session bearer retention posture differs from the ingress token");
++        return Err(AuthRejection::ZdrPostureMismatch);
++    }
++    Ok(Some(VerifiedApiKeySessionBearer::new(&token)))
++}
++
+ async fn verify_delegated_service_inference_bearer(
+     headers: &HeaderMap,
+     model_claims: &Claims,
+@@ -1482,6 +1616,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
+         warn!("JWT carries missing, mismatched, or ambiguous principal identity");
+     })?;
+     let mut api_key_browser_bearer = None;
++    let mut api_key_session_bearer = None;
+     let (
+         data_plane_bearer,
+         capability_bearer,
+@@ -1539,11 +1674,14 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
+         }
+         PrincipalKind::ApiKey => {
+             // A key carries no user identity, so no user-bound downstream bearer can be bound to
+-            // it. Only the key's own broker bearer, on the key-grant routes.
+-            if API_KEY_FORBIDDEN_DELEGATIONS
+-                .iter()
+-                .any(|header| req.headers().contains_key(*header))
+-            {
++            // it. Only the key's own broker bearer, on the key-grant routes, and (EP-12 S5) the
++            // key's own session bearer, on an Agent API route while its switch is on.
++            let on_agent_api_route = agent_api_route(req.method().as_str(), req.uri().path())
++                && crate::agent_api_routes::enabled();
++            if API_KEY_FORBIDDEN_DELEGATIONS.iter().any(|header| {
++                req.headers().contains_key(*header)
++                    && !(on_agent_api_route && *header == API_KEY_SESSION_HEADER)
++            }) {
+                 warn!("api key principal supplied a downstream delegation it may not hold");
+                 return Err(StatusCode::FORBIDDEN.into());
+             }
+@@ -1554,12 +1692,20 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
+                 req.uri().path(),
+             )
+             .await?;
++            if on_agent_api_route {
++                api_key_session_bearer =
++                    verify_delegated_api_key_session_bearer(req.headers(), &token_data.claims)
++                        .await?;
++            }
+             (None, None, None, None, None, None, None, None, None)
+         }
+     };
+     if let Some(bearer) = api_key_browser_bearer {
+         req.extensions_mut().insert(bearer);
+     }
++    if let Some(bearer) = api_key_session_bearer {
++        req.extensions_mut().insert(bearer);
++    }
+     req.extensions_mut().insert(step_up);
+     req.extensions_mut().insert(token_data.claims);
+     req.extensions_mut()
+@@ -1785,13 +1931,20 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
+             }
+             Ok(next.run(req).await)
+         }
+-        // INNH-10: a key reaches exactly the key-grant routes, with `browser:agent`. Every other
+-        // route (and every route added later) is a 403: this arm is an allow-list, not a deny-list.
++        // INNH-10: a key reaches exactly the key-grant routes, with `browser:agent`, and (EP-12 S5)
++        // the Agent API routes, with `agent:runs`, while `MODEL_GATEWAY_AGENT_API` is on. Every
++        // other route (and every route added later) is a 403: this arm is an allow-list, not a
++        // deny-list. The switch is read only for a path that is an Agent API route.
+         PrincipalKind::ApiKey => {
+-            if api_key_route_allowed(req.method().as_str(), req.uri().path())
+-                && claims.has_scope(API_KEY_SCOPE_BROWSER_AGENT)
+-            {
++            let (method, path) = (req.method().as_str(), req.uri().path());
++            let agent_api = agent_api_route(method, path) && crate::agent_api_routes::enabled();
++            let scope = api_key_route_scope(method, path, agent_api);
++            if scope.is_some_and(|scope| claims.has_scope(scope)) {
+                 Ok(next.run(req).await)
++            } else if scope == Some(API_KEY_SCOPE_AGENT_RUNS) {
++                // The Agent API contract names this refusal, so a client can tell a key that
++                // lacks the permission from a route it may not reach.
++                Ok(crate::agent_api_routes::scope_missing().into_response())
+             } else {
+                 warn!(
+                     method = %req.method(),
+@@ -1913,6 +2066,7 @@ mod tests {
+         std::env::remove_var("SANDBOX_MANAGER_AUTH_AUDIENCE");
+         std::env::remove_var("MODEL_GATEWAY_AUTH_DEV_BYPASS");
+         std::env::remove_var("ALLOW_INSECURE_DEV_DEFAULTS");
++        std::env::remove_var(crate::agent_api_routes::ENABLED_ENV);
+     }
+ 
+     fn test_router() -> Router {
+@@ -2685,6 +2839,297 @@ mod tests {
+         assert_eq!(API_KEY_ROUTES.len(), 2);
+     }
+ 
++    /// EP-12 S5: the key allow-list as a table over the Agent API switch. Off, it is exactly the
++    /// INNH-10 pair with `browser:agent`; on, the five Agent API shapes join it with
++    /// `agent:runs`, and nothing else does.
++    #[test]
++    fn api_key_route_scope_is_a_table_over_the_agent_api_switch() {
++        let key_grant = Some(API_KEY_SCOPE_BROWSER_AGENT);
++        let agent = Some(API_KEY_SCOPE_AGENT_RUNS);
++        let table: &[(&str, &str, Option<&str>, Option<&str>)] = &[
++            // (method, path, switch off, switch on)
++            ("POST", "/v1/browser/key-grants", key_grant, key_grant),
++            ("DELETE", "/v1/browser/key-grants/g1", key_grant, key_grant),
++            ("GET", "/v1/agent/runs/run-1", None, agent),
++            ("GET", "/v1/agent/runs/run-1/events", None, agent),
++            ("POST", "/v1/agent/runs/run-1/cancel", None, agent),
++            ("GET", "/v1/agent/threads/thread-1/runs", None, agent),
++            ("GET", "/v1/agent/threads/thread-1/messages", None, agent),
++            // Wrong method, missing or extra segment, trailing slash, the people's run routes.
++            ("POST", "/v1/agent/runs/run-1", None, None),
++            ("DELETE", "/v1/agent/runs/run-1", None, None),
++            ("GET", "/v1/agent/runs/run-1/cancel", None, None),
++            ("GET", "/v1/agent/runs", None, None),
++            ("POST", "/v1/agent/runs", None, None),
++            ("GET", "/v1/agent/runs/", None, None),
++            ("GET", "/v1/agent/runs//events", None, None),
++            ("GET", "/v1/agent/runs/run-1/", None, None),
++            ("GET", "/v1/agent/runs/run-1/events/replay", None, None),
++            ("GET", "/v1/agent/runs/a/b", None, None),
++            ("GET", "/v1/agent/threads/thread-1", None, None),
++            ("GET", "/v1/agent/threads/thread-1/events", None, None),
++            ("GET", "/v1/agent/threads/thread-1/messages/x", None, None),
++            ("GET", "/v1/runs/run-1", None, None),
++            ("GET", "/v1/runs/run-1/events", None, None),
++            ("POST", "/v1/runs/run-1/cancel", None, None),
++            ("GET", "/v1/threads/thread-1/messages", None, None),
++            ("POST", "/v1/invoke", None, None),
++        ];
++        for (method, path, off, on) in table {
++            assert_eq!(api_key_route_scope(method, path, false), *off, "off: {method} {path}");
++            assert_eq!(api_key_route_scope(method, path, true), *on, "on: {method} {path}");
++        }
++        assert_eq!(AGENT_API_KEY_ROUTES.len(), 5);
++        for (method, pattern) in AGENT_API_KEY_ROUTES {
++            let concrete = pattern.replace(":run_id", "r1").replace(":thread_id", "t1");
++            assert_eq!(api_key_route_scope(method, &concrete, true), agent, "{method} {pattern}");
++        }
++    }
++
++    #[tokio::test]
++    #[serial]
++    async fn authorize_principal_route_admits_a_key_on_the_agent_api_only_while_it_is_on() {
++        async fn ok_handler() -> &'static str {
++            "ok"
++        }
++        async fn call(claims: Claims, method: &str, path: &str) -> (StatusCode, String) {
++            let response = Router::new()
++                .route("/v1/agent/runs/:run_id", get(ok_handler))
++                .route("/v1/agent/runs/:run_id/cancel", axum::routing::post(ok_handler))
++                .route("/v1/browser/key-grants", axum::routing::post(ok_handler))
++                .route("/v1/runs/:run_id", get(ok_handler))
++                .layer(middleware::from_fn(authorize_principal_route))
++                .layer(axum::Extension(claims))
++                .oneshot(
++                    HttpRequest::builder()
++                        .method(method)
++                        .uri(path)
++                        .body(Body::empty())
++                        .unwrap(),
++                )
++                .await
++                .unwrap();
++            let status = response.status();
++            let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
++            (status, String::from_utf8_lossy(&body).into_owned())
++        }
++        let agent_key = Claims {
++            scopes: vec![API_KEY_SCOPE_AGENT_RUNS.to_owned()],
++            ..api_key_claims("key-1")
++        };
++
++        clear_env();
++        let (status, body) = call(agent_key.clone(), "GET", "/v1/agent/runs/r1").await;
++        assert_eq!(status, StatusCode::FORBIDDEN, "off: the agent routes are not on the list");
++        assert!(body.is_empty(), "off: the bare 403 every other route gives");
++
++        for value in ["1", "on", "yes", "truthy", ""] {
++            std::env::set_var(crate::agent_api_routes::ENABLED_ENV, value);
++            let (status, _) = call(agent_key.clone(), "GET", "/v1/agent/runs/r1").await;
++            assert_eq!(status, StatusCode::FORBIDDEN, "only the word true enables it: {value:?}");
++        }
++
++        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
++        assert_eq!(call(agent_key.clone(), "GET", "/v1/agent/runs/r1").await.0, StatusCode::OK);
++        assert_eq!(
++            call(agent_key.clone(), "POST", "/v1/agent/runs/r1/cancel").await.0,
++            StatusCode::OK
++        );
++        // `agent:runs` opens neither the key-grant routes nor a person's run route.
++        assert_eq!(
++            call(agent_key.clone(), "POST", "/v1/browser/key-grants").await.0,
++            StatusCode::FORBIDDEN
++        );
++        assert_eq!(
++            call(agent_key.clone(), "GET", "/v1/runs/r1").await.0,
++            StatusCode::FORBIDDEN
++        );
++        // A key without `agent:runs` gets the contract's typed refusal, naming the scope.
++        let (status, body) = call(api_key_claims("key-1"), "GET", "/v1/agent/runs/r1").await;
++        assert_eq!(status, StatusCode::FORBIDDEN);
++        let body: serde_json::Value = serde_json::from_str(&body).expect("a typed body");
++        assert_eq!(body["error"]["code"], "agent_api_scope_missing");
++        assert_eq!(body["error"]["details"]["scope"], API_KEY_SCOPE_AGENT_RUNS);
++        clear_env();
++    }
++
++    #[tokio::test]
++    #[serial]
++    async fn delegated_api_key_session_bearer_is_the_same_key_once_and_only_on_agent_routes() {
++        async fn echo_key_session(
++            bearer: Option<axum::Extension<VerifiedApiKeySessionBearer>>,
++        ) -> String {
++            bearer.map_or_else(String::new, |bearer| {
++                bearer.0.as_session_bearer().as_str().to_owned()
++            })
++        }
++
++        clear_env();
++        reset_jwks_cache_for_test().await;
++        let kid = "test-kid-api-key-session-delegation";
++        let server = start_jwks_mock(kid).await;
++        std::env::set_var(
++            "AUTH_CORE_JWKS_URL",
++            format!("{}/.well-known/jwks.json", server.uri()),
++        );
++        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
++        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
++        std::env::set_var("SESSION_CORE_AUTH_AUDIENCE", "session-core");
++
++        let agent = |claims: Claims| Claims {
++            scopes: vec![API_KEY_SCOPE_AGENT_RUNS.to_owned()],
++            ..claims
++        };
++        let session_aud = |claims: Claims| Claims {
++            aud: Some("session-core".into()),
++            ..agent(claims)
++        };
++        let model_token = sign_jwt(&agent(api_key_claims("key-1")), kid);
++        let key_session = sign_jwt(&session_aud(api_key_claims("key-1")), kid);
++        let router = || {
++            Router::new()
++                .route("/v1/agent/runs/:run_id", get(echo_key_session))
++                .route("/v1/runs/:run_id", get(echo_key_session))
++                .layer(middleware::from_fn(require_auth))
++        };
++        let call = |path: &'static str, extra: Vec<(&'static str, String)>| {
++            let mut builder = HttpRequest::builder()
++                .method("GET")
++                .uri(path)
++                .header("authorization", format!("Bearer {model_token}"));
++            for (name, value) in extra {
++                builder = builder.header(name, value);
++            }
++            router().oneshot(builder.body(Body::empty()).unwrap())
++        };
++        let session_header =
++            |token: &str| vec![("x-session-authorization", format!("Bearer {token}"))];
++
++        // Off: the header is one a key may not send, as before.
++        let response = call("/v1/agent/runs/r1", session_header(&key_session)).await.unwrap();
++        assert_eq!(response.status(), StatusCode::FORBIDDEN, "switch off");
++
++        std::env::set_var(crate::agent_api_routes::ENABLED_ENV, "true");
++        let response = call("/v1/agent/runs/r1", session_header(&key_session)).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
++        assert_eq!(body, key_session.as_bytes(), "the key's own session bearer is forwarded");
++
++        // The same header on any other route stays forbidden.
++        let response = call("/v1/runs/r1", session_header(&key_session)).await.unwrap();
++        assert_eq!(response.status(), StatusCode::FORBIDDEN, "a person's run route");
++
++        // Twice, even the same value: refused.
++        let response = call(
++            "/v1/agent/runs/r1",
++            vec![
++                ("x-session-authorization", format!("Bearer {key_session}")),
++                ("x-session-authorization", format!("Bearer {key_session}")),
++            ],
++        )
++        .await
++        .unwrap();
++        assert_eq!(response.status(), StatusCode::FORBIDDEN, "exactly one session bearer");
++
++        let unscoped = sign_jwt(
++            &Claims {
++                aud: Some("session-core".into()),
++                ..api_key_claims("key-1")
++            },
++            kid,
++        );
++        let another_key = sign_jwt(&session_aud(api_key_claims("key-2")), kid);
++        let another_owner = sign_jwt(
++            &session_aud(Claims {
++                acting_user_id: Some("user-other".into()),
++                ..api_key_claims("key-1")
++            }),
++            kid,
++        );
++        let other_org = sign_jwt(
++            &session_aud(Claims {
++                org_id: "org-other".into(),
++                ..api_key_claims("key-1")
++            }),
++            kid,
++        );
++        let a_user = sign_jwt(
++            &Claims {
++                aud: Some("session-core".into()),
++                ..base_claims()
++            },
++            kid,
++        );
++        for (case, token) in [
++            ("without agent:runs", unscoped),
++            ("another key", another_key),
++            ("another owner", another_owner),
++            ("another org", other_org),
++            ("a user bearer", a_user),
++        ] {
++            let response = call("/v1/agent/runs/r1", session_header(&token)).await.unwrap();
++            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{case}");
++        }
++
++        let wrong_audience = sign_jwt(&agent(api_key_claims("key-1")), kid);
++        let response = call("/v1/agent/runs/r1", session_header(&wrong_audience)).await.unwrap();
++        assert_eq!(
++            response.status(),
++            StatusCode::UNAUTHORIZED,
++            "the model token is not a session bearer"
++        );
++
++        let zdr_session = sign_jwt(
++            &session_aud(Claims {
++                zdr: true,
++                ..api_key_claims("key-1")
++            }),
++            kid,
++        );
++        let response = call("/v1/agent/runs/r1", session_header(&zdr_session)).await.unwrap();
++        assert_eq!(response.status(), StatusCode::FORBIDDEN);
++        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
++        assert!(
++            String::from_utf8_lossy(&body).contains("zdr_posture_mismatch"),
++            "a mixed posture is the typed refusal"
++        );
++
++        // Every other downstream bearer stays forbidden on an Agent API route.
++        for header in API_KEY_FORBIDDEN_DELEGATIONS
++            .iter()
++            .filter(|header| **header != API_KEY_SESSION_HEADER)
++        {
++            let response = call(
++                "/v1/agent/runs/r1",
++                vec![
++                    ("x-session-authorization", format!("Bearer {key_session}")),
++                    (*header, format!("Bearer {key_session}")),
++                ],
++            )
++            .await
++            .unwrap();
++            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{header}");
++        }
++        let response = call(
++            "/v1/agent/runs/r1",
++            vec![("x-browser-authorization", format!("Bearer {key_session}"))],
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            response.status(),
++            StatusCode::FORBIDDEN,
++            "the broker bearer stays on the key-grant routes"
++        );
++
++        // Without the header the request passes auth with no key session bearer for the handler.
++        let response = call("/v1/agent/runs/r1", Vec::new()).await.unwrap();
++        assert_eq!(response.status(), StatusCode::OK);
++        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
++        assert!(body.is_empty());
++        clear_env();
++    }
++
+     #[tokio::test]
+     async fn authorize_principal_route_admits_a_key_only_on_its_routes_with_its_scope() {
+         async fn ok_handler() -> &'static str {
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index 716875129..b081cdaf4 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -284,6 +284,13 @@ pub fn build_router_with_readiness(
+ /// `require_auth`, `authorize_principal_route` and the rate limiter; a test wraps it in the route
+ /// policy alone, to prove every route here answers to it (INNH-10 MP-3).
+ fn authed_routes() -> Router<AppState> {
++    authed_routes_with(crate::agent_api_routes::enabled())
++}
++
++/// [`authed_routes`] with the Agent API switch passed in (EP-12 S5): its routes are merged only
++/// while it is on, and the route-fence test merges them to prove a key reaches none of them
++/// without the switch and its scope.
++fn authed_routes_with(agent_api: bool) -> Router<AppState> {
+     Router::new()
+         .route("/v1/invoke", post(invoke))
+         // Attachments ride the body as base64, so the 2 MiB default would refuse two
+@@ -491,6 +498,9 @@ fn authed_routes() -> Router<AppState> {
+         // Wave 3 EP-11 S7: /learn, a person's request to distil one of their threads into a skill
+         // proposal. capability-core runs it and answers 404 while LEARN_COMMAND_ENABLED is off.
+         .route("/v1/learning/learn", post(learn_from_thread))
++        // Wave 3 EP-12 S5: the Agent API read and control routes, for API keys only; absent
++        // while MODEL_GATEWAY_AGENT_API is off.
++        .merge(crate::agent_api_routes::router(agent_api))
+ }
+ 
+ /// `/v1/orchestration/*` read + mutation routes. Merged into the auth-gated router.
+@@ -8948,7 +8958,7 @@ fn parse_skill_decision(word: &str) -> Option<mp_contracts::model_plane::v1::Ski
+ /// the rest of the orchestration surface; the SPA client normalizes to
+ /// camelCase. Timestamps are emitted as RFC3339 strings (null when unset) and
+ /// the arbitrary `metadata` Struct is flattened to plain JSON.
+-fn run_detail_value(run: &RunDetail) -> Value {
++pub(crate) fn run_detail_value(run: &RunDetail) -> Value {
+     run_detail_value_with(run, run_origin_field_enabled())
+ }
+ 
+@@ -22161,7 +22171,9 @@ mod api_key_route_fence_tests {
+         let mut state = AppState::new();
+         // On, so the two key routes reach their handler: it answers 401 for the missing key bearer.
+         state.browser_key_grants = Some(true);
+-        let router = authed_routes()
++        // With the Agent API routes merged, so the scan proves a key reaches none of them while
++        // the switch is off (EP-12 S5; this test leaves the environment unset).
++        let router = authed_routes_with(true)
+             .layer(middleware::from_fn(auth::authorize_principal_route))
+             .layer(Extension(key_claims()))
+             .with_state(state);
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/lib.rs b/apps/Model Plane/rust/services/model-gateway/src/lib.rs
+index 295cfd22d..dcc54c3c7 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
+@@ -1,5 +1,6 @@
+ //! model-gateway library crate — exposes modules for integration tests.
+ 
++pub mod agent_api_routes;
+ pub mod approvals;
+ pub mod attachment_policy;
+ pub mod artifact_edit_routes;

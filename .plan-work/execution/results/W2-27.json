@@ -1,0 +1,831 @@
+{
+ "batchId": "W2-27",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS27-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse_events.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\zdr_feature_table.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\sse-event-taxonomy.md",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\apps\\gateway\\src\\domains\\ag_ui.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat\\verevon-ui-events.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat\\verevon-ui-events.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "apps/Model Plane/rust: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "2503 passed, 1 failed, 4 ignored. The one failure is sse_events::payload_contract::sse_event_payload_golden: the committed golden predates the new variant (lead regenerates it, see lead_todo). The rendered golden differs from the committed one only by the new usage_progress event; no existing event changed."
+    },
+    {
+     "command": "same, filter --lib sse_events",
+     "outcome": "33 passed, 1 failed (the same golden test)."
+    },
+    {
+     "command": "same, filters --lib usage_progress / answer_progress / a_recorded_call / the_usage_progress_switch",
+     "outcome": "3, 1, 1 and 1 passed."
+    },
+    {
+     "command": "apps/Model Plane/rust: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test zdr_feature_table --test usage_meter_contract",
+     "outcome": "usage_meter_contract 5 passed; zdr_feature_table 11 passed (includes usage_progress_is_not_streamed_for_a_zdr_turn)."
+    },
+    {
+     "command": "apps/Frontend Plane/verevonv3: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/gateway/Cargo.toml --all-targets -- ag_ui",
+     "outcome": "10 passed, 0 failed, exit 0 (includes a_usage_progress_frame_is_carried_as_a_custom_event_with_its_cursor)."
+    },
+    {
+     "command": "apps/Frontend Plane/verevonv3: pnpm vitest run src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts --pool=forks",
+     "outcome": "2 files, 139 tests, all passed."
+    },
+    {
+     "command": "apps/Frontend Plane/verevonv3: pnpm exec eslint on chat-client.ts, verevon-ui-events.ts and their two test files",
+     "outcome": "clean, exit 0."
+    },
+    {
+     "command": "apps/Frontend Plane/verevonv3: pnpm typecheck (tsc -b)",
+     "outcome": "exit 1 with 23 errors. One is from this slice: src/shared/api/ag-ui-client.ts(127,53) TS2366, caused by the new usage.progress union member (handed back as a shared edit). The other 22 are in quarry-client.ts and schedule-contract.test.ts, both unmodified in git, so they predate this slice."
+    },
+    {
+     "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py (regenerate), then --check",
+     "outcome": "doc rewritten with one new row (usage_progress, family usage); --check: up to date, 28 events, exit 0."
+    },
+    {
+     "command": "node scripts/gen-chat-event-types.mjs --check (apps/Frontend Plane/verevonv3)",
+     "outcome": "matches the golden, exit 0 (the golden was not changed here)."
+    },
+    {
+     "command": "rustfmt --check on sse_events.rs, tool_loop.rs and sse.rs, filtered to this slice's lines",
+     "outcome": "no diff touches a line this slice added; the remaining diffs predate it. Not used as a gate on whole files."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service, directly after the line `      MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}` (about line 371), add a comment line stating that usage_progress frames are off by default and only the literal true enables them, then the line `      MODEL_GATEWAY_USAGE_PROGRESS: ${MODEL_GATEWAY_USAGE_PROGRESS:-false}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts: in toAgUiEvent, insert the line `    case 'usage.progress':` directly above `    case 'lifecycle.retry':` (about line 195) so it joins the existing `return null` group. Without it `tsc -b` reports TS2366 at ag-ui-client.ts(127,53) for the new VerevonUiEvent member.",
+    "Golden regeneration (not owned by this slice; do it after the two shared edits above): (a) `cd apps/Model Plane/rust && MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse_event_payload_golden` rewrites apps/Model Plane/api/contracts/sse-event-payloads.json. The only change is the new usage_progress entry; I checked the rendered output structurally against the committed file. (b) Refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256. (c) Copy the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json and refresh its .sha256. (d) `cd apps/Frontend Plane/verevonv3 && node scripts/gen-chat-event-types.mjs` regenerates src/shared/api/chat-event-payloads.generated.ts. (e) Update the pinned digest for apps/Model Plane/api/contracts/sse-event-payloads.json on line 151 of scripts/tests/zdr-contract-sync.test.sh. That script already has failures that predate this batch (D2-491), so compare its failing set against HEAD rather than trusting its exit code.",
+    "After the golden regeneration: `cargo test -q -p model-gateway --lib sse_events` must be fully green, and `node scripts/gen-chat-event-types.mjs --check` must match the golden.",
+    "Live proof, lead-run (nothing here ran docker, compose or the DB harness): rebuild model-gateway and the Verevon BFF gateway (apps/Frontend Plane/verevonv3/apps/gateway) with bash apps/Model Plane/scripts/compose.sh up -d --no-deps --build <service>. With MODEL_GATEWAY_USAGE_PROGRESS unset, a tool turn's stream must carry no usage_progress frames. With it true, curl -N a tool turn whose features include usage: one usage_progress per provider call, counters rising, the answer's frame immediately before the usage frame with the same totals, and no frame for a client that did not ask for usage.",
+    "Shared worktree: other slices are editing this same checkout right now (execution-core owner_reads.rs and runtime files, apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs, integration-corev2 Go files, the agent-action-admission contracts). Stage only the ten files in files_changed. sse.rs and tool_loop.rs are hot files for other lanes, so land this slice's add-only hunks after theirs or rebase them."
+   ],
+   "deviations": [
+    "The plan asks for a usage.progress member in VerevonUiEvent, which makes ag-ui-client.ts's exhaustive toAgUiEvent switch fail tsc (TS2366); the one-line case is handed back in lead_todo rather than edited, because that file is not owned.",
+    "Judge and resample overhead calls in sse.rs also stream a progress frame each (through tool_loop::stream_call_usage), beyond the tool-round and artifact-check sites the row names; this follows the row's 'once per provider call' wording.",
+    "The answer's progress frame is emitted in sse.rs through emit_and_buffer from the turn total, not through RichEventSink::record_call, so the last progress frame equals the usage frame by construction; the sink meter covers only the calls recorded before the answer.",
+    "run_infer_fallback also emits the answer's progress frame, reading MODEL_GATEWAY_USAGE_PROGRESS through usage_progress_switch() because that path has no sink.",
+    "The progress payload has no request_id, following the row's closed key list.",
+    "A mixed-basis sample (usage_progress(4, Some(0.25), None, 0)) was added to the payload samples so the golden marks cost_basis and unpriced_calls optional; the row did not mention it, and the sample list is the source the golden is rendered from."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (shared-edit, see lead_todo)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts (one case line, see lead_todo)",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json (golden regeneration, see lead_todo)",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 (pin refresh)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json (SPA vendored copy)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256 (pin refresh)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts (generator output)",
+    "scripts/tests/zdr-contract-sync.test.sh (pinned digest on line 151)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Apply the ag-ui-client.ts shared edit before committing: add `case 'usage.progress':` to the `return null` group in toAgUiEvent. I re-ran `pnpm typecheck` and the slice adds exactly one new error, TS2366 at src/shared/api/ag-ui-client.ts(127,53). The other 22 errors are in quarry-client.ts and schedule-contract.test.ts and were already there. The SPA does not typecheck until this edit lands.",
+     "Regenerate the SSE payload golden (MP_UPDATE_GOLDEN=1 ... sse_event_payload_golden), then refresh its .sha256, the SPA vendored copy and its .sha256, chat-event-payloads.generated.ts (gen-chat-event-types.mjs) and the pinned digest in scripts/tests/zdr-contract-sync.test.sh. I compared the committed golden with the rendered one as JSON: the only difference is the new `usage_progress` event (family usage; calls, phase, the four token keys and cost_usd [null|number] always present; cost_basis and unpriced_calls optional). Until then `cargo test -p model-gateway --lib sse_events` reports 33 passed, 1 failed.",
+     "Apply the docker-compose.yml shared edit: `MODEL_GATEWAY_USAGE_PROGRESS: ${MODEL_GATEWAY_USAGE_PROGRESS:-false}` in the model-gateway service.",
+     "Live proof (lead-run, docker): rebuild model-gateway and the BFF gateway. With the switch unset, a tool turn's stream must carry no usage_progress frames. With it set to true, curl -N a tool turn: one usage_progress per provider call, monotonic counters, the answer's frame immediately before the usage frame with the same totals, and no frames for a client that did not ask for usage.",
+     "Stage only this slice's files. sse.rs and tool_loop.rs are hot files shared with other lanes in the same worktree."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "stream_call_usage prices each call with state.pricing.priced(), which runs ensure_fresh() per call; with a cold or unreachable cost-core every provider call while the flag is on can wait on a catalogue fetch up to FETCH_TIMEOUT, where the turn-end snapshot did it once. Fix before the flag goes on: take one pricing.snapshot() per turn and price from it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Each usage.progress projection goes through onUiEvent, which use-chat-controller appends to uiEvents, and the trace and work feed render every event and count them; once the flag is on, each provider call adds a trace row, so S4 must filter progress out of the trace before the flag is switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No handler-level test proves that the last usage_progress frame equals the terminal usage totals and precedes it; coverage is one source-order guard plus the sink unit tests, so the live SSE transcript with the flag on is still owed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The answer's progress frame states the end-of-turn total priced from one RateSnapshot while tool-round frames are priced per call, so a catalogue refresh mid-turn can make the last progress total differ from the usage frame; the usage frame stays the authority by design, and the live run should measure the gap."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows that a switched-off sink never reads the catalogue (stream_call_usage returns before pricing); add a counting wiremock on /api/v1/pricing to lock that in."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Judge and resample verification calls (judge_sources and resample_answer in sse.rs) also stream usage_progress frames because the row asks for one per provider call; the owner should confirm progress frames for verification calls are wanted."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The fallback answer path (run_infer_fallback) reads the switch itself rather than from the sink, so one turn has two readers of the same switch; pass the sink's flag or one value per turn."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Progress frames ride the sink's resume buffer under the existing sync_cursor stretches, and no test covers a reconnect during the tool phase replaying them in order."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The SPA native usage_progress case reads Record<string, unknown> because the generated payload types lack the key until the golden is regenerated; switch it to ChatEventPayloads['usage_progress'] then, as the usage case does."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The progress payload carries no request_id (the closed key list), so a consumer correlates by stream only; confirm that is enough for S4's meter."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "tool_loop::stream_call_usage calls state.pricing.priced() once per provider call (ensure_fresh each time), so with the switch on and cost-core cold or unreachable, each call can wait up to the catalogue fetch timeout. Price from one per-turn snapshot before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The SPA now projects usage.progress through PROJECTABLE_CUSTOM_NAMES and onUiEvent, so each provider call will add a trace or work-feed row once the switch is on. S4 must filter progress events out of the trace before the flip."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Only a source-order guard (the_answer_progress_frame_precedes_the_usage_frame_with_the_turn_total) proves that the last progress frame precedes and equals the terminal usage frame. No handler-level stream test checks it, so the live SSE transcript is still owed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Tool-round and overhead frames are priced per call against the live catalogue, while the answer frame states turn_usage's single-snapshot total. A catalogue refresh mid-turn can therefore make cost_usd non-monotonic or jump at the answer frame."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "run_infer_fallback reads usage_progress_switch() itself instead of the sink's flag, so one turn reads the switch twice. Toggling the env mid-turn can give tool-round frames without an answer frame, or the reverse."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test proves that a switched-off sink never reads the pricing catalogue (the early return in stream_call_usage). A counting mock on /api/v1/pricing would lock that in."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers reconnect or resume replay of progress frames buffered through the sink's resume buffer during the tool phase."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Judge (judge_sources) and resample (resample_answer) verification calls also stream progress frames. This goes beyond the row's named sites but follows its 'once per provider call' wording, so the owner should confirm it is wanted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "After the golden is regenerated, switch the SPA's native usage_progress parsing from a Record<string, unknown> read to ChatEventPayloads['usage_progress'], as the usage case does."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The progress payload has no request_id (closed key list). S4's meter must correlate by stream; confirm that is enough."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib sse_events",
+      "outcome": "33 passed, 1 failed: sse_events::payload_contract::sse_event_payload_golden (committed golden sse-event-payloads.json lacks the new usage_progress event; the lead must regenerate it).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test zdr_feature_table",
+      "outcome": "11 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "python3 scripts/gen-sse-event-taxonomy.py --check",
+      "outcome": "sse taxonomy up to date (28 events), exit 0.",
+      "passed": true
+     },
+     {
+      "command": "pnpm vitest run chat-client.test.ts verevon-ui-events.test.ts --pool=threads",
+      "outcome": "2 files, 139 tests, all passed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (verevonv3)",
+      "outcome": "768 passed, 0 failed, 1 ignored (lib); other targets 7, 3 and 1 passed; exit 0. This compiles the gateway crate with the ag_ui.rs change.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Built the usage_progress frame end to end behind MODEL_GATEWAY_USAGE_PROGRESS (default off; only the literal true enables it). RichEventSink gains with_usage_progress, streams_usage_progress and record_call (sink meter plus an emit through the usage family gate). Tool rounds, artifact-check overhead, judge and resample calls stream through tool_loop::stream_call_usage, which prices only when the switch is on, so a switched-off turn adds no catalogue read and emits nothing new. The answer's progress frame (invoke path and fallback) goes just before the usage frame and states the same turn total. Payload keys: calls, phase, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd (null when unknown or subscription), cost_basis (omitted when mixed), unpriced_calls (omitted at zero). The BFF maps usage_progress into the CUSTOM allowlist, and the SPA parses it natively and via AG-UI CUSTOM into onUsageProgress and usage.progress. The ZDR branch returns before the sink exists, and a source guard plus a ZDR table test assert it. The taxonomy doc is regenerated (28 events, one new row). Golden: sse_event_payload_golden fails until the lead regenerates it (see lead_todo); its rendered output differs only by the new event. Partial because of the ag-ui-client.ts line, the golden regeneration, the compose passthrough and the live proof, all lead steps. Nothing here ran docker, compose or the DB harness, and no secrets were read. CARGO_TARGET_DIR was C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0 on every cargo command."
+  },
+  {
+   "id": "WS23-S7.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Ingestion Plane/integration-corev2/internal/actions/mail_read.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Ingestion Plane/integration-corev2/internal/actions/mail_read_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Ingestion Plane/integration-corev2/internal/actions/drive_read_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Ingestion Plane/integration-corev2' && go test ./internal/actions/...",
+     "outcome": "ok github.com/triodelab/integration-corev2/internal/actions 7.844s (final run, after every Go edit)"
+    },
+    {
+     "command": "go vet ./internal/actions/",
+     "outcome": "no findings"
+    },
+    {
+     "command": "go test ./internal/actions/ -run 'TestReadSources|TestMailReadOutlookDoesNotHandOutANextLinkItWouldRefuse' -v",
+     "outcome": "PASS: 22 listing subtests of TestReadSourcesListEnvelopeIsTheSameAcrossProviders, both subtests of TestReadSourcesContentEnvelopeIsTheSameAcrossProviders, and TestMailReadOutlookDoesNotHandOutANextLinkItWouldRefuse"
+    },
+    {
+     "command": "gofmt -d on LF-normalised copies of mail_read.go, mail_read_test.go and drive_read_test.go",
+     "outcome": "no differences (working copy is CRLF because core.autocrlf=true; line endings kept)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/provider_reads.rs and apps/Model Plane/rust/services/execution-core/src/integration_tools.rs: in shape_read set more_available to next_page_token.is_some() || result.get(\"moreAvailable\").and_then(Value::as_bool) == Some(true) (provider_reads.rs:335, integration_tools.rs:982). Update the Rust tests that assume the old value.",
+    "shared-edit the same two Rust files, shape_file_content (provider_reads.rs:342-365, integration_tools.rs:989-1013): read mime_type (fallback mimeType) and base64-decode content_base64 (STANDARD) instead of content, with the existing UTF-8 and text/* rule. The executor returns content_base64 and mime_type for drive.file.content on both providers (drive_read.go:229 and :555). Update a_binary_file_is_unsupported_not_a_blob and the shaping tests that use content.",
+    "shared-edit the same two Rust files, read_fields (provider_reads.rs ~397-440, integration_tools.rs ~1044-1090): calendar.events add summary and htmlLink (Google rows); sharepoint.sites add displayName and keep name; profile add name (Google userinfo); mail.messages and gmail.messages add bodyPreview and date; drive.files and sharepoint.drives add folder, and shape_item reads file.mimeType into mimeType.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/integration_tools.rs: replace the private shape_read, shape_file_content, shape_item and read_fields copy (~lines 792-1090) with calls into mp_contracts::provider_reads, so the Do and Ask loops cannot drift.",
+    "shared-edit apps/Ingestion Plane/integration-corev2/README.md: in the Outlook paragraph, after the sentence that ends with the Graph host under /v1.0/me/, add: A link that is refused gives moreAvailable: true and no token.",
+    "Live proof, lead or owner, not run here, after the Rust items above: rebuild integration-corev2 from this worktree with its deploy recipe; the owner connects the OD12 dedicated Microsoft 365 and Gmail accounts (DEC-27 consent); then one Do run and one Ask turn per source and provider on the delegated user token, checking tool_call and tool_result, the session-core step row (counts only), the audit row with data_category personal, and the SSE connector citations. Keep the redacted responses as fixtures and add a dated row to CHAT_GAP plan section 0."
+   ],
+   "deviations": [
+    "calendar_read.go, calendar_read_test.go and drive_read.go are unchanged: no code-only helper fix was found there.",
+    "The cross-source envelope tests are in drive_read_test.go rather than a new file, because the slice names no new files.",
+    "moreAvailable beside a replayable token is set by the calendar listing and pinned by its own tests, so that convention was not changed; the mail change follows the file listing's refused-link rule.",
+    "The Rust shaping fixes were not applied: they are in files this slice does not own (see needs_other_files)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/provider_reads.rs (shape_read more_available ~line 335, shape_file_content ~342-365, read_fields ~397-440)",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs (private copy of the same shaping, ~lines 792-1090; more_available line 982, shape_file_content 989-1013, read_fields 1044-1090)",
+    "apps/Ingestion Plane/integration-corev2/README.md (Outlook paragraph: one sentence for a refused next link)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof for F2 to F4: rebuild integration-corev2 from this worktree, the owner connects the OD12 dedicated Microsoft 365 and Gmail accounts (DEC-27 consent), then one Do run and one Ask turn per source and provider on the delegated user token, checking tool_call/tool_result, the session-core step row, the audit row (data_category personal) and the SSE connector citations. Redacted fixtures and a dated CHAT_GAP section 0 row follow from that run.",
+     "The Rust shaping fixes in mp-contracts provider_reads.rs and execution-core integration_tools.rs (content_base64/mime_type, calendar summary/htmlLink, sharepoint displayName, more_available from moreAvailable) are outside this slice's files and must land before the live proof can pass.",
+     "Shared-edit for apps/Ingestion Plane/integration-corev2/README.md (Outlook paragraph: a refused link gives moreAvailable: true and no token) is handed back to the lead."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Agent shaping reads content and mimeType for drive.file.content, but the executor returns content_base64 and mime_type on both providers, so every connector file read comes back unsupported_content (integration_tools.rs:989-1013, provider_reads.rs:342-365)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Google calendar rows carry summary and htmlLink, which the calendar.events field list does not keep, so Google events reach the model without a title or link (integration_tools.rs ~1063, provider_reads.rs ~416)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "SharePoint site rows carry displayName, but sharepoint.sites keeps only name, so sites reach the model nameless (integration_tools.rs:1081, provider_reads.rs:434)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live rows for F2 to F4 stay open: the four sources on both providers need a Do run and an Ask turn on the delegated user token (OD12 accounts, owner consent), and the header items (KQL date terms, %2F search, %2C and %21 ids, $orderby on calendarView, corpora=drive) are answerable only by that run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The agent derives more_available from nextPageToken alone (integration_tools.rs:982, provider_reads.rs:335), so the executor's moreAvailable for a refused link never reaches the model, which reads the list as ended."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "execution-core keeps a private copy of the shaping (integration_tools.rs ~792-1090) that already lacks fixes provider_reads.rs has, so the Do and Ask loops drift apart; route it through mp_contracts::provider_reads."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shares a fixture between the Go executor and the Rust shaping, so the cross-language field names are checked only by reading; the redacted live fixtures should feed both sides."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Listed mail loses its preview and date: Graph bodyPreview and Gmail date are not in the mail field lists, so the model cannot say when mail arrived or what it says without a per-message get."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Graph drive rows put the mime type under file and mark folders with a folder facet, and drive.files reads neither, so a OneDrive or SharePoint listing cannot tell folders from files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The mail $search path sends received<=until while the $filter path uses lt until+1; whether KQL covers the whole until day is unverified, so the live proof must include mail received late on that day."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Gmail list rows carry only ids unless the model passes headers=true, and the read tool description does not say so, so an Ask or Do turn can list mail it cannot name."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Shaping drops the calendar window the executor states (window, timeZone) and the Google profile name, so the model cannot tell which dates a read covered or whose account it is."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Agent shaping for drive.file.content reads content and mimeType while the executor returns content_base64 and mime_type on both providers (pinned now by TestReadSourcesContentEnvelopeIsTheSameAcrossProviders), so every connector file read reaches the model as unsupported content until provider_reads.rs and integration_tools.rs are fixed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Google calendar rows (summary, htmlLink) and SharePoint site rows (displayName) are dropped by the Rust read_fields lists, so those rows reach the model without a title; must close before the live proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The new Outlook mail moreAvailable flag is not consumed by the agent, which derives more_available from nextPageToken alone, so a refused next link still reads as the end of the list on the model side."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "execution-core integration_tools.rs keeps a private copy of the provider-read shaping that has already drifted from mp_contracts::provider_reads; route it through the shared crate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new envelope tests are Go-only; no fixture is shared between the Go executor and the Rust shaping, so cross-language field names stay unchecked by any test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Gmail and Google Drive envelope cases have no refused-next-page variant (Google tokens are passed through), so the uniform moreAvailable rule is only proven on Graph listings and the Google calendar."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cd 'apps/Ingestion Plane/integration-corev2' && go test -count=1 ./internal/actions/...",
+      "outcome": "ok github.com/triodelab/integration-corev2/internal/actions 15.666s (uncached)",
+      "passed": true
+     },
+     {
+      "command": "go test -count=1 -run 'TestReadSources|TestMailReadOutlookDoesNotHandOutANextLinkItWouldRefuse' -v ./internal/actions/",
+      "outcome": "27 PASS lines (top-level and subtests), no FAIL",
+      "passed": true
+     },
+     {
+      "command": "go vet ./internal/actions/",
+      "outcome": "no findings",
+      "passed": true
+     },
+     {
+      "command": "go build ./... (integration-corev2)",
+      "outcome": "compiles clean",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "auth",
+    "audit"
+   ],
+   "notes": "Code half of the four connector read sources (mail, calendar, drive, SharePoint listing) in integration-corev2. Existing suites already pinned request shapes, so the new tests pin the result envelope the agent and picker read: 8 listings on both providers, each as a last page (no token, no moreAvailable), a replayable next page (token), and where the link can be refused a refused next page (moreAvailable, no token); plus the binary content keys on both providers. One code fix: a refused Outlook mail next link now reports moreAvailable as the file listing does, and its refusal test asserts it. No live run, no fixture capture, no switch added. Helpers in calendar_read.go, drive_read.go and their tests had no code-only fix; their live-only items stay in their file headers. CHAT_GAP plan section 0 has a dated code-half paragraph and records no live result. Open: the live DoD for F2 to F4, and four agent-side shaping gaps in Rust (lead_todo) that make the live proof fail for drive content and Google calendar titles."
+  },
+  {
+   "id": "WS24-S8",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\owner_reads.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\capability_policy.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\agent_action_admission_contract.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\model-access.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\contracts\\agent-action-admission.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\agent-action-admission.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\agent-action-admission.json.sha256",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\api\\testdata\\agent-action-admission.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\fixtures\\agent-action-admission.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\fixtures\\agent-action-admission.json"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib owner_reads",
+     "outcome": "8 passed, 0 failed, exit 0 (the row's test command)"
+    },
+    {
+     "command": "same, --lib the_owner_document_listing_is_never_offered_to_a_retention_bound_run",
+     "outcome": "1 passed, 0 failed"
+    },
+    {
+     "command": "same, --test agent_action_admission_contract",
+     "outcome": "6 passed, 0 failed (the S5 contract test plus two new do-binding checks)"
+    },
+    {
+     "command": "same, --lib (full execution-core lib, final code)",
+     "outcome": "1510 passed, 0 failed, exit 0 in 304 s. Warnings from the non-test lib build are in files not touched: capability_policy.rs:340 unreachable else; unused verification_result_for, execute_step_with_subagent, decision_closer"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && VEREVON_UPDATE_GOLDEN=1 pnpm vitest run src/shared/actions/admission-contract.test.ts",
+     "outcome": "5 passed; regenerated the contract. The only diff is knowledge.list_documents executor gaining do"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/shared/actions",
+     "outcome": "12 files, 157 tests passed"
+    },
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm typecheck",
+     "outcome": "exit 1 with 23 errors, all in src/shared/api/quarry-client.ts, ag-ui-client.ts and schedule-contract.test.ts. None in model-access.ts or the admission test (not touched by this slice)"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "85 passed, 23 not ok. One is this slice: line 157 still pins the old digest (see lead_todo). The other 22 are in goldens this slice does not touch (Quarry cross-plane token requests, rerank-v1 goldens missing, usage-envelopes pin). The four vendored copies are byte-identical"
+    },
+    {
+     "command": "not run: model-gateway every_ask_read_in_the_admission_contract... and Go tests",
+     "outcome": "not executed. Reasoned unaffected: the gateway test reads only executor.ask, and no Go code names the testdata copy"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/lib.rs: after line 52 (`pub mod owner_actions;`) add `pub mod owner_reads;`. Then in runtime_loop/mod.rs delete the `// WS24-S8` comment and the `#[path = \"../owner_reads.rs\"]` line, rename `crate::runtime_loop::owner_reads` to `crate::owner_reads` in runtime_loop/mod.rs and runtime_loop/agent.rs, and rename `execution_core::runtime_loop::owner_reads` to `execution_core::owner_reads` in tests/agent_action_admission_contract.rs. Precedent: scheduled_agent in the same file.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: line 157, replace `68ff49dcbdc79c38afe7a8ba16b7540e581cff169e92ce0a37191968ee400fc2` with `6169af41d89cf10519d11c0885e1b694fa2a71b84ed7093031988a0eb0766f9b`. Until this is applied the sync check reports one not-ok (the pinned digest).",
+    "Decide before the flag leaves the proof stack: either the switch alone gates knowledge.list_documents (record that in the ledger), or capability-core seeds a row (new migration; next free capability-core number is 0026) and exec-core reads its status through a seam. This is the open row-enabled condition.",
+    "Live proof, not run here: rebuild execution-core, set MODEL_ACTION_ADMISSION=table on the proof stack, and run a Do-mode chat 'list the documents of type policy'. Capture the offered tool list, SSE tool_call/tool_result, the EvaluatePolicy evidence for cap.retrieval.query, and a Data Plane access-log line showing the delegated user. Confirm ListDocuments accepts the forwarded bearer exactly as the gateway's retrieval authorize step does; the plan leaves this undetermined.",
+    "Staging: commit only the 12 files of this slice. The worktree holds other batches' uncommitted changes (sse.rs, sse_events.rs, tool_loop.rs, ag_ui.rs, browser.rs, chat-client, CHAT_GAP plan, integration-corev2 mail/drive reads)."
+   ],
+   "deviations": [
+    "Row-enabled condition not implemented. The offer is MODEL_ACTION_ADMISSION=table plus not retention-bound, not the per-row enabled status. exec-core has no read to that status, and migration 0022 seeds no knowledge.list_documents row.",
+    "Module declared in runtime_loop/mod.rs with #[path = \"../owner_reads.rs\"] (WS20 precedent in the same file), because lib.rs is outside this slice's files.",
+    "The read's pin is constants in owner_reads.rs, not an OWNER_ACTION_PINS entry. owner_actions.rs is outside this slice's files, and its name-as-action-id shape cannot carry knowledge_list_documents against the action id knowledge.list_documents.",
+    "Refused on waived routes as well as under ZDR, which is stricter than the plan's 'not ZDR'.",
+    "Do-side schema: limit 1-25 and deny_unknown_fields. The Ask-loop schema stays limit 1-100 with output capped at 25.",
+    "trusted_capability_id binds the name unconditionally (WS24-S3 precedent). With the switch off, the offered set and every successful path are unchanged. Only a forged or unoffered call named knowledge_list_documents differs: it now fails at the dispatch refusal instead of 'no governed capability binding'."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs (one line, see lead_todo)",
+    "scripts/tests/zdr-contract-sync.test.sh (line 157 digest, see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Shared edit to lib.rs: declare `pub mod owner_reads;` there, then drop the `#[path = \"../owner_reads.rs\"]` declaration in runtime_loop/mod.rs and rename the paths, as the implementer's lead_todo describes.",
+     "Shared edit to scripts/tests/zdr-contract-sync.test.sh line 157: change the pinned digest 68ff49dc... to 6169af41d89cf10519d11c0885e1b694fa2a71b84ed7093031988a0eb0766f9b. Until then the sync check reports one not-ok for this slice.",
+     "Decide how the per-row status='enabled' condition (or the OWNER_ACTION_PINS path) is met. Today the switch alone gates the offer.",
+     "Live proof on rebuilt images with MODEL_ACTION_ADMISSION=table. Run a Do chat 'list the documents of type policy' and capture: the offered tool list, SSE tool_call/tool_result, the EvaluatePolicy evidence for cap.retrieval.query, and the Data Plane access log showing the delegated user. Also check that a second user sees filtered rows, and that ListDocuments accepts exec-core's forwarded bearer.",
+     "Golden row owner_reads_under_zdr_not_offered in zdr-posture-matrix.json, which belongs to WS24-S9.",
+     "Staging: commit only the 12 owned files. The worktree holds other batches' uncommitted changes."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The admission row's enabled status is not consulted at offer time. The read is offered whenever MODEL_ACTION_ADMISSION=table and the run is not retention-bound, so the S6 row status cannot switch it off. This must be decided before the flag leaves the proof stack."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Waived routes are refused like ZDR (zdr already folds in the waiver), which is stricter than the plan's 'not ZDR'. The owner may allow a listing on a waived route, since it is the org's own inventory."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test sets MODEL_ACTION_ADMISSION=table, so the switch-on offer is covered only by the pure permitted() tests, the wire round trip and the live proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Delegated subagents inherit the parent's toolset, so a child may be offered this read with the parent's bearer. Not verified; confirm whether children should get it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A run offered the read is not derivable and cannot park, because the tool is appended after the base set, as the workspace tools are. Confirm this is acceptable when the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's golden row owner_reads_under_zdr_not_offered is not in zdr-posture-matrix.json. That row belongs to WS24-S9 and is outside this slice's files; the retention behaviour is covered by a Rust test in agent.rs instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "ListDocumentsRequest has no field mask, so Data Plane returns each document's content over gRPC for up to 25 rows before the projection drops it. This is a bandwidth cost only; the content never reaches the model."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Do tool description duplicates the Ask-loop description text; move both to one constant when either schema is next touched."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The plan's offer condition is 'MODEL_ACTION_ADMISSION=table + per-row status=enabled' (or OWNER_ACTION_PINS). Only the switch and the not-retention-bound check are implemented, so the S6 admission row cannot switch the read off. This must be closed before the switch is turned on outside the proof stack."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Waived routes are refused like ZDR runs: offer and dispatch both use zdr||waived. This is stricter than the plan's 'not ZDR'. The owner should confirm it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test exercises merged_tool_defs with MODEL_ACTION_ADMISSION=table to show the tool is offered when the switch is on. Only permitted() and the ZDR-off case are covered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Delegated subagents inherit the parent's toolset and bearer, so a child run may be offered this read. Confirm that is intended."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The tool is appended after the base set, so a run offered it is not derivable and cannot park. Accept this explicitly before the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Not re-run: the full execution-core lib, model-gateway every_ask_read, and the Go tests. Grep shows no Go code names the testdata copy, and the change only adds an executor.do field."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "ListDocumentsRequest has no field mask, so Data Plane sends up to 25 documents' full content over gRPC before the projection drops it. This costs bandwidth only; the content never reaches the model."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The DESCRIPTION text is duplicated between the Ask-loop and Do-loop schemas. Move it to one shared constant."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p execution-core --lib owner_reads (target C:/dev/mp-target-w2)",
+      "outcome": "8 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib the_owner_document_listing",
+      "outcome": "1 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test agent_action_admission_contract",
+      "outcome": "6 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p execution-core --all-targets",
+      "outcome": "Finished with no errors (only dead-code warnings in untouched files such as resume.rs)",
+      "passed": true
+     },
+     {
+      "command": "pnpm vitest run --pool=threads src/shared/actions (verevonv3)",
+      "outcome": "12 files, 157 tests passed",
+      "passed": true
+     },
+     {
+      "command": "pnpm typecheck (filtered to model-access / admission files)",
+      "outcome": "no TS errors in model-access.ts or the admission contract test; the implementer reported 23 other errors in untouched files (quarry-client, ag-ui-client, schedule-contract.test), which I did not re-count",
+      "passed": true
+     },
+     {
+      "command": "sha256 of Model Plane api/contracts/agent-action-admission.json vs its .sha256",
+      "outcome": "match (6169af41...)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "policy"
+   ],
+   "notes": "Built: owner_reads.rs runs knowledge_list_documents as a Do tool through DocumentService.ListDocuments on the run's delegated bearer, the run's org, 1-25 rows, five fields, no content, titles cut at 180 characters. It is offered from merged_tool_defs_governed only when MODEL_ACTION_ADMISSION=table and zdr is false (zdr already folds in the waiver). execute_step_inner refuses it before the capability gate and dispatches it otherwise. trusted_capability_id binds it to cap.retrieval.query, and data_category classes it customer_private. The FE model-access row gains its do executor, the contract is regenerated and byte-identical in all five copies, and the pin is refreshed (6169af41...). Status is partial because the spec's 'admission row is enabled' condition is not implemented (depth P1), and two edits belong to the lead. The worktree also holds other batches' uncommitted changes (sse, tool_loop, chat-client, browser, CHAT_GAP plan, integration-corev2 reads); commit only the 12 files above."
+  },
+  {
+   "id": "WS21-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --bin verevon-gateway-rs domains::browser::tests::",
+     "outcome": "73 passed, 0 failed, 0 ignored. Includes the 8 slice tests: three handler tests with wiremock upstreams (real grant, zero-retention, switch off), a no-host refusal, a refused-grant pass-through, the strict switch parser, the host policy, and the issued-grant request shape. The four existing build_ai_run_request tests moved to the new signature and pass."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets --no-fail-fast (the test_commands entry)",
+     "outcome": "exit 0. Bin unit tests 768 passed, 0 failed, 1 ignored. Integration targets 7, 3 and 1 passed, 0 failed."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on browser.rs (read-only)",
+     "outcome": "exit 0, clean. It was clean before the edit; the five hunks the first pass found were fixed by hand."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clippy --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets -- -D warnings (CI gate, run for information)",
+     "outcome": "exit 101 with 14 errors, none in browser.rs (zero clippy lines). They sit in src/domains/chat/history.rs:723, src/domains/mail_task.rs:34-46, src/domains/spaces.rs:654 and src/domains/chat/streams.rs:388 (test target). Those four files have an empty diff against HEAD in this worktree, so the gate was already red before this slice."
+    },
+    {
+     "command": "model-gateway cargo tests (not run)",
+     "outcome": "Not run: browser_run.rs is unchanged in this slice. Playwright specs browser-workspace-hitl.spec.ts and browser-workspace-session.spec.ts were not run; they need the rebuilt stack."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml: in the gateway service, directly after the line '      BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}' (file line 141), insert these three lines with the same 6-space indentation: a comment '# WS21-S7: a workspace AI run starts under a real broker grant and carries the browser bearer. Off by default; only the literal true. Keep it off until Quarry accepts broker grants and the broker site policy is shadow or enforce.' then 'BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false}'. Compose is not in this slice's file list, so the default is also off in code without it.",
+    "Do not switch BROWSER_AI_RUN_REAL_GRANT on for any stack until depth findings 1, 3 and 4 are closed.",
+    "Live proof, after quarryv2 merges (lead-run, not done here): rebuild the verevon gateway image from the worktree. On a dev stack set BROWSER_AI_RUN_REAL_GRANT=true and BROWSER_BROKER_SITE_POLICY=shadow, run browser-workspace-hitl.spec.ts and browser-workspace-session.spec.ts, and record a workspace AI run starting under the issued grant. Also check that a host the org policy denies is refused at grant time. No model-gateway rebuild is needed for this slice.",
+    "CI: the verevonv3 gateway clippy gate (cargo clippy --all-targets -- -D warnings) is red at HEAD because of src/domains/chat/history.rs:723, mail_task.rs:34-46, spaces.rs:654 and chat/streams.rs:388. This slice does not cause it; route those to their owners.",
+    "Plan drift: correct the WS21.json S7 needs_external note and BUILT STATUS note, which say the model-gateway /v1/browser/grants route and the broker sitepolicy package are absent. Both exist (browser_grants.rs wired at http_routes.rs:320; broker commit 76e1b9fd3). The S7 row should name browser_grants.rs as the issuance route."
+   ],
+   "deviations": [
+    "Bearer source: the plan says the bearer goes through browser_token. Its gate (BROWSER_DO_ENABLED, an agentic chat body, not Space, not ZDR) cannot hold for a workspace run, so the run calls require_model_service_token for aud=browser-broker under BROWSER_AI_RUN_REAL_GRANT alone. Zero retention still never mints.",
+    "Grant source: the grant comes from model-gateway's existing POST /v1/browser/grants (browser_grants.rs, which wraps the broker AcquireGrant), not from a Quarry issuance endpoint. Quarry only has to accept the grant on its run path.",
+    "Run call: for the run request the shared proxy_model_json_with_data_plane is replaced by a local proxy_model_json_with_browser, because the shared helper has no browser slot and chat/shared.rs is not in this slice. With the switch off the headers and body are the same as before.",
+    "Run policy: the run starts with the host list the broker issued (returned by the grant route), not the request's list, so a narrower site-policy answer is honoured. The request's list is used only when the grant names no hosts.",
+    "Host default: when the request names no hosts, the grant covers the host of the current page. The plan is silent on this; see depth finding 2.",
+    "browser_run.rs is unchanged. The row says nothing beyond its ZDR helper, and the zero-retention gap is depth finding 1."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Shared edit to apps/Frontend Plane/verevonv3/docker-compose.yml (add BROWSER_AI_RUN_REAL_GRANT: ${BROWSER_AI_RUN_REAL_GRANT:-false} after BROWSER_DO_ENABLED) is still pending. The code default is already off.",
+     "Live proof after quarryv2 merges: Quarry must accept the broker session and derived run grant ids, and a workspace AI run must start under an issued grant on a rebuilt gateway with BROWSER_AI_RUN_REAL_GRANT=true and BROWSER_BROKER_SITE_POLICY=shadow (browser-workspace-hitl.spec.ts and browser-workspace-session.spec.ts).",
+     "The verevonv3 gateway clippy -D warnings gate is red at HEAD in history.rs, mail_task.rs, spaces.rs and chat/streams.rs. These files are unchanged in this slice and browser.rs is clean."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under zero retention a workspace AI run gets a bare 401 instead of the typed feature_not_supported browser_run refusal: model-gateway browser_run_start extracts VerifiedBrowserBearer before its ZDR check, the BFF sends no browser bearer under ZDR, and the BFF then reports the 401 as 'Quarry browser session is not available'. Fix before the switch goes on, by refusing ZDR before the bearer extractor in browser_run.rs or by refusing in the BFF."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner to confirm the host policy for a run that names no hosts: the only SPA caller (KnowledgeComposer.tsx startBrowserAiRun) sends goal and maxSteps only, so the BFF grants the current page host alone, and an explicit host list that omits that page fails at derive with 'start_url is outside the broker grant policy'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The org site policy narrows a grant only when the broker runs with BROWSER_BROKER_SITE_POLICY shadow or enforce. The default is off (ParseMode of empty is off, go/services/browser-broker/internal/sitepolicy/client.go) and the Model Plane deploy compose sets no value, so the BFF switch must not go on before the broker mode is set, in the S10 order."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before the switch goes on, Quarry (quarryv2, not on model-plane) must accept the broker-issued session and derived run grant ids on its run path, and the lead must prove a workspace AI run on a rebuilt stack with browser-workspace-hitl.spec.ts and browser-workspace-session.spec.ts. Neither was run here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A run that fails after its session grant is issued leaves that grant live until the broker TTL, because the BFF never calls model-gateway DELETE /v1/browser/grants/:grant_id (browser_grants.rs) when a run start fails. Model-gateway already revokes its own derived run grants on failure."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The plan says the workspace run forwards the bearer 'through browser_token', but that gate needs BROWSER_DO_ENABLED and an agentic chat body, so this slice mints aud=browser-broker through require_model_service_token under BROWSER_AI_RUN_REAL_GRANT alone. Owner to confirm that no second switch is wanted."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Workspace runs carry no Space scope and WS21-S8's browser_entitled floor does not gate them. That is safe only while browser sessions are never Space-scoped, which browser.rs does not do today; keep it that way or add the floor before any Space-scoped browser session exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every workspace run creates a new broker session grant (session_key ui-<ulid>), so repeated runs can reach the per-parent cap and return too_many_browser_grants (429) until TTLs release them. Measure before default-on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "proxy_model_json_with_browser repeats the header set of chat/shared.rs proxy_model_json_with_delegations, because the shared helper has no browser slot and shared.rs is not in this slice. Fold the slot into the shared helper when that file is next edited."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "forward_quarry_failure answers any model-gateway failure without an error key with 'Quarry browser session is not available', which misreports the grant and run routes now that they are model-gateway calls. A model-gateway-specific message would fix it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test reaches a typed zero-retention refusal from the workspace run. Add one together with the fix for depth finding 1."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The error branches of issue_ai_run_grant are untested: a 201 with no grant_id (502 browser_grant_invalid) and an unreadable allowed_domains list (502)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Plan and extraction drift: WS21.json says the model-gateway POST /v1/browser/grants route and the broker sitepolicy package are absent, but both exist (browser_grants.rs wired at http_routes.rs:320; broker commit 76e1b9fd3). The S7 row should name browser_grants.rs as the issuance route."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "When the switch is on, a zero-retention workspace run still sends the session:{id} string and no browser bearer, so model-gateway browser_run_start returns a bare 401 from its VerifiedBrowserBearer extractor, not a typed feature_not_supported refusal. forward_quarry_failure then shows that 401 as 'Quarry browser session is not available'. Fix this in browser_run.rs or in the BFF before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The org site policy narrows the issued grant only when the broker runs with BROWSER_BROKER_SITE_POLICY set to shadow or enforce, and that defaults to off. BROWSER_AI_RUN_REAL_GRANT must not go on before the broker mode is set."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner to confirm the host default. If the request names no hosts, the grant covers only the current page host. If the request names hosts that leave out the current page, model-gateway refuses the run at derive with start_url outside the grant policy."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "If a run fails to start after issue_ai_run_grant succeeded, the session grant stays live until the broker TTL. The BFF never calls DELETE /v1/browser/grants/:grant_id, and each run creates a new ui-<ulid> session grant, so repeated failures can reach too_many_browser_grants."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The bearer is minted through require_model_service_token(BrowserBroker) under BROWSER_AI_RUN_REAL_GRANT alone, not through browser_token as the plan row says. The deviation is reasoned, because the browser_token gate cannot hold for a workspace run, but the owner should confirm."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The issue_ai_run_grant error branches have no tests: a 201 with no grant_id (502 browser_grant_invalid), and an allowed_domains value that is not a string list (502)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "proxy_model_json_with_browser copies proxy_model_json_with_delegations from chat/shared.rs, with the same headers when no browser bearer is passed. Fold a browser slot into the shared helper the next time shared.rs is in scope."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The switch is read with std::env::var in the handler, not from AppState. That goes against the gateway's AppState-not-env convention. Tests avoid the env race through start_ai_run_with_switch, but the switch could move to AppState config."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Plan drift: WS21.json says the model-gateway POST /v1/browser/grants route and the broker sitepolicy package are absent. Both exist (browser_grants.rs is wired). The S7 row should name browser_grants.rs as the issuance route."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets --no-fail-fast",
+      "outcome": "Pass, exit 0. Bin unit tests 768 passed, 0 failed, 1 ignored. continue_error_vocabulary 7 passed. sse_relay_no_allowlist 3 passed. ssrf_forward_not_fetch 1 passed. This also compiles the gateway crate, so it covers the compile check for browser.rs.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --bin verevon-gateway-rs domains::browser::tests:: (same manifest and target dir)",
+      "outcome": "Pass: 73 passed, 0 failed, 696 filtered out.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges"
+   ],
+   "notes": "WS21-S7 code half is built behind BROWSER_AI_RUN_REAL_GRANT, read exactly as the literal true (value == Some(true-string)) and off by default. With the switch on and the session not zero-retention, start_ai_run now: (1) takes the hosts the request names, else the host of the current page; (2) mints aud=browser-broker through require_model_service_token and fails with 503 if it cannot; (3) POSTs model-gateway /v1/browser/grants (browser_grants.rs, already wired at http_routes.rs:320 and wrapping the broker AcquireGrant) with the model bearer and the browser bearer; (4) starts /v1/browser/runs under the issued grant_id, sending the broker-issued host list, with the browser bearer. A zero-retention session never mints, never asks for a grant and keeps the session string, as before. With the switch off the run request has the same headers and body as before: session colon id as grant_id, the request's own allowed_domains, no browser header, no extra upstream call. browser_run.rs is unchanged. The comment at the old 1258-1262 was rewritten. The only file touched is browser.rs (plus 700 insertions and 20 deletions). Worktree note: apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs shows as modified in git status but was not edited by this slice; it belongs to another session. Not built here: the Quarry side (grant acceptance on the run path, on quarryv2) and the live proof."
+  }
+ ]
+}

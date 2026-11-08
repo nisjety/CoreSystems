@@ -1,0 +1,918 @@
+{
+ "outcomes": [
+  {
+   "unit": "s8-7",
+   "impl": {
+    "summary": "I built S8-7 (the gateway's park continue, which never terminalizes) on the committed S8-0..S8-6 tree, but most of the new tests have not been run. The disk filled up partway through.\n\nThe first link of tests/continue_preconsume_test.rs failed with LNK1318. C: had 245 MB free at that point (14 GB at the start, 1.1 GB at the end, with the target dir at 46 GB). Your rule says to stop on LNK1318, so I did not retry any linking build and deleted nothing.\n\nWhat did run:\n- **model-gateway lib tests:** 1885 passed before my changes, 1898 after (13 new). No failures, 4 ignored as before. The lib test binary was linked after my last sse.rs edit, so this covers the final sse.rs.\n- **cargo check:** `cargo check -p model-gateway --tests` and `cargo check -p execution-core --test durable_loop_contract` both compile with no new warnings.\n- **Taxonomy check:** `gen-sse-event-taxonomy.py --check` is up to date (23 events). It needs `PYTHONUTF8=1` on Windows.\n\nWhat did not run:\n- The new and changed cases in model-gateway tests/continue_preconsume_test.rs (baseline was 10 passed).\n- The durable_loop_contract changes (baseline was 29 passed), including `every_guard_goes_red_when_the_code_it_guards_regresses`. I did not change any committed row of it.\n- No mutation checks: each one needs a relink.\n\n**sse.rs, `continue_run`** (in the design's order):\n- The binding `let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();`.\n- The incomplete check `(!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty()`.\n- After GetRun, `if parking { park_preflight(..) } else { GetApproval; continue_preflight(..) }`. Only the indentation of the committed GetApproval/continue_preflight lines changed.\n- The single switch read, then `resume_mode_for(resume_enabled, detail.resumable, parking)`.\n- `if parking && !resume_enabled` gives 409 `continue_disabled`.\n- `let resume_enabled = resume_enabled && !parking;` comes BEFORE the unchanged pre-check, so a park continue skips the pre-check, launches as NotSpent and never reaches the consume.\n- With the parking switch off, every path is byte-identical to the committed code. An empty approval_id is the committed 400.\n\n**sse.rs, `agentic_run_stream`:**\n- The binding `let parking = resume.as_ref().is_some_and(|r| r.mode == \"park\");`.\n- In the construction Err arm, an `if parking { park_refusal_event(.., \"continue_refused\"); return; }` block before the unchanged `if spend.is_spent() {`.\n- The interception `let dispatch_result = match park_dispatch_of(parking, dispatch_result) {..}` before the unchanged `let response = match dispatch_result {`. Its Refused branch publishes `park_closing` once and sends one park frame. The five committed dispatch arms keep their text and order.\n- When parking, the pinned deadline (`route.is_pinned() || parking`) and pinned wording (`!route.provider_hint.is_empty() || parking`).\n- `AgenticRunOutcome::Parked`. `classify_agentic_run_outcome(\"parked\")` gives Parked for every turn. A known reason publishes `RUN_PARKED` and sends the raw `run_parked` frame `{run_id, request_id, status, reason, resume_after}`, with no append and no receipt. An unknown reason falls to the shared `Parked | Unknown` arm, so the `run_end_error_event` count stays at 3.\n\n**New free functions in sse.rs:** `park_preflight`, `park_refusal_event` (adds `run_id` and `park_continue: true`, retryable false, never `approval_spent`), `park_dispatch_run_event`, `park_frame_token`, `enum ParkDispatch<R>`, `park_dispatch_of`, `run_parked_event`.\n\n**Amended existing sse tests:** the two `resume_mode_for` call sites take a third argument (`false`). `the_spent_arm_closes_the_attempt_once_and_never_ends_the_run` now expects `\"RUN_CONTINUE_REFUSED\"` twice, once per map. `the_continue_vocabularies_are_closed` also scans `park_preflight`. `continue_run_checks_the_request_before_it_consumes` and the dispatch-arm-order test are unchanged and pass.\n\n**durable_loop_contract.rs** (written, not run):\n- A model-gateway `LOOP_PARKING_ENV` row in `switch_table()`.\n- `spent_closing_violations` amended: the literal must appear twice, once in each map.\n- New `park_dispatch_violations` and `park_continue_violations`, with tests `the_park_continue_never_terminalizes_and_never_reaches_the_pre_consume` and `the_park_continue_guards_go_red_when_the_code_they_guard_regresses`. The mutation rows: interception removed, interception moved after the match, a terminalize in the Refused branch, a second publish, the binding renamed to `closing`, construction block dropped, construction block swapped after `if spend.is_spent() {`, a sixth arm, rebinding moved after the pre-check, rebinding removed, a second parking read, a trim in the binding, GetApproval in the park branch, the `continue_disabled` check before the switch read, the pre-check changed, a third RUN_CONTINUE_REFUSED literal, the park map losing its literal, renamed Park proof tests, and an emptied Park entry.\n- The Park StoreProof is filled with 9 tests that exist in the tree, and the Park exemption in `store_proof_violations` is removed.\n\n**Compose:** a model-gateway `EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}` row with its comment. The file's CRLF endings are preserved.\n\n**Step items:**\n- continue_run: done.\n- agentic_run_stream: done.\n- Free functions: done.\n- Amended S8-PRE tests: done.\n- continue_preconsume park cases: written, not run. There are 9 executor cases, not 8: the design's six refusal codes, plus continue_disabled, a dropped connection and the follow deadline. The construction case is covered in the sse lib test instead (see deviations).\n- durable_loop_contract changes: written, not run.\n- Compose row and switch_table row: done.\n\nEvery file I changed is LF except docker-compose.yml, which stays CRLF.",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "tests_added": [
+     "model-gateway sse continue_run_tests::classify_agentic_run_outcome_parked (ran, pass)",
+     "sse::run_parked_frame_has_exactly_the_documented_keys (ran, pass)",
+     "sse::an_unknown_park_reason_is_agent_run_state_unknown (ran, pass; also checks the parked arm appends nothing, terminalizes nothing and publishes RUN_PARKED once)",
+     "sse::orchestration_run_parked_frame_has_no_reason (ran, pass)",
+     "sse::orchestration_run_resumed_frame_uses_resumed_segment (ran, pass)",
+     "sse::park_dispatch_run_event_maps_refused_and_unreachable_to_the_attempt_and_unknown_to_degraded (ran, pass)",
+     "sse::park_frame_token_table (ran, pass)",
+     "sse::park_refusal_event_marks_the_frame_and_never_says_approval_spent (ran, pass)",
+     "sse::park_dispatch_of_takes_only_an_executor_refusal_of_a_park (ran, pass)",
+     "sse::the_park_branch (ran, pass)",
+     "sse::a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read (ran, pass; Park StoreProof)",
+     "sse::a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame (ran, pass)",
+     "sse::a_park_continue_words_a_pinned_failure_and_follows_with_the_pinned_deadline (ran, pass)",
+     "continue_preconsume_test::a_park_continue_never_terminalizes (NOT RUN)",
+     "continue_preconsume_test::a_parked_answer_is_a_run_parked_frame (NOT RUN)",
+     "continue_preconsume_test::the_park_form_is_refused_before_any_dispatch_unless_the_run_is_parked (NOT RUN)",
+     "durable_loop_contract::the_park_continue_never_terminalizes_and_never_reaches_the_pre_consume (NOT RUN)",
+     "durable_loop_contract::the_park_continue_guards_go_red_when_the_code_they_guard_regresses (NOT RUN)"
+    ],
+    "tests_written_not_run": [
+     "model-gateway tests/continue_preconsume_test.rs: the whole binary, which now also has a_park_continue_never_terminalizes, a_parked_answer_is_a_run_parked_frame and the_park_form_is_refused_before_any_dispatch_unless_the_run_is_parked, plus changes to the rig (Runs.status/park_reason, approval_reads counter, Execution.delay, ExecutionKind::Slow, Case.parking_switch/status/park_reason, Case::parked, post_with). Its link failed with LNK1318.",
+     "execution-core tests/durable_loop_contract.rs: the whole binary, which has the new park_dispatch_violations and park_continue_violations and their two tests, the amended spent_closing_violations, the filled Park StoreProof with the exemption removed, and the model-gateway switch_table row. every_guard_goes_red_when_the_code_it_guards_regresses has not been re-run.",
+     "The full model-gateway --tests run (the other integration binaries are unchanged, but they were not relinked or re-run).",
+     "No DB-backed tests were written or changed in this unit."
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -q -p model-gateway --lib --tests (baseline)",
+      "outcome": "lib 1885 passed / 4 ignored; every integration binary green (continue_preconsume_test 10 passed)"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (baseline)",
+      "outcome": "29 passed"
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib continue_run_tests (after the sse.rs changes)",
+      "outcome": "76 passed. First attempt failed to compile: RunParked/RunResumed are nested in orchestration_event; path fixed"
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test continue_preconsume_test",
+      "outcome": "FAILED to link: LNK1318, with 245 MB free on C:. Stopped, per the rule; no retry, nothing deleted"
+     },
+     {
+      "command": "du -sh target; df -h /c",
+      "outcome": "target is 46G (deps 37G, incremental 8G); C: free went from 245M to 1.1-1.7G"
+     },
+     {
+      "command": "cargo check -q -p model-gateway --tests && cargo check -q -p execution-core --test durable_loop_contract",
+      "outcome": "both compile; only the 3 warnings execution-core already had"
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (no relink, the binary already held the final sse.rs)",
+      "outcome": "1898 passed, 0 failed, 4 ignored (up from 1885)"
+     },
+     {
+      "command": "PYTHONUTF8=1 python3 scripts/gen-sse-event-taxonomy.py --check",
+      "outcome": "up to date (23 events). Without PYTHONUTF8 the check fails on Windows with a cp1252 encoding error, which is a false 'stale'"
+     },
+     {
+      "command": "python3 byte counts of the changed files",
+      "outcome": "sse.rs, continue_preconsume_test.rs and durable_loop_contract.rs are LF with 0 CRLF; docker-compose.yml is CRLF, 1992/1992"
+     }
+    ],
+    "deviations": [
+     "The construction-failure case is not in continue_preconsume_test. A bearer the router accepts is a verified JWT, which is always valid gRPC metadata, so the router cannot produce a construction failure. sse.rs a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame drives agentic_run_stream directly with a broken inference bearer and a park resume. It asserts connected, then one park_continue continue_refused frame, nothing published, and that the unbuildable_continuation_stream frame is not a park frame.",
+     "The pinned-wording check is a pure and source-level lib test only. I wrote a handler-level case and then removed it. Its typed-failure path appends the explanation through AppState::new()'s default session client, which points at http://localhost:9091, possibly the live dev stack's session-core.",
+     "The 'never consumed, never GetApproval' and 'empty id with parking off / blank id are the committed 400' items of the_park_branch are checked at the handler level in continue_preconsume_test (an approval_reads counter on the orchestration double). The lib test pins the expressions and their order in the source.",
+     "Rule 6: I made several edits to continue_preconsume_test.rs (rig fields, Case fields, Execution.delay) in one python3 script with exact single-occurrence asserts, instead of the Edit tool. LF endings were kept. I also used one python3 replace in sse.rs to fix two lines of my own new tests (the RunParked/RunResumed paths). Every other edit used the Edit tool.",
+     "The Parked outcome is a match guard (`AgenticRunOutcome::Parked if run_parked_event(..).is_some() =>`), and the committed Unknown arm became `AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown =>`. This keeps one run_end_error_event per run-end code, which after_answer_frame_violations and the sse tests require. run_parked_event is called twice (in the guard and in the arm): it is pure and cheap.",
+     "run_parked_event normalises resume_after through chrono and gives JSON null for a resets_at that does not parse, so unparsed text is never echoed. The design did not say what to do with an unreadable time.",
+     "park_dispatch_of carries #[allow(clippy::type_complexity)] for its nested Result signature.",
+     "No mutation checks were run on sse.rs: each needs a relink, and the disk was full. The meta-test rows for the new guards are written but not executed.",
+     "The design's 'eight handler cases' are nine in a_park_continue_never_terminalizes: the six refusal codes it names, plus continue_disabled (from the failure matrix), a dropped connection (Unknown, giving RUN_DISPATCH_DEGRADED) and the follow deadline (the bare agent_dispatch_unavailable, giving RUN_DISPATCH_DEGRADED)."
+    ],
+    "blockers": [
+     "Drive C: is full. LNK1318 when linking model-gateway's continue_preconsume_test (245 MB free at that moment, 1.1 GB at the end). This worktree's target dir is 46 GB (deps 37 GB, incremental 8 GB). Per the rule I stopped all linking builds and deleted nothing. To finish verifying, free disk space, then run: `cargo test -q -p model-gateway --tests` (continue_preconsume_test is expected to grow from 10 to 13 tests) and `cargo test -q -p execution-core --test durable_loop_contract` (expected to grow from 29 to 31, with every_guard_goes_red_when_the_code_it_guards_regresses still green). Then run sse.rs mutation checks if wanted, for example moving the rebinding after the pre-check and removing the park_dispatch_of interception.",
+     "S8-8 should not start until those two runs are green."
+    ],
+    "names_for_later_units": [
+     "sse.rs free fns: park_preflight(enabled, run_status, resumable, parked, persistent) -> Result<(), (StatusCode, &'static str)>; park_refusal_event(request_id, run_id, token) -> Event; park_dispatch_run_event(&ContinueDispatchFailure) -> &'static str; park_frame_token(&ContinueDispatchFailure) -> &'static str; enum ParkDispatch<R> { Refused(tonic::Status), Pass(R) }; park_dispatch_of(parking, result); run_parked_event(request_id, run_id, &RunAgentResponse) -> Option<Event>; resume_mode_for(resume_enabled, resumable, parking)",
+     "AgenticRunOutcome::Parked; classify_agentic_run_outcome(\"parked\") gives Parked",
+     "Turn-stream frame `run_parked` {run_id, request_id, status:\"parked\", reason (a closed ParkReason token), resume_after (RFC 3339 string or null)}, owner's stream only; run subject RUN_PARKED",
+     "Park failure frame: `error` {code ∈ CONTINUE_FRAME_REFUSALS, message, retryable:false, request_id, run_id, park_continue:true}, never approval_spent. A follow deadline or join error gives the bare committed agent_dispatch_unavailable (retryable true, run_id, no park_continue). A construction failure gives park_continue continue_refused with nothing published.",
+     "Run subject per failed park attempt: RUN_CONTINUE_REFUSED for Refused or Unreachable, RUN_DISPATCH_DEGRADED for Unknown, deadline or join",
+     "HTTP for the park form (POST /v1/orchestration/runs/{id}/continue {\"approval_id\":\"\",\"claim_token\":\"..\"}): gateway parking off gives 400 continue_incomplete; resume switch off gives 409 continue_disabled; not parked, not resumable or ended gives 409 not_resumable; a non-persistent turn gives 409 not_resumable",
+     "AgentResume sent for a park: mode \"park\", approval_id \"\", claim_token as given, segment_no 0",
+     "durable_loop_contract: park_dispatch_violations(gateway_sse), park_continue_violations(gateway_sources), switch_table row (\"model-gateway\", LOOP_PARKING_ENV), Park StoreProof filled with 9 tests; the store_proof_violations Park exemption is gone",
+     "continue_preconsume_test rig: Case::parked(execution), Case.parking_switch/status/park_reason, ExecutionKind::Slow(answer, delay), Rig::post_with(approval_id, claim), Rig::approval_read_count()"
+    ],
+    "deferred_files": [
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row, S8-7; for the lead)",
+      "content": "WS03 S8-A / S8-7, the model-gateway park continue: built on the local branch model-plane, uncommitted, default off. sse.rs continue_run: the park form (an exactly empty approval_id, accepted only with EXECUTION_LOOP_PARKING_ENABLED on the gateway), park_preflight instead of GetApproval and continue_preflight, resume_mode_for(.., parking) giving \"park\", 409 continue_disabled with the resume switch off, and the rebinding `resume_enabled && !parking` BEFORE the unchanged pre-consume check (no pre-check, no consume, launched NotSpent). agentic_run_stream: a construction-arm `if parking` block before the unchanged spent check; the park_dispatch_of interception before the unchanged five-arm dispatch match (one RUN_CONTINUE_REFUSED or RUN_DISPATCH_DEGRADED, one park_continue frame, never terminalized); the pinned deadline and wording for a park; AgenticRunOutcome::Parked giving RUN_PARKED and the owner's run_parked frame. durable_loop_contract: park_dispatch_violations, park_continue_violations, spent_closing amended (RUN_CONTINUE_REFUSED x2), Park StoreProof filled with the exemption removed, model-gateway switch_table row. Compose: model-gateway EXECUTION_LOOP_PARKING_ENABLED default false. Verified: model-gateway lib 1898 passed (baseline 1885). NOT RUN, because the disk was full (LNK1318): continue_preconsume_test (3 new park scenarios) and durable_loop_contract (2 new tests, plus the meta-test re-run)."
+     },
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (addendum to the 2026-10-18 durable-loop entry, S8-7; for the lead)",
+      "content": "S8-7 (WS03 S8-A, the gateway's park continue). The one /continue route resumes a parked run when the body's approval_id is EXACTLY empty and model-gateway's EXECUTION_LOOP_PARKING_ENABLED is on. With it off, or for a blank id that is not empty, the answer is the committed 400 continue_incomplete. A park continue reads no approval: the run's RunDetail (resumable, plus a non-empty park_reason, which session-core shows the owner) is checked by park_preflight after the same early persistent-turn gate as an approval continuation. It needs EXECUTION_LOOP_RESUME_ENABLED (else 409 continue_disabled). It is never pre-consumed, never reaches the buildable pre-check (the rebinding resume_enabled && !parking stands before it) and is launched as NotSpent with AgentResume.mode \"park\". The gateway NEVER terminalizes a park continue. A construction failure gives one park_continue continue_refused frame with nothing published. An executor refusal or an unreachable executor is intercepted before the committed dispatch match (park_dispatch_of, a free function, so the five committed arms and their guard rows are untouched): one RUN_CONTINUE_REFUSED, or RUN_DISPATCH_DEGRADED for an unknown outcome, and one final park_continue frame that never says approval_spent. A follow deadline or join error keeps the committed bare agent_dispatch_unavailable. A park continue is followed with the pinned deadline and its typed failure is worded as a pinned run's. A parked answer (any turn) gives RUN_PARKED and the owner's run_parked {run_id, request_id, status, reason, resume_after} frame, with no append and no receipt; an unknown reason is an unknown status. The gateway's switch is the same name as the executor's but only ACCEPTS the park shape: flip it with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED, and turn it off only after session-core park recovery is off or no park is left (kill order c)."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "I built S8-7 (the gateway's park continue, which never terminalizes) on the committed S8-0..S8-6 tree, but most of the new tests have not been run. The disk filled up partway through.\n\nThe first link of tests/continue_preconsume_test.rs failed with LNK1318. C: had 245 MB free at that point (14 GB at the start, 1.1 GB at the end, with the target dir at 46 GB). Your rule says to stop on LNK1318, so I did not retry any linking build and deleted nothing.\n\nWhat did run:\n- **model-gateway lib tests:** 1885 passed before my changes, 1898 after (13 new). No failures, 4 ignored as before. The lib test binary was linked after my last sse.rs edit, so this covers the final sse.rs.\n- **cargo check:** `cargo check -p model-gateway --tests` and `cargo check -p execution-core --test durable_loop_contract` both compile with no new warnings.\n- **Taxonomy check:** `gen-sse-event-taxonomy.py --check` is up to date (23 events). It needs `PYTHONUTF8=1` on Windows.\n\nWhat did not run:\n- The new and changed cases in model-gateway tests/continue_preconsume_test.rs (baseline was 10 passed).\n- The durable_loop_contract changes (baseline was 29 passed), including `every_guard_goes_red_when_the_code_it_guards_regresses`. I did not change any committed row of it.\n- No mutation checks: each one needs a relink.\n\n**sse.rs, `continue_run`** (in the design's order):\n- The binding `let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();`.\n- The incomplete check `(!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty()`.\n- After GetRun, `if parking { park_preflight(..) } else { GetApproval; continue_preflight(..) }`. Only the indentation of the committed GetApproval/continue_preflight lines changed.\n- The single switch read, then `resume_mode_for(resume_enabled, detail.resumable, parking)`.\n- `if parking && !resume_enabled` gives 409 `continue_disabled`.\n- `let resume_enabled = resume_enabled && !parking;` comes BEFORE the unchanged pre-check, so a park continue skips the pre-check, launches as NotSpent and never reaches the consume.\n- With the parking switch off, every path is byte-identical to the committed code. An empty approval_id is the committed 400.\n\n**sse.rs, `agentic_run_stream`:**\n- The binding `let parking = resume.as_ref().is_some_and(|r| r.mode == \"park\");`.\n- In the construction Err arm, an `if parking { park_refusal_event(.., \"continue_refused\"); return; }` block before the unchanged `if spend.is_spent() {`.\n- The interception `let dispatch_result = match park_dispatch_of(parking, dispatch_result) {..}` before the unchanged `let response = match dispatch_result {`. Its Refused branch publishes `park_closing` once and sends one park frame. The five committed dispatch arms keep their text and order.\n- When parking, the pinned deadline (`route.is_pinned() || parking`) and pinned wording (`!route.provider_hint.is_empty() || parking`).\n- `AgenticRunOutcome::Parked`. `classify_agentic_run_outcome(\"parked\")` gives Parked for every turn. A known reason publishes `RUN_PARKED` and sends the raw `run_parked` frame `{run_id, request_id, status, reason, resume_after}`, with no append and no receipt. An unknown reason falls to the shared `Parked | Unknown` arm, so the `run_end_error_event` count stays at 3.\n\n**New free functions in sse.rs:** `park_preflight`, `park_refusal_event` (adds `run_id` and `park_continue: true`, retryable false, never `approval_spent`), `park_dispatch_run_event`, `park_frame_token`, `enum ParkDispatch<R>`, `park_dispatch_of`, `run_parked_event`.\n\n**Amended existing sse tests:** the two `resume_mode_for` call sites take a third argument (`false`). `the_spent_arm_closes_the_attempt_once_and_never_ends_the_run` now expects `\"RUN_CONTINUE_REFUSED\"` twice, once per map. `the_continue_vocabularies_are_closed` also scans `park_preflight`. `continue_run_checks_the_request_before_it_consumes` and the dispatch-arm-order test are unchanged and pass.\n\n**durable_loop_contract.rs** (written, not run):\n- A model-gateway `LOOP_PARKING_ENV` row in `switch_table()`.\n- `spent_closing_violations` amended: the literal must appear twice, once in each map.\n- New `park_dispatch_violations` and `park_continue_violations`, with tests `the_park_continue_never_terminalizes_and_never_reaches_the_pre_consume` and `the_park_continue_guards_go_red_when_the_code_they_guard_regresses`. The mutation rows: interception removed, interception moved after the match, a terminalize in the Refused branch, a second publish, the binding renamed to `closing`, construction block dropped, construction block swapped after `if spend.is_spent() {`, a sixth arm, rebinding moved after the pre-check, rebinding removed, a second parking read, a trim in the binding, GetApproval in the park branch, the `continue_disabled` check before the switch read, the pre-check changed, a third RUN_CONTINUE_REFUSED literal, the park map losing its literal, renamed Park proof tests, and an emptied Park entry.\n- The Park StoreProof is filled with 9 tests that exist in the tree, and the Park exemption in `store_proof_violations` is removed.\n\n**Compose:** a model-gateway `EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}` row with its comment. The file's CRLF endings are preserved.\n\n**Step items:**\n- continue_run: done.\n- agentic_run_stream: done.\n- Free functions: done.\n- Amended S8-PRE tests: done.\n- continue_preconsume park cases: written, not run. There are 9 executor cases, not 8: the design's six refusal codes, plus continue_disabled, a dropped connection and the follow deadline. The construction case is covered in the sse lib test instead (see deviations).\n- durable_loop_contract changes: written, not run.\n- Compose row and switch_table row: done.\n\nEvery file I changed is LF except docker-compose.yml, which stays CRLF.",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+     ],
+     "tests_added": [
+      "model-gateway sse continue_run_tests::classify_agentic_run_outcome_parked (ran, pass)",
+      "sse::run_parked_frame_has_exactly_the_documented_keys (ran, pass)",
+      "sse::an_unknown_park_reason_is_agent_run_state_unknown (ran, pass; also checks the parked arm appends nothing, terminalizes nothing and publishes RUN_PARKED once)",
+      "sse::orchestration_run_parked_frame_has_no_reason (ran, pass)",
+      "sse::orchestration_run_resumed_frame_uses_resumed_segment (ran, pass)",
+      "sse::park_dispatch_run_event_maps_refused_and_unreachable_to_the_attempt_and_unknown_to_degraded (ran, pass)",
+      "sse::park_frame_token_table (ran, pass)",
+      "sse::park_refusal_event_marks_the_frame_and_never_says_approval_spent (ran, pass)",
+      "sse::park_dispatch_of_takes_only_an_executor_refusal_of_a_park (ran, pass)",
+      "sse::the_park_branch (ran, pass)",
+      "sse::a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read (ran, pass; Park StoreProof)",
+      "sse::a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame (ran, pass)",
+      "sse::a_park_continue_words_a_pinned_failure_and_follows_with_the_pinned_deadline (ran, pass)",
+      "continue_preconsume_test::a_park_continue_never_terminalizes (NOT RUN)",
+      "continue_preconsume_test::a_parked_answer_is_a_run_parked_frame (NOT RUN)",
+      "continue_preconsume_test::the_park_form_is_refused_before_any_dispatch_unless_the_run_is_parked (NOT RUN)",
+      "durable_loop_contract::the_park_continue_never_terminalizes_and_never_reaches_the_pre_consume (NOT RUN)",
+      "durable_loop_contract::the_park_continue_guards_go_red_when_the_code_they_guard_regresses (NOT RUN)"
+     ],
+     "tests_written_not_run": [
+      "model-gateway tests/continue_preconsume_test.rs: the whole binary, which now also has a_park_continue_never_terminalizes, a_parked_answer_is_a_run_parked_frame and the_park_form_is_refused_before_any_dispatch_unless_the_run_is_parked, plus changes to the rig (Runs.status/park_reason, approval_reads counter, Execution.delay, ExecutionKind::Slow, Case.parking_switch/status/park_reason, Case::parked, post_with). Its link failed with LNK1318.",
+      "execution-core tests/durable_loop_contract.rs: the whole binary, which has the new park_dispatch_violations and park_continue_violations and their two tests, the amended spent_closing_violations, the filled Park StoreProof with the exemption removed, and the model-gateway switch_table row. every_guard_goes_red_when_the_code_it_guards_regresses has not been re-run.",
+      "The full model-gateway --tests run (the other integration binaries are unchanged, but they were not relinked or re-run).",
+      "No DB-backed tests were written or changed in this unit."
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test -q -p model-gateway --lib --tests (baseline)",
+       "outcome": "lib 1885 passed / 4 ignored; every integration binary green (continue_preconsume_test 10 passed)"
+      },
+      {
+       "command": "cargo test -q -p execution-core --test durable_loop_contract (baseline)",
+       "outcome": "29 passed"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --lib continue_run_tests (after the sse.rs changes)",
+       "outcome": "76 passed. First attempt failed to compile: RunParked/RunResumed are nested in orchestration_event; path fixed"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --test continue_preconsume_test",
+       "outcome": "FAILED to link: LNK1318, with 245 MB free on C:. Stopped, per the rule; no retry, nothing deleted"
+      },
+      {
+       "command": "du -sh target; df -h /c",
+       "outcome": "target is 46G (deps 37G, incremental 8G); C: free went from 245M to 1.1-1.7G"
+      },
+      {
+       "command": "cargo check -q -p model-gateway --tests && cargo check -q -p execution-core --test durable_loop_contract",
+       "outcome": "both compile; only the 3 warnings execution-core already had"
+      },
+      {
+       "command": "cargo test -q -p model-gateway --lib (no relink, the binary already held the final sse.rs)",
+       "outcome": "1898 passed, 0 failed, 4 ignored (up from 1885)"
+      },
+      {
+       "command": "PYTHONUTF8=1 python3 scripts/gen-sse-event-taxonomy.py --check",
+       "outcome": "up to date (23 events). Without PYTHONUTF8 the check fails on Windows with a cp1252 encoding error, which is a false 'stale'"
+      },
+      {
+       "command": "python3 byte counts of the changed files",
+       "outcome": "sse.rs, continue_preconsume_test.rs and durable_loop_contract.rs are LF with 0 CRLF; docker-compose.yml is CRLF, 1992/1992"
+      }
+     ],
+     "deviations": [
+      "The construction-failure case is not in continue_preconsume_test. A bearer the router accepts is a verified JWT, which is always valid gRPC metadata, so the router cannot produce a construction failure. sse.rs a_park_continue_skips_the_pre_consume_check_and_its_construction_failure_is_a_park_frame drives agentic_run_stream directly with a broken inference bearer and a park resume. It asserts connected, then one park_continue continue_refused frame, nothing published, and that the unbuildable_continuation_stream frame is not a park frame.",
+      "The pinned-wording check is a pure and source-level lib test only. I wrote a handler-level case and then removed it. Its typed-failure path appends the explanation through AppState::new()'s default session client, which points at http://localhost:9091, possibly the live dev stack's session-core.",
+      "The 'never consumed, never GetApproval' and 'empty id with parking off / blank id are the committed 400' items of the_park_branch are checked at the handler level in continue_preconsume_test (an approval_reads counter on the orchestration double). The lib test pins the expressions and their order in the source.",
+      "Rule 6: I made several edits to continue_preconsume_test.rs (rig fields, Case fields, Execution.delay) in one python3 script with exact single-occurrence asserts, instead of the Edit tool. LF endings were kept. I also used one python3 replace in sse.rs to fix two lines of my own new tests (the RunParked/RunResumed paths). Every other edit used the Edit tool.",
+      "The Parked outcome is a match guard (`AgenticRunOutcome::Parked if run_parked_event(..).is_some() =>`), and the committed Unknown arm became `AgenticRunOutcome::Parked | AgenticRunOutcome::Unknown =>`. This keeps one run_end_error_event per run-end code, which after_answer_frame_violations and the sse tests require. run_parked_event is called twice (in the guard and in the arm): it is pure and cheap.",
+      "run_parked_event normalises resume_after through chrono and gives JSON null for a resets_at that does not parse, so unparsed text is never echoed. The design did not say what to do with an unreadable time.",
+      "park_dispatch_of carries #[allow(clippy::type_complexity)] for its nested Result signature.",
+      "No mutation checks were run on sse.rs: each needs a relink, and the disk was full. The meta-test rows for the new guards are written but not executed.",
+      "The design's 'eight handler cases' are nine in a_park_continue_never_terminalizes: the six refusal codes it names, plus continue_disabled (from the failure matrix), a dropped connection (Unknown, giving RUN_DISPATCH_DEGRADED) and the follow deadline (the bare agent_dispatch_unavailable, giving RUN_DISPATCH_DEGRADED)."
+     ],
+     "blockers": [
+      "Drive C: is full. LNK1318 when linking model-gateway's continue_preconsume_test (245 MB free at that moment, 1.1 GB at the end). This worktree's target dir is 46 GB (deps 37 GB, incremental 8 GB). Per the rule I stopped all linking builds and deleted nothing. To finish verifying, free disk space, then run: `cargo test -q -p model-gateway --tests` (continue_preconsume_test is expected to grow from 10 to 13 tests) and `cargo test -q -p execution-core --test durable_loop_contract` (expected to grow from 29 to 31, with every_guard_goes_red_when_the_code_it_guards_regresses still green). Then run sse.rs mutation checks if wanted, for example moving the rebinding after the pre-check and removing the park_dispatch_of interception.",
+      "S8-8 should not start until those two runs are green."
+     ],
+     "names_for_later_units": [
+      "sse.rs free fns: park_preflight(enabled, run_status, resumable, parked, persistent) -> Result<(), (StatusCode, &'static str)>; park_refusal_event(request_id, run_id, token) -> Event; park_dispatch_run_event(&ContinueDispatchFailure) -> &'static str; park_frame_token(&ContinueDispatchFailure) -> &'static str; enum ParkDispatch<R> { Refused(tonic::Status), Pass(R) }; park_dispatch_of(parking, result); run_parked_event(request_id, run_id, &RunAgentResponse) -> Option<Event>; resume_mode_for(resume_enabled, resumable, parking)",
+      "AgenticRunOutcome::Parked; classify_agentic_run_outcome(\"parked\") gives Parked",
+      "Turn-stream frame `run_parked` {run_id, request_id, status:\"parked\", reason (a closed ParkReason token), resume_after (RFC 3339 string or null)}, owner's stream only; run subject RUN_PARKED",
+      "Park failure frame: `error` {code ∈ CONTINUE_FRAME_REFUSALS, message, retryable:false, request_id, run_id, park_continue:true}, never approval_spent. A follow deadline or join error gives the bare committed agent_dispatch_unavailable (retryable true, run_id, no park_continue). A construction failure gives park_continue continue_refused with nothing published.",
+      "Run subject per failed park attempt: RUN_CONTINUE_REFUSED for Refused or Unreachable, RUN_DISPATCH_DEGRADED for Unknown, deadline or join",
+      "HTTP for the park form (POST /v1/orchestration/runs/{id}/continue {\"approval_id\":\"\",\"claim_token\":\"..\"}): gateway parking off gives 400 continue_incomplete; resume switch off gives 409 continue_disabled; not parked, not resumable or ended gives 409 not_resumable; a non-persistent turn gives 409 not_resumable",
+      "AgentResume sent for a park: mode \"park\", approval_id \"\", claim_token as given, segment_no 0",
+      "durable_loop_contract: park_dispatch_violations(gateway_sse), park_continue_violations(gateway_sources), switch_table row (\"model-gateway\", LOOP_PARKING_ENV), Park StoreProof filled with 9 tests; the store_proof_violations Park exemption is gone",
+      "continue_preconsume_test rig: Case::parked(execution), Case.parking_switch/status/park_reason, ExecutionKind::Slow(answer, delay), Rig::post_with(approval_id, claim), Rig::approval_read_count()"
+     ],
+     "deferred_files": [
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger row, S8-7; for the lead)",
+       "content": "WS03 S8-A / S8-7, the model-gateway park continue: built on the local branch model-plane, uncommitted, default off. sse.rs continue_run: the park form (an exactly empty approval_id, accepted only with EXECUTION_LOOP_PARKING_ENABLED on the gateway), park_preflight instead of GetApproval and continue_preflight, resume_mode_for(.., parking) giving \"park\", 409 continue_disabled with the resume switch off, and the rebinding `resume_enabled && !parking` BEFORE the unchanged pre-consume check (no pre-check, no consume, launched NotSpent). agentic_run_stream: a construction-arm `if parking` block before the unchanged spent check; the park_dispatch_of interception before the unchanged five-arm dispatch match (one RUN_CONTINUE_REFUSED or RUN_DISPATCH_DEGRADED, one park_continue frame, never terminalized); the pinned deadline and wording for a park; AgenticRunOutcome::Parked giving RUN_PARKED and the owner's run_parked frame. durable_loop_contract: park_dispatch_violations, park_continue_violations, spent_closing amended (RUN_CONTINUE_REFUSED x2), Park StoreProof filled with the exemption removed, model-gateway switch_table row. Compose: model-gateway EXECUTION_LOOP_PARKING_ENABLED default false. Verified: model-gateway lib 1898 passed (baseline 1885). NOT RUN, because the disk was full (LNK1318): continue_preconsume_test (3 new park scenarios) and durable_loop_contract (2 new tests, plus the meta-test re-run)."
+      },
+      {
+       "path": "apps/Model Plane/docs/decisions/ledger.md (addendum to the 2026-10-18 durable-loop entry, S8-7; for the lead)",
+       "content": "S8-7 (WS03 S8-A, the gateway's park continue). The one /continue route resumes a parked run when the body's approval_id is EXACTLY empty and model-gateway's EXECUTION_LOOP_PARKING_ENABLED is on. With it off, or for a blank id that is not empty, the answer is the committed 400 continue_incomplete. A park continue reads no approval: the run's RunDetail (resumable, plus a non-empty park_reason, which session-core shows the owner) is checked by park_preflight after the same early persistent-turn gate as an approval continuation. It needs EXECUTION_LOOP_RESUME_ENABLED (else 409 continue_disabled). It is never pre-consumed, never reaches the buildable pre-check (the rebinding resume_enabled && !parking stands before it) and is launched as NotSpent with AgentResume.mode \"park\". The gateway NEVER terminalizes a park continue. A construction failure gives one park_continue continue_refused frame with nothing published. An executor refusal or an unreachable executor is intercepted before the committed dispatch match (park_dispatch_of, a free function, so the five committed arms and their guard rows are untouched): one RUN_CONTINUE_REFUSED, or RUN_DISPATCH_DEGRADED for an unknown outcome, and one final park_continue frame that never says approval_spent. A follow deadline or join error keeps the committed bare agent_dispatch_unavailable. A park continue is followed with the pinned deadline and its typed failure is worded as a pinned run's. A parked answer (any turn) gives RUN_PARKED and the owner's run_parked {run_id, request_id, status, reason, resume_after} frame, with no append and no receipt; an unknown reason is an unknown status. The gateway's switch is the same name as the executor's but only ACCEPTS the park shape: flip it with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED, and turn it off only after session-core park recovery is off or no park is left (kill order c)."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "high",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+       "issue": "The new handler test a_park_continue_never_terminalizes is red. It fails on its ECONNREFUSED case. The cause is the test rig: it sets AGENTIC_RUN_DEADLINE_SECS=1 for every case, and on Windows a connect to a closed localhost port takes about 2 s (the OS retries the SYN). The follow deadline therefore fires before the connect is refused, and the stream takes the committed deadline arm instead of the park interception. Because the case loop panics at the 7th case, the 'dropped' (Unknown, RUN_DISPATCH_DEGRADED) and 'follow deadline' cases never run either. Two of the design's required handler-level failure-matrix rows are unverified: the unreachable executor and the dropped connection. This also reverses the implementer's expectation: continue_preconsume_test is not 13 green, it is 12 passed and 1 failed.",
+       "evidence": "I ran `cargo test -q -p model-gateway --test continue_preconsume_test` twice (once alone, once in `--lib --tests --no-fail-fast`). Both runs: 'a_park_continue_never_terminalizes --- FAILED ... panicked at continue_preconsume_test.rs:1514:9: ECONNREFUSED: ... event: error data: {\"code\":\"agent_dispatch_unavailable\",...,\"retryable\":true,\"run_id\":\"run-1\"} left: \"agent_dispatch_unavailable\" right: \"continue_unreachable\"'. Result: 12 passed; 1 failed. The cause is line 1506 `let _deadline = EnvGuard::set(\"AGENTIC_RUN_DEADLINE_SECS\", Some(\"1\"));`, which is applied to all nine cases. resolve_agentic_run_deadline lets that env var override the pinned default as well.",
+       "suggested_fix": "Set AGENTIC_RUN_DEADLINE_SECS only in the 'follow deadline' case. For example, carry an Option<&str> deadline per case, or split the deadline case into its own test. The other cases then run under the pinned default deadline, and an unreachable executor is classified by the park interception. Then rerun on the host and confirm all 9 cases, including 'dropped' and 'follow deadline', pass."
+      },
+      {
+       "severity": "medium",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "No mutation check was ever executed against the new sse.rs production code. The interception, the construction block, the rebinding and the Parked arm are pinned only by source-text guards. I am in review mode and could not run mutations either. The durable_loop_contract meta rows do run and are green, but they mutate copies of the text. Nothing shows that a behavioural regression would turn a handler test red, for example park_dispatch_of returning Pass for a park, or the rebinding moved after the pre-check. The one handler test that would show it is currently red (finding 1).",
+       "evidence": "The implementer's report says: 'No mutation checks were run on sse.rs: each needs a relink'. The disk is no longer a blocker (C: has 282 GB free). durable_loop_contract: 31 passed, including every_guard_goes_red_when_the_code_it_guards_regresses and the_park_continue_guards_go_red_when_the_code_they_guard_regresses.",
+       "suggested_fix": "After fixing finding 1, run at least two copy-and-cmp mutation checks on sse.rs. (a) Make park_dispatch_of always return Pass: a_park_continue_never_terminalizes must go red, with a receipt or a RUN_FAILED. (b) Move `let resume_enabled = resume_enabled && !parking;` after the pre-check: the sse construction test and the contract guard must go red. Restore byte for byte."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "When a park continue hits the follow deadline or a join error, it keeps the committed arm. That arm sends the bare agent_dispatch_unavailable with retryable:true and the message 'the run remains retriable'. The design accepts this. In practice it invites a second park continue while the executor may still hold the park claim. The executor fences it (aborted loop_checkpoint_claim_held, which maps to continue_in_progress), so nothing is spent or run twice, but the client sees a retry offer that a normal flow then refuses.",
+       "evidence": "In agentic_run_stream, the `Err(DeadlineExpired)` and `Ok(Err(join_error))` arms call dispatch_unknown_event(spend, ..) with NotSpent, which gives agent_dispatch_unavailable_event (retryable: true). park_dispatch_of passes Err(deadline) and Ok(Err(join)) through untouched. execution-core classify_park_claim maps Aborted loop_checkpoint_claim_held to ContinueInProgress.",
+       "suggested_fix": "No change for this unit, since it is per design. Record it as a follow-up for the SPA reader (S8-8 / chatRunContinueParkFailureOf): treat a bare agent_dispatch_unavailable after a park continue as 'follow the run', not 'retry'."
+      }
+     ],
+     "checked": [
+      "Every switch off: the parking binding in continue_run reads EXECUTION_LOOP_PARKING_ENABLED only when approval_id is exactly empty, so the committed 400 continue_incomplete is unchanged. resume_mode_for(.., false) never returns 'park'. In agentic_run_stream, parking is false unless resume.mode == 'park'. The deadline and wording expressions reduce to the committed ones. An unparsed park reason falls into the shared Unknown arm (same frame, same RUN_DISPATCH_DEGRADED).",
+      "ZDR and waived: continue_persistent_gate still runs before the parking binding, the owner check, GetRun and park_preflight. park_preflight re-applies continue_turn_gate(persistent). A continue states zdr=false, space_id='' and AgentRoute::default() as committed (D2). No plan context is taken for a resume (D4).",
+      "Authority: require_durable_run_owner_with_token runs before GetRun. park_reason is read with the user's model bearer after the owner check (D5, owner-or-service).",
+      "A park continue never reads GetApproval, never reaches the pre-check and never consumes: the rebinding `resume_enabled && !parking` comes before `if resume_enabled {`, launch_spend is NotSpent, and `if !resume_enabled { return Ok(launch()); }` is taken.",
+      "The gateway never terminalizes a park: the construction-arm `if parking` block sits before the unchanged `if spend.is_spent() {` and publishes nothing. park_dispatch_of takes every Ok(Ok(Err(status))) of a park before the committed five-arm match, so the confirmed-rejection arm and the unreachable-terminalize arm are never reached for a park. The deadline and join-error arms do not terminalize.",
+      "Frames: park_refusal_event carries park_continue:true and retryable:false, never approval_spent. The code comes from the closed CONTINUE_EXECUTOR_MESSAGE_TOKENS map, so no executor message is echoed. Logs have no claim token and no content.",
+      "The run_parked frame has ids, a closed reason and a normalised timestamp. The RUN_PARKED envelope on the run subject has no reason. The executor's parked_response sets resets_at = park_until.",
+      "Compose: one model-gateway row `EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}`, CRLF preserved. The switch_table row was added.",
+      "Park StoreProof: 9 named tests, exemption removed; durable_loop_contract confirms the named tests exist.",
+      "Ran `cargo test -q -p execution-core --test durable_loop_contract`: 31 passed, including every_guard_goes_red_when_the_code_it_guards_regresses and the new park guard meta-test.",
+      "Ran `cargo test -q -p model-gateway --lib --tests --no-fail-fast`: lib 1898 passed, 4 ignored. Every integration binary is green except continue_preconsume_test (12 passed, 1 failed: a_park_continue_never_terminalizes, ECONNREFUSED case).",
+      "Ran `PYTHONUTF8=1 python3 scripts/gen-sse-event-taxonomy.py --check`: up to date (23 events). run_parked is a raw frame like awaiting_approval and is not in sse_events.rs.",
+      "Did not run mutation checks: review mode, no edits. Did not run DB-backed tests: none were changed in this unit."
+     ]
+    },
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "high",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+       "issue": "The new handler-level test a_park_continue_never_terminalizes fails deterministically. It sets AGENTIC_RUN_DEADLINE_SECS=1 for every case in the loop. The ECONNREFUSED case needs longer than 1 s to learn that the connect was refused, so the follow deadline expires first and the stream sends the bare agent_dispatch_unavailable frame, not park_continue continue_unreachable.",
+       "evidence": "cargo test -q -p model-gateway --test continue_preconsume_test: 12 passed, 1 failed. Panic at continue_preconsume_test.rs:1514 for ECONNREFUSED: the error frame is {\"code\":\"agent_dispatch_unavailable\",\"retryable\":true,\"run_id\":\"run-1\"}, but the test expects continue_unreachable. Rerunning only that test fails the same way. The deadline env is 'a set value applies to every route' (resolve_agentic_run_deadline, sse.rs ~9609), so the 1 s cap applies to all nine cases. A plain TCP connect to a closed 127.0.0.1 port took 2.1 s on this host. The committed 'on / unreachable' case passes because it keeps the default deadline. The six refusal cases before it pass, and dropped and follow-deadline never ran. The implementer's report listed this test as NOT RUN because of LNK1318, so the red state went unnoticed. The test therefore does not yet establish the 'unreachable gives RUN_CONTINUE_REFUSED and a park_continue continue_unreachable frame' requirement.",
+       "suggested_fix": "Set AGENTIC_RUN_DEADLINE_SECS=1 only for the 'follow deadline' case (a per-case Option in the tuple, or a separate test). Leave the default deadline for the other eight cases. Then re-run the whole test, since the dropped and follow-deadline cases have not executed yet."
+      },
+      {
+       "severity": "high",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml",
+       "issue": "The model-gateway row (line 279) and the execution-core row (line 1162) are both '${EXECUTION_LOOP_PARKING_ENABLED:-false}', so one host variable sets both services. The design's flip order has the gateway and BFF accept the park form first (3) and the executor write parks last (4). Kill step (a) turns executor parking off while existing parks stay resumable, and (c) turns the gateway off only after park recovery is off. None of that can be done through compose. The comments also contradict each other and one is false.",
+       "evidence": "Gateway comment: 'Flip it together with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED'. Executor comment: 'Flip it last' and 'A park resume is NOT gated by this switch: with it off, existing parks stay resumable'. With the shared host variable, turning the executor off also turns the gateway's acceptance off. An empty approval_id then returns 400 continue_incomplete, so the existing parks are unresumable until the TTL ends them. This is the state kill order (c) forbids. The design risk list only says 'two scopes under one name' and does not address the compose host variable. The existing resume switches deliberately share one host variable because they are one coupled flip. The park switches are not meant to be coupled.",
+       "suggested_fix": "Give the gateway row its own host variable, for example 'EXECUTION_LOOP_PARKING_ENABLED: ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}'. Keep the container env name, because mp_contracts::loop_parking_enabled reads it. Update both comments. If the lead keeps the shared name, say so under deviations, and correct the executor comment and the kill order to say that (a) also turns off park acceptance."
+      },
+      {
+       "severity": "medium",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+       "issue": "The Park StoreProof now names a_park_continue_never_terminalizes as a test that drives the gateway's real gate, and the Park exemption is removed. The contract only checks that the named test exists, so it is green while that test is red. The other gateway proof, a_park_continue_of_a_non_persistent_turn_is_refused_before_any_read, drives only the pure functions continue_persistent_gate and park_preflight, plus source order. It never sends a park-form request from a waived or zero-retention caller through the real handler.",
+       "evidence": "durable_loop_contract: 31 passed, including every_guard_goes_red_when_the_code_it_guards_regresses and the two new park tests. The gateway test named in the Park entry fails in the same worktree (see the first finding). The gateway-side proof is pure-function plus text-order only, as with the approval form. The handler-level non-persistent park case is absent from the_park_form_is_refused_before_any_dispatch_unless_the_run_is_parked, whose cases use a persistent token.",
+       "suggested_fix": "After fixing the test, add a handler-level case. The park form (approval_id \"\", parking and resume switches on) with a waived and with a zero-retention bearer must give 409 not_resumable with zero GetRun, GetApproval, consume and RunAgent calls. Name it in the Park proof in place of, or beside, the never_terminalizes test."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "Several of the new sse lib tests (the_park_branch, a_park_continue_skips_the_pre_consume_check..., a_park_continue_words_a_pinned_failure...) pin the source text of continue_run and agentic_run_stream, not behaviour. The handler-level deadline and pinned-wording case was removed, so only the text is pinned for the pinned wording. The construction-failure case is covered only on agentic_run_stream directly, not through the router.",
+       "evidence": "Implementer deviations 1 to 3 say so. The sse lib tests pass (continue_run_tests 76 passed). The source-text asserts are what the design asked for. The router cannot produce a non-metadata bearer, so the construction case is a reasonable substitute. The risk is limited to a refactor that keeps the text but breaks the behaviour.",
+       "suggested_fix": "Optional. Add a behavioural pinned-wording test by injecting a session client double instead of AppState::new()'s default, and accept the construction case as is."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+       "issue": "No byte-identity, struct-literal or revert problem found. This entry records what was checked and cleared.",
+       "evidence": "git diff of sse.rs contains only the claimed hunks. With the parking switch off the parking binding is false, the rebinding is a no-op, resume_mode_for gets false, and an empty approval_id is the committed 400. The dispatch match keeps its 5 arms and the interception sits before it. The durable_loop_contract guards (31 passed) and model-gateway lib continue_run_tests (76 passed) are green. zdr_posture_matrix, zdr_feature_table and plan_execute_switch_test pass. The sse taxonomy check is up to date (23 events, needs PYTHONUTF8=1). Line endings are preserved: sse.rs, the continue_preconsume test and durable_loop_contract are LF at HEAD and in the working tree, and the compose file is CRLF in the working tree against LF at HEAD with a +9 line diff. Every caller of resume_mode_for was updated and nothing outside this unit changed.",
+       "suggested_fix": "None."
+      }
+     ],
+     "checked": [
+      "git diff of sse.rs, continue_preconsume_test.rs, durable_loop_contract.rs and docker-compose.yml, read in full against s8a-v2.json (steps, amendments_to_prior_specs, invariants, failure_matrix, and the S8-7 file_changes and tests entries)",
+      "Source reading of continue_run, agentic_run_stream, the dispatch arms, classify_continue_dispatch_failure, dispatch_unknown_event and resolve_agentic_run_deadline",
+      "Ran cargo test -p model-gateway --test continue_preconsume_test: 12 passed, 1 failed (a_park_continue_never_terminalizes, deterministic); the dropped and follow-deadline cases did not run",
+      "Ran cargo test -p execution-core --test durable_loop_contract: 31 passed (including every_guard_goes_red_when_the_code_it_guards_regresses and the two new park tests)",
+      "Ran model-gateway lib continue_run_tests (76 passed) and the zdr_posture_matrix, zdr_feature_table and plan_execute_switch_test integration tests (all passed)",
+      "Ran gen-sse-event-taxonomy.py --check with PYTHONUTF8=1: up to date (23 events)",
+      "Measured a TCP connect to a closed port on this host: 2.1 s, which is longer than the test's 1 s deadline",
+      "Verified that the Park StoreProof tests exist in park.rs, agent.rs, loop_checkpoint.rs and sse.rs, and checked executor park-resume refusal statuses against the classifier",
+      "Checked line endings of the four files at HEAD and in the working tree with python3 byte counts, plus every caller of resume_mode_for and of the changed test structs",
+      "Checked that session-core RunDetail.resumable and park_reason match what park_preflight relies on",
+      "Not run (rule 3): DB-backed #[ignore] tests. Not run (not needed for the verdict): the e2e_invoke_chain_test and the remaining model-gateway integration binaries",
+      "Not done: mutation checks (the lens is read-only review and no file may be edited)"
+     ]
+    }
+   ],
+   "blocking": [
+    {
+     "severity": "high",
+     "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+     "issue": "The new handler test a_park_continue_never_terminalizes is red. It fails on its ECONNREFUSED case. The cause is the test rig: it sets AGENTIC_RUN_DEADLINE_SECS=1 for every case, and on Windows a connect to a closed localhost port takes about 2 s (the OS retries the SYN). The follow deadline therefore fires before the connect is refused, and the stream takes the committed deadline arm instead of the park interception. Because the case loop panics at the 7th case, the 'dropped' (Unknown, RUN_DISPATCH_DEGRADED) and 'follow deadline' cases never run either. Two of the design's required handler-level failure-matrix rows are unverified: the unreachable executor and the dropped connection. This also reverses the implementer's expectation: continue_preconsume_test is not 13 green, it is 12 passed and 1 failed.",
+     "evidence": "I ran `cargo test -q -p model-gateway --test continue_preconsume_test` twice (once alone, once in `--lib --tests --no-fail-fast`). Both runs: 'a_park_continue_never_terminalizes --- FAILED ... panicked at continue_preconsume_test.rs:1514:9: ECONNREFUSED: ... event: error data: {\"code\":\"agent_dispatch_unavailable\",...,\"retryable\":true,\"run_id\":\"run-1\"} left: \"agent_dispatch_unavailable\" right: \"continue_unreachable\"'. Result: 12 passed; 1 failed. The cause is line 1506 `let _deadline = EnvGuard::set(\"AGENTIC_RUN_DEADLINE_SECS\", Some(\"1\"));`, which is applied to all nine cases. resolve_agentic_run_deadline lets that env var override the pinned default as well.",
+     "suggested_fix": "Set AGENTIC_RUN_DEADLINE_SECS only in the 'follow deadline' case. For example, carry an Option<&str> deadline per case, or split the deadline case into its own test. The other cases then run under the pinned default deadline, and an unreachable executor is classified by the park interception. Then rerun on the host and confirm all 9 cases, including 'dropped' and 'follow deadline', pass."
+    },
+    {
+     "severity": "high",
+     "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+     "issue": "The new handler-level test a_park_continue_never_terminalizes fails deterministically. It sets AGENTIC_RUN_DEADLINE_SECS=1 for every case in the loop. The ECONNREFUSED case needs longer than 1 s to learn that the connect was refused, so the follow deadline expires first and the stream sends the bare agent_dispatch_unavailable frame, not park_continue continue_unreachable.",
+     "evidence": "cargo test -q -p model-gateway --test continue_preconsume_test: 12 passed, 1 failed. Panic at continue_preconsume_test.rs:1514 for ECONNREFUSED: the error frame is {\"code\":\"agent_dispatch_unavailable\",\"retryable\":true,\"run_id\":\"run-1\"}, but the test expects continue_unreachable. Rerunning only that test fails the same way. The deadline env is 'a set value applies to every route' (resolve_agentic_run_deadline, sse.rs ~9609), so the 1 s cap applies to all nine cases. A plain TCP connect to a closed 127.0.0.1 port took 2.1 s on this host. The committed 'on / unreachable' case passes because it keeps the default deadline. The six refusal cases before it pass, and dropped and follow-deadline never ran. The implementer's report listed this test as NOT RUN because of LNK1318, so the red state went unnoticed. The test therefore does not yet establish the 'unreachable gives RUN_CONTINUE_REFUSED and a park_continue continue_unreachable frame' requirement.",
+     "suggested_fix": "Set AGENTIC_RUN_DEADLINE_SECS=1 only for the 'follow deadline' case (a per-case Option in the tuple, or a separate test). Leave the default deadline for the other eight cases. Then re-run the whole test, since the dropped and follow-deadline cases have not executed yet."
+    },
+    {
+     "severity": "high",
+     "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml",
+     "issue": "The model-gateway row (line 279) and the execution-core row (line 1162) are both '${EXECUTION_LOOP_PARKING_ENABLED:-false}', so one host variable sets both services. The design's flip order has the gateway and BFF accept the park form first (3) and the executor write parks last (4). Kill step (a) turns executor parking off while existing parks stay resumable, and (c) turns the gateway off only after park recovery is off. None of that can be done through compose. The comments also contradict each other and one is false.",
+     "evidence": "Gateway comment: 'Flip it together with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED'. Executor comment: 'Flip it last' and 'A park resume is NOT gated by this switch: with it off, existing parks stay resumable'. With the shared host variable, turning the executor off also turns the gateway's acceptance off. An empty approval_id then returns 400 continue_incomplete, so the existing parks are unresumable until the TTL ends them. This is the state kill order (c) forbids. The design risk list only says 'two scopes under one name' and does not address the compose host variable. The existing resume switches deliberately share one host variable because they are one coupled flip. The park switches are not meant to be coupled.",
+     "suggested_fix": "Give the gateway row its own host variable, for example 'EXECUTION_LOOP_PARKING_ENABLED: ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}'. Keep the container env name, because mp_contracts::loop_parking_enabled reads it. Update both comments. If the lead keeps the shared name, say so under deviations, and correct the executor comment and the kill order to say that (a) also turns off park acceptance."
+    }
+   ],
+   "fix": {
+    "summary": "Fix round for S8-7. All three findings were real and are fixed test-first. Everything in the unit now runs and is green. The disk had room this time (267 GB free), so I could run the tests the previous report listed as not run.\n\nFindings:\n1. **Fixed** (high): `a_park_continue_never_terminalizes` was red on its ECONNREFUSED case. The reviewers' failure (12 passed, 1 failed) matches the root cause: the test set `AGENTIC_RUN_DEADLINE_SECS=1` for all nine cases, and on Windows a refused connect takes about 2 s, so the deadline fired first. The deadline is now set only for the 'follow deadline' case, as `(name == \"follow deadline\").then_some(\"1\")`. `EnvGuard::set(.., None)` removes the variable, so the other cases run under the pinned default deadline. All 9 cases now run and pass, including 'dropped' and 'follow deadline'. `continue_preconsume_test` is 13 passed.\n2. **Fixed** (high): this is the same defect as finding 1, with the same fix.\n3. **Fixed** (high): the model-gateway and execution-core compose rows shared one host variable.\n   - Test first: in `tests/durable_loop_contract.rs` I added `compose_host_var(service, key)` and `const GATEWAY_PARKING_HOST_VAR = \"MODEL_GATEWAY_LOOP_PARKING_ENABLED\"`. `compose_violations` now requires the gateway parking row to be `${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}`. Every other row keeps `${KEY:-false}`.\n   - `every_switch_defaults_off_violations` also accepts the gateway's own spelling, which must still default OFF.\n   - New mutation rows in `every_guard_goes_red_when_the_code_it_guards_regresses`: the gateway on the shared host variable, the executor on the gateway's host variable, the gateway row dropped, and the gateway's host variable defaulting to true. Each is flagged.\n   - I ran the contract before changing compose and it failed for the right reason: 29 passed, 2 failed, with \"model-gateway sets EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}, expected ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}\".\n   - Then I changed the compose gateway row to `EXECUTION_LOOP_PARKING_ENABLED: ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}`. The container env name is unchanged, so `mp_contracts::loop_parking_enabled` still reads it.\n   - I corrected both comments. The gateway's says it flips with the BFF before the executor, comes off only after park recovery is off, and has its own host variable so turning the executor off leaves parks resumable. The executor's says the gateway reads its own host variable, and to flip it last and turn it off first.\n   - `durable_loop_contract` is now 31 passed, up from a baseline of 29. That includes the two S8-7 tests that had not been run before, and the meta-test.\n\n**Final verification:**\n- model-gateway lib: 1898 passed, 4 ignored.\n- All model-gateway integration binaries are green.\n- execution-core `durable_loop_contract`: 31 passed.\n\n**Mutation check on sse.rs:** I forced `park_dispatch_of(false, ..)`. `a_park_continue_never_terminalizes` went red, getting `agent_dispatch_rejected` where it expected `resume_incomplete`. I restored the file from a scratchpad copy, `cmp` showed it identical, and the test was 13 green again.\n\n**Line endings:** the compose file stays CRLF (1997/1997 lines), the test files stay LF, and sse.rs is unchanged by this round. No transient LNK or lock errors came up.",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "tests_added": [
+     "durable_loop_contract::every_guard_goes_red_when_the_code_it_guards_regresses: 4 new parking compose mutation rows (ran, pass)",
+     "durable_loop_contract::every_durable_loop_switch_is_set_on_the_services_that_read_it_and_defaults_off: now requires the gateway's own host variable (ran, pass)",
+     "continue_preconsume_test::a_park_continue_never_terminalizes: per-case deadline fix (ran, pass, all 9 cases)"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test -q -p model-gateway --test continue_preconsume_test (after the deadline fix)",
+      "outcome": "13 passed"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (contract changed, compose not yet changed)",
+      "outcome": "29 passed, 2 failed, for the expected reason (shared host variable on the gateway)"
+     },
+     {
+      "command": "cargo test -q -p execution-core --test durable_loop_contract (after the compose fix)",
+      "outcome": "31 passed"
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib --tests --no-fail-fast",
+      "outcome": "lib 1898 passed / 4 ignored; every integration binary green (continue_preconsume_test 13, the 124-test binary green)"
+     },
+     {
+      "command": "mutation: sse.rs park_dispatch_of(parking, ..) -> park_dispatch_of(false, ..), then cargo test a_park_continue_never_terminalizes",
+      "outcome": "red (agent_dispatch_rejected where resume_incomplete was expected); restored from a scratchpad copy, cmp identical, rerun 13 passed"
+     },
+     {
+      "command": "python3 byte counts of docker-compose.yml",
+      "outcome": "CRLF 1997/1997"
+     }
+    ],
+    "deviations": [
+     "compose_violations' 'it must default to OFF' wording also appears when the gateway uses the wrong host variable. The message still names the expected value, so I left the shared wording alone.",
+     "every_switch_defaults_off_violations accepts `${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}` only for the EXECUTION_LOOP_PARKING_ENABLED key. Which service may use that spelling is enforced per service by compose_violations."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "Compose host variable for the gateway's parking acceptance: MODEL_GATEWAY_LOOP_PARKING_ENABLED (the container env name stays EXECUTION_LOOP_PARKING_ENABLED). The executor's park write keeps the host variable EXECUTION_LOOP_PARKING_ENABLED.",
+     "durable_loop_contract: compose_host_var(service, key), const GATEWAY_PARKING_HOST_VAR"
+    ],
+    "tests_written_not_run": [],
+    "deferred_files": [
+     {
+      "path": "apps/Model Plane/docs/decisions/ledger.md (S8-7 addendum, correction; for the lead)",
+      "content": "The gateway's parking switch is NOT part of the coupled flip and does not share the executor's compose host variable. model-gateway reads EXECUTION_LOOP_PARKING_ENABLED from the host variable MODEL_GATEWAY_LOOP_PARKING_ENABLED (default false). Execution-core keeps EXECUTION_LOOP_PARKING_ENABLED. Flip order: the gateway (together with the BFF's VEREVON_GATEWAY_CONTINUE_PARK_ENABLED) before the executor's park write. Kill order: the executor's parking off first (existing parks stay resumable), the gateway off only after session-core park recovery is off or no park is left. durable_loop_contract's compose_violations enforces the split host variable, and mutation rows cover it."
+     }
+    ]
+   },
+   "rereview": {
+    "verdict": "approve",
+    "findings": [],
+    "checked": [
+     "Findings 1 and 2 (one defect): resolved. continue_preconsume_test.rs a_park_continue_never_terminalizes now sets AGENTIC_RUN_DEADLINE_SECS only for the 'follow deadline' case, via (name == \"follow deadline\").then_some(\"1\"). EnvGuard::set(.., None) calls std::env::remove_var, so the other eight cases run under the pinned default. The test is #[serial_test::serial], so no env race. I ran `cargo test -q -p model-gateway --test continue_preconsume_test` on the host: 13 passed, 0 failed. The loop has no early exit, so all 9 cases ran, including ECONNREFUSED (continue_unreachable, RUN_CONTINUE_REFUSED), dropped (continue_outcome_unknown, RUN_DISPATCH_DEGRADED) and follow deadline (bare agent_dispatch_unavailable, retryable true, no park_continue).",
+     "Finding 3: resolved. In docker-compose.yml the model-gateway row is now `EXECUTION_LOOP_PARKING_ENABLED: ${MODEL_GATEWAY_LOOP_PARKING_ENABLED:-false}`. The container name is unchanged, so mp_contracts still reads it. The execution-core row keeps `${EXECUTION_LOOP_PARKING_ENABLED:-false}`. Both comments now state the right flip order (gateway with the BFF first, executor last) and the right kill order (executor off first, parks stay resumable; gateway off only after park recovery is off). The false 'reads the same name' claim is corrected.",
+     "durable_loop_contract.rs: compose_host_var maps only (model-gateway, LOOP_PARKING_ENV) to GATEWAY_PARKING_HOST_VAR. compose_violations enforces the per-service host variable. every_switch_defaults_off_violations accepts the gateway spelling only when it is ':-false'. There are new mutation rows for: the gateway on the shared variable, the executor on the gateway's variable, the gateway row missing, and the gateway variable defaulting to true. I ran `cargo test -q -p execution-core --test durable_loop_contract`: 31 passed, 0 failed (158.7 s), including every_guard_goes_red_when_the_code_it_guards_regresses.",
+     "New critical or high problems from the fix: none found. The rest of the coupled-flip resume rows still require the shared `${KEY:-false}` form. The compose diff touches only the two parking rows and their comments. git diff --stat shows only the four unit-owned files modified.",
+     "Not re-run by me: the full model-gateway lib suite and the sse.rs mutation check the fixer reported. Those are outside the scope of these blocking findings."
+    ]
+   },
+   "verify": {
+    "all_green": true,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway --lib (run from apps/Model Plane/rust)",
+      "outcome": "PASS, exit 0. Build finished in 2m 03s, no compiler warnings. Verbatim: 'test result: ok. 1898 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 9.99s'. The 4 ignored tests were not run: source_validation::tests::list_how_the_finer_rule_changes_saved_cases (A/B helper, needs VEREVON_AB_CASES) and stream_buffer::tests::redis_append_latency_probe, redis_resume_survives_store_restart_and_preserves_identity_scope, redis_stalled_server_does_not_stall_appends (need REDIS_URL and probe env vars).",
+      "passed": "1898 passed, 0 failed, 4 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --test continue_preconsume_test",
+      "outcome": "PASS, exit 0. No warnings. Verbatim: 'test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.45s'.",
+      "passed": "13 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p model-gateway --test e2e_invoke_chain_test",
+      "outcome": "PASS, exit 0. No warnings. Verbatim: 'test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 227.16s'.",
+      "passed": "124 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "PASS, exit 0. Verbatim: 'test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 164.67s'. Compiling the execution-core lib as a dependency printed 3 warnings (not errors) in files this round does not modify: unreachable else clause at services/execution-core/src/capability_policy.rs:181; unused fn verification_result_for at services/execution-core/src/approval_delivery_worker.rs:744; unused fn decision_closer at services/execution-core/src/runtime_loop/resume.rs:554.",
+      "passed": "31 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo test -p execution-core --lib",
+      "outcome": "PASS, exit 0. Build finished in 2m 04s, no warnings in this run. Verbatim: 'test result: ok. 1134 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 300.14s'.",
+      "passed": "1134 passed, 0 failed, 0 ignored"
+     },
+     {
+      "command": "cargo check --workspace --all-targets --keep-going",
+      "outcome": "PASS, exit 0. Verbatim: 'Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 08s', no errors across all targets. Warnings: execution-core (lib) 3, the same three as above; session-core (bin session-core) 2: method provider (impl ZdrWaiver) never used at services/session-core/src/auth.rs:73, and fn start_managed_run_inner never used at services/session-core/src/terminalization.rs:697. Neither session-core file is in the modified set.",
+      "passed": ""
+     },
+     {
+      "command": "git status --short; git rev-parse --abbrev-ref HEAD; git log --oneline -3 (read-only)",
+      "outcome": "Branch model-plane, HEAD beeca491 (WS03 S8-6). Modified: apps/Model Plane/deploy/docker-compose.yml, apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs, apps/Model Plane/rust/services/model-gateway/src/sse.rs, apps/Model Plane/rust/services/model-gateway/tests/continue_preconsume_test.rs. Untracked: .plan-work/. All four modified files sit inside the s8-7 ownership set; no apps/Frontend Plane file is modified. Same set as the session-start snapshot.",
+      "passed": ""
+     },
+     {
+      "command": "Combined totals and run hygiene",
+      "outcome": "Five cargo test runs combined: 3200 passed, 0 failed, 4 ignored (all in model-gateway --lib). No command was retried: no LNK1104 and no mid-edit build failure occurred. Nothing edited, no git write, no docker, no DB-backed test run or written by me, so no deferred_files text. Worktree used: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b. Full logs in C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ as s8-7-v1-mg-lib.log, s8-7-v2-mg-continue.log, s8-7-v3-mg-e2e.log, s8-7-v4-ec-durable.log, s8-7-v5-ec-lib.log and s8-7-v6-ws-check.log.",
+      "passed": "3200 passed, 0 failed, 4 ignored"
+     }
+    ],
+    "failures": []
+   }
+  },
+  {
+   "unit": "s8-8",
+   "impl": {
+    "summary": "S8-8 (BFF and SPA display, no UI button) is built and green. The flag is off by default and with it off the BFF body is byte-identical to the committed code. Built test-first: the new tests were red against the missing code, then went green. BFF `cargo test --all-targets` passed 670 (baseline 657, 1 ignored as before, 0 failed). Full vitest has the baseline 7 failing tests in 5 files (all ZDR-refusal, SupportPage and quarry-client, none in a file I touched). `tsc -b` has the baseline 34 errors and eslint the baseline 1 error and 191 warnings, none new. `gen-sse-event-taxonomy.py --check` passes (23 events) only with PYTHONUTF8=1; in the default cp1252 mode it shows mojibake diffs, which is an environment problem and not a staleness. Mutation checks on the files I own all went red as intended and every file was restored byte for byte (cmp-verified).\n\nWhat I did, step by step:\n- BFF flag: AppState.continue_park_form is read once in config.rs by build_state through `continue_park_form_enabled()` and the pure `continue_park_form_from(Option<&str>)`. It is on only for exactly \"true\" (not trimmed, not case-folded; \"1\", \"yes\", \"on\" and \"TRUE\" are off). All 5 other literal constructions in the BFF (main.rs, browser.rs, chat/shared.rs, orchestration.rs tests, crawl_preview/stream_e2e.rs) got `continue_park_form: false`. The env declaration is `apps/Frontend Plane/verevonv3/docker-compose.yml`, gateway service: `VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${...:-false}`, with a comment.\n- `continue_upstream_body(body, park_form)` in orchestration.rs: with the flag on, an exactly empty approval_id and a non-blank token forward as {\"approval_id\":\"\",\"claim_token\":token}; the token is forwarded as sent. A whitespace-only id, a blank token, and every flag-off input are exactly as committed; a committed-oracle test checks that. There is no absent-key exception: an absent key is axum's 422 with the flag on or off, and deny_unknown_fields still holds. The handler passes `state.continue_park_form`.\n- ag_ui.rs: `run_parked` and `run_resumed` join the CUSTOM allowlist, with the SSE cursor kept. A name that merely resembles them stays RAW.\n- Parity row in tests/continue_error_vocabulary.rs, against model-gateway's `park_refusal_event`:\n  - the gateway frame sets `park_continue: true` and `run_id` and never says approval_spent;\n  - the SPA reader requires that marker and refuses any approval_spent key;\n  - the tokens a park frame can carry are in both closed 25-token lists;\n  - the SPA runStaysParked buckets name only tokens a park frame can carry, with `agent_dispatch_unavailable` kept as the bare frame outside the lists;\n  - the BFF's production handler never mentions park_continue or approval_spent.\n  Its header doc now lists the new row.\n- SPA chat-client.ts: optional `onRunParked(RunParkedFrame)`. `case 'run_parked'` calls it for a frame `runParkedFrameOf` reads, and sends any other frame to onUnknownEvent. An unknown reason, `crash_interrupted`, and the orchestration-subject frame with only a run id all go to onUnknownEvent. The same logic is in the AG-UI CUSTOM branch.\n- `src/features/chat/lib/run-park.ts` (new) and `run-park.test.ts` (new): `RUN_PARK_REASONS` (four closed reasons), `runParkedFrameOf`, `runResumedFrameOf` (segment must be a non-negative integer, as run-console-client does), `parkReasonLabel(reason, 'no'|'en')`. Labels start \"Satt på pause\" / \"Paused\", offer no retry, and fall back to a generic label for an unknown reason. A source test pins it as display only: no fetch, no client import, no continue call.\n- orchestration-client.ts: `continueParkedRun(runId, claimToken, onEvent, signal)` posts exactly `{\"approval_id\":\"\",\"claim_token\":...}`. It has NO caller, and a test scans src to confirm only the client names it. I also re-exported `chatRunContinueParkFailureOf` and the park failure types there, so a caller reads failures from one place.\n\nDisputed or deferred: nothing from the S8-8 scope. Not built, because they belong to others: the UI button, any caller of continueParkedRun, the S8-7 model-gateway frames, and S8-9 (compose flip and kill table, ledger, plan rows).",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/stream_e2e.rs",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docker-compose.yml",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.test.ts"
+    ],
+    "tests_added": [
+     "BFF config.rs: the_park_form_flag_is_on_only_for_the_exact_word_true",
+     "BFF config.rs: the_park_form_flag_is_read_once_by_build_state_and_by_no_handler (also pins the compose row, default false, declared once)",
+     "BFF orchestration.rs: continue_forwards_the_park_form_only_with_the_flag_and_an_exact_empty_approval",
+     "BFF orchestration.rs: the_flag_changes_nothing_for_an_ordinary_approval_continue (committed-oracle comparison)",
+     "BFF orchestration.rs: with_the_flag_off_a_blank_approval_is_the_committed_400_and_an_absent_key_the_committed_422",
+     "BFF orchestration.rs: the_park_form_with_a_blank_id_that_is_not_empty_or_a_blank_token_is_still_the_400",
+     "BFF orchestration.rs: deny_unknown_fields_still_holds",
+     "BFF orchestration.rs: the_park_form_reaches_model_gateway_as_an_empty_id_and_the_token_with_the_flag_on",
+     "BFF orchestration.rs: the_park_form_never_reaches_model_gateway_with_the_flag_off",
+     "BFF orchestration.rs: the_flag_is_an_app_state_field_and_the_handler_passes_it_to_the_body_builder",
+     "BFF ag_ui.rs: a_parked_runs_frames_are_carried_as_custom_events_with_their_cursor",
+     "BFF ag_ui.rs: a_name_that_only_resembles_a_park_frame_stays_raw",
+     "BFF tests/continue_error_vocabulary.rs: the_park_frame_the_gateway_writes_is_the_one_the_spa_park_reader_reads (the parity row against park_refusal_event)",
+     "SPA run-park.test.ts (new, 14 tests): runParkedFrameOf, runResumedFrameOf, parkReasonLabel in no/en, display-only source test",
+     "SPA chat-client.test.ts: describe 'run_parked (WS03 S8-A, display only)' with 5 tests (known reason, every closed reason, unknown reason or no reason to onUnknownEvent, no handler set, AG-UI CUSTOM)",
+     "SPA orchestration-client.test.ts: describe 'continueParkedRun (WS03 S8-A, no caller)' with 7 tests (exact body, signal, run id encoding, typed 409, park frame read by the park reader only, no caller in src, doc has no retry advice)"
+    ],
+    "commands_run": [
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (baseline, from the verevonv3 directory)",
+      "outcome": "EXIT 0. 647 unit + 6 + 3 + 1 = 657 passed, 1 ignored, 0 failed"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (after)",
+      "outcome": "EXIT 0. 659 unit + 7 + 3 + 1 = 670 passed, 1 ignored, 0 failed. The first run after the changes had one failure in my own compose-row assertion, fixed (the substring also matched the ${...:-false} reference), then green"
+     },
+     {
+      "command": "vitest run (run-park, chat-client, orchestration-client tests), first against missing code",
+      "outcome": "red for the right reasons: module not found, 11 tests failed on missing onRunParked and continueParkedRun"
+     },
+     {
+      "command": "vitest run src/shared/actions, orchestration-client, chat-client, run-console-client and run-park tests (after)",
+      "outcome": "12 files, 279 tests passed"
+     },
+     {
+      "command": "vitest run (full suite, after)",
+      "outcome": "7 failed tests in 5 files, 3619 passed. The failing files are chat-client.zdr-refusal, http.zdr-refusal, use-chat-controller.zdr-refusal, SupportPage.test, quarry-client.test: the baseline count and set shape, none touched by this unit"
+     },
+     {
+      "command": "node_modules/.bin/tsc -b",
+      "outcome": "34 errors, equal to baseline: quarry-client.ts 21, RemoteSupportPage.tsx 12, and chat-client.ts(964) failureFeature unused, which exists at HEAD line 957; no error in a new or edited line"
+     },
+     {
+      "command": "node_modules/.bin/eslint . -f json",
+      "outcome": "1 error and 191 warnings, equal to baseline; the one error is the pre-existing failureFeature no-unused-vars"
+     },
+     {
+      "command": "PYTHONUTF8=1 python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+      "outcome": "sse taxonomy up to date (23 events). Without PYTHONUTF8=1 on this Windows host it prints mojibake-only diffs and then crashes on a cp1252 print, which is an environment artifact"
+     },
+     {
+      "command": "mutation batch A on config.rs, orchestration.rs, ag_ui.rs (flag ignored, lax true parse, run_parked dropped from CUSTOM, park marker added to the BFF handler), restored and cmp-verified",
+      "outcome": "caught by 8 BFF tests plus the parity row; all three files restored byte-identical"
+     },
+     {
+      "command": "mutation batch B on orchestration.rs (whitespace id treated as park form, handler passes false), restored and cmp-verified",
+      "outcome": "caught by 4 tests; restored byte-identical"
+     },
+     {
+      "command": "mutation batch C on run-park.ts, chat-client.ts, orchestration-client.ts (status check dropped, crash_interrupted accepted, case renamed, approval_id dropped from the body), restored and cmp-verified",
+      "outcome": "7 tests went red; all three files restored byte-identical"
+     },
+     {
+      "command": "python3 byte count of CRLF and LF per edited file, against the earlier measurements",
+      "outcome": "no file has mixed endings; config.rs, ag_ui.rs, main.rs, browser.rs, chat/shared.rs and stream_e2e.rs stay CRLF, the rest LF; new files are LF"
+     }
+    ],
+    "deviations": [
+     "The BFF env declaration is apps/Frontend Plane/verevonv3/docker-compose.yml, gateway service, next to VEREVON_PUBLIC_ORIGIN. production.yml, .env.example and the Model Plane compose do not declare BFF envs, and I did not touch them.",
+     "The design does not mention run_resumed in the SPA chat client. I added no onRunResumed handler (the turn stream never carries run_resumed; the run console already reads it). run_resumed is still in the BFF CUSTOM allowlist, and run-park.ts provides runResumedFrameOf.",
+     "I added `case 'run_parked'` to the AG-UI CUSTOM branch of chat-client.ts too (same semantics), because the BFF now emits run_parked as CUSTOM. The design names only the native case.",
+     "I re-exported chatRunContinueParkFailureOf, ChatRunContinueParkFailure and ChatRunContinueRunStaysParked from orchestration-client.ts. This is additive and not in the design; it follows the file's own rule that a caller reads failures from one place.",
+     "`crash_interrupted` is deliberately NOT in RUN_PARK_REASONS, although the Rust ParkReason::parse accepts it: crash-park is out of scope and the executor never writes it, so a run_parked frame carrying it goes to onUnknownEvent. If a later slice makes the gateway emit it, add it to the tuple and the labels.",
+     "I did not touch src/shared/chat/verevon-ui-events.ts (PROJECTABLE_CUSTOM_NAMES). run_parked and run_resumed have no UI projection yet. That is a UI decision, so they surface only through onRunParked, onUnknownEvent and the run console.",
+     "Two edits fell outside the files named in the design, but they are under the Frontend Plane tree that s8-8 owns: the 5 AppState test constructions (main.rs, browser.rs, chat/shared.rs, stream_e2e.rs, orchestration.rs) and the compose file."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "BFF: AppState.continue_park_form (bool); env VEREVON_GATEWAY_CONTINUE_PARK_ENABLED, exactly \"true\"; config.rs fns continue_park_form_enabled() and continue_park_form_from(Option<&str>); orchestration.rs continue_upstream_body(&ContinueRunBody, park_form: bool)",
+     "BFF ag_ui.rs CUSTOM allowlist now includes run_parked and run_resumed",
+     "BFF parity test: tests/continue_error_vocabulary.rs the_park_frame_the_gateway_writes_is_the_one_the_spa_park_reader_reads (reads model-gateway sse.rs park_refusal_event, park_frame_token, agent_dispatch_unavailable_event and the production park_refusal_event call sites)",
+     "SPA: src/features/chat/lib/run-park.ts exports RUN_PARK_REASONS, RunParkReason, RunParkedFrame, RunResumedFrame, runParkedFrameOf, runResumedFrameOf, parkReasonLabel(reason, 'no'|'en')",
+     "SPA: chat-client.ts ChatStreamHandlers.onRunParked?: (RunParkedFrame) => void",
+     "SPA: orchestration-client.ts continueParkedRun(runId, claimToken, onEvent, signal?) (no caller; a test fails if any other file under src names it, so the future wiring step must update that test) and the re-exports chatRunContinueParkFailureOf, ChatRunContinueParkFailure, ChatRunContinueRunStaysParked",
+     "Compose row for S8-9: `VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:-false}` in apps/Frontend Plane/verevonv3/docker-compose.yml (flip together with model-gateway EXECUTION_LOOP_PARKING_ENABLED; the flag on in front of a gateway with parking off gives 400 continue_incomplete, reported as model_error)"
+    ],
+    "tests_written_not_run": [],
+    "deferred_files": [
+     {
+      "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger addendum, text only)",
+      "content": "WS03 S8-8 (BFF and SPA display, no UI button): built on the local model-plane branch, uncommitted at hand-off.\n- BFF: AppState.continue_park_form from VEREVON_GATEWAY_CONTINUE_PARK_ENABLED (exactly \"true\", default false, read once in config.rs; declared in apps/Frontend Plane/verevonv3/docker-compose.yml). continue_upstream_body(body, park_form) forwards an exactly empty approval_id with a non-blank token only with the flag on; no absent-key form (422 either way); deny_unknown_fields holds. ag_ui.rs carries run_parked and run_resumed as CUSTOM. continue_error_vocabulary.rs has the park frame parity row against model-gateway's park_refusal_event.\n- SPA: chat-client.ts onRunParked (an unknown reason goes to onUnknownEvent); src/features/chat/lib/run-park.ts (runParkedFrameOf, runResumedFrameOf, parkReasonLabel no/en, display only); orchestration-client.ts continueParkedRun posting {approval_id:'', claim_token} with NO caller.\n- Verified: BFF cargo test --all-targets 670 passed (baseline 657), vitest failing set unchanged (7 tests in 5 files), tsc -b 34 errors and eslint 1 error and 191 warnings (baselines), sse taxonomy up to date under PYTHONUTF8=1.\n- Flip: VEREVON_GATEWAY_CONTINUE_PARK_ENABLED goes on together with model-gateway EXECUTION_LOOP_PARKING_ENABLED (flip 3); kill order (c) applies to it. A BFF flag on in front of a gateway with parking off answers the park form 400 continue_incomplete, reported as model_error.\n- Open for later: the UI projection of run_parked in verevon-ui-events.ts, and the first caller of continueParkedRun (a test pins that none exists)."
+     }
+    ]
+   },
+   "impls": [
+    {
+     "summary": "S8-8 (BFF and SPA display, no UI button) is built and green. The flag is off by default and with it off the BFF body is byte-identical to the committed code. Built test-first: the new tests were red against the missing code, then went green. BFF `cargo test --all-targets` passed 670 (baseline 657, 1 ignored as before, 0 failed). Full vitest has the baseline 7 failing tests in 5 files (all ZDR-refusal, SupportPage and quarry-client, none in a file I touched). `tsc -b` has the baseline 34 errors and eslint the baseline 1 error and 191 warnings, none new. `gen-sse-event-taxonomy.py --check` passes (23 events) only with PYTHONUTF8=1; in the default cp1252 mode it shows mojibake diffs, which is an environment problem and not a staleness. Mutation checks on the files I own all went red as intended and every file was restored byte for byte (cmp-verified).\n\nWhat I did, step by step:\n- BFF flag: AppState.continue_park_form is read once in config.rs by build_state through `continue_park_form_enabled()` and the pure `continue_park_form_from(Option<&str>)`. It is on only for exactly \"true\" (not trimmed, not case-folded; \"1\", \"yes\", \"on\" and \"TRUE\" are off). All 5 other literal constructions in the BFF (main.rs, browser.rs, chat/shared.rs, orchestration.rs tests, crawl_preview/stream_e2e.rs) got `continue_park_form: false`. The env declaration is `apps/Frontend Plane/verevonv3/docker-compose.yml`, gateway service: `VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${...:-false}`, with a comment.\n- `continue_upstream_body(body, park_form)` in orchestration.rs: with the flag on, an exactly empty approval_id and a non-blank token forward as {\"approval_id\":\"\",\"claim_token\":token}; the token is forwarded as sent. A whitespace-only id, a blank token, and every flag-off input are exactly as committed; a committed-oracle test checks that. There is no absent-key exception: an absent key is axum's 422 with the flag on or off, and deny_unknown_fields still holds. The handler passes `state.continue_park_form`.\n- ag_ui.rs: `run_parked` and `run_resumed` join the CUSTOM allowlist, with the SSE cursor kept. A name that merely resembles them stays RAW.\n- Parity row in tests/continue_error_vocabulary.rs, against model-gateway's `park_refusal_event`:\n  - the gateway frame sets `park_continue: true` and `run_id` and never says approval_spent;\n  - the SPA reader requires that marker and refuses any approval_spent key;\n  - the tokens a park frame can carry are in both closed 25-token lists;\n  - the SPA runStaysParked buckets name only tokens a park frame can carry, with `agent_dispatch_unavailable` kept as the bare frame outside the lists;\n  - the BFF's production handler never mentions park_continue or approval_spent.\n  Its header doc now lists the new row.\n- SPA chat-client.ts: optional `onRunParked(RunParkedFrame)`. `case 'run_parked'` calls it for a frame `runParkedFrameOf` reads, and sends any other frame to onUnknownEvent. An unknown reason, `crash_interrupted`, and the orchestration-subject frame with only a run id all go to onUnknownEvent. The same logic is in the AG-UI CUSTOM branch.\n- `src/features/chat/lib/run-park.ts` (new) and `run-park.test.ts` (new): `RUN_PARK_REASONS` (four closed reasons), `runParkedFrameOf`, `runResumedFrameOf` (segment must be a non-negative integer, as run-console-client does), `parkReasonLabel(reason, 'no'|'en')`. Labels start \"Satt på pause\" / \"Paused\", offer no retry, and fall back to a generic label for an unknown reason. A source test pins it as display only: no fetch, no client import, no continue call.\n- orchestration-client.ts: `continueParkedRun(runId, claimToken, onEvent, signal)` posts exactly `{\"approval_id\":\"\",\"claim_token\":...}`. It has NO caller, and a test scans src to confirm only the client names it. I also re-exported `chatRunContinueParkFailureOf` and the park failure types there, so a caller reads failures from one place.\n\nDisputed or deferred: nothing from the S8-8 scope. Not built, because they belong to others: the UI button, any caller of continueParkedRun, the S8-7 model-gateway frames, and S8-9 (compose flip and kill table, ledger, plan rows).",
+     "files_changed": [
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/stream_e2e.rs",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docker-compose.yml",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+      "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.test.ts"
+     ],
+     "tests_added": [
+      "BFF config.rs: the_park_form_flag_is_on_only_for_the_exact_word_true",
+      "BFF config.rs: the_park_form_flag_is_read_once_by_build_state_and_by_no_handler (also pins the compose row, default false, declared once)",
+      "BFF orchestration.rs: continue_forwards_the_park_form_only_with_the_flag_and_an_exact_empty_approval",
+      "BFF orchestration.rs: the_flag_changes_nothing_for_an_ordinary_approval_continue (committed-oracle comparison)",
+      "BFF orchestration.rs: with_the_flag_off_a_blank_approval_is_the_committed_400_and_an_absent_key_the_committed_422",
+      "BFF orchestration.rs: the_park_form_with_a_blank_id_that_is_not_empty_or_a_blank_token_is_still_the_400",
+      "BFF orchestration.rs: deny_unknown_fields_still_holds",
+      "BFF orchestration.rs: the_park_form_reaches_model_gateway_as_an_empty_id_and_the_token_with_the_flag_on",
+      "BFF orchestration.rs: the_park_form_never_reaches_model_gateway_with_the_flag_off",
+      "BFF orchestration.rs: the_flag_is_an_app_state_field_and_the_handler_passes_it_to_the_body_builder",
+      "BFF ag_ui.rs: a_parked_runs_frames_are_carried_as_custom_events_with_their_cursor",
+      "BFF ag_ui.rs: a_name_that_only_resembles_a_park_frame_stays_raw",
+      "BFF tests/continue_error_vocabulary.rs: the_park_frame_the_gateway_writes_is_the_one_the_spa_park_reader_reads (the parity row against park_refusal_event)",
+      "SPA run-park.test.ts (new, 14 tests): runParkedFrameOf, runResumedFrameOf, parkReasonLabel in no/en, display-only source test",
+      "SPA chat-client.test.ts: describe 'run_parked (WS03 S8-A, display only)' with 5 tests (known reason, every closed reason, unknown reason or no reason to onUnknownEvent, no handler set, AG-UI CUSTOM)",
+      "SPA orchestration-client.test.ts: describe 'continueParkedRun (WS03 S8-A, no caller)' with 7 tests (exact body, signal, run id encoding, typed 409, park frame read by the park reader only, no caller in src, doc has no retry advice)"
+     ],
+     "commands_run": [
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (baseline, from the verevonv3 directory)",
+       "outcome": "EXIT 0. 647 unit + 6 + 3 + 1 = 657 passed, 1 ignored, 0 failed"
+      },
+      {
+       "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (after)",
+       "outcome": "EXIT 0. 659 unit + 7 + 3 + 1 = 670 passed, 1 ignored, 0 failed. The first run after the changes had one failure in my own compose-row assertion, fixed (the substring also matched the ${...:-false} reference), then green"
+      },
+      {
+       "command": "vitest run (run-park, chat-client, orchestration-client tests), first against missing code",
+       "outcome": "red for the right reasons: module not found, 11 tests failed on missing onRunParked and continueParkedRun"
+      },
+      {
+       "command": "vitest run src/shared/actions, orchestration-client, chat-client, run-console-client and run-park tests (after)",
+       "outcome": "12 files, 279 tests passed"
+      },
+      {
+       "command": "vitest run (full suite, after)",
+       "outcome": "7 failed tests in 5 files, 3619 passed. The failing files are chat-client.zdr-refusal, http.zdr-refusal, use-chat-controller.zdr-refusal, SupportPage.test, quarry-client.test: the baseline count and set shape, none touched by this unit"
+      },
+      {
+       "command": "node_modules/.bin/tsc -b",
+       "outcome": "34 errors, equal to baseline: quarry-client.ts 21, RemoteSupportPage.tsx 12, and chat-client.ts(964) failureFeature unused, which exists at HEAD line 957; no error in a new or edited line"
+      },
+      {
+       "command": "node_modules/.bin/eslint . -f json",
+       "outcome": "1 error and 191 warnings, equal to baseline; the one error is the pre-existing failureFeature no-unused-vars"
+      },
+      {
+       "command": "PYTHONUTF8=1 python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+       "outcome": "sse taxonomy up to date (23 events). Without PYTHONUTF8=1 on this Windows host it prints mojibake-only diffs and then crashes on a cp1252 print, which is an environment artifact"
+      },
+      {
+       "command": "mutation batch A on config.rs, orchestration.rs, ag_ui.rs (flag ignored, lax true parse, run_parked dropped from CUSTOM, park marker added to the BFF handler), restored and cmp-verified",
+       "outcome": "caught by 8 BFF tests plus the parity row; all three files restored byte-identical"
+      },
+      {
+       "command": "mutation batch B on orchestration.rs (whitespace id treated as park form, handler passes false), restored and cmp-verified",
+       "outcome": "caught by 4 tests; restored byte-identical"
+      },
+      {
+       "command": "mutation batch C on run-park.ts, chat-client.ts, orchestration-client.ts (status check dropped, crash_interrupted accepted, case renamed, approval_id dropped from the body), restored and cmp-verified",
+       "outcome": "7 tests went red; all three files restored byte-identical"
+      },
+      {
+       "command": "python3 byte count of CRLF and LF per edited file, against the earlier measurements",
+       "outcome": "no file has mixed endings; config.rs, ag_ui.rs, main.rs, browser.rs, chat/shared.rs and stream_e2e.rs stay CRLF, the rest LF; new files are LF"
+      }
+     ],
+     "deviations": [
+      "The BFF env declaration is apps/Frontend Plane/verevonv3/docker-compose.yml, gateway service, next to VEREVON_PUBLIC_ORIGIN. production.yml, .env.example and the Model Plane compose do not declare BFF envs, and I did not touch them.",
+      "The design does not mention run_resumed in the SPA chat client. I added no onRunResumed handler (the turn stream never carries run_resumed; the run console already reads it). run_resumed is still in the BFF CUSTOM allowlist, and run-park.ts provides runResumedFrameOf.",
+      "I added `case 'run_parked'` to the AG-UI CUSTOM branch of chat-client.ts too (same semantics), because the BFF now emits run_parked as CUSTOM. The design names only the native case.",
+      "I re-exported chatRunContinueParkFailureOf, ChatRunContinueParkFailure and ChatRunContinueRunStaysParked from orchestration-client.ts. This is additive and not in the design; it follows the file's own rule that a caller reads failures from one place.",
+      "`crash_interrupted` is deliberately NOT in RUN_PARK_REASONS, although the Rust ParkReason::parse accepts it: crash-park is out of scope and the executor never writes it, so a run_parked frame carrying it goes to onUnknownEvent. If a later slice makes the gateway emit it, add it to the tuple and the labels.",
+      "I did not touch src/shared/chat/verevon-ui-events.ts (PROJECTABLE_CUSTOM_NAMES). run_parked and run_resumed have no UI projection yet. That is a UI decision, so they surface only through onRunParked, onUnknownEvent and the run console.",
+      "Two edits fell outside the files named in the design, but they are under the Frontend Plane tree that s8-8 owns: the 5 AppState test constructions (main.rs, browser.rs, chat/shared.rs, stream_e2e.rs, orchestration.rs) and the compose file."
+     ],
+     "blockers": [],
+     "names_for_later_units": [
+      "BFF: AppState.continue_park_form (bool); env VEREVON_GATEWAY_CONTINUE_PARK_ENABLED, exactly \"true\"; config.rs fns continue_park_form_enabled() and continue_park_form_from(Option<&str>); orchestration.rs continue_upstream_body(&ContinueRunBody, park_form: bool)",
+      "BFF ag_ui.rs CUSTOM allowlist now includes run_parked and run_resumed",
+      "BFF parity test: tests/continue_error_vocabulary.rs the_park_frame_the_gateway_writes_is_the_one_the_spa_park_reader_reads (reads model-gateway sse.rs park_refusal_event, park_frame_token, agent_dispatch_unavailable_event and the production park_refusal_event call sites)",
+      "SPA: src/features/chat/lib/run-park.ts exports RUN_PARK_REASONS, RunParkReason, RunParkedFrame, RunResumedFrame, runParkedFrameOf, runResumedFrameOf, parkReasonLabel(reason, 'no'|'en')",
+      "SPA: chat-client.ts ChatStreamHandlers.onRunParked?: (RunParkedFrame) => void",
+      "SPA: orchestration-client.ts continueParkedRun(runId, claimToken, onEvent, signal?) (no caller; a test fails if any other file under src names it, so the future wiring step must update that test) and the re-exports chatRunContinueParkFailureOf, ChatRunContinueParkFailure, ChatRunContinueRunStaysParked",
+      "Compose row for S8-9: `VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:-false}` in apps/Frontend Plane/verevonv3/docker-compose.yml (flip together with model-gateway EXECUTION_LOOP_PARKING_ENABLED; the flag on in front of a gateway with parking off gives 400 continue_incomplete, reported as model_error)"
+     ],
+     "tests_written_not_run": [],
+     "deferred_files": [
+      {
+       "path": "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger addendum, text only)",
+       "content": "WS03 S8-8 (BFF and SPA display, no UI button): built on the local model-plane branch, uncommitted at hand-off.\n- BFF: AppState.continue_park_form from VEREVON_GATEWAY_CONTINUE_PARK_ENABLED (exactly \"true\", default false, read once in config.rs; declared in apps/Frontend Plane/verevonv3/docker-compose.yml). continue_upstream_body(body, park_form) forwards an exactly empty approval_id with a non-blank token only with the flag on; no absent-key form (422 either way); deny_unknown_fields holds. ag_ui.rs carries run_parked and run_resumed as CUSTOM. continue_error_vocabulary.rs has the park frame parity row against model-gateway's park_refusal_event.\n- SPA: chat-client.ts onRunParked (an unknown reason goes to onUnknownEvent); src/features/chat/lib/run-park.ts (runParkedFrameOf, runResumedFrameOf, parkReasonLabel no/en, display only); orchestration-client.ts continueParkedRun posting {approval_id:'', claim_token} with NO caller.\n- Verified: BFF cargo test --all-targets 670 passed (baseline 657), vitest failing set unchanged (7 tests in 5 files), tsc -b 34 errors and eslint 1 error and 191 warnings (baselines), sse taxonomy up to date under PYTHONUTF8=1.\n- Flip: VEREVON_GATEWAY_CONTINUE_PARK_ENABLED goes on together with model-gateway EXECUTION_LOOP_PARKING_ENABLED (flip 3); kill order (c) applies to it. A BFF flag on in front of a gateway with parking off answers the park form 400 continue_incomplete, reported as model_error.\n- Open for later: the UI projection of run_parked in verevon-ui-events.ts, and the first caller of continueParkedRun (a test pins that none exists)."
+      }
+     ]
+    }
+   ],
+   "reviews": [
+    {
+     "verdict": "changes",
+     "findings": [
+      {
+       "severity": "high",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+       "issue": "runParkedFrameOf says resume_after is kept only when it parses as a time and that free text is never echoed. That is false. The check is Date.parse(...) not NaN, and V8's lenient legacy parser accepts many arbitrary strings, so free text passes through into RunParkedFrame.resumeAfter. The test only uses 'soon, maybe', which happens to be NaN, so it does not catch this.",
+       "evidence": "In node, Date.parse('ignore previous instructions 12') is 1007161200000, Date.parse('hello 1') is 978303600000, Date.parse('x 2026') is 1767222000000 and Date.parse('1') is 978303600000. In run-park.ts, `typeof record.resume_after === 'string' && !Number.isNaN(Date.parse(record.resume_after)) ? record.resume_after : null` returns the raw string. run-park.test.ts line 67 only asserts 'soon, maybe', '', null and a number. Real frames are safe, because model-gateway's run_parked_event re-formats the value with to_rfc3339_opts. But the SPA reader is documented as the closed, content-free guard, and a later UI that renders resumeAfter would show whatever string arrives.",
+       "suggested_fix": "Require an RFC 3339 shape before accepting the string, for example a regex like /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$/ together with the Date.parse check. Add tests with 'hello 1', 'x 2026', '2026' and '1' that expect null."
+      },
+      {
+       "severity": "medium",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+       "issue": "The design's P10 mitigation says run_parked is shown on the owner's turn stream. S8-8 adds onRunParked to the client, but nothing sets it (the controller sets only onUnknownEvent, which console.warns the name). With the switches on, a parked chat turn shows no park state. Its stream ends with run_parked and no done, so the controller treats it as a dropped connection (reconnectRequested, then attemptResumeStream), and the user sees the turn reconnecting. The park is neither shown nor words-labelled by parkReasonLabel, which has no caller.",
+       "evidence": "grep finds onRunParked only in chat-client.ts and tests. The controller's EOF branch at use-chat-controller.ts ~2950-2985 sets reconnectRequested for any non-aborted stream that ends without an outcome. The model-gateway Parked arm sends run_parked and returns, with no done frame. This is gated by the BFF and model-gateway flags and does not change anything with the switches off. It does not meet the risk-0 mitigation the design relies on before flip (4).",
+       "suggested_fix": "Either wire a minimal onRunParked in the controller that settles the turn as paused with parkReasonLabel (and does not reconnect), or record in the ledger that the P10 mitigation 'run_parked is shown on the turn stream' is NOT met by S8-8 and must be built before flip (4). Also state explicitly that the EOF-reconnect path is what a parked turn goes through."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs",
+       "issue": "The parity row pins the park refusal frame, but nothing pins the SPA's RUN_PARK_REASONS (four reasons) or the run_parked frame keys against the Rust side (mp-contracts ParkReason, model-gateway run_parked_event). If a reason is added in Rust, the SPA silently sends it to onUnknownEvent. This fails safe, but it is unpinned drift for a closed vocabulary.",
+       "evidence": "The new test reads park_refusal_event, park_frame_token and CONTINUE_FRAME_REFUSALS. It never reads park_reason.rs or run_parked_event. RUN_PARK_REASONS matches the five-variant enum minus crash_interrupted only by hand.",
+       "suggested_fix": "In the same test, read mp-contracts park_reason.rs as_str literals and assert RUN_PARK_REASONS equals them minus crash_interrupted. Assert the run_parked_event keys (run_id, request_id, status, reason, resume_after)."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+       "issue": "The CONTINUE_RELAYED_ERRORS doc still says continue_incomplete is not relayed because 'this handler's own blank check answers first'. With the park flag on, the park form passes that check, and the gateway's continue_incomplete (parking off upstream) is reported as model_error. The compose and AppState docs say so, but this doc comment is now stale.",
+       "evidence": "orchestration.rs doc above CONTINUE_RELAYED_ERRORS: 'Not here, on purpose: `continue_incomplete` (this handler's own blank check answers first)'.",
+       "suggested_fix": "Add 'except the park form with the flag on, where the gateway's continue_incomplete is reported as model_error'."
+      }
+     ],
+     "checked": [
+      "git diff of all 13 modified tracked files plus the two new untracked files (run-park.ts, run-park.test.ts), read in full",
+      "Line endings: HEAD blobs are LF and the working copies keep their per-file endings (config.rs, ag_ui.rs, main.rs, browser.rs, chat/shared.rs and stream_e2e.rs are CRLF; the rest are LF); no mixed endings",
+      "BFF continue_upstream_body: with the flag off it is byte-identical to the committed body (the committed-oracle test covers it). With the flag on only an EXACTLY empty approval_id with a non-blank token is forwarded. A whitespace-only id, a blank token and an absent key (axum 422) are unchanged, and deny_unknown_fields holds",
+      "BFF flag: read once in build_state, exactly 'true' (not trimmed, not case-folded), default false in compose (the gateway service environment), all 5 test AppState constructions get false. No other deployment manifest declares the BFF env; docker-compose.production.yml merges the environment maps",
+      "The BFF handler neither reads nor writes park_continue or approval_spent. It does not trim or log the claim token, and the SSE is relayed untouched. ZDR still flows via the x-zdr header and the gateway's own refusal",
+      "ag_ui.rs: run_parked and run_resumed join the CUSTOM allowlist with the SSE cursor kept; a name that only resembles them stays RAW. No RUN_FINISHED is synthesized at EOF",
+      "SPA chat-client: both the native and the AG-UI CUSTOM branches read run_parked through runParkedFrameOf, and an unknown reason or crash_interrupted goes to onUnknownEvent. continueParkedRun posts {approval_id:'', claim_token}, readSseStream has no retry (no double POST), and no caller exists in src",
+      "Frame parity against model-gateway sse.rs (park_refusal_event sets park_continue and run_id and never approval_spent; run_parked_event keys are run_id, request_id, status, reason, resume_after; reasons match park_reason.rs)",
+      "Ran: cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (659 unit + 7 + 3 + 1 passed, 1 ignored, 0 failed); vitest on run-park, chat-client, orchestration-client, run-console-client and src/shared/actions (12 files, 279 passed); tsc -b gives 34 errors (RemoteSupportPage 12, quarry-client 21, chat-client failureFeature 1), the same as baseline; eslint on touched files gives only the pre-existing failureFeature error",
+      "I did not rerun the full vitest suite or the sse taxonomy check, and I did not run mutation checks myself (I did not edit anything); I rely on the implementer's report for those",
+      "Red-team checklist items relevant to this unit (claim token logging, ZDR/waived reach, authority widening, replay): none apply on the BFF or SPA beyond the points above. Executor and gateway invariants (INV-01..08) belong to the other units"
+     ]
+    },
+    {
+     "verdict": "approve",
+     "findings": [
+      {
+       "severity": "medium",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+       "issue": "A well-formed run_parked frame is now swallowed silently, and nothing in production sets onRunParked. The only trace of a parked turn was the console.warn from onUnknownEvent, and that is gone for valid frames. The design's risk P10 names 'run_parked is shown on the owner's turn stream' as a mitigation. On the wire that is true, but the SPA shows nothing.",
+       "evidence": "dispatchEvent (~line 1667) and the AG-UI CUSTOM branch (~line 1420) call `handlers.onRunParked?.(parked)` for a frame that reads, and only an unreadable frame goes to onUnknownEvent. `grep -rn onRunParked src` finds only the declaration, these two call sites, and the unrelated run-console-client handler. use-chat-controller.ts sets onUnknownEvent (console.warn) but no onRunParked. The test 'does nothing, and does not report an unknown event, for a known frame when no handler is set' pins the swallow. With the flags flipped, a parked turn stream ends with no done, stopped or error, and nothing says why.",
+       "suggested_fix": "This matches the S8-8 step text, so it is not a build defect. Either fall back to onUnknownEvent when onRunParked is unset, so the warn is kept until a consumer exists, or record in S8-9 and the ledger that the display half of P10 is still open. The follow-up is to wire onRunParked in use-chat-controller with parkReasonLabel, before flip (4)."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+       "issue": "run_parked and run_resumed are carried as CUSTOM, but a parked turn's AG-UI stream gets no TEXT_MESSAGE_END and no RUN_FINISHED. An AG-UI client sees a stream that just ends. This is the same behaviour as awaiting_approval and the other CUSTOM-family frames, and it is not in the design.",
+       "evidence": "The `\"done\" | \"stopped\"` arm is the only one that closes an open text message and emits RUN_FINISHED. The new names join the pass-through CUSTOM arm. The new test only checks CUSTOM, the name, the marker and the cursor.",
+       "suggested_fix": "Accept it for now. If an AG-UI consumer is ever wired to parks, add a terminal mapping for run_parked in a later step."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs",
+       "issue": "The parity row for the park frame is mostly checks on source text, not on behaviour: `contains(r#\"payload[\"park_continue\"] = json!(true);\"#)`, `contains(\"isParkMarked(record)\")` and `contains(\"'approval_spent' in record\")`. A harmless refactor on either side turns it red, and an equivalent change that breaks the contract (for example building the payload another way) can slip through. The token and bucket assertions are real list comparisons.",
+       "evidence": "The `the_park_frame_the_gateway_writes_is_the_one_the_spa_park_reader_reads` assertions on `writer.contains(...)` and `reader.contains(...)`. This matches the file's existing style of reading the other plane's source as a test, and the design asks for a 'parity row against park_refusal_event'. Model-gateway's own unit test `park_refusal_event_marks_the_frame_and_never_says_approval_spent` covers the frame behaviour.",
+       "suggested_fix": "No change is needed for S8-8. Keep the text pins as a drift alarm only."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+       "issue": "The continueParkedRun doc says to read frames with chatRunContinueParkFailureOf. It does not say that a rejection before the stream opens (for example a 409 not_resumable) read through chatRunContinueHttpRefusalOf gets the regime-1 spend semantics ('unknown'). For a park nothing was spent. The park contract has no HTTP-level reader, because S8-3 is committed and out of scope here.",
+       "evidence": "The doc says 'Rejects as `continueRun` does'. The contract's HTTP refusal reader describes the spend of an approval, which a park form never has.",
+       "suggested_fix": "When the first caller of continueParkedRun is wired, add a park-aware reading of the HTTP refusals, or state in the doc that the spend flags of that reader do not apply to a park."
+      },
+      {
+       "severity": "low",
+       "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+       "issue": "RUN_PARK_REASONS leaves out crash_interrupted, which Rust's ParkReason::parse accepts and the gateway's run_parked_event would forward if an executor ever wrote it. This is deliberate and documented, and the frame goes to onUnknownEvent. runResumedFrameOf and parkReasonLabel have no production caller yet.",
+       "evidence": "run-park.ts comment and the test 'gives null for a reason it does not know' (crash_interrupted). `grep -rn \"runResumedFrameOf\\|parkReasonLabel\" src` finds only run-park.ts and its test. No dead-export tool is configured, and the eslint baseline is unchanged.",
+       "suggested_fix": "None now. When crash-park (S8-B) is built, extend the tuple, the labels and the tests together."
+      }
+     ],
+     "checked": [
+      "Read the binding design s8a-v2.json: the S8-8 steps, file_changes, tests, interfaces, risks, failure_matrix and amendments.",
+      "Read the full diff of all 13 modified files and the 2 new untracked files under Frontend Plane, and checked that nothing under src/shared/actions or any Model Plane file was touched by this unit.",
+      "Verified in config.rs that the flag is read once through build_state, is on only for the exact string true, and defaults off. All five test AppState literals (main.rs, browser.rs, chat/shared.rs, stream_e2e.rs, orchestration.rs tests) get false, and the cargo --all-targets build catches any missed literal.",
+      "Verified that continue_upstream_body with the flag off equals the committed body for every input. The committed-oracle test compares them, and a whitespace-only id and a blank token still give None, the 400. An absent key stays axum's 422 with the flag on or off, and deny_unknown_fields holds.",
+      "Checked the handler order. The 400 comes before any token mint, and the park form reaches model-gateway as {approval_id:'',claim_token} only with the flag on. Wiremock tests with expect(1) and expect(0) cover both states.",
+      "Compared the run_parked frame the SPA reads with model-gateway run_parked_event (S8-7): run_id, request_id, status 'parked', reason, and resume_after RFC 3339 or null. Compared the park failure frame with park_refusal_event (park_continue true, run_id, never approval_spent). Both match run-park.ts and the SPA park reader.",
+      "Compared the env declaration with the other compose files: the BFF env is declared in verevonv3/docker-compose.yml, and docker-compose.production.yml overrides only some gateway vars. The Model Plane compose declares model-gateway, not the BFF.",
+      "Compared git HEAD blobs with the working tree for line endings. HEAD is LF and the working tree is mixed per file, with no mixed-ending file and no EOL churn in the diff.",
+      "Looked for weakened, renamed or deleted existing tests. The only changes to existing tests are the added park_form argument on two continue_upstream_body calls and one doc-comment addition. Nothing from an earlier fix is reverted, since all edits are additive.",
+      "Ran `cargo test --manifest-path apps/gateway/Cargo.toml --all-targets` from the verevonv3 directory: 659 + 7 + 3 + 1 passed, 1 ignored, 0 failed, exit 0. This matches the implementer's 670.",
+      "Ran vitest on run-park, chat-client, orchestration-client and src/shared/actions: 11 files, 264 tests passed. Ran the full vitest: 7 failed in 5 files (the zdr-refusal tests, SupportPage and quarry-client), which is the baseline set.",
+      "Ran `tsc -b` (34 errors, baseline) and eslint on the six touched TS files (only the pre-existing failureFeature error at chat-client.ts:964). `gen-sse-event-taxonomy.py --check` reports up to date (23 events) with PYTHONUTF8=1.",
+      "Checked that nothing calls continueParkedRun, with a test and a grep of src. Checked that the design's step order and scope are respected (no UI button, no crash-park, no model-gateway edits) and that no docker or DB-backed test was run. The implementer's tests_written_not_run is empty, and no #[ignore] DB test was added."
+     ]
+    }
+   ],
+   "blocking": [
+    {
+     "severity": "high",
+     "file": "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+     "issue": "runParkedFrameOf says resume_after is kept only when it parses as a time and that free text is never echoed. That is false. The check is Date.parse(...) not NaN, and V8's lenient legacy parser accepts many arbitrary strings, so free text passes through into RunParkedFrame.resumeAfter. The test only uses 'soon, maybe', which happens to be NaN, so it does not catch this.",
+     "evidence": "In node, Date.parse('ignore previous instructions 12') is 1007161200000, Date.parse('hello 1') is 978303600000, Date.parse('x 2026') is 1767222000000 and Date.parse('1') is 978303600000. In run-park.ts, `typeof record.resume_after === 'string' && !Number.isNaN(Date.parse(record.resume_after)) ? record.resume_after : null` returns the raw string. run-park.test.ts line 67 only asserts 'soon, maybe', '', null and a number. Real frames are safe, because model-gateway's run_parked_event re-formats the value with to_rfc3339_opts. But the SPA reader is documented as the closed, content-free guard, and a later UI that renders resumeAfter would show whatever string arrives.",
+     "suggested_fix": "Require an RFC 3339 shape before accepting the string, for example a regex like /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$/ together with the Date.parse check. Add tests with 'hello 1', 'x 2026', '2026' and '1' that expect null."
+    }
+   ],
+   "fix": {
+    "summary": "Fix round for s8-8: the one finding is fixed. It was real. Date.parse alone let free text through, so runParkedFrameOf echoed strings like 'hello 1' as resumeAfter. Fixed test-first. The new test went red on 'ignore previous instructions 12', which came back as the value. run-park.ts now keeps resume_after only when it matches an RFC 3339 shape (a regex requiring the T separator, seconds, optional fraction, and Z or a +-hh:mm offset) and Date.parse also accepts it. Anything else becomes null. Real frames still pass, because model-gateway re-formats the time with to_rfc3339_opts(AutoSi, true), which gives Z-form timestamps. Tests added to run-park.test.ts: 13 rejected strings (the four from the review plus date-only, space-separated, no-offset, padded, trailing text, Date.toString form, and an out-of-range timestamp) and 4 accepted stamps (Z, fractional Z, +02:00, -02:00). Verification: run-park, chat-client and orchestration-client vitest files 144 passed; full vitest 7 failed / 3619 passed in the same 5 baseline files (the zdr-refusal tests, SupportPage, quarry-client), none touched; tsc -b 34 errors (baseline); eslint clean on the two files edited; both files stay LF. No Rust or BFF file changed in this round, so I did not re-run cargo, and no mutation check was needed (the red phase against the old code was the mutation).",
+    "files_changed": [
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.ts",
+     "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/run-park.test.ts"
+    ],
+    "tests_added": [
+     "run-park.test.ts: 'keeps resume_after only when it is a readable time, and never echoes free text' extended with 13 rejected free-text/non-RFC3339 strings and 4 accepted RFC 3339 stamps"
+    ],
+    "commands_run": [
+     {
+      "command": "vitest run src/features/chat/lib/run-park.test.ts (before the fix)",
+      "outcome": "1 failed, 13 passed: 'ignore previous instructions 12' was echoed as resumeAfter"
+     },
+     {
+      "command": "vitest run run-park, chat-client, orchestration-client tests (after)",
+      "outcome": "3 files, 144 passed"
+     },
+     {
+      "command": "vitest run (full)",
+      "outcome": "7 failed / 3619 passed in 5 files, the baseline set (zdr-refusal x3 files, SupportPage, quarry-client)"
+     },
+     {
+      "command": "node_modules/.bin/tsc -b | grep -c 'error TS'",
+      "outcome": "34, equal to baseline"
+     },
+     {
+      "command": "node_modules/.bin/eslint on run-park.ts and run-park.test.ts",
+      "outcome": "no output (clean)"
+     },
+     {
+      "command": "python3 CRLF/LF byte count of the two files",
+      "outcome": "both pure LF (0 CRLF), unchanged from before"
+     }
+    ],
+    "deviations": [
+     "The finding's suggested regex was used with an added Date.parse check, so an out-of-range timestamp such as 2026-13-45T99:99:99Z is also dropped."
+    ],
+    "blockers": [],
+    "names_for_later_units": [
+     "run-park.ts: private rfc3339Of(value) and the RFC3339 regex; the exported API is unchanged (RUN_PARK_REASONS, runParkedFrameOf, runResumedFrameOf, parkReasonLabel)"
+    ],
+    "tests_written_not_run": []
+   },
+   "rereview": {
+    "verdict": "approve",
+    "findings": [],
+    "checked": [
+     "run-park.ts: rfc3339Of requires the RFC 3339 regex (T separator, seconds, optional fraction, Z or +-hh:mm offset, anchored with no m flag) AND a successful Date.parse. Free text ('hello 1', 'x 2026', '2026', '1', 'ignore previous instructions 12') fails the regex and gives null. The out-of-range stamp '2026-13-45T99:99:99Z' passes the regex but Date.parse rejects it, so it also gives null. A trailing newline is rejected, because JS '$' does not allow one.",
+     "run-park.test.ts: asserts null for 13 hostile or non-RFC3339 strings, including the four from the review, and keeps 5 valid stamps (Z, fractional Z, +02:00, -02:00, +00:00 fractional).",
+     "Ran vitest on run-park.test.ts, chat-client.test.ts and orchestration-client.test.ts: 3 files, 144 passed.",
+     "eslint on both edited files: clean.",
+     "Both files are pure LF (0 CRLF), so line endings are preserved.",
+     "The only consumers of runParkedFrameOf are chat-client.ts at lines 1421 and 1670. Its resumeAfter tests (chat-client.test.ts lines 1912-1944) still pass with the stricter reader. A real model-gateway frame uses a Z-form to_rfc3339 stamp, which matches the regex.",
+     "The fix adds no new import, network call or claim-token handling, and the exported API is unchanged. The 'display only' source-scan test passes."
+    ]
+   },
+   "verify": {
+    "all_green": false,
+    "results": [
+     {
+      "command": "Summary of the s8-8 verify run (read-only, no files edited, no docker, no DB-backed test run or written)",
+      "outcome": "No test added or changed this round fails. Gateway cargo: 670 passed. run-park.test.ts 14, chat-client.test.ts 100, orchestration-client.test.ts 30 all pass. Every red item is in the baseline set, and the counts equal the baseline: vitest 7 failing tests in 5 files, tsc -b 34 errors, eslint 1 error and 191 warnings. One red item is not in the baseline list you gave: the node action-surface contract (see below), which build3b-final.json and build5b.json also record on the committed tree. Logs are in C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ as s8-8-cargo-gateway.log, s8-8-vitest-touched.log, s8-8-vitest-full.json, s8-8-tsc-b.clean.log, s8-8-eslint.clean.log and s8-8-node-gates.log.",
+      "passed": "not a test"
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (cwd apps/Frontend Plane/verevonv3)",
+      "outcome": "EXIT=0 in 1m36s. Unit tests in src/main.rs: 659 passed, 0 failed, 1 ignored. tests/continue_error_vocabulary.rs: 7 passed. tests/sse_relay_no_allowlist.rs: 3 passed. tests/ssrf_forward_not_fetch.rs: 1 passed. Zero compiler warnings and zero errors. The ignored test is onboarding::crawl_preview::stream_e2e::dump_crawl_preview_stream, a diagnostic dump whose #[ignore] attribute is also in HEAD. No DB-backed test was skipped.",
+      "passed": "670 passed, 0 failed, 1 ignored"
+     },
+     {
+      "command": "node_modules/.bin/vitest run src/features/chat/lib/run-park.test.ts src/shared/api/chat-client.test.ts src/shared/api/orchestration-client.test.ts",
+      "outcome": "EXIT=0. 3 of 3 files pass: run-park.test.ts 14 tests, chat-client.test.ts 100, orchestration-client.test.ts 30. The full run gives the same per-file counts.",
+      "passed": "144 of 144"
+     },
+     {
+      "command": "node_modules/.bin/vitest run (full suite, JSON reporter)",
+      "outcome": "EXIT=1, the baseline outcome. 323 test files: 318 pass, 5 do not. 3626 tests: 3619 pass, 7 fail, 0 unhandled errors. The 7 failing tests are the baseline set, and every one is an assertion on the zero-retention feature name: chat-client.zdr-refusal.test.ts x4, http.zdr-refusal.test.ts x2, use-chat-controller.zdr-refusal.test.ts x1. Two files fail to load, also baseline: quarry-client.test.ts (cannot resolve @quarry/client) and SupportPage.test.tsx (cannot resolve @verevon/remote-core). No touched-set test fails. Run time 3m24s.",
+      "passed": "3619 of 3626 tests; 7 failing tests in 5 files, matching the baseline exactly"
+     },
+     {
+      "command": "node_modules/.bin/tsc -b",
+      "outcome": "EXIT=1, the baseline outcome. 34 error TS lines: quarry-client.ts 21, RemoteSupportPage.tsx 12, chat-client.ts 1. The chat-client.ts one is TS6133 'failureFeature' is declared but never read, now at line 964. The same unused function is at line 957 in HEAD, so it predates this round. No error in run-park.ts, orchestration-client.ts or the touched test files.",
+      "passed": "34 errors, equal to baseline 34"
+     },
+     {
+      "command": "node_modules/.bin/eslint . (the package lint script)",
+      "outcome": "EXIT=1, the baseline outcome. 192 problems: 1 error and 191 warnings. The error is chat-client.ts 964:10, 'failureFeature' is defined but never used, the same defect as the tsc error. Zero problems in run-park.ts, run-park.test.ts, orchestration-client.ts, orchestration-client.test.ts and chat-client.test.ts.",
+      "passed": "1 error and 191 warnings, equal to baseline"
+     },
+     {
+      "command": "node --test on the four gate scripts that the package test script runs before vitest (extra, read-only)",
+      "outcome": "EXIT=1. 26 tests: 25 pass, 1 fails. The failure is action-surface-contract.test.mjs, 'every registered action has exactly one live gateway dispatcher contract'. Its diff names exactly two ids, chat.execute_approved_plan and chat.run.continue. Both are in the SPA action registry and have no dispatcher literal in apps/gateway/src/domains/actions/handlers.rs. Both ids were committed before this round (5b28196e and 74260949). Whether the SPA continue call reaches this dispatcher was not traced.",
+      "passed": "25 of 26"
+     },
+     {
+      "command": "git status --short before and after the node gates and at the end (read-only)",
+      "outcome": "Unchanged: 17 modified and 3 untracked (.plan-work/, run-park.ts, run-park.test.ts), the same set as the round-start snapshot. The only writes are build output under apps/gateway/target (gitignored), node and vite caches, and logs in the scratchpad.",
+      "passed": "yes"
+     },
+     {
+      "command": "python3 -I byte counts of CRLF and bare LF for the 13 changed and 2 untracked frontend files, against HEAD (read-only)",
+      "outcome": "HEAD blobs are all LF. Working copies: config.rs, ag_ui.rs, browser.rs, chat/shared.rs, main.rs and stream_e2e.rs are CRLF with no bare LF. orchestration.rs (0 CRLF, 1672 LF) and tests/continue_error_vocabulary.rs (0 CRLF, 778 LF) are LF, and git prints an 'LF will be replaced by CRLF' warning for both. The TS files, docker-compose.yml and the two run-park files are LF. No file mixes endings. Whether these match the pre-round endings cannot be told from this run.",
+      "passed": "flag only, not a test"
+     }
+    ],
+    "failures": [
+     "Pre-existing, matches baseline: the full vitest run has 7 failing tests in 3 files (C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.zdr-refusal.test.ts x4, src/shared/api/http.zdr-refusal.test.ts x2, src/features/chat/components/use-chat-controller.zdr-refusal.test.ts x1). Two files fail to load: src/shared/api/quarry-client.test.ts and src/features/support/components/SupportPage.test.tsx.",
+     "Pre-existing, matches baseline: tsc -b reports 34 errors (quarry-client.ts 21, RemoteSupportPage.tsx 12, and C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:964 TS6133 'failureFeature' declared but never read).",
+     "Pre-existing, matches baseline: eslint reports 1 error (C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:964:10, 'failureFeature' is defined but never used) and 191 warnings.",
+     "Pre-existing, not in the baseline list given and not in this round's file list: node action-surface-contract.test.mjs (C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/scripts/action-surface-contract.test.mjs) fails because chat.execute_approved_plan and chat.run.continue have no dispatcher literal in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs."
+    ]
+   }
+  }
+ ],
+ "failedUnits": []
+}

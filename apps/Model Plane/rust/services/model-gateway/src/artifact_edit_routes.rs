@@ -19,9 +19,9 @@
 //! `artifact_edit_waived_thread`). A ZDR credential is refused here with the durable-mutation 412
 //! before anything is read. Only text kinds are editable (`document`, `code`, `html`): a deck
 //! keeps its own structure and is never edited as text (C-B8). An edit is refused while a run on
-//! the thread is running (409 `artifact_edit_run_active`); a run that starts while the editor is
-//! open fails its commit with the retryable `artifact_revision_conflict` instead. Content is never
-//! logged.
+//! the thread is live, queued, running or awaiting approval (409 `artifact_edit_run_active`); a run
+//! that starts while the editor is open fails its commit with the retryable
+//! `artifact_revision_conflict` instead. Content is never logged.
 
 use axum::{
     extract::{rejection::JsonRejection, Path, State},
@@ -51,8 +51,9 @@ pub const EDITING_ENV: &str = "MODEL_GATEWAY_ARTIFACT_EDITING";
 /// The kinds a person may edit as source text. Everything else (a deck, a spreadsheet, an image,
 /// a generated file) is refused: its text is not what the person sees.
 const EDITABLE_KINDS: [&str; 3] = ["document", "code", "html"];
-/// The run phase that blocks an edit: the run's commit would race the person's save.
-const RUNNING: &str = "running";
+/// The run phases that block an edit: the live set session-core's liveness predicate counts. A
+/// `queued` run has not started streaming yet, but its commit would race the person's save all the same.
+const LIVE_RUN_PHASES: [&str; 3] = ["queued", "running", "awaiting_approval"];
 
 /// session-core's refusals this route turns into its own codes.
 const REVISION_MISMATCH: &str = "revision_mismatch";
@@ -148,7 +149,7 @@ pub(crate) async fn save_artifact_edit(
             "content must be between 1 and 200000 characters",
         ));
     }
-    ensure_no_running_run(&state, &bearer, &thread_id).await?;
+    ensure_no_live_run(&state, &bearer, &thread_id).await?;
     let head = read_head(&state, &claims, &bearer, &thread_id, &artifact_id).await?;
     check_editable(&head, body.expected_version)?;
     let title = body
@@ -183,7 +184,7 @@ pub(crate) async fn restore_artifact_revision(
     if body.version == 0 {
         return Err(invalid("version must be a stored version"));
     }
-    ensure_no_running_run(&state, &bearer, &thread_id).await?;
+    ensure_no_live_run(&state, &bearer, &thread_id).await?;
     let head = read_head(&state, &claims, &bearer, &thread_id, &artifact_id).await?;
     check_editable(&head, body.expected_version)?;
     let source = match get_revision(&state, &claims, &bearer, &thread_id, &artifact_id, body.version)
@@ -225,48 +226,60 @@ fn admit(state: &AppState, claims: &Claims) -> Result<(), HttpJsonError> {
     require_non_zdr_durable_mutation(claims)
 }
 
-/// Refuse while a run on the thread is running. Its commit would otherwise race the save; the
-/// commit's own conflict check is the backstop for a run that starts after this read. Fails
+/// Refuse while a run on the thread is live. Its commit would otherwise race the save; the
+/// commit's own conflict check is the backstop for a run that starts after these reads. Each live
+/// phase is asked for on its own, since a run list is filtered by one phase at a time. Fails
 /// closed: a run state nobody could read refuses the edit.
-async fn ensure_no_running_run(
+async fn ensure_no_live_run(
     state: &AppState,
     bearer: &VerifiedSessionBearer,
     thread_id: &str,
 ) -> Result<(), HttpJsonError> {
-    let request = authenticated_session_request(
-        ListRunsRequest {
-            thread_id: thread_id.to_owned(),
-            status_filter: RUNNING.to_owned(),
-            limit: 1,
-            ..Default::default()
-        },
-        bearer,
-    )?;
-    let runs = state
-        .run_client
-        .clone()
-        .list_runs(request)
-        .await
-        .map_err(|status| {
-            tracing::debug!(code = ?status.code(), "artifact edit: run state unreadable");
-            refusal(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "artifact_edit_run_state_unavailable",
-                "Whether a run is working on this conversation could not be read. Try again.",
-                json!({ "retryable": true }),
-            )
-        })?
-        .into_inner()
-        .runs;
-    if runs.is_empty() {
-        return Ok(());
+    for phase in LIVE_RUN_PHASES {
+        let request = authenticated_session_request(
+            ListRunsRequest {
+                thread_id: thread_id.to_owned(),
+                status_filter: phase.to_owned(),
+                limit: 1,
+                ..Default::default()
+            },
+            bearer,
+        )?;
+        let runs = state
+            .run_client
+            .clone()
+            .list_runs(request)
+            .await
+            .map_err(|status| {
+                tracing::debug!(code = ?status.code(), "artifact edit: run state unreadable");
+                run_state_error(&status)
+            })?
+            .into_inner()
+            .runs;
+        if !runs.is_empty() {
+            return Err(refusal(
+                StatusCode::CONFLICT,
+                "artifact_edit_run_active",
+                "Verevon is still working in this conversation. Save when the answer is done.",
+                json!({}),
+            ));
+        }
     }
-    Err(refusal(
-        StatusCode::CONFLICT,
-        "artifact_edit_run_active",
-        "Verevon is still working in this conversation. Save when the answer is done.",
-        json!({}),
-    ))
+    Ok(())
+}
+
+/// A run list that could not be read. A thread the caller may not read answers like one that does
+/// not exist, as on every route here; any other failure refuses the edit with a retryable 503.
+fn run_state_error(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => store_error(status),
+        _ => refusal(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "artifact_edit_run_state_unavailable",
+            "Whether a run is working on this conversation could not be read. Try again.",
+            json!({ "retryable": true }),
+        ),
+    }
 }
 
 /// The artifact's head revision. A thread or artifact the caller may not read answers like one
@@ -650,10 +663,20 @@ mod tests {
         }
     }
 
-    /// A run service double that answers only `ListRuns`: one running run, or none.
+    /// A run service double that answers only `ListRuns`: one live run in `phase` when it is set,
+    /// a failure with `fail` when it is set, and it keeps the status filter of every request.
     #[derive(Clone, Default)]
     struct FakeRuns {
-        running: bool,
+        phase: Option<&'static str>,
+        fail: Option<tonic::Code>,
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn live_run(phase: &'static str) -> FakeRuns {
+        FakeRuns {
+            phase: Some(phase),
+            ..FakeRuns::default()
+        }
     }
 
     #[tonic::async_trait]
@@ -663,16 +686,21 @@ mod tests {
             request: TonicRequest<ListRunsRequest>,
         ) -> Result<TonicResponse<ListRunsResponse>, Status> {
             let request = request.into_inner();
-            assert_eq!(request.status_filter, RUNNING);
-            let runs = if self.running {
-                vec![RunDetail {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(request.status_filter.clone());
+            if let Some(code) = self.fail {
+                return Err(Status::new(code, "the run state is down"));
+            }
+            let runs = match self.phase {
+                Some(phase) if phase == request.status_filter => vec![RunDetail {
                     run_id: "run-live".to_owned(),
                     thread_id: request.thread_id,
-                    status: RUNNING.to_owned(),
+                    status: phase.to_owned(),
                     ..RunDetail::default()
-                }]
-            } else {
-                Vec::new()
+                }],
+                _ => Vec::new(),
             };
             Ok(TonicResponse::new(ListRunsResponse {
                 runs,
@@ -1072,11 +1100,125 @@ mod tests {
     #[tokio::test]
     async fn edit_refused_while_run_streams() {
         let fake = model_history();
-        let state = state_with(fake.clone(), FakeRuns { running: true }).await;
-        let (status, body) =
-            refused(save_edit(&state, false, json!({ "content": "x", "expected_version": 2 })).await);
+        let state = state_with(fake.clone(), live_run("running")).await;
+        let (status, body) = refused(
+            save_edit(
+                &state,
+                false,
+                json!({ "content": "x", "expected_version": 2 }),
+            )
+            .await,
+        );
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["error"]["code"], "artifact_edit_run_active");
+        assert!(fake.appends.lock().unwrap().is_empty());
+    }
+
+    /// A turn that has not started streaming yet is `queued`; its commit races the save all the same.
+    #[tokio::test]
+    async fn edit_refused_while_a_run_is_queued() {
+        let fake = model_history();
+        let state = state_with(fake.clone(), live_run("queued")).await;
+        let (status, body) = refused(
+            save_edit(
+                &state,
+                false,
+                json!({ "content": "x", "expected_version": 2 }),
+            )
+            .await,
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "artifact_edit_run_active");
+        assert!(fake.appends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn edit_refused_while_a_run_awaits_approval() {
+        let fake = model_history();
+        let state = state_with(fake.clone(), live_run("awaiting_approval")).await;
+        let (status, body) = refused(
+            save_edit(
+                &state,
+                false,
+                json!({ "content": "x", "expected_version": 2 }),
+            )
+            .await,
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "artifact_edit_run_active");
+        assert!(fake.appends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_refused_while_a_run_is_queued() {
+        let fake = model_history();
+        let state = state_with(fake.clone(), live_run("queued")).await;
+        let (status, body) = refused(restore(&state, 1, 2).await);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"]["code"], "artifact_edit_run_active");
+        assert!(fake.appends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn edit_allowed_once_no_run_is_live_and_every_live_phase_was_asked() {
+        let fake = model_history();
+        let runs = FakeRuns::default();
+        let state = state_with(fake.clone(), runs.clone()).await;
+        let Json(body) = save_edit(
+            &state,
+            false,
+            json!({ "content": "x", "expected_version": 2 }),
+        )
+        .await
+        .expect("saved");
+        assert_eq!(body["data"]["revision"]["version"], 3);
+        assert_eq!(fake.appends.lock().unwrap().len(), 1);
+        assert_eq!(
+            *runs.asked.lock().unwrap(),
+            ["queued", "running", "awaiting_approval"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_state_that_cannot_be_read_fails_the_edit_closed() {
+        let fake = model_history();
+        let runs = FakeRuns {
+            fail: Some(tonic::Code::Unavailable),
+            ..FakeRuns::default()
+        };
+        let state = state_with(fake.clone(), runs).await;
+        let (status, body) = refused(
+            save_edit(
+                &state,
+                false,
+                json!({ "content": "x", "expected_version": 2 }),
+            )
+            .await,
+        );
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "artifact_edit_run_state_unavailable");
+        assert!(fake.appends.lock().unwrap().is_empty());
+    }
+
+    /// A thread another person owns reads as missing here too, so the run check is no existence oracle.
+    #[tokio::test]
+    async fn a_thread_the_caller_may_not_read_is_not_found_before_any_write() {
+        let fake = model_history();
+        let runs = FakeRuns {
+            fail: Some(tonic::Code::PermissionDenied),
+            ..FakeRuns::default()
+        };
+        let state = state_with(fake.clone(), runs).await;
+        let (status, body) = refused(
+            save_edit(
+                &state,
+                false,
+                json!({ "content": "x", "expected_version": 2 }),
+            )
+            .await,
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "artifact_not_found");
         assert!(fake.appends.lock().unwrap().is_empty());
     }
 

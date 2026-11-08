@@ -7417,6 +7417,37 @@ mod tests {
         }
     }
 
+    // EP-10-S1 (D4): shaping a draft writes no log line that carries its text. Every event emitted
+    // while the draft is shaped is captured, and none may name the recipient, subject or body.
+    #[test]
+    fn preview_shaping_writes_no_log_line_carrying_the_draft() {
+        let lines = crate::test_log_capture::CapturedLines::default();
+        let wire = tracing::subscriber::with_default(lines.clone(), || {
+            approval_preview_to_proto(
+                mp_contracts::write_preview::preview_from_input(
+                    "execute_provider_action",
+                    &serde_json::json!({
+                        "connection_id": "conn-1",
+                        "operation": "gmail.send",
+                        "body": {
+                            "to": "recipient-marker@example.com",
+                            "subject": "subject-marker",
+                            "bodyText": "body-marker",
+                        },
+                    }),
+                ),
+                "f".repeat(64),
+            )
+        });
+        assert_eq!(wire.body_text, "body-marker", "the shaping ran");
+        let markers = ["recipient-marker", "subject-marker", "body-marker"];
+        for line in lines.lines() {
+            for marker in markers {
+                assert!(!line.contains(marker), "logged: {line}");
+            }
+        }
+    }
+
     #[test]
     fn preview_wire_form_carries_the_shaped_draft_and_the_fingerprint() {
         let view = mp_contracts::write_preview::preview_from_input(

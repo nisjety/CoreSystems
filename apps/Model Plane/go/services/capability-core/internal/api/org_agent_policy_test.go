@@ -374,6 +374,40 @@ func TestOrgAgentPolicyWebSwitchesTakeOffOrLive(t *testing.T) {
 	}
 }
 
+// The origin allow-list (Wave 4 W4-D M1a) is reserved: only its default, none, is accepted, and a
+// malformed origin is refused as invalid_value before the reserved check. isHTTPSOrigin accepts and
+// refuses the strings mp-contracts' is_https_origin does.
+func TestOrgAgentPolicyMCPAppOriginsIsReservedAndFailsClosed(t *testing.T) {
+	const key = "mcp_apps.network_origins"
+	ceiling := loosestOrgAgentCeiling()
+	if got := orgAgentPolicyDefaults()[key]; !reflect.DeepEqual(got, map[string]any{"mode": "none", "ids": []string{}}) {
+		t.Fatalf("default = %#v, want none with no ids", got)
+	}
+	if _, refusal := validateOrgAgentSettings(map[string]any{key: map[string]any{"mode": "none", "ids": []any{}}}, ceiling); refusal != nil {
+		t.Fatalf("the default refused: %s", refusal.code)
+	}
+	reserved := map[string]any{key: map[string]any{"mode": "approved_only", "ids": []any{"https://api.example.test"}}}
+	if _, refusal := validateOrgAgentSettings(reserved, ceiling); refusal == nil || refusal.code != "not_enforced" {
+		t.Fatalf("approved_only = %v, want not_enforced", refusal)
+	}
+	for _, bad := range []string{"http://api.example.test", "https://api.example.test/app", "https://*.example.test", "https://API.example.test", "https://api.example.test:0443", "https://api.example.test:65536", "data:text/html,x"} {
+		written := map[string]any{key: map[string]any{"mode": "approved_only", "ids": []any{bad}}}
+		if _, refusal := validateOrgAgentSettings(written, ceiling); refusal == nil || refusal.code != "invalid_value" {
+			t.Fatalf("%s = %v, want invalid_value", bad, refusal)
+		}
+	}
+	for _, origin := range []string{"https://api.example.test", "https://a.b-c.d1.test:8443", "https://localhost:1"} {
+		if !isHTTPSOrigin(origin) {
+			t.Fatalf("%s refused", origin)
+		}
+	}
+	for _, origin := range []string{"", "https://", "https://api.example.test.", "https://api.example.test:08", "https://api.example.test:+443", "https://[::1]:443", "https://api.example.test:"} {
+		if isHTTPSOrigin(origin) {
+			t.Fatalf("%q accepted", origin)
+		}
+	}
+}
+
 // The golden holds the schema as data. This table must match it key by key, in order,
 // with the same kinds, orders, defaults, fail-closed values, status and reserved values.
 func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {

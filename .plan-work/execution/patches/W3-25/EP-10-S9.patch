@@ -1,0 +1,673 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts
+index 3e522bfc3..a7f5051b6 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
+@@ -59,6 +59,7 @@ import {
+ } from '@/shared/chat/support-chat-thread'
+ import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
+ import { announceAttentionChanged } from '@/shared/api/attention-client'
++import { clearIntent, readIntent, type ConnectIntent } from '@/shared/integrations/connect-intent'
+ import {
+   toggleBrowserDockPosition,
+   useBrowserDock,
+@@ -4847,6 +4848,61 @@ export function useChatController() {
+       && current.outgoingAssistant?.id === exchange.outgoingAssistant?.id
+   }
+ 
++  // EP-10 S9: a connect started from a connector suggestion card resumes the question that suggestion answers. The
++  // saved connect lives in this tab's sessionStorage (`connect-intent.ts`) and is read per thread, so a reload shows
++  // "Finish connecting" and nothing is resent until the person clicks.
++  const [connectIntentVersion, setConnectIntentVersion] = createSignal(0)
++
++  // No connect starts or resumes on a temporary (zero-retention), Space-scoped or foreign-origin thread. `sendContent`
++  // already drops a send to a foreign-origin thread without a word, so the refusal has to be made here, first.
++  const connectResumable = (threadId: string): boolean => (
++    !isTemporaryThread(threadId) && !isForeignOriginThread(threadId) && !scopedThreadRefs.get(threadId)
++  )
++
++  /** The thread and the question a new connect resumes: the latest question, which the suggestion answers. */
++  const connectTurn = (): { threadId: string; prompt: string } | null => {
++    const threadId = state.threadId
++    const exchange = latestExchange()
++    if (!threadId || !exchange || !connectResumable(threadId)) return null
++    return { threadId, prompt: exchange.lastUser.content }
++  }
++
++  /** The saved connect of the thread on screen while it is unexpired. Reactive to the thread and to a resume or a dismissal. */
++  const pendingConnectIntent = (): ConnectIntent | null => {
++    connectIntentVersion()
++    const threadId = state.threadId
++    if (!threadId || !connectResumable(threadId)) return null
++    return readIntent(threadId)
++  }
++
++  /**
++   * Resends a connect's saved question on its new connection. `appendUser: false`: the question is already in the
++   * transcript, so only the answer is appended. The connection is this turn's connected-apps choice and nothing more,
++   * never remembered between turns (`chat.set_connector_scope`). Returns false, and changes nothing, when the turn
++   * cannot go out now: another thread is open, a run is streaming, or the transcript is not loaded.
++   */
++  const resumeConnectIntent = (intent: ConnectIntent, connectionId: string, providerLabel: string): boolean => {
++    if (state.threadId !== intent.threadId || !intent.prompt.trim()) return false
++    if (isStreaming() || !hasMessages() || !connectResumable(intent.threadId)) return false
++    // The gateway refuses connected apps on a web-only, knowledge-only or conversation-only turn (`connectorScopeBlock`),
++    // so the resend waits for the composer's default scope; the saved connect stays until then.
++    if (retrievalScope() !== 'auto' || sourceScope() === 'conversation') return false
++    setConnectIntentVersion((version) => version + 1)
++    showFeedbackNotice(i18n.tr(
++      `Fortsetter med ${providerLabel} koblet til`,
++      `Continuing with ${providerLabel} connected`,
++    ))
++    void sendContent(intent.prompt, undefined, { appendUser: false, connectorScope: [connectionId] })
++    return true
++  }
++
++  /** "Not now" on a saved connect: the question is not resent and the record is removed. */
++  const dismissConnectIntent = () => {
++    const threadId = state.threadId
++    if (threadId) clearIntent(threadId)
++    setConnectIntentVersion((version) => version + 1)
++  }
++
+   const regenerateLatest = () => {
+     const exchange = latestExchange()
+     if (!exchange) return
+@@ -5324,5 +5380,11 @@ export function useChatController() {
+     hasEarlierTurns,
+     loadingEarlierTurns,
+     loadEarlier,
++    // EP-10 S9: the question and thread a suggestion card's connect resumes, the saved connect of the thread on
++    // screen, its resend on the new connection and its dismissal.
++    connectTurn,
++    pendingConnectIntent,
++    resumeConnectIntent,
++    dismissConnectIntent,
+   }
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.test.ts b/apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.test.ts
+new file mode 100644
+index 000000000..7c7be5453
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.test.ts	
+@@ -0,0 +1,303 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import {
++  CONNECT_INTENT_TTL_MS,
++  clearIntent,
++  continueSavedConnectIntent,
++  findNewConnection,
++  readIntent,
++  runConnectIntent,
++  saveIntent,
++  takeIntent,
++  waitForNewConnection,
++  type ConnectIntent,
++  type ConnectionRef,
++} from './connect-intent'
++
++const T0 = 1_700_000_000_000
++const KEY = 'verevon-connect-intent:thread-a'
++
++function intent(overrides: Partial<ConnectIntent> = {}): ConnectIntent {
++  return {
++    threadId: 'thread-a',
++    suggestionId: 'suggestion-1',
++    provider: 'google',
++    prompt: 'What did Kari send me yesterday?',
++    createdAt: T0,
++    ...overrides,
++  }
++}
++
++function connection(id: string, overrides: Partial<ConnectionRef> = {}): ConnectionRef {
++  return { id, providerKey: 'google', status: 'active', ...overrides }
++}
++
++/** A clock the tests move by hand: sleeping advances time instead of waiting. */
++function fakeClock() {
++  let at = T0
++  return {
++    now: () => at,
++    sleep: async (ms: number) => {
++      at += ms
++    },
++  }
++}
++
++// The one resume the tests use: it records the call and answers with `result`.
++function resumeReturning(result: boolean) {
++  return vi.fn((_intent: ConnectIntent, _connectionId: string) => result)
++}
++
++beforeEach(() => {
++  window.sessionStorage.clear()
++})
++
++afterEach(() => {
++  vi.restoreAllMocks()
++})
++
++describe('connect intent storage', () => {
++  it('keeps one intent per thread and replaces it on a new connect', () => {
++    saveIntent(intent())
++    saveIntent(intent({ threadId: 'thread-b', prompt: 'A different question' }))
++    expect(readIntent('thread-a', T0)).toEqual(intent())
++    expect(readIntent('thread-b', T0)?.prompt).toBe('A different question')
++
++    saveIntent(intent({ prompt: 'Replaced question' }))
++    expect(readIntent('thread-a', T0)?.prompt).toBe('Replaced question')
++  })
++
++  it('expires at the 15 minute TTL and removes the record', () => {
++    saveIntent(intent())
++    expect(readIntent('thread-a', T0 + CONNECT_INTENT_TTL_MS - 1)).not.toBeNull()
++    expect(readIntent('thread-a', T0 + CONNECT_INTENT_TTL_MS)).toBeNull()
++    expect(window.sessionStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('drops a record dated after now, and a malformed one', () => {
++    saveIntent(intent({ createdAt: T0 + 5_000 }))
++    expect(readIntent('thread-a', T0)).toBeNull()
++    expect(window.sessionStorage.getItem(KEY)).toBeNull()
++
++    window.sessionStorage.setItem(KEY, '{"threadId":')
++    expect(readIntent('thread-a', T0)).toBeNull()
++    expect(window.sessionStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('ignores a record whose thread id does not match its key', () => {
++    window.sessionStorage.setItem(KEY, JSON.stringify(intent({ threadId: 'thread-z' })))
++    expect(readIntent('thread-a', T0)).toBeNull()
++  })
++
++  it('never throws when storage is blocked or full', () => {
++    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
++      throw new Error('QuotaExceededError')
++    })
++    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
++      throw new Error('SecurityError')
++    })
++    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
++      throw new Error('SecurityError')
++    })
++    expect(() => saveIntent(intent())).not.toThrow()
++    expect(readIntent('thread-a', T0)).toBeNull()
++    expect(takeIntent('thread-a', T0)).toBeNull()
++    expect(() => clearIntent('thread-a')).not.toThrow()
++  })
++})
++
++describe('takeIntent', () => {
++  it('hands the intent to the first caller only', () => {
++    saveIntent(intent())
++    expect(takeIntent('thread-a', T0)).toEqual(intent())
++    expect(takeIntent('thread-a', T0)).toBeNull()
++  })
++})
++
++describe('findNewConnection', () => {
++  it('matches an active connection of the provider that was not already known', () => {
++    const connections = [
++      connection('known'),
++      connection('paused', { status: 'revoked' }),
++      connection('outlook', { providerKey: 'microsoft' }),
++      connection('fresh'),
++    ]
++    expect(findNewConnection(connections, 'google', new Set<string>(['known']))).toBe('fresh')
++    expect(findNewConnection(connections, 'google', new Set<string>(['known', 'fresh']))).toBeNull()
++    expect(findNewConnection(connections, 'microsoft', new Set<string>())).toBe('outlook')
++  })
++})
++
++describe('waitForNewConnection', () => {
++  it('keeps polling through a failed read until the connection appears', async () => {
++    const list = vi.fn()
++      .mockResolvedValueOnce([])
++      .mockRejectedValueOnce(new Error('offline'))
++      .mockResolvedValueOnce([connection('fresh')])
++    const id = await waitForNewConnection({
++      provider: 'google',
++      knownIds: new Set<string>(),
++      listConnections: list,
++      ...fakeClock(),
++    })
++    expect(id).toBe('fresh')
++    expect(list).toHaveBeenCalledTimes(3)
++  })
++
++  it('stops at the deadline and reports that no connection appeared', async () => {
++    const list = vi.fn().mockResolvedValue([])
++    const id = await waitForNewConnection({
++      provider: 'google',
++      knownIds: new Set<string>(),
++      listConnections: list,
++      timeoutMs: 5_000,
++      intervalMs: 2_000,
++      ...fakeClock(),
++    })
++    expect(id).toBeNull()
++    // Reads at 0 s, 2 s and 4 s, then one last read after the final second before the 5 s deadline.
++    expect(list).toHaveBeenCalledTimes(4)
++  })
++})
++
++describe('runConnectIntent', () => {
++  function run(overrides: Partial<Parameters<typeof runConnectIntent>[0]> = {}) {
++    return runConnectIntent({
++      threadId: 'thread-a',
++      suggestionId: 'suggestion-1',
++      provider: 'google',
++      prompt: 'What did Kari send me yesterday?',
++      knownIds: new Set<string>(),
++      openConnect: async () => undefined,
++      listConnections: async () => [connection('fresh')],
++      resume: resumeReturning(true),
++      ...fakeClock(),
++      ...overrides,
++    })
++  }
++
++  it('saves the intent before the sign-in opens, then resumes once on the new connection', async () => {
++    let savedWhileOpening: string | null = null
++    const resume = resumeReturning(true)
++    const outcome = await run({
++      openConnect: async () => {
++        savedWhileOpening = window.sessionStorage.getItem(KEY)
++      },
++      resume,
++    })
++    expect(savedWhileOpening).not.toBeNull()
++    expect(resume).toHaveBeenCalledTimes(1)
++    expect(resume).toHaveBeenCalledWith(intent(), 'fresh')
++    expect(outcome).toEqual({ status: 'resumed', connectionId: 'fresh' })
++    expect(window.sessionStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('clears the intent when the sign-in fails, and reports the provider error', async () => {
++    const failure = new Error('Access was denied by the provider.')
++    const resume = resumeReturning(true)
++    const outcome = await run({
++      openConnect: async () => {
++        throw failure
++      },
++      resume,
++    })
++    expect(outcome).toEqual({ status: 'failed', error: failure })
++    expect(resume).not.toHaveBeenCalled()
++    expect(window.sessionStorage.getItem(KEY)).toBeNull()
++  })
++
++  it('keeps the intent when the resend is refused, so it can be finished later', async () => {
++    const outcome = await run({ resume: resumeReturning(false) })
++    expect(outcome).toEqual({ status: 'pending' })
++    expect(readIntent('thread-a', T0)).toEqual(intent())
++  })
++
++  it('keeps the intent and resumes nothing when no connection appears in time', async () => {
++    const resume = resumeReturning(true)
++    const outcome = await run({
++      listConnections: async () => [],
++      timeoutMs: 4_000,
++      intervalMs: 2_000,
++      resume,
++    })
++    expect(outcome).toEqual({ status: 'pending' })
++    expect(resume).not.toHaveBeenCalled()
++    expect(readIntent('thread-a', T0)).toEqual(intent())
++  })
++
++  it('does not resume on a connection the card already knew about', async () => {
++    const resume = resumeReturning(true)
++    const outcome = await run({
++      knownIds: new Set<string>(['known']),
++      listConnections: async () => [connection('known')],
++      timeoutMs: 0,
++      resume,
++    })
++    expect(outcome).toEqual({ status: 'pending' })
++    expect(resume).not.toHaveBeenCalled()
++  })
++})
++
++describe('continueSavedConnectIntent', () => {
++  it('does nothing when no intent is saved', async () => {
++    const listConnections = vi.fn(async () => [connection('fresh')])
++    const outcome = await continueSavedConnectIntent({
++      threadId: 'thread-a',
++      listConnections,
++      resume: resumeReturning(true),
++      now: () => T0,
++    })
++    expect(outcome).toBe('none')
++    expect(listConnections).not.toHaveBeenCalled()
++  })
++
++  it('reports not connected and keeps the intent until the connection exists', async () => {
++    saveIntent(intent())
++    const resume = resumeReturning(true)
++    const outcome = await continueSavedConnectIntent({
++      threadId: 'thread-a',
++      listConnections: async () => [],
++      resume,
++      now: () => T0,
++    })
++    expect(outcome).toBe('not_connected')
++    expect(resume).not.toHaveBeenCalled()
++    expect(readIntent('thread-a', T0)).toEqual(intent())
++  })
++
++  it('resumes once after a reload, and a second click finds nothing to send', async () => {
++    saveIntent(intent())
++    const resume = resumeReturning(true)
++    const listConnections = async () => [connection('fresh')]
++    const first = await continueSavedConnectIntent({ threadId: 'thread-a', listConnections, resume, now: () => T0 })
++    const second = await continueSavedConnectIntent({ threadId: 'thread-a', listConnections, resume, now: () => T0 })
++    expect(first).toBe('resumed')
++    expect(second).toBe('none')
++    expect(resume).toHaveBeenCalledTimes(1)
++    expect(resume).toHaveBeenCalledWith(intent(), 'fresh')
++  })
++
++  it('saves the intent again when the resend is refused', async () => {
++    saveIntent(intent())
++    const outcome = await continueSavedConnectIntent({
++      threadId: 'thread-a',
++      listConnections: async () => [connection('fresh')],
++      resume: resumeReturning(false),
++      now: () => T0,
++    })
++    expect(outcome).toBe('pending')
++    expect(readIntent('thread-a', T0)).toEqual(intent())
++  })
++
++  it('treats an expired intent as absent and does not list connections', async () => {
++    saveIntent(intent())
++    const listConnections = vi.fn(async () => [connection('fresh')])
++    const outcome = await continueSavedConnectIntent({
++      threadId: 'thread-a',
++      listConnections,
++      resume: resumeReturning(true),
++      now: () => T0 + CONNECT_INTENT_TTL_MS,
++    })
++    expect(outcome).toBe('none')
++    expect(listConnections).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.ts b/apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.ts
+new file mode 100644
+index 000000000..0095ae734
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/integrations/connect-intent.ts	
+@@ -0,0 +1,272 @@
++/**
++ * The connect intent of a connector suggestion (EP-10 S9): the person's own question, kept in this tab's
++ * sessionStorage while they connect an account in a popup, so a reload during the sign-in does not lose the
++ * place. It is a browser convenience and never goes to a server (EP-10 D7). Every access is guarded: a blocked,
++ * full or unreadable store degrades to a plain "connected" state, never to an error.
++ */
++
++/** A saved connect expires after 15 minutes: an older question may no longer be the one being asked. */
++export const CONNECT_INTENT_TTL_MS = 15 * 60 * 1000
++
++/** How long a connect waits for its new connection to appear in the connection list. */
++export const CONNECT_INTENT_WAIT_MS = 30_000
++
++/** Pause between two reads of the connection list while the wait runs. */
++const CONNECT_POLL_INTERVAL_MS = 2_000
++
++const KEY_PREFIX = 'verevon-connect-intent:'
++
++export interface ConnectIntent {
++  threadId: string
++  suggestionId: string
++  provider: string
++  /** The question the suggestion answers, resent as it was asked. */
++  prompt: string
++  /** Epoch milliseconds when the connect started. */
++  createdAt: number
++}
++
++/** The fields of an integration connection that the connect flow reads. */
++export interface ConnectionRef {
++  id: string
++  providerKey?: string
++  status: string
++}
++
++/**
++ * How a connect started from a suggestion card ended. `pending` means connected or waiting but not resumed: the
++ * saved connect stays, so "Finish connecting" can resume it after a reload.
++ */
++export type ConnectIntentOutcome =
++  | { status: 'resumed'; connectionId: string }
++  | { status: 'pending' }
++  | { status: 'failed'; error: unknown }
++
++/** How a saved connect was continued on a click. `not_connected` keeps the record for another try. */
++export type SavedConnectOutcome = 'resumed' | 'pending' | 'not_connected' | 'none'
++
++function store(): Storage | null {
++  try {
++    return window.sessionStorage
++  } catch {
++    // Reading the property throws where storage is blocked (sandboxed frames, some privacy modes).
++    return null
++  }
++}
++
++function keyFor(threadId: string): string {
++  return `${KEY_PREFIX}${threadId}`
++}
++
++function isConnectIntent(value: unknown, threadId: string): value is ConnectIntent {
++  if (!value || typeof value !== 'object') return false
++  const record = value as Record<string, unknown>
++  return record.threadId === threadId
++    && typeof record.suggestionId === 'string'
++    && typeof record.provider === 'string'
++    && typeof record.prompt === 'string'
++    && typeof record.createdAt === 'number'
++    && Number.isFinite(record.createdAt)
++}
++
++// A record dated after `now` (the clock moved back) cannot be placed in time, so it is dropped like an expired one.
++function isWithinTtl(createdAt: number, now: number): boolean {
++  const age = now - createdAt
++  return age >= 0 && age < CONNECT_INTENT_TTL_MS
++}
++
++function readRaw(threadId: string): string | null {
++  try {
++    return store()?.getItem(keyFor(threadId)) ?? null
++  } catch {
++    return null
++  }
++}
++
++function parseRecord(raw: string, threadId: string): ConnectIntent | null {
++  try {
++    const value: unknown = JSON.parse(raw)
++    return isConnectIntent(value, threadId) ? value : null
++  } catch {
++    return null
++  }
++}
++
++/** Saves the thread's intent. One per thread: a new connect replaces the earlier one. */
++export function saveIntent(intent: ConnectIntent): void {
++  try {
++    store()?.setItem(keyFor(intent.threadId), JSON.stringify(intent))
++  } catch {
++    // A full or blocked store loses only the reload safety net; the connect itself still runs.
++  }
++}
++
++/** The thread's intent while it is unexpired. An expired or unreadable record is removed and reads as absent. */
++export function readIntent(threadId: string, now: number = Date.now()): ConnectIntent | null {
++  const raw = readRaw(threadId)
++  if (raw === null) return null
++  const intent = parseRecord(raw, threadId)
++  if (intent && isWithinTtl(intent.createdAt, now)) return intent
++  clearIntent(threadId)
++  return null
++}
++
++/** Removes the thread's intent. */
++export function clearIntent(threadId: string): void {
++  try {
++    store()?.removeItem(keyFor(threadId))
++  } catch {
++    // Nothing to remove where storage is blocked.
++  }
++}
++
++/** Reads and removes the thread's intent in one step, so only the first caller gets it. */
++export function takeIntent(threadId: string, now: number = Date.now()): ConnectIntent | null {
++  const intent = readIntent(threadId, now)
++  clearIntent(threadId)
++  return intent
++}
++
++/**
++ * The id of the first active connection of `provider` that is not in `knownIds`, or null. Only an active
++ * connection counts, as it does in the connector picker.
++ */
++export function findNewConnection(
++  connections: readonly ConnectionRef[],
++  provider: string,
++  knownIds: ReadonlySet<string>,
++): string | null {
++  const match = connections.find((connection) => (
++    connection.providerKey === provider && connection.status === 'active' && !knownIds.has(connection.id)
++  ))
++  return match?.id ?? null
++}
++
++const defaultSleep = (ms: number): Promise<void> => new Promise<void>((resolve) => {
++  setTimeout(resolve, ms)
++})
++
++/**
++ * Polls the connection list until a new connection of `provider` appears, or returns null when the wait runs out.
++ * A failed read is retried until the deadline: the sign-in can still complete while the list is unreachable.
++ */
++export async function waitForNewConnection(input: {
++  provider: string
++  knownIds: ReadonlySet<string>
++  listConnections: () => Promise<readonly ConnectionRef[]>
++  timeoutMs?: number
++  intervalMs?: number
++  now?: () => number
++  sleep?: (ms: number) => Promise<void>
++}): Promise<string | null> {
++  const now = input.now ?? Date.now
++  const sleep = input.sleep ?? defaultSleep
++  const intervalMs = input.intervalMs ?? CONNECT_POLL_INTERVAL_MS
++  const deadline = now() + (input.timeoutMs ?? CONNECT_INTENT_WAIT_MS)
++  for (;;) {
++    try {
++      const connectionId = findNewConnection(await input.listConnections(), input.provider, input.knownIds)
++      if (connectionId !== null) return connectionId
++    } catch {
++      // Retried below until the deadline.
++    }
++    const remaining = deadline - now()
++    if (remaining <= 0) return null
++    await sleep(Math.min(intervalMs, remaining))
++  }
++}
++
++/**
++ * Hands the intent to `resume`, and saves it again when the resend is refused or throws, so a refused question is
++ * still there to finish. The caller has removed the record before the call; that is what keeps a second resume from
++ * finding it.
++ */
++function resumeWithRestore(
++  intent: ConnectIntent,
++  connectionId: string,
++  resume: (intent: ConnectIntent, connectionId: string) => boolean,
++): boolean {
++  let resumed = false
++  try {
++    resumed = resume(intent, connectionId)
++  } finally {
++    if (!resumed) saveIntent(intent)
++  }
++  return resumed
++}
++
++/**
++ * Runs a connect started from a suggestion card. The intent is saved before the sign-in opens, so a reload while the
++ * person is in the popup keeps it. When the new connection appears, the saved question is resent on it once. A failed
++ * sign-in clears the intent. A connection that does not appear in time, or a resend that is refused, keeps the intent
++ * for "Finish connecting".
++ */
++export async function runConnectIntent(input: {
++  threadId: string
++  suggestionId: string
++  provider: string
++  prompt: string
++  /** The connections the card saw before the sign-in. Only a connection outside this set resumes the question. */
++  knownIds: ReadonlySet<string>
++  /** Opens the provider sign-in and resolves when it completes. Rejects with the provider's message on failure. */
++  openConnect: () => Promise<void>
++  listConnections: () => Promise<readonly ConnectionRef[]>
++  /** Resends the question on the connection. Returns false when that cannot happen now. */
++  resume: (intent: ConnectIntent, connectionId: string) => boolean
++  now?: () => number
++  sleep?: (ms: number) => Promise<void>
++  timeoutMs?: number
++  intervalMs?: number
++}): Promise<ConnectIntentOutcome> {
++  const now = input.now ?? Date.now
++  const intent: ConnectIntent = {
++    threadId: input.threadId,
++    suggestionId: input.suggestionId,
++    provider: input.provider,
++    prompt: input.prompt,
++    createdAt: now(),
++  }
++  saveIntent(intent)
++  try {
++    await input.openConnect()
++  } catch (error) {
++    clearIntent(intent.threadId)
++    return { status: 'failed', error }
++  }
++  const connectionId = await waitForNewConnection({
++    provider: intent.provider,
++    knownIds: input.knownIds,
++    listConnections: input.listConnections,
++    timeoutMs: input.timeoutMs,
++    intervalMs: input.intervalMs,
++    now,
++    sleep: input.sleep,
++  })
++  if (connectionId === null) return { status: 'pending' }
++  // This connect owns its question, so its record goes before the resend and a stale copy cannot resume it again.
++  clearIntent(intent.threadId)
++  return resumeWithRestore(intent, connectionId, input.resume)
++    ? { status: 'resumed', connectionId }
++    : { status: 'pending' }
++}
++
++/**
++ * Continues a saved connect after a reload, on the person's "Continue" click: resumes the question once its connection
++ * exists. Nothing is resent on load. `not_connected` keeps the record, so the person can connect and continue again.
++ */
++export async function continueSavedConnectIntent(input: {
++  threadId: string
++  listConnections: () => Promise<readonly ConnectionRef[]>
++  resume: (intent: ConnectIntent, connectionId: string) => boolean
++  now?: () => number
++}): Promise<SavedConnectOutcome> {
++  const now = input.now ?? Date.now
++  const saved = readIntent(input.threadId, now())
++  if (!saved) return 'none'
++  const connectionId = findNewConnection(await input.listConnections(), saved.provider, new Set<string>())
++  if (connectionId === null) return 'not_connected'
++  // Taken, not only read, before the resend: a second click that lands while the list was being read finds nothing.
++  const intent = takeIntent(input.threadId, now())
++  if (!intent) return 'none'
++  return resumeWithRestore(intent, connectionId, input.resume) ? 'resumed' : 'pending'
++}

@@ -1,0 +1,48 @@
+== chained rows and heads
+ chained_rows | heads | all_rows 
+--------------+-------+----------
+           11 |     3 |   110170
+
+== chained rows, latest 12
+              org_id              | chain_seq |           event            |  plane  | chain_mode |     prev     |   row_hash   |          ingested_at          
+----------------------------------+-----------+----------------------------+---------+------------+--------------+--------------+-------------------------------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         8 | plane_service_token_issued | control | insert     | 892b4a371619 | 3372ac86134c | 2026-10-27 06:04:18.070589+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         7 | tool_action                | model   | insert     | 6528fbd1b159 | 892b4a371619 | 2026-10-27 06:04:14.528404+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         6 | tool_action_reserved       | model   | insert     | b8935e3c37c7 | 6528fbd1b159 | 2026-10-27 06:04:13.884711+00
+ global                           |         2 | plane_service_token_issued | control | insert     | d200804a8232 | 798c1cf6808a | 2026-10-27 06:04:13.351877+00
+ global                           |         1 | plane_service_token_issued | control | insert     | fcb515c7b7d7 | d200804a8232 | 2026-10-27 06:04:13.332213+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         5 | plane_service_token_issued | control | insert     | d3a73a7d011f | b8935e3c37c7 | 2026-10-27 06:04:05.77435+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         4 | plane_service_token_issued | control | insert     | f0317c20e8d9 | d3a73a7d011f | 2026-10-27 06:04:03.165468+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         3 | plane_service_token_issued | control | insert     | b1c8067970cc | f0317c20e8d9 | 2026-10-27 06:04:03.04319+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         2 | plane_service_token_issued | control | insert     | 5391315748a7 | b1c8067970cc | 2026-10-27 06:02:58.435922+00
+ platform                         |         1 | plane_service_token_issued | control | insert     | 5891dfc6355c | 15a4f91712de | 2026-10-27 06:02:55.073254+00
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |         1 | plane_service_token_issued | control | insert     | 7cb01fc1fb45 | 5391315748a7 | 2026-10-27 06:02:50.647924+00
+
+== contiguity, links and genesis per org (expect gaps 0, link_breaks 0, genesis_ok t)
+              org_id              | rows | min | max | gaps | link_breaks | genesis_ok 
+----------------------------------+------+-----+-----+------+-------------+------------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |    8 |   1 |   8 |    0 |           0 | t
+ global                           |    2 |   1 |   2 |    0 |           0 | t
+ platform                         |    1 |   1 |   1 |    0 |           0 | t
+
+== head equals the last row (expect seq_ok t, hash_ok t, state ok)
+              org_id              | head_seq | state |         activated_at          | seq_ok | hash_ok 
+----------------------------------+----------+-------+-------------------------------+--------+---------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf |        8 | ok    | 2026-10-27 06:02:50.647924+00 | t      | t
+ global                           |        2 | ok    | 2026-10-27 06:04:13.332213+00 | t      | t
+ platform                         |        1 | ok    | 2026-10-27 06:02:55.073254+00 | t      | t
+
+== verifier state
+              org_id              | last_status |  last_reason   | first_broken_seq | verified_through_seq | legacy_unchained_rows |          last_run_at          
+----------------------------------+-------------+----------------+------------------+----------------------+-----------------------+-------------------------------
+ FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf | partial     | no_attestation |                  |                    8 |                 25711 | 2026-10-27 06:04:20.637607+00
+ global                           | partial     | no_attestation |                  |                    2 |                 26693 | 2026-10-27 06:04:20.664576+00
+ platform                         | partial     | no_attestation |                  |                    1 |                 17140 | 2026-10-27 06:04:20.714262+00
+
+== the latest audit rows of any kind (plane, producer, event), last 10 minutes
+  plane  | source_producer |           event            | count |              max              
+---------+-----------------+----------------------------+-------+-------------------------------
+ control | auth-core       | plane_service_token_issued |    21 | 2026-10-27 06:04:18.070589+00
+ model   | session-core    | tool_action                |     1 | 2026-10-27 06:04:14.528404+00
+ model   | session-core    | tool_action_reserved       |     1 | 2026-10-27 06:04:13.884711+00
+

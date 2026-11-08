@@ -1,0 +1,2153 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs
+index 477b34b05..4782abcc1 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs	
+@@ -51,6 +51,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/agents/runs/{run_id}/plan-approval",
+             post(approve_plan),
+         )
++        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts.
++        .route(
++            "/api/v1/agents/wide-research/estimate",
++            post(wide_research_estimate),
++        )
+         // Per-org/user rate limiting, ordered like `orchestration.rs`:
+         // `require_session` (written last → outer) runs first and inserts
+         // `AuthenticatedUser`, so `rate_limit_middleware` (written first → inner)
+@@ -313,3 +318,72 @@ pub(crate) async fn approve_plan(
+     .await;
+     (status, body).into_response()
+ }
++
++/// The fields of a wide-research estimate the SPA may send. Anything else in the body is dropped
++/// here, so the browser cannot name an org, a cap or a price source.
++#[derive(Debug, Deserialize, serde::Serialize)]
++struct WideResearchEstimateBody {
++    item_count: u32,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    provider: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    subscription_connection_id: Option<String>,
++}
++
++/// `POST /api/v1/agents/wide-research/estimate` — what a wide-research run of `item_count` items
++/// would look like before it starts (Wave 3 EP-2 S8), passed through as model-gateway answers it.
++/// Model-gateway reads the org's item cap from its own policy registry, refuses a zero-retention
++/// caller with the typed `agentic` refusal and answers 404 while its switch is off, so this layer
++/// adds no rule of its own beyond the closed body.
++async fn wide_research_estimate(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Json(body): Json<WideResearchEstimateBody>,
++) -> impl IntoResponse {
++    let token = model_token(&state, &user, &headers).await;
++    let session_token = session_token(&state, &user, &headers).await;
++    let url = format!("{}/v1/research/wide/estimate", state.model_gateway_url);
++    let (status, body) = proxy_model_json_with_session(
++        &state,
++        Method::POST,
++        &url,
++        serde_json::to_value(&body).ok(),
++        token.as_deref(),
++        session_token.as_deref(),
++        &user,
++    )
++    .await;
++    (status, body).into_response()
++}
++
++#[cfg(test)]
++mod wide_research_tests {
++    use super::*;
++
++    #[test]
++    fn the_estimate_body_keeps_only_its_own_fields() {
++        let body: WideResearchEstimateBody = serde_json::from_value(serde_json::json!({
++            "item_count": 10,
++            "model": "verevon-balance",
++            "org_id": "someone-else",
++            "cap": 100,
++        }))
++        .expect("unknown fields are dropped, not refused");
++        let forwarded = serde_json::to_value(&body).expect("serialisable");
++        assert_eq!(
++            forwarded,
++            serde_json::json!({"item_count": 10, "model": "verevon-balance"})
++        );
++    }
++
++    #[test]
++    fn the_estimate_body_needs_a_count() {
++        assert!(serde_json::from_value::<WideResearchEstimateBody>(serde_json::json!({
++            "model": "verevon-balance"
++        }))
++        .is_err());
++    }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.test.tsx
+new file mode 100644
+index 000000000..22f750c57
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.test.tsx	
+@@ -0,0 +1,135 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render } from '@solidjs/testing-library'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { ApiError } from '@/shared/api/api-error'
++import type { WideResearchEstimate } from '@/shared/api/chat-client'
++import { requestedItemCount, WideResearchStart, wideResearchChoice } from './WideResearchStart'
++
++// Without a provider the card renders in its default locale, Norwegian.
++
++afterEach(() => {
++  cleanup()
++  vi.restoreAllMocks()
++})
++
++const estimate = (overrides: Partial<WideResearchEstimate> = {}): WideResearchEstimate => ({
++  itemsRequested: 10,
++  itemsAfterCap: 5,
++  concurrency: 4,
++  roundsPerItem: 2,
++  minutesLow: 1,
++  minutesHigh: 6,
++  usdLow: 0.12,
++  usdHigh: 0.4,
++  costBasis: 'metered',
++  cap: 5,
++  capSource: 'org_policy',
++  ...overrides,
++})
++
++function button(container: HTMLElement, selector: string): HTMLButtonElement {
++  const found = container.querySelector<HTMLButtonElement>(selector)
++  if (!found) throw new Error(`${selector} is not rendered`)
++  return found
++}
++
++describe('wide research choice', () => {
++  it('sends the pasted items when there are any, else the preset count', () => {
++    expect(wideResearchChoice(10, '')).toEqual({ itemCap: 10 })
++    expect(wideResearchChoice(10, ' a \n\n b\r\n')).toEqual({ items: ['a', 'b'] })
++    expect(requestedItemCount({ items: ['a', 'b', 'c'] })).toBe(3)
++    expect(requestedItemCount({ itemCap: 16 })).toBe(16)
++  })
++
++  it('bounds a pasted list to 64 items of at most 500 characters', () => {
++    const many = Array.from({ length: 80 }, (_, n) => `q${n}`).join('\n')
++    expect(wideResearchChoice(5, many).items).toHaveLength(64)
++    expect(wideResearchChoice(5, 'x'.repeat(600)).items?.[0]).toHaveLength(500)
++  })
++})
++
++describe('WideResearchStart', () => {
++  it('asks for no estimate until told to, and offers no Start before one', () => {
++    const load = vi.fn(async () => estimate())
++    const { container } = render(() => <WideResearchStart onStart={vi.fn()} estimate={load} />)
++    expect(load).not.toHaveBeenCalled()
++    expect(button(container, '.verevon-wide-research__start').disabled).toBe(true)
++  })
++
++  it('shows the capped estimate and starts with the pasted items', async () => {
++    const load = vi.fn(async () => estimate())
++    const onStart = vi.fn()
++    const { container, findByTestId } = render(() => (
++      <WideResearchStart model="verevon-balance" onStart={onStart} estimate={load} />
++    ))
++    const list = Array.from({ length: 10 }, (_, n) => `question ${n}`).join('\n')
++    fireEvent.input(container.querySelector('textarea') as HTMLTextAreaElement, { target: { value: list } })
++    fireEvent.click(button(container, '.verevon-wide-research__estimate'))
++    expect(load).toHaveBeenCalledWith({ itemCount: 10, model: 'verevon-balance' })
++    expect((await findByTestId('wide-research-items')).textContent).toContain('5 spørsmål')
++    expect((await findByTestId('wide-research-capped')).textContent).toContain('grensen på 5')
++    expect((await findByTestId('wide-research-cost')).textContent).toContain('$0.12')
++    const start = button(container, '.verevon-wide-research__start')
++    expect(start.disabled).toBe(false)
++    fireEvent.click(start)
++    expect(onStart).toHaveBeenCalledWith({ items: Array.from({ length: 10 }, (_, n) => `question ${n}`) })
++  })
++
++  it('states no cost on a subscription route and none for an unpriced model', async () => {
++    const subscription = render(() => (
++      <WideResearchStart
++        onStart={vi.fn()}
++        estimate={async () => estimate({ usdLow: null, usdHigh: null, costBasis: 'subscription' })}
++      />
++    ))
++    fireEvent.click(button(subscription.container, '.verevon-wide-research__estimate'))
++    expect((await subscription.findByTestId('wide-research-cost')).textContent).toContain('abonnementet')
++    cleanup()
++
++    const unpriced = render(() => (
++      <WideResearchStart onStart={vi.fn()} estimate={async () => estimate({ usdLow: null, usdHigh: null })} />
++    ))
++    fireEvent.click(button(unpriced.container, '.verevon-wide-research__estimate'))
++    expect((await unpriced.findByTestId('wide-research-cost')).textContent).toContain('kan ikke anslås')
++  })
++
++  it('says wide research is not available when the entry is off, and offers no Start', async () => {
++    const off = new ApiError('not found', 404, 'not_found')
++    const { container, findByText } = render(() => (
++      <WideResearchStart onStart={vi.fn()} estimate={async () => Promise.reject(off)} />
++    ))
++    fireEvent.click(button(container, '.verevon-wide-research__estimate'))
++    expect(await findByText('Bred forskning er ikke tilgjengelig her.')).toBeTruthy()
++    expect(button(container, '.verevon-wide-research__start').disabled).toBe(true)
++  })
++
++  it('treats a zero-retention refusal like an entry that is off', async () => {
++    const zdr = new ApiError('refused', 412, 'zdr_feature_not_supported', { feature: 'agentic' })
++    const { findByText } = render(() => (
++      <WideResearchStart onStart={vi.fn()} estimate={async () => Promise.reject(zdr)} />
++    ))
++    fireEvent.click(document.querySelector('.verevon-wide-research__estimate') as HTMLButtonElement)
++    expect(await findByText('Bred forskning er ikke tilgjengelig her.')).toBeTruthy()
++  })
++
++  it('offers no Start when the organisation has wide research off', async () => {
++    const { container, findByText } = render(() => (
++      <WideResearchStart onStart={vi.fn()} estimate={async () => estimate({ itemsAfterCap: 0, cap: 0 })} />
++    ))
++    fireEvent.click(button(container, '.verevon-wide-research__estimate'))
++    expect(await findByText('Organisasjonen din har slått av bred forskning.')).toBeTruthy()
++    expect(button(container, '.verevon-wide-research__start').disabled).toBe(true)
++  })
++
++  it('makes an estimate stale when the choice changes', async () => {
++    const { container, findByTestId } = render(() => (
++      <WideResearchStart onStart={vi.fn()} estimate={async () => estimate()} />
++    ))
++    fireEvent.click(button(container, '.verevon-wide-research__estimate'))
++    await findByTestId('wide-research-items')
++    fireEvent.click(container.querySelectorAll<HTMLButtonElement>('.verevon-wide-research__preset')[2] as HTMLButtonElement)
++    expect(container.querySelector('[data-testid="wide-research-items"]')).toBeNull()
++    expect(button(container, '.verevon-wide-research__start').disabled).toBe(true)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.tsx
+new file mode 100644
+index 000000000..094da5a97
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.tsx	
+@@ -0,0 +1,192 @@
++/**
++ * The composer's "Bred forskning" entry (EP-2 S8). The person picks a count preset or pastes a list,
++ * one question per line, and asks for an estimate first: model-gateway answers with the items after
++ * the organisation's cap, how many run at once, a time range and, on a metered and priced route, a
++ * cost range. Start hands the choice to the composer, which sends it as one Do turn
++ * (`chat.wide_research_start`); the server clamps the count again and names any items past the cap in
++ * the answer, so nothing on this card can widen a run.
++ *
++ * The estimate route answers 404 while `WIDE_RESEARCH_ENTRY_ENABLED` is off; the card then says wide
++ * research is not available and offers no Start. A zero-retention session gets the typed refusal and
++ * the same outcome.
++ */
++
++import { createSignal, For, Match, Show, Switch } from 'solid-js'
++import { ApiError } from '@/shared/api/api-error'
++import {
++  estimateWideResearch,
++  parseWideResearchItems,
++  WIDE_RESEARCH_PRESETS,
++  type WideResearchEstimate,
++  type WideResearchStart as WideResearchChoice,
++} from '@/shared/api/chat-client'
++import { useI18n } from '@/shared/i18n'
++
++type EstimateLoader = (input: { itemCount: number; model?: string }) => Promise<WideResearchEstimate>
++
++type Estimate =
++  | { state: 'idle' }
++  | { state: 'loading' }
++  | { state: 'ready'; estimate: WideResearchEstimate }
++  | { state: 'unavailable' }
++  | { state: 'failed' }
++
++/** The choice the composer sends: the pasted items when there are any, else the preset count. */
++export function wideResearchChoice(preset: number, pasted: string): WideResearchChoice {
++  const items = parseWideResearchItems(pasted)
++  return items.length > 0 ? { items } : { itemCap: preset }
++}
++
++/** How many items a choice asks for, for the estimate. */
++export function requestedItemCount(choice: WideResearchChoice): number {
++  return choice.items?.length ?? choice.itemCap ?? 0
++}
++
++function formatUsd(low: number, high: number): string {
++  const format = (value: number) => (value < 0.01 ? '< $0.01' : `$${value.toFixed(2)}`)
++  return low === high ? format(low) : `${format(low)} – ${format(high)}`
++}
++
++export function WideResearchStart(props: {
++  model?: string
++  onStart: (choice: WideResearchChoice) => void
++  onCancel?: () => void
++  /** Injectable for tests; the real route by default. */
++  estimate?: EstimateLoader
++}) {
++  const i18n = useI18n()
++  const [preset, setPreset] = createSignal<number>(WIDE_RESEARCH_PRESETS[0])
++  const [pasted, setPasted] = createSignal('')
++  const [estimate, setEstimate] = createSignal<Estimate>({ state: 'idle' })
++  const choice = () => wideResearchChoice(preset(), pasted())
++
++  // Any change to the choice makes an earlier estimate stale, so Start waits for a new one.
++  const changeChoice = (apply: () => void) => {
++    apply()
++    setEstimate({ state: 'idle' })
++  }
++
++  const loadEstimate = async () => {
++    const load = props.estimate ?? estimateWideResearch
++    setEstimate({ state: 'loading' })
++    try {
++      const answer = await load({ itemCount: requestedItemCount(choice()), model: props.model })
++      setEstimate({ state: 'ready', estimate: answer })
++    } catch (error) {
++      const refused = error instanceof ApiError && (error.status === 404 || error.feature === 'agentic')
++      setEstimate({ state: refused ? 'unavailable' : 'failed' })
++    }
++  }
++
++  const ready = () => {
++    const current = estimate()
++    return current.state === 'ready' ? current.estimate : null
++  }
++
++  return (
++    <section class="verevon-wide-research" aria-label={i18n.tr('Bred forskning', 'Wide research')}>
++      <h3 class="verevon-wide-research__title">{i18n.tr('Bred forskning', 'Wide research')}</h3>
++      <div role="group" aria-label={i18n.tr('Antall spørsmål', 'Number of questions')}>
++        <For each={WIDE_RESEARCH_PRESETS}>
++          {(count) => (
++            <button
++              type="button"
++              class="verevon-wide-research__preset"
++              aria-pressed={preset() === count && parseWideResearchItems(pasted()).length === 0 ? 'true' : 'false'}
++              onClick={() => changeChoice(() => setPreset(count))}
++            >
++              {count}
++            </button>
++          )}
++        </For>
++      </div>
++      <label class="verevon-wide-research__list">
++        <span>{i18n.tr('Eller lim inn en liste, ett spørsmål per linje', 'Or paste a list, one question per line')}</span>
++        <textarea
++          rows={5}
++          value={pasted()}
++          onInput={(event) => changeChoice(() => setPasted(event.currentTarget.value))}
++        />
++      </label>
++      <button type="button" class="verevon-wide-research__estimate" onClick={() => void loadEstimate()}>
++        {i18n.tr('Beregn omfang', 'Estimate')}
++      </button>
++      <Switch>
++        <Match when={estimate().state === 'loading'}>
++          <p role="status">{i18n.tr('Beregner…', 'Estimating…')}</p>
++        </Match>
++        <Match when={estimate().state === 'unavailable'}>
++          <p role="status">{i18n.tr('Bred forskning er ikke tilgjengelig her.', 'Wide research is not available here.')}</p>
++        </Match>
++        <Match when={estimate().state === 'failed'}>
++          <p role="alert">{i18n.tr('Kunne ikke beregne omfanget. Prøv igjen.', 'The estimate failed. Try again.')}</p>
++        </Match>
++        <Match when={ready()}>
++          {(current) => (
++            <div class="verevon-wide-research__card">
++              <Show
++                when={current().itemsAfterCap > 0}
++                fallback={
++                  <p role="status">
++                    {i18n.tr(
++                      'Organisasjonen din har slått av bred forskning.',
++                      'Your organisation has wide research turned off.',
++                    )}
++                  </p>
++                }
++              >
++                <p data-testid="wide-research-items">
++                  {i18n.tr(
++                    `${current().itemsAfterCap} spørsmål undersøkes, ${current().concurrency} om gangen.`,
++                    `${current().itemsAfterCap} questions are researched, ${current().concurrency} at a time.`,
++                  )}
++                </p>
++                <Show when={current().itemsRequested > current().itemsAfterCap}>
++                  <p data-testid="wide-research-capped">
++                    {i18n.tr(
++                      `${current().itemsRequested - current().itemsAfterCap} spørsmål er over grensen på ${current().cap} og blir ikke undersøkt; svaret nevner dem.`,
++                      `${current().itemsRequested - current().itemsAfterCap} questions are past the limit of ${current().cap} and are not researched; the answer names them.`,
++                    )}
++                  </p>
++                </Show>
++                <p data-testid="wide-research-minutes">
++                  {i18n.tr(
++                    `Omtrent ${current().minutesLow}–${current().minutesHigh} minutter. Et anslag, ikke et løfte.`,
++                    `About ${current().minutesLow}–${current().minutesHigh} minutes. An estimate, not a promise.`,
++                  )}
++                </p>
++                <p data-testid="wide-research-cost">
++                  {current().usdLow !== null && current().usdHigh !== null
++                    ? i18n.tr(
++                        `Anslått kostnad: ${formatUsd(current().usdLow as number, current().usdHigh as number)}`,
++                        `Estimated cost: ${formatUsd(current().usdLow as number, current().usdHigh as number)}`,
++                      )
++                    : current().costBasis === 'subscription'
++                      ? i18n.tr('Ingen kostnad per token på abonnementet ditt.', 'No per-token cost on your subscription.')
++                      : i18n.tr('Kostnaden kan ikke anslås for denne modellen.', 'The cost cannot be estimated for this model.')}
++                </p>
++              </Show>
++            </div>
++          )}
++        </Match>
++      </Switch>
++      <div class="verevon-wide-research__actions">
++        <Show when={props.onCancel}>
++          {(cancel) => (
++            <button type="button" onClick={() => cancel()()}>
++              {i18n.tr('Avbryt', 'Cancel')}
++            </button>
++          )}
++        </Show>
++        <button
++          type="button"
++          class="verevon-wide-research__start"
++          disabled={(ready()?.itemsAfterCap ?? 0) === 0}
++          onClick={() => props.onStart(choice())}
++        >
++          {i18n.tr('Start', 'Start')}
++        </button>
++      </div>
++    </section>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index ffd2ec0ab..1d31a2082 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1114,6 +1114,15 @@ const chatInspectRunRequestInput = z
+   })
+   .strict()
+ 
++// A wide-research start (EP-2 S8) names a count preset or the person's own items. The server clamps
++// the count to the org's item cap, so nothing here can widen a run.
++const chatWideResearchStartInput = z
++  .object({
++    itemCap: z.number().int().min(1).max(16).optional(),
++    items: z.array(z.string().min(1).max(500)).max(64).optional(),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4031,6 +4040,17 @@ export const actionRegistry = [
+     inputSchema: chatInspectRunRequestInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.wide_research_start',
++    label: 'Start wide research',
++    description: 'Start a wide-research run from the composer: one Do turn that researches up to the organisation's item cap of separate questions in parallel and merges the answers. The person gives a pasted list (one question per line) or a count preset, and sees an estimate of the items, time and cost first. The server clamps the count to the organisation's research.max_fan_out_items policy and names any items past it in the answer; a zero-retention session is refused. Never model-executable: a model does not start a fan-out that spends on the person's behalf.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: chatWideResearchStartInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 03927a80b..4b607bad7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -32,6 +32,117 @@ import {
+ } from '@/features/chat/lib/chat-retention'
+ import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
+ 
++// ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
++
++/** The count presets of the "Bred forskning" entry; 16 is the platform's hard maximum. */
++export const WIDE_RESEARCH_PRESETS = [5, 10, 16] as const
++
++/** The most items the entry sends; model-gateway reads no more than this many either. */
++export const WIDE_RESEARCH_MAX_ITEMS = 64
++
++/** The longest item the entry sends; model-gateway cuts at the same length. */
++export const WIDE_RESEARCH_MAX_ITEM_CHARS = 500
++
++/** What the person asked a wide-research run to cover: a pasted list, or a count preset. */
++export type WideResearchStart = {
++  /** The person's ask: a preset count, or the number of listed items when omitted. */
++  itemCap?: number
++  /** One research question per entry, in the order given. */
++  items?: string[]
++}
++
++/**
++ * The items of a pasted list: one per line, trimmed, blank lines skipped, each cut to
++ * {@link WIDE_RESEARCH_MAX_ITEM_CHARS} characters and at most {@link WIDE_RESEARCH_MAX_ITEMS} kept.
++ */
++export function parseWideResearchItems(text: string): string[] {
++  return text
++    .split(/\r?\n/)
++    .map((line) => line.trim())
++    .filter((line) => line.length > 0)
++    .slice(0, WIDE_RESEARCH_MAX_ITEMS)
++    .map((line) => line.slice(0, WIDE_RESEARCH_MAX_ITEM_CHARS))
++}
++
++function wideResearchWire(start: WideResearchStart): { item_cap?: number; items?: string[] } {
++  const items = (start.items ?? []).slice(0, WIDE_RESEARCH_MAX_ITEMS)
++  const itemCap =
++    typeof start.itemCap === 'number' && Number.isInteger(start.itemCap) && start.itemCap > 0
++      ? start.itemCap
++      : undefined
++  return {
++    ...(itemCap !== undefined ? { item_cap: itemCap } : {}),
++    ...(items.length > 0 ? { items } : {}),
++  }
++}
++
++/** Model-gateway's estimate of a wide-research run, before it starts. A range, never a promise. */
++export type WideResearchEstimate = {
++  itemsRequested: number
++  itemsAfterCap: number
++  concurrency: number
++  roundsPerItem: number
++  minutesLow: number
++  minutesHigh: number
++  /** Null on a subscription route or for a model the price catalogue does not name. */
++  usdLow: number | null
++  usdHigh: number | null
++  costBasis: 'metered' | 'subscription'
++  cap: number
++  capSource: 'org_policy' | 'platform_default'
++}
++
++function wideResearchUsd(value: unknown): number | null {
++  return typeof value === 'number' && Number.isFinite(value) ? value : null
++}
++
++function wideResearchCount(value: unknown): number {
++  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0
++}
++
++/** Reads the estimate answer; a field of the wrong type reads as zero or null, never as a guess. */
++export function normalizeWideResearchEstimate(raw: unknown): WideResearchEstimate {
++  const value = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
++  return {
++    itemsRequested: wideResearchCount(value.items_requested),
++    itemsAfterCap: wideResearchCount(value.items_after_cap),
++    concurrency: wideResearchCount(value.concurrency),
++    roundsPerItem: wideResearchCount(value.rounds_per_item),
++    minutesLow: wideResearchCount(value.minutes_low),
++    minutesHigh: wideResearchCount(value.minutes_high),
++    usdLow: wideResearchUsd(value.usd_low),
++    usdHigh: wideResearchUsd(value.usd_high),
++    costBasis: value.cost_basis === 'subscription' ? 'subscription' : 'metered',
++    cap: wideResearchCount(value.cap),
++    capSource: value.cap_source === 'org_policy' ? 'org_policy' : 'platform_default',
++  }
++}
++
++/**
++ * `POST /api/v1/agents/wide-research/estimate`: what a wide-research run of `itemCount` items
++ * would look like. Nothing is stored or started. The gateway answers 404 while the entry is off and
++ * a typed `agentic` refusal for a zero-retention caller.
++ */
++export async function estimateWideResearch(input: {
++  itemCount: number
++  model?: string
++  provider?: string
++  subscriptionConnectionId?: string
++}): Promise<WideResearchEstimate> {
++  const raw = await requestJson<unknown>('/api/v1/agents/wide-research/estimate', {
++    method: 'POST',
++    body: JSON.stringify({
++      item_count: Math.max(0, Math.floor(input.itemCount)),
++      ...(input.model ? { model: input.model } : {}),
++      ...(input.provider ? { provider: input.provider } : {}),
++      ...(input.subscriptionConnectionId
++        ? { subscription_connection_id: input.subscriptionConnectionId }
++        : {}),
++    }),
++  })
++  return normalizeWideResearchEstimate(raw)
++}
++
+ // ── Wire contract ───────────────────────────────────────────────────────────
+ // `truncated` is set when a workbook was cut on a row boundary to fit one turn;
+ // the cut is also marked inside `content`, where the model reads it.
+@@ -123,6 +234,13 @@ export type ChatInvokeRequest = {
+   browseWeb?: boolean
+   /** Deep research mode: gateway runs plan -> concurrent searches -> page reads -> a cited report. */
+   deepResearch?: boolean
++  /**
++   * Wide research from the composer's "Bred forskning" entry (EP-2 S8): the items to research, or
++   * only a count when the model should split the question itself. Sent as `wide_research` only on
++   * an agentic turn that keeps data (never zero-retention); model-gateway ignores it while
++   * WIDE_RESEARCH_ENTRY_ENABLED is off and clamps the count to the org's item cap.
++   */
++  wideResearch?: WideResearchStart
+   /**
+    * Durable ids of earlier messages the user pinned into context.
+    *
+@@ -1706,6 +1824,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
+     // Search turn — the same failure planMode had. The gateway keys the
+     // multi-round research pipeline off this flag.
+     deep_research: conversationOnly || supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
++    // Present only on an agentic turn that keeps data (EP-2 S8), so every other body is
++    // byte-identical to what it was before wide research had an entry.
++    ...(request.wideResearch && features.has('agentic') && !request.zdr
++      ? { wide_research: wideResearchWire(request.wideResearch) }
++      : {}),
+     // Omitted entirely when unset or `standard`: the gateway treats an absent
+     // effort as "no thinking", and sending `standard` explicitly would be a
+     // no-op field on every ordinary turn.
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go
+index d88ecefc9..d033405aa 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go	
+@@ -25,6 +25,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"log/slog"
++	"math"
+ 	"net/http"
+ 	"slices"
+ 	"sort"
+@@ -75,6 +76,19 @@ var orgAgentPolicySettings = []orgAgentSetting{
+ 	{key: "mcp_tool_approval", kind: "enum", order: []string{"approved_only", "trust_annotations"}, def: "trust_annotations", failClose: "approved_only"},
+ 	{key: "user_hooks", kind: "enum", order: []string{"denied", "allowed"}, def: "allowed", failClose: "denied", reserved: true},
+ 	{key: "reference_uploads", kind: "enum", order: []string{"off", "on"}, def: "off", failClose: "off", reserved: true},
++	// Wave 3 EP-2 S8 (D5): the wide-research item cap, a whole number from 0 (wide research off)
++	// to 16. The gateway enforces it when a wide-research run starts.
++	{key: "research.max_fan_out_items", kind: "integer", order: orgAgentCountOrder(16), def: "8", failClose: "0"},
++}
++
++// orgAgentCountOrder is the strictness order of an integer key: "0" to max, smallest first,
++// so a count is tighten-only by the same rank as every other kind.
++func orgAgentCountOrder(ceiling int) []string {
++	order := make([]string, 0, ceiling+1)
++	for count := 0; count <= ceiling; count++ {
++		order = append(order, strconv.Itoa(count))
++	}
++	return order
+ }
+ 
+ // orgAgentRefusal is one closed refusal code and the status it answers with.
+@@ -118,6 +132,10 @@ func orgAgentDefaultValue(def orgAgentSetting, token string) any {
+ 		return token == "true"
+ 	case "allow_list":
+ 		return map[string]any{"mode": token, "ids": []string{}}
++	case "integer":
++		// A token in the order is always a decimal count, so the parse cannot fail.
++		count, _ := strconv.Atoi(token)
++		return count
+ 	default:
+ 		return token
+ 	}
+@@ -187,6 +205,18 @@ func parseOrgAgentValue(def orgAgentSetting, raw any) (string, any, *orgAgentRef
+ 		return "false", false, nil
+ 	case "allow_list":
+ 		return parseOrgAgentAllowList(def, raw)
++	case "integer":
++		// encoding/json decodes every number as float64: a fraction, a negative or a quoted
++		// number is refused rather than rounded or read as text.
++		number, ok := raw.(float64)
++		if !ok || number != math.Trunc(number) || number < 0 || number > math.MaxInt32 {
++			return "", nil, &orgAgentRefuseInvalidValue
++		}
++		token := strconv.FormatInt(int64(number), 10)
++		if !slices.Contains(def.order, token) {
++			return "", nil, &orgAgentRefuseInvalidValue
++		}
++		return token, int(number), nil
+ 	}
+ 	return "", nil, &orgAgentRefuseInvalidValue
+ }
+@@ -522,7 +552,11 @@ func (h *OrgAgentPolicyHandler) effective(w http.ResponseWriter, r *http.Request
+ 	}
+ 	settings := make([]orgAgentEffectiveSetting, 0, len(orgAgentPolicySettings))
+ 	for _, def := range orgAgentPolicySettings {
+-		value := row.Settings[def.key]
++		value, stored := row.Settings[def.key]
++		if !stored {
++			// A document written before the key existed holds the key's default.
++			value = orgAgentDefaultValue(def, def.def)
++		}
+ 		source := "platform_default"
+ 		if row.Revision > 0 && orgAgentTokenOf(value) != def.def {
+ 			source = "org_policy"
+@@ -552,6 +586,12 @@ func orgAgentTokenOf(value any) string {
+ 	case map[string]any:
+ 		mode, _ := typed["mode"].(string)
+ 		return mode
++	case float64:
++		// A stored integer key, read back from the JSONB document.
++		return strconv.FormatInt(int64(typed), 10)
++	case int:
++		// An integer key's default, before it was ever stored.
++		return strconv.Itoa(typed)
+ 	}
+ 	return ""
+ }
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go
+index 89da1156f..877112912 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go	
+@@ -172,6 +172,10 @@ func TestOrgAgentPolicyValidationRefusesBeforeTheRegistryIsTouched(t *testing.T)
+ 		{name: "ids under a mode that names none", body: `{"settings":{"ext.mcp_servers":{"mode":"any","ids":["srv.one"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
+ 		{name: "an id that is not an identifier", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["has space"]}}}`, status: http.StatusBadRequest, code: "invalid_value"},
+ 		{name: "an allow-list with an extra field", body: `{"settings":{"ext.mcp_servers":{"mode":"approved_only","ids":["srv.one"],"extra":1}}}`, status: http.StatusBadRequest, code: "invalid_value"},
++		{name: "a fan-out cap written as text", body: `{"settings":{"research.max_fan_out_items":"8"}}`, status: http.StatusBadRequest, code: "invalid_value"},
++		{name: "a fan-out cap that is a fraction", body: `{"settings":{"research.max_fan_out_items":8.5}}`, status: http.StatusBadRequest, code: "invalid_value"},
++		{name: "a negative fan-out cap", body: `{"settings":{"research.max_fan_out_items":-1}}`, status: http.StatusBadRequest, code: "invalid_value"},
++		{name: "a fan-out cap past sixteen", body: `{"settings":{"research.max_fan_out_items":17}}`, status: http.StatusBadRequest, code: "invalid_value"},
+ 	}
+ 	for _, tc := range tests {
+ 		t.Run(tc.name, func(t *testing.T) {
+@@ -315,6 +319,34 @@ func TestOrgAgentPolicyDigestFollowsTheDocument(t *testing.T) {
+ 	}
+ }
+ 
++// The wide-research item cap (EP-2 S8) is a whole number: its default is 8, a stored value reads
++// back as the same token, 0 turns wide research off, and a value above the ceiling is refused.
++func TestOrgAgentPolicyFanOutItemsIsATightenOnlyCount(t *testing.T) {
++	const key = "research.max_fan_out_items"
++	if got := orgAgentPolicyDefaults()[key]; !reflect.DeepEqual(got, 8) {
++		t.Fatalf("default = %#v, want 8", got)
++	}
++	ceiling := loosestOrgAgentCeiling()
++	if ceiling[key] != "16" {
++		t.Fatalf("loosest = %q, want 16", ceiling[key])
++	}
++	// encoding/json hands the handler a float64, as a PUT body decodes.
++	settings, refusal := validateOrgAgentSettings(map[string]any{key: float64(0)}, ceiling)
++	if refusal != nil || !reflect.DeepEqual(settings[key], 0) {
++		t.Fatalf("0 = %#v %v, want the stored count 0", settings[key], refusal)
++	}
++	if token := orgAgentTokenOf(float64(5)); token != "5" {
++		t.Fatalf("a stored 5 reads back as %q", token)
++	}
++	ceiling[key] = "4"
++	if _, refusal := validateOrgAgentSettings(map[string]any{key: float64(10)}, ceiling); refusal == nil || refusal.code != "exceeds_platform_ceiling" {
++		t.Fatalf("10 under a ceiling of 4 = %v, want exceeds_platform_ceiling", refusal)
++	}
++	if _, refusal := validateOrgAgentSettings(map[string]any{key: float64(3)}, ceiling); refusal != nil {
++		t.Fatalf("3 under a ceiling of 4 refused: %s", refusal.code)
++	}
++}
++
+ // The golden holds the schema as data. This table must match it key by key, in order,
+ // with the same kinds, orders, defaults, fail-closed values and status.
+ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
+diff --git a/apps/Model Plane/proto/model_plane/v1/execution.proto b/apps/Model Plane/proto/model_plane/v1/execution.proto
+index 27c1dddde..804b2c451 100644
+--- a/apps/Model Plane/proto/model_plane/v1/execution.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/execution.proto	
+@@ -269,6 +269,29 @@ message RunAgentRequest {
+   // which the run's hook engine enforces on every tool call. Absent when HOOKS_DO_RUNS is off
+   // or the org has no rules, so the run is exactly as it was before the field existed.
+   OrgPolicyContext org_policy = 24;
++
++  // A wide-research run started from the composer (Wave 3 EP-2 S8/S9; additive). Absent = an ordinary Do
++  // run, exactly as before the field existed. The gateway sets it only while WIDE_RESEARCH_ENTRY_ENABLED
++  // is on and never for a zero-retention turn; execution-core then bounds the run's delegations to
++  // `item_cap` and seeds the run's goal with the items. Field 25 is reserved for this message by the
++  // Wave 3 integration round A.
++  WideResearchRequest wide_research = 25;
++}
++
++// WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
++// narrows the run: it can never raise the run's delegation ceiling above the platform's.
++message WideResearchRequest {
++  // The most items the run may fan out: the gateway sets it to the smaller of the person's ask and the
++  // org's `research.max_fan_out_items` agent-policy key. Zero means the org has wide research off, and
++  // execution-core refuses the run.
++  uint32 item_cap = 1;
++  // The person's items, one research question each, in the order they were given. Items past
++  // `item_cap` are not researched; execution-core names them in the answer.
++  repeated string items = 2;
++  // The fan-out batch a retry belongs to (EP-2 S9). Empty for a fresh wide-research run.
++  string batch_id = 3;
++  // The child run whose item a one-item retry runs again (EP-2 S9). Empty for a fresh run.
++  string retry_of_child_run_id = 4;
+ }
+ 
+ // OrgPolicyContext is the org's policy for one Do run (build plan WS25 S3). Its rules can only
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs b/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs
+index dac2e1249..2b096be91 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs	
+@@ -38,6 +38,9 @@ pub enum Kind {
+     Bool,
+     /// `{"mode": <from strictness_order>, "ids": [...]}`. Only `approved_only` names ids.
+     AllowList,
++    /// A JSON whole number whose decimal form is in `strictness_order`, smallest (strictest)
++    /// first, so a count is tighten-only by the same rank as every other kind.
++    Integer,
+ }
+ 
+ impl Kind {
+@@ -46,10 +49,32 @@ impl Kind {
+             Self::Enum => "enum",
+             Self::Bool => "bool",
+             Self::AllowList => "allow_list",
++            Self::Integer => "integer",
+         }
+     }
+ }
+ 
++/// The org's wide-research item cap (Wave 3 EP-2 S8, D5): the most items one wide-research run
++/// may fan out. `0` turns wide research off for the org.
++pub const RESEARCH_MAX_FAN_OUT_ITEMS: &str = "research.max_fan_out_items";
++
++/// The value of [`RESEARCH_MAX_FAN_OUT_ITEMS`] an org with no row has: execution-core's default
++/// child ceiling, so an org that never sets the key fans out exactly as wide as a run did before.
++pub const DEFAULT_MAX_FAN_OUT_ITEMS: u32 = 8;
++
++/// The loosest value [`RESEARCH_MAX_FAN_OUT_ITEMS`] accepts: execution-core's fan-out ceiling.
++pub const MAX_FAN_OUT_ITEMS: u32 = 16;
++
++/// Reads a stored [`RESEARCH_MAX_FAN_OUT_ITEMS`] value: a whole number from 0 to
++/// [`MAX_FAN_OUT_ITEMS`]. Anything else is `None`, and the reader takes the fail-closed `0`.
++#[must_use]
++pub fn fan_out_items_of(value: &Value) -> Option<u32> {
++    value
++        .as_u64()
++        .and_then(|count| u32::try_from(count).ok())
++        .filter(|count| *count <= MAX_FAN_OUT_ITEMS)
++}
++
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Status {
+     Enforced,
+@@ -153,6 +178,20 @@ pub const SETTINGS: &[SettingDef] = &[
+         fail_closed_value: "off",
+         status: Status::Reserved,
+     },
++    // Wave 3 EP-2 S8 (D5): the wide-research item cap. Enforced by the gateway when a run starts
++    // (behind WIDE_RESEARCH_ENTRY_ENABLED), which sends it to execution-core as the run's
++    // `WideResearchRequest.item_cap`; `0` turns wide research off.
++    SettingDef {
++        key: RESEARCH_MAX_FAN_OUT_ITEMS,
++        kind: Kind::Integer,
++        strictness_order: &[
++            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15",
++            "16",
++        ],
++        default: "8",
++        fail_closed_value: "0",
++        status: Status::Enforced,
++    },
+ ];
+ 
+ /// Why a document is refused. The codes are the closed vocabulary capability-core
+@@ -252,6 +291,19 @@ fn parse(def: &SettingDef, written: &Value) -> Result<(String, Value), Refusal>
+             Ok((token.to_owned(), Value::Bool(flag)))
+         }
+         Kind::AllowList => parse_allow_list(def, written),
++        Kind::Integer => {
++            // `as_u64` refuses a fraction, a negative and a quoted number, so `8.5`, `-1` and `"8"`
++            // are invalid rather than rounded or read as text.
++            let token = written
++                .as_u64()
++                .map(|count| count.to_string())
++                .ok_or(Refusal::InvalidValue)?;
++            if !def.strictness_order.contains(&token.as_str()) {
++                return Err(Refusal::InvalidValue);
++            }
++            let value = value_of(def, &token);
++            Ok((token, value))
++        }
+     }
+ }
+ 
+@@ -297,6 +349,9 @@ fn value_of(def: &SettingDef, token: &str) -> Value {
+             canonical.insert("ids".to_owned(), Value::Array(Vec::new()));
+             Value::Object(canonical)
+         }
++        Kind::Integer => token
++            .parse::<u64>()
++            .map_or(Value::Null, |count| Value::Number(count.into())),
+     }
+ }
+ 
+@@ -459,6 +514,58 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn org_agent_policy_fan_out_items_defaults_to_eight_and_is_a_number() {
++        let settings = defaults();
++        assert_eq!(settings[RESEARCH_MAX_FAN_OUT_ITEMS], json!(8));
++        assert_eq!(
++            fan_out_items_of(&settings[RESEARCH_MAX_FAN_OUT_ITEMS]),
++            Some(DEFAULT_MAX_FAN_OUT_ITEMS)
++        );
++        let accepted = validate(
++            &doc(&json!({"research.max_fan_out_items": 5})),
++            &loosest_ceiling(),
++        )
++        .expect("5 is inside the order");
++        assert_eq!(accepted[RESEARCH_MAX_FAN_OUT_ITEMS], json!(5));
++    }
++
++    #[test]
++    fn org_agent_policy_fan_out_items_refuses_text_fractions_and_values_past_sixteen() {
++        for written in [json!("8"), json!(8.5), json!(-1), json!(17), json!(true)] {
++            assert_eq!(
++                validate(
++                    &doc(&json!({"research.max_fan_out_items": written.clone()})),
++                    &loosest_ceiling()
++                ),
++                Err(Refusal::InvalidValue),
++                "{written}"
++            );
++        }
++        assert_eq!(fan_out_items_of(&json!(17)), None);
++        assert_eq!(fan_out_items_of(&json!("4")), None);
++    }
++
++    #[test]
++    fn org_agent_policy_fan_out_items_is_tighten_only_and_zero_turns_it_off() {
++        let mut ceiling = loosest_ceiling();
++        assert_eq!(ceiling[RESEARCH_MAX_FAN_OUT_ITEMS], "16");
++        ceiling.insert(RESEARCH_MAX_FAN_OUT_ITEMS, "4");
++        assert_eq!(
++            validate(&doc(&json!({"research.max_fan_out_items": 10})), &ceiling),
++            Err(Refusal::ExceedsPlatformCeiling)
++        );
++        let off = validate(&doc(&json!({"research.max_fan_out_items": 0})), &ceiling)
++            .expect("0 is the strictest value");
++        assert_eq!(fan_out_items_of(&off[RESEARCH_MAX_FAN_OUT_ITEMS]), Some(0));
++        let def = SETTINGS
++            .iter()
++            .find(|def| def.key == RESEARCH_MAX_FAN_OUT_ITEMS)
++            .expect("the key is in the schema");
++        assert_eq!(def.fail_closed_value, "0");
++        assert_eq!(def.status, Status::Enforced);
++    }
++
+     #[test]
+     fn org_agent_policy_refusal_codes_are_the_closed_vocabulary() {
+         let codes: Vec<&str> = Refusal::ALL.iter().map(|refusal| refusal.code()).collect();
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs b/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs
+index 134b0f651..b11007573 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs	
+@@ -64,7 +64,13 @@ fn org_agent_policy_golden_defaults_are_the_documented_document() {
+         let key = row["key"].as_str().expect("key is text");
+         let default = row["default"].as_str().expect("default is text");
+         let value = &settings[key];
++        // An integer key's default is a number; its token is the decimal form the golden holds.
++        let number;
+         let in_force = match value {
++            Value::Number(count) => {
++                number = count.to_string();
++                number.as_str()
++            }
+             Value::String(text) => text.as_str(),
+             Value::Bool(flag) => {
+                 if *flag {
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index ad5d59a48..c3700c3ff 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -1856,6 +1856,31 @@ async fn run_agent_with_route(
+     .await
+ }
+ 
++/// Admits a wide-research run (Wave 3 EP-2 S8) or refuses it. The gateway never sends one for a
++/// zero-retention turn, so one that arrives is refused rather than run; a run while the fan-out
++/// tool is switched off is refused with that tool's own refusal; and an org cap of 0 is refused,
++/// because the org has wide research off.
++fn admit_wide_research(
++    req: &pb::RunAgentRequest,
++    wide: &pb::WideResearchRequest,
++) -> Result<crate::subagent::research_fan_out::WideResearchPlan, tonic::Status> {
++    use crate::subagent::research_fan_out;
++
++    if req.zdr {
++        return Err(
++            mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic")
++                .grpc_status(tonic::Code::FailedPrecondition),
++        );
++    }
++    if !research_fan_out::enabled() {
++        return Err(tonic::Status::failed_precondition(
++            research_fan_out::disabled_refusal(),
++        ));
++    }
++    research_fan_out::plan_wide_research(&wide.items, wide.item_cap)
++        .map_err(tonic::Status::failed_precondition)
++}
++
+ /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
+ /// body of the route-level driver. `derivable` is the offer's own claim; an approval
+ /// continuation is never derivable whatever it says, because its tools are the snapshot's.
+@@ -1981,8 +2006,27 @@ async fn run_agent_with_route_parkable(
+     // pattern this would mirror). Until that lookup lands, a request is
+     // resolved against the hard ceiling only — never silently unbounded, just
+     // not yet org-tightenable.
+-    let child_ceiling =
+-        crate::subagent::resolve_child_ceiling(Some(req.max_subagents).filter(|&n| n != 0), None);
++    //
++    // A wide-research run started from the composer (Wave 3 EP-2 S8) is the exception: the
++    // gateway reads the org's `research.max_fan_out_items` and sends the smaller of it and the
++    // person's ask as `wide_research.item_cap`, which is the org ceiling here. Only a fresh run
++    // reads it; a continuation or a scheduled run keeps the shape it started with. A refusal
++    // returns before the run's first heartbeat, so nothing of the run is written.
++    let wide_research = match req.wide_research.as_ref() {
++        Some(wide) if resumed.is_none() && scheduled.is_none() => {
++            Some(admit_wide_research(&req, wide)?)
++        }
++        _ => None,
++    };
++    let child_ceiling = match wide_research.as_ref() {
++        Some(plan) => {
++            crate::subagent::wide_research_child_ceiling(Some(req.max_subagents), plan.cap)
++        }
++        None => crate::subagent::resolve_child_ceiling(
++            Some(req.max_subagents).filter(|&n| n != 0),
++            None,
++        ),
++    };
+ 
+     // The run's model and provider are `route`'s (see `crate::agent_route`).
+     // Autonomous, tool-using runs need a tool-following model, so an UNPINNED
+@@ -2089,7 +2133,20 @@ async fn run_agent_with_route_parkable(
+     // 2. The governed ReAct loop.
+     let (loop_goal, seeded_round) = match resumed {
+         Some(resumed) => (resumed.goal, Some(resumed.seed)),
+-        None => (req.goal.clone(), None),
++        // A wide-research run's goal carries its items and the items past the cap (EP-2 S8).
++        None => (
++            wide_research.as_ref().map_or_else(
++                || req.goal.clone(),
++                |plan| {
++                    format!(
++                        "{}\n\n{}",
++                        req.goal,
++                        crate::subagent::research_fan_out::wide_research_goal_context(plan)
++                    )
++                },
++            ),
++            None,
++        ),
+     };
+     let rounds = run_rounds(&context, &loop_goal, max_rounds, seeded_round).await?;
+     // Closed here, at the loop's end, so finalizing is not counted as the last round's dispatch.
+@@ -2155,6 +2212,15 @@ async fn run_agent_with_route_parkable(
+             )),
+         ),
+     };
++    // A finished wide-research answer names the items past the org's cap itself (EP-2 S8), so the
++    // person learns what was left out whatever the model wrote.
++    let final_answer = match wide_research
++        .as_ref()
++        .and_then(crate::subagent::research_fan_out::dropped_items_note)
++    {
++        Some(note) if success => format!("{final_answer}\n\n{note}"),
++        _ => final_answer,
++    };
+ 
+     let finalized = finalize(
+         state,
+@@ -13208,9 +13274,68 @@ mod tests {
+             // No question tool, which is what every run that predates the field sends; the
+             // `ask_user` tests set it explicitly.
+             max_questions: 0,
++            // An ordinary Do run, which is what every run before wide research (EP-2 S8) sent.
++            wide_research: None,
+         }
+     }
+ 
++    fn wide_research(item_cap: u32, items: &[&str]) -> pb::WideResearchRequest {
++        pb::WideResearchRequest {
++            item_cap,
++            items: items.iter().map(|item| (*item).to_owned()).collect(),
++            ..Default::default()
++        }
++    }
++
++    #[test]
++    fn a_wide_research_run_is_admitted_with_its_items_split_at_the_cap() {
++        let _enabled = crate::subagent::research_fan_out::EnabledOverride::set(true);
++        let plan = admit_wide_research(&sample_request(), &wide_research(2, &["a", "b", "c"]))
++            .expect("a persistent run with fan-out on and a cap above zero");
++        assert_eq!(plan.kept, ["a", "b"]);
++        assert_eq!(plan.dropped, ["c"]);
++        assert_eq!(
++            crate::subagent::wide_research_child_ceiling(Some(0), plan.cap),
++            2,
++            "the org-clamped cap is the run's child ceiling"
++        );
++    }
++
++    #[test]
++    fn a_wide_research_run_is_refused_under_zdr_with_fan_out_off_and_at_cap_zero() {
++        let enabled = crate::subagent::research_fan_out::EnabledOverride::set(true);
++        let zdr = pb::RunAgentRequest {
++            zdr: true,
++            ..sample_request()
++        };
++        let refused = admit_wide_research(&zdr, &wide_research(4, &["a"])).expect_err("ZDR");
++        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(
++            refused
++                .metadata()
++                .get(mp_contracts::zdr_refusal::FEATURE_TRAILER)
++                .and_then(|value| value.to_str().ok()),
++            Some("agentic"),
++            "the typed refusal names the feature the run rides on"
++        );
++
++        let off = admit_wide_research(&sample_request(), &wide_research(0, &["a"]))
++            .expect_err("the org has wide research off");
++        assert_eq!(
++            off.message(),
++            crate::subagent::research_fan_out::wide_research_off_refusal()
++        );
++
++        drop(enabled);
++        let _disabled = crate::subagent::research_fan_out::EnabledOverride::set(false);
++        let switched_off = admit_wide_research(&sample_request(), &wide_research(4, &["a"]))
++            .expect_err("the fan-out tool is switched off");
++        assert_eq!(
++            switched_off.message(),
++            crate::subagent::research_fan_out::disabled_refusal()
++        );
++    }
++
+     fn sample_agent_skill(name: &str, keywords: &[&str], content: &str) -> pb::AgentSkill {
+         pb::AgentSkill {
+             id: format!("sk-{name}"),
+diff --git a/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs b/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs
+index 7a9187967..d3e73d9d7 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs	
+@@ -90,6 +90,25 @@ pub fn resolve_child_ceiling(requested: Option<u32>, org_ceiling: Option<u32>) -
+     wanted.min(org).min(MAX_CHILDREN_CEILING)
+ }
+ 
++/// The most items a wide-research run may fan out (Wave 3 EP-2 S8): the hard maximum of the org
++/// agent-policy key `research.max_fan_out_items`. An `item_cap` above it, from a gateway that clamped
++/// nothing, is held to it here.
++pub const MAX_WIDE_RESEARCH_ITEMS: u32 = 16;
++
++/// The per-run child ceiling of a wide-research run (Wave 3 EP-2 S8).
++///
++/// `item_cap` is `WideResearchRequest.item_cap`, which the gateway sets to the smaller of the
++/// person's ask and the org's item cap, so it is passed as the org ceiling and can only tighten.
++/// An unspecified `requested` takes the item cap instead of [`DEFAULT_MAX_CHILDREN`], so a cap of
++/// sixteen is not silently cut to eight; a stated `requested` still tightens. A cap of zero
++/// resolves to zero: the org has wide research off and no delegation is admitted.
++#[must_use]
++pub fn wide_research_child_ceiling(requested: Option<u32>, item_cap: u32) -> u32 {
++    let cap = item_cap.min(MAX_WIDE_RESEARCH_ITEMS);
++    let wanted = requested.filter(|&n| n != 0).unwrap_or(cap);
++    resolve_child_ceiling(Some(wanted), Some(cap)).min(cap)
++}
++
+ /// Refuse a delegation that would exceed `ceiling` (the run's own resolved
+ /// value from [`resolve_child_ceiling`] — no longer a single global constant).
+ ///
+@@ -327,6 +346,26 @@ mod tests {
+         assert_eq!(resolve_child_ceiling(None, Some(u32::MAX)), DEFAULT_MAX_CHILDREN);
+     }
+ 
++    #[test]
++    fn wide_research_child_ceiling_is_the_org_clamped_item_cap() {
++        // The person asked for 16, the org allows 8: the gateway sent 8, and 8 is the ceiling.
++        assert_eq!(wide_research_child_ceiling(None, 8), 8);
++        // A cap above the default is not cut back to the default of eight.
++        assert_eq!(wide_research_child_ceiling(None, 16), 16);
++        // A stated request still tightens; it never widens past the cap.
++        assert_eq!(wide_research_child_ceiling(Some(4), 10), 4);
++        assert_eq!(wide_research_child_ceiling(Some(50), 10), 10);
++        // A gateway that clamped nothing is held to the key's hard maximum.
++        assert_eq!(wide_research_child_ceiling(None, 40), MAX_WIDE_RESEARCH_ITEMS);
++    }
++
++    #[test]
++    fn wide_research_child_ceiling_of_zero_admits_no_delegation() {
++        assert_eq!(wide_research_child_ceiling(None, 0), 0);
++        assert_eq!(wide_research_child_ceiling(Some(8), 0), 0);
++        assert!(guard_child_ceiling(0, wide_research_child_ceiling(None, 0)).is_err());
++    }
++
+     #[test]
+     fn recursion_guard_allows_one_level_and_then_fails_closed() {
+         assert!(may_spawn_at(0));
+diff --git a/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs b/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs
+index ed6e78f2b..0b1cd6bce 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs	
+@@ -597,6 +597,134 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
+     out
+ }
+ 
++/// Longest item a wide-research run seeds into its goal (Wave 3 EP-2 S8). An item is the person's
++/// own question; a longer one is cut, never dropped.
++pub const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
++
++/// Most items one `WideResearchRequest` is read for, kept and dropped together, so a pasted list
++/// cannot grow the run's goal without bound. Items past it are neither researched nor named.
++pub const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
++
++/// A wide-research run's items once the org-clamped cap is applied (Wave 3 EP-2 S8).
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct WideResearchPlan {
++    /// The cap the run is held to: `WideResearchRequest.item_cap`, at most
++    /// [`super::MAX_WIDE_RESEARCH_ITEMS`].
++    pub cap: u32,
++    /// The items the run researches, in the order given. Empty when the person chose a count
++    /// and left the model to split the question.
++    pub kept: Vec<String>,
++    /// The items past the cap, in the order given. The run does not research them, and the
++    /// answer names them ([`dropped_items_note`]).
++    pub dropped: Vec<String>,
++}
++
++/// What a wide-research run is refused with when its org has wide research off (`item_cap` 0).
++#[must_use]
++pub fn wide_research_off_refusal() -> String {
++    "Wide research is turned off for this organisation (its research.max_fan_out_items policy is \
++     0), so this run was not started."
++        .to_owned()
++}
++
++/// One item as the run's goal carries it: trimmed, control characters as spaces, at most
++/// [`MAX_WIDE_RESEARCH_ITEM_CHARS`] characters. `None` for an item with nothing left.
++fn wide_research_item(raw: &str) -> Option<String> {
++    let cleaned: String = raw
++        .chars()
++        .map(|c| if c.is_control() { ' ' } else { c })
++        .collect();
++    let cut: String = cleaned
++        .trim()
++        .chars()
++        .take(MAX_WIDE_RESEARCH_ITEM_CHARS)
++        .collect();
++    let item = cut.trim_end();
++    (!item.is_empty()).then(|| item.to_owned())
++}
++
++/// Splits a wide-research request's items at its cap.
++///
++/// # Errors
++///
++/// [`wide_research_off_refusal`] when the cap is 0: the org has wide research off, and the run
++/// is refused before its first round rather than started with no delegation allowed.
++pub fn plan_wide_research(items: &[String], item_cap: u32) -> Result<WideResearchPlan, String> {
++    let cap = item_cap.min(super::MAX_WIDE_RESEARCH_ITEMS);
++    if cap == 0 {
++        return Err(wide_research_off_refusal());
++    }
++    let mut kept: Vec<String> = items
++        .iter()
++        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
++        .filter_map(|raw| wide_research_item(raw))
++        .collect();
++    let at = kept.len().min(usize::try_from(cap).unwrap_or(usize::MAX));
++    let dropped = kept.split_off(at);
++    Ok(WideResearchPlan { cap, kept, dropped })
++}
++
++/// The block appended to a wide-research run's goal: the items to fan out, or the cap the model
++/// splits the question within, and the items past the cap it must name. The items are the
++/// person's own text, as the goal above them is.
++#[must_use]
++pub fn wide_research_goal_context(plan: &WideResearchPlan) -> String {
++    use std::fmt::Write as _;
++
++    let mut out = String::new();
++    if plan.kept.is_empty() {
++        let _ = writeln!(
++            out,
++            "Wide research: split the question above into at most {} self-contained research \
++             items and research them with one {RESEARCH_TOOL_NAME} call, then answer from its \
++             merged results.",
++            plan.cap
++        );
++    } else {
++        let _ = writeln!(
++            out,
++            "Wide research: research exactly these {} item(s) with one {RESEARCH_TOOL_NAME} call, \
++             one item per entry and in this order, then answer from its merged results.",
++            plan.kept.len()
++        );
++        for (index, item) in plan.kept.iter().enumerate() {
++            let _ = writeln!(out, "{}. {item}", index + 1);
++        }
++    }
++    if !plan.dropped.is_empty() {
++        let _ = writeln!(
++            out,
++            "These {} item(s) are past this organisation's limit of {} and are not researched. \
++             Say so in the answer and name them:",
++            plan.dropped.len(),
++            plan.cap
++        );
++        for item in &plan.dropped {
++            let _ = writeln!(out, "- {item}");
++        }
++    }
++    out
++}
++
++/// The note a finished wide-research answer ends with when items were past the cap: added by the
++/// run itself, so the person learns what was left out even if the model did not say it.
++#[must_use]
++pub fn dropped_items_note(plan: &WideResearchPlan) -> Option<String> {
++    if plan.dropped.is_empty() {
++        return None;
++    }
++    let mut note = format!(
++        "Not researched ({} item(s) past this organisation's limit of {}):",
++        plan.dropped.len(),
++        plan.cap
++    );
++    for item in &plan.dropped {
++        note.push_str("\n- ");
++        note.push_str(item);
++    }
++    Some(note)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -608,6 +736,65 @@ mod tests {
+         }
+     }
+ 
++    fn items(names: &[&str]) -> Vec<String> {
++        names.iter().map(|name| (*name).to_owned()).collect()
++    }
++
++    #[test]
++    fn plan_wide_research_keeps_the_cap_and_names_the_rest() {
++        let plan = plan_wide_research(&items(&["a", "b", "c", "d", "e"]), 3).expect("cap 3");
++        assert_eq!(plan.cap, 3);
++        assert_eq!(plan.kept, items(&["a", "b", "c"]));
++        assert_eq!(plan.dropped, items(&["d", "e"]));
++        let note = dropped_items_note(&plan).expect("two items were dropped");
++        assert!(note.contains("limit of 3"), "{note}");
++        assert!(note.contains("\n- d") && note.contains("\n- e"), "{note}");
++        let context = wide_research_goal_context(&plan);
++        assert!(context.contains(RESEARCH_TOOL_NAME), "{context}");
++        assert!(context.contains("1. a\n2. b\n3. c\n"), "{context}");
++        assert!(context.contains("- d\n- e\n"), "{context}");
++    }
++
++    #[test]
++    fn plan_wide_research_with_cap_zero_is_refused() {
++        let refused = plan_wide_research(&items(&["a"]), 0).expect_err("the org has it off");
++        assert_eq!(refused, wide_research_off_refusal());
++    }
++
++    #[test]
++    fn plan_wide_research_holds_an_unclamped_cap_to_sixteen() {
++        let many: Vec<String> = (0..20).map(|n| format!("item {n}")).collect();
++        let plan = plan_wide_research(&many, 40).expect("cap held to 16");
++        assert_eq!(plan.cap, crate::subagent::MAX_WIDE_RESEARCH_ITEMS);
++        assert_eq!(plan.kept.len(), 16);
++        assert_eq!(plan.dropped.len(), 4);
++    }
++
++    #[test]
++    fn plan_wide_research_cleans_cuts_and_bounds_the_items() {
++        let long = "x".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 50);
++        let plan = plan_wide_research(&items(&["  a\u{0}b  ", "   ", &long]), 8).expect("cap 8");
++        assert_eq!(plan.kept[0], "a b");
++        assert_eq!(plan.kept.len(), 2, "a blank item is skipped");
++        assert_eq!(plan.kept[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
++
++        let flood: Vec<String> = (0..100).map(|n| format!("q{n}")).collect();
++        let plan = plan_wide_research(&flood, 16).expect("cap 16");
++        assert_eq!(
++            plan.kept.len() + plan.dropped.len(),
++            MAX_WIDE_RESEARCH_REQUEST_ITEMS
++        );
++    }
++
++    #[test]
++    fn plan_wide_research_without_items_leaves_the_split_to_the_model() {
++        let plan = plan_wide_research(&[], 5).expect("a count preset");
++        assert!(plan.kept.is_empty() && plan.dropped.is_empty());
++        assert_eq!(dropped_items_note(&plan), None);
++        let context = wide_research_goal_context(&plan);
++        assert!(context.contains("at most 5"), "{context}");
++    }
++
+     #[test]
+     fn parse_fan_out_accepts_one_to_n_items_and_rejects_empty() {
+         let request = parse_fan_out(
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index e1869a0e6..de2db5e80 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -400,6 +400,12 @@ fn authed_routes() -> Router<AppState> {
+         // Browser reasoning: Model Plane proposes one safe browser action from
+         // Quarry evidence; Quarry remains the only executor/capture layer.
+         .route("/v1/browser/suggest-action", post(browser_suggest_action))
++        // Wave 3 EP-2 S8: what a wide-research run would look like before it starts. Pure compute;
++        // 404 while WIDE_RESEARCH_ENTRY_ENABLED is off.
++        .route(
++            "/v1/research/wide/estimate",
++            post(wide_research_estimate_route),
++        )
+         // Durable browser-agent run (Phase 2) — start/pause/resume/stop a
+         // bounded multi-step browser-agent loop; progress streams over the
+         // existing `/v1/runs/:run_id/events` route above.
+@@ -9869,6 +9875,491 @@ pub struct InvokeRequest {
+     /// to the WS25-S6 strictest-wins mode resolve, so it can only lower the result.
+     #[serde(default)]
+     pub agent_autonomy_cap: Option<serde_json::Value>,
++    /// Wave 3 EP-2 S8 — a wide-research run from the composer's "Bred forskning" entry:
++    /// `{item_cap, items}`. Kept as raw JSON and read only on an agentic turn while
++    /// `WIDE_RESEARCH_ENTRY_ENABLED` is on ([`wide_research_request`]), so a body carrying it is
++    /// parsed exactly as before with the switch off. It only narrows a run: the gateway clamps
++    /// `item_cap` to the org's `research.max_fan_out_items`.
++    #[serde(default, alias = "wideResearch")]
++    pub wide_research: Option<serde_json::Value>,
++}
++
++/// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
++/// it. Off, `POST /v1/research/wide/estimate` answers 404 and `InvokeRequest.wide_research` is never
++/// read, so a run is exactly what it was before the switch existed.
++pub const WIDE_RESEARCH_ENTRY_ENV: &str = "WIDE_RESEARCH_ENTRY_ENABLED";
++
++/// Whether the wide-research entry is on in this process.
++#[must_use]
++pub fn wide_research_entry_enabled() -> bool {
++    wide_research_entry_enabled_with(&|key| std::env::var(key).ok())
++}
++
++fn wide_research_entry_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
++    get(WIDE_RESEARCH_ENTRY_ENV).is_some_and(|value| value.trim() == "true")
++}
++
++/// The most items one wide-research run fans out: the hard maximum of the org policy key and of
++/// execution-core's `subagent::MAX_WIDE_RESEARCH_ITEMS`.
++pub const MAX_WIDE_RESEARCH_ITEMS: u32 = mp_contracts::org_agent_policy::MAX_FAN_OUT_ITEMS;
++
++/// Most items a wide-research request may carry, kept and dropped together (execution-core reads
++/// no more than this many either).
++const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
++
++/// Longest item forwarded; execution-core cuts at the same length.
++const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
++
++/// Items in flight at once in one fan-out: execution-core's `WIDE_RESEARCH_FAN_OUT_CONCURRENCY`
++/// default. The gateway cannot read that executor's environment, so the estimate states this.
++const WIDE_RESEARCH_CONCURRENCY: u32 = 4;
++
++/// The org's wide-research item cap and where it came from: the org's own policy, or the key's
++/// platform default when the policy switch does not enforce.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct WideResearchCap {
++    pub items: u32,
++    pub source: &'static str,
++}
++
++impl WideResearchCap {
++    /// The cap a run is held to: the org's value when the policy is enforced (`Some`), else the
++    /// key's default, never above [`MAX_WIDE_RESEARCH_ITEMS`].
++    #[must_use]
++    pub fn of(org_cap: Option<u32>) -> Self {
++        match org_cap {
++            Some(items) => Self {
++                items: items.min(MAX_WIDE_RESEARCH_ITEMS),
++                source: "org_policy",
++            },
++            None => Self {
++                items: mp_contracts::org_agent_policy::DEFAULT_MAX_FAN_OUT_ITEMS,
++                source: "platform_default",
++            },
++        }
++    }
++}
++
++/// The wide-research request a Do run carries (Wave 3 EP-2 S8), from the turn's raw JSON.
++///
++/// `None` with the switch off, for a ZDR or waived turn, and for a body that is not
++/// `{item_cap?, items?}`. Items are trimmed, blank ones skipped, each cut to 500 characters and at
++/// most 64 kept; `item_cap` is the person's ask (the item count when absent) clamped to the org
++/// cap, so a request can only narrow. An org cap of 0 is sent as 0, and execution-core refuses the
++/// run: wide research is off for that org.
++#[must_use]
++pub fn wide_research_request(
++    enabled: bool,
++    raw: Option<&Value>,
++    zdr_or_waived: bool,
++    cap: WideResearchCap,
++) -> Option<mp_contracts::model_plane::v1::WideResearchRequest> {
++    #[derive(Deserialize)]
++    struct Input {
++        #[serde(default)]
++        item_cap: Option<u32>,
++        #[serde(default)]
++        items: Vec<String>,
++    }
++
++    if !enabled || zdr_or_waived {
++        return None;
++    }
++    let input = raw
++        .filter(|raw| raw.is_object())
++        .and_then(|raw| serde_json::from_value::<Input>(raw.clone()).ok())?;
++    let items: Vec<String> = input
++        .items
++        .iter()
++        .map(|item| item.trim())
++        .filter(|item| !item.is_empty())
++        .take(MAX_WIDE_RESEARCH_REQUEST_ITEMS)
++        .map(|item| item.chars().take(MAX_WIDE_RESEARCH_ITEM_CHARS).collect())
++        .collect();
++    let asked = input
++        .item_cap
++        .filter(|&count| count > 0)
++        .or_else(|| u32::try_from(items.len()).ok().filter(|&count| count > 0))
++        .unwrap_or(cap.items);
++    Some(mp_contracts::model_plane::v1::WideResearchRequest {
++        item_cap: asked.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS),
++        items,
++        ..Default::default()
++    })
++}
++
++/// `POST /v1/research/wide/estimate` body: how many items the person means to research, and on
++/// which model and route.
++#[derive(Debug, Deserialize)]
++pub struct WideResearchEstimateRequest {
++    pub item_count: u32,
++    #[serde(default)]
++    pub model: Option<String>,
++    /// The route the run would be pinned to, as the composer sends it on the turn; a subscription
++    /// route has no per-token price.
++    #[serde(default)]
++    pub provider: Option<String>,
++    #[serde(default)]
++    pub subscription_connection_id: Option<String>,
++}
++
++/// What one research round is assumed to read and write, for the USD range only: a researcher's
++/// round reads a page or a result list and writes a short note. A range, never a promise.
++const ESTIMATE_INPUT_TOKENS_PER_ROUND: (u32, u32) = (6_000, 18_000);
++const ESTIMATE_OUTPUT_TOKENS_PER_ROUND: (u32, u32) = (500, 1_500);
++
++/// Seconds one item round is assumed to take, low and high, for the wall-clock range.
++const ESTIMATE_SECONDS_PER_ROUND: (u64, u64) = (30, 90);
++
++/// What a wide-research run of some items would look like before it starts (Wave 3 EP-2 S8).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct WideResearchEstimate {
++    pub items_requested: u32,
++    pub items_after_cap: u32,
++    pub concurrency: u32,
++    pub rounds_per_item: u32,
++    pub minutes_low: u64,
++    pub minutes_high: u64,
++    pub cap: WideResearchCap,
++}
++
++impl WideResearchEstimate {
++    /// The pure part of the estimate. `max_rounds` is the run's round budget and `deadline_secs`
++    /// its wall clock, resolved server-side exactly as a real run's are.
++    #[must_use]
++    pub fn compute(
++        item_count: u32,
++        cap: WideResearchCap,
++        max_rounds: u32,
++        deadline_secs: u64,
++    ) -> Self {
++        let items = item_count.min(cap.items).min(MAX_WIDE_RESEARCH_ITEMS);
++        let concurrency = WIDE_RESEARCH_CONCURRENCY.min(items.max(1));
++        // The parent spends its first round calling the fan-out and keeps one to answer with
++        // (execution-core's `PARENT_SYNTHESIS_RESERVE`); the rest is divided between the items.
++        let rounds_per_item = if items == 0 {
++            0
++        } else {
++            max_rounds.saturating_sub(2) / items
++        };
++        let waves = u64::from(items.div_ceil(concurrency));
++        let rounds = u64::from(rounds_per_item.max(1));
++        let deadline_minutes = deadline_secs.div_ceil(60);
++        Self {
++            items_requested: item_count,
++            items_after_cap: items,
++            concurrency,
++            rounds_per_item,
++            minutes_low: (waves * ESTIMATE_SECONDS_PER_ROUND.0)
++                .div_ceil(60)
++                .min(deadline_minutes),
++            minutes_high: (waves * rounds * ESTIMATE_SECONDS_PER_ROUND.1)
++                .div_ceil(60)
++                .min(deadline_minutes),
++            cap,
++        }
++    }
++
++    /// The USD range on a metered, priced route; `None` (null on the wire) on a subscription
++    /// route or for a model the catalogue does not name, never a borrowed figure.
++    #[must_use]
++    pub fn usd(&self, list: Option<&crate::pricing::ListPrice>) -> Option<(f64, f64)> {
++        let list = list?;
++        let rounds = f64::from(self.items_after_cap) * f64::from(self.rounds_per_item.max(1));
++        let cost = |input: u32, output: u32| {
++            rounds
++                * (f64::from(input) * list.input_per_million
++                    + f64::from(output) * list.output_per_million)
++                / 1_000_000.0
++        };
++        Some((
++            cost(
++                ESTIMATE_INPUT_TOKENS_PER_ROUND.0,
++                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.0,
++            ),
++            cost(
++                ESTIMATE_INPUT_TOKENS_PER_ROUND.1,
++                ESTIMATE_OUTPUT_TOKENS_PER_ROUND.1,
++            ),
++        ))
++    }
++
++    /// The `data` of the estimate answer.
++    #[must_use]
++    pub fn json(&self, usd: Option<(f64, f64)>, basis: crate::pricing::CostBasis) -> Value {
++        json!({
++            "items_requested": self.items_requested,
++            "items_after_cap": self.items_after_cap,
++            "concurrency": self.concurrency,
++            "rounds_per_item": self.rounds_per_item,
++            "minutes_low": self.minutes_low,
++            "minutes_high": self.minutes_high,
++            "usd_low": usd.map(|(low, _)| low),
++            "usd_high": usd.map(|(_, high)| high),
++            "cost_basis": basis.as_str(),
++            "cap": self.cap.items,
++            "cap_source": self.cap.source,
++        })
++    }
++}
++
++/// A typed error of the estimate route; `details` is always an object.
++fn wide_research_error(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
++    (
++        status,
++        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
++    )
++}
++
++/// `POST /v1/research/wide/estimate` (Wave 3 EP-2 S8): what a wide-research run of `item_count`
++/// items would look like, before it is started. Pure compute: nothing is stored and nothing is
++/// started. 404 while `WIDE_RESEARCH_ENTRY_ENABLED` is off. A zero-retention caller is refused with
++/// the typed `agentic` refusal, because the run it estimates is refused under ZDR. The org's cap is
++/// read as a Do run's is; a policy that is enforced and cannot be read answers
++/// `org_policy_unavailable`. USD is null unless the route is metered and the model priced.
++async fn wide_research_estimate_route(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
++    Json(req): Json<WideResearchEstimateRequest>,
++) -> Result<Json<Value>, HttpJsonError> {
++    if !wide_research_entry_enabled() {
++        return Err(wide_research_error(
++            StatusCode::NOT_FOUND,
++            "not_found",
++            "not found",
++        ));
++    }
++    wide_research_estimate_posture(&claims)?;
++    let org_cap = wide_research_org_cap(&state, &claims.org_id, capability_bearer.as_deref())
++        .await
++        .map_err(|code| {
++            wide_research_error(
++                StatusCode::SERVICE_UNAVAILABLE,
++                code,
++                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
++            )
++        })?;
++    let basis = crate::pricing::CostBasis::of_route(
++        req.provider.as_deref().unwrap_or_default(),
++        req.subscription_connection_id.as_deref().unwrap_or_default(),
++    );
++    let pinned = basis == crate::pricing::CostBasis::Subscription;
++    let estimate = WideResearchEstimate::compute(
++        req.item_count,
++        WideResearchCap::of(org_cap),
++        crate::run_budget::run_budget_from_env(pinned).max_rounds,
++        crate::sse::agentic_run_deadline_secs(pinned),
++    );
++    let model = req.model.as_deref().map(str::trim).unwrap_or_default();
++    let list = if model.is_empty() {
++        None
++    } else {
++        state.pricing.snapshot().await.list_price(basis, model)
++    };
++    Ok(Json(json!({
++        "data": estimate.json(estimate.usd(list.as_ref()), basis)
++    })))
++}
++
++/// The estimate's ZDR gate: a zero-retention caller is refused with the `agentic` feature (the run
++/// it estimates is refused the same way); a waiver, which names one chat connection, is answered as
++/// a Do run of its org would be, since the estimate names no connection and stores nothing.
++///
++/// # Errors
++///
++/// The typed refusal as an HTTP answer.
++fn wide_research_estimate_posture(claims: &Claims) -> Result<(), HttpJsonError> {
++    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)) {
++        Ok(posture) if posture.zdr() => Err(crate::zdr_posture::http(
++            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("agentic"),
++        )),
++        Ok(_) => Ok(()),
++        Err(refusal) if refusal.code() == mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH => {
++            Ok(())
++        }
++        Err(refusal) => Err(crate::zdr_posture::http(&refusal)),
++    }
++}
++
++/// The org's `research.max_fan_out_items` as the policy switch reads it: `None` when the switch
++/// does not enforce (the platform default applies), the org's value when it does.
++///
++/// # Errors
++///
++/// [`crate::org_agent_policy::POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be
++/// read inside its bound, as a Do run would be refused.
++pub(crate) async fn wide_research_org_cap(
++    state: &AppState,
++    org_id: &str,
++    capability_bearer: Option<&VerifiedCapabilityBearer>,
++) -> Result<Option<u32>, &'static str> {
++    use crate::org_agent_policy::{policy_mode, shared_cache, PolicyMode};
++
++    if policy_mode() != PolicyMode::Enforce {
++        return Ok(None);
++    }
++    crate::org_agent_policy::ensure(
++        shared_cache(),
++        &state.http_client,
++        &state.capability_core_base_url,
++        org_id,
++        capability_bearer.map_or("", VerifiedCapabilityBearer::as_str),
++    )
++    .await
++    .map(|policy| Some(policy.max_fan_out_items))
++    .map_err(|error| {
++        tracing::warn!(%org_id, %error, "org agent policy cannot be read for a wide-research estimate");
++        crate::org_agent_policy::POLICY_UNAVAILABLE_CODE
++    })
++}
++
++#[cfg(test)]
++mod wide_research_tests {
++    use super::*;
++
++    fn claims(zdr: bool) -> Claims {
++        serde_json::from_value(json!({
++            "sub": "user-1",
++            "iss": "https://auth.test/model",
++            "aud": "model-gateway",
++            "exp": 4_102_444_800_i64,
++            "nbf": 1_700_000_000_i64,
++            "org_id": "org-1",
++            "user_id": "user-1",
++            "principal_type": "user",
++            "zdr": zdr,
++            "org_zdr": zdr,
++        }))
++        .expect("a minted token's payload is valid Claims")
++    }
++
++    fn org(items: u32) -> WideResearchCap {
++        WideResearchCap::of(Some(items))
++    }
++
++    #[test]
++    fn wide_research_entry_switch_is_only_the_literal_true() {
++        for (value, on) in [
++            (None, false),
++            (Some("false"), false),
++            (Some("1"), false),
++            (Some("TRUE"), false),
++            (Some("true"), true),
++        ] {
++            let get = |_: &str| value.map(str::to_owned);
++            assert_eq!(wide_research_entry_enabled_with(&get), on, "{value:?}");
++        }
++    }
++
++    #[test]
++    fn wide_research_request_is_absent_with_the_switch_off_and_under_zdr() {
++        let body = json!({"item_cap": 5, "items": ["a"]});
++        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
++        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
++        assert_eq!(wide_research_request(true, None, false, org(8)), None);
++        assert_eq!(
++            wide_research_request(true, Some(&json!(["a"])), false, org(8)),
++            None
++        );
++    }
++
++    #[test]
++    fn wide_research_request_clamps_the_ask_to_the_org_cap() {
++        // Org cap 5, ten items asked: the run is held to 5 and carries all ten items, so
++        // execution-core can name the five it drops.
++        let items: Vec<String> = (0..10).map(|n| format!("item {n}")).collect();
++        let request = wide_research_request(true, Some(&json!({"items": items})), false, org(5))
++            .expect("the switch is on");
++        assert_eq!(request.item_cap, 5);
++        assert_eq!(request.items.len(), 10);
++        // A count preset with no list asks for that many, never more than the org allows.
++        let preset = wide_research_request(true, Some(&json!({"item_cap": 16})), false, org(8))
++            .expect("the switch is on");
++        assert_eq!(preset.item_cap, 8);
++        assert!(preset.items.is_empty());
++        // A narrower ask stays narrower.
++        let narrow =
++            wide_research_request(true, Some(&json!({"item_cap": 3})), false, org(8)).expect("on");
++        assert_eq!(narrow.item_cap, 3);
++        // An org with wide research off is sent 0, and execution-core refuses the run.
++        let off = wide_research_request(true, Some(&json!({"items": ["a"]})), false, org(0))
++            .expect("on");
++        assert_eq!(off.item_cap, 0);
++    }
++
++    #[test]
++    fn wide_research_request_bounds_and_cleans_items() {
++        let long = "y".repeat(MAX_WIDE_RESEARCH_ITEM_CHARS + 10);
++        let many: Vec<String> = (0..80).map(|n| format!("q{n}")).collect();
++        let request = wide_research_request(
++            true,
++            Some(&json!({"items": ["  a  ", "", "   ", long]})),
++            false,
++            org(16),
++        )
++        .expect("on");
++        assert_eq!(request.items[0], "a");
++        assert_eq!(request.items.len(), 2);
++        assert_eq!(request.items[1].chars().count(), MAX_WIDE_RESEARCH_ITEM_CHARS);
++        let flood = wide_research_request(true, Some(&json!({"items": many})), false, org(16))
++            .expect("on");
++        assert_eq!(flood.items.len(), MAX_WIDE_RESEARCH_REQUEST_ITEMS);
++    }
++
++    #[test]
++    fn wide_research_cap_without_an_enforced_policy_is_the_platform_default() {
++        let platform = WideResearchCap::of(None);
++        assert_eq!(platform.items, 8);
++        assert_eq!(platform.source, "platform_default");
++        let held = WideResearchCap::of(Some(40));
++        assert_eq!(held.items, MAX_WIDE_RESEARCH_ITEMS);
++        assert_eq!(held.source, "org_policy");
++    }
++
++    #[test]
++    fn wide_research_estimate_clamps_to_the_org_cap_and_bounds_minutes_by_the_deadline() {
++        let estimate = WideResearchEstimate::compute(10, org(5), 12, 600);
++        assert_eq!(estimate.items_requested, 10);
++        assert_eq!(estimate.items_after_cap, 5);
++        assert_eq!(estimate.concurrency, 4);
++        assert_eq!(estimate.rounds_per_item, 2, "(12 - 2) rounds over 5 items");
++        assert!(estimate.minutes_low <= estimate.minutes_high);
++        assert!(estimate.minutes_high <= 10, "never past the 600 s deadline");
++        let off = WideResearchEstimate::compute(10, org(0), 12, 600);
++        assert_eq!(off.items_after_cap, 0);
++        assert_eq!(off.rounds_per_item, 0);
++    }
++
++    #[test]
++    fn wide_research_estimate_usd_is_null_without_a_list_price() {
++        let estimate = WideResearchEstimate::compute(4, org(8), 12, 600);
++        assert_eq!(estimate.usd(None), None);
++        let body = estimate.json(None, crate::pricing::CostBasis::Subscription);
++        assert!(body["usd_low"].is_null() && body["usd_high"].is_null(), "{body}");
++        assert_eq!(body["cost_basis"], "subscription");
++        assert_eq!(body["cap_source"], "org_policy");
++
++        let list = crate::pricing::ListPrice {
++            input_per_million: 1.0,
++            output_per_million: 2.0,
++            currency: "USD".to_owned(),
++            source: crate::pricing::PriceSource::Exact,
++        };
++        let (low, high) = estimate.usd(Some(&list)).expect("a priced, metered route");
++        assert!(low > 0.0 && low < high, "{low} {high}");
++    }
++
++    /// The golden case `e_zdr_token_wide_research_estimate_refused` (EP-2 S8): a feature refusal,
++    /// so it lives here and in the ZDR feature table, not as a posture-matrix row.
++    #[test]
++    fn wide_research_estimate_refuses_a_zdr_caller_with_the_agentic_feature() {
++        let (status, Json(body)) =
++            wide_research_estimate_posture(&claims(true)).expect_err("a ZDR caller is refused");
++        assert_eq!(status, StatusCode::PRECONDITION_FAILED);
++        assert_eq!(body["error"]["feature"], "agentic", "{body}");
++        assert!(wide_research_estimate_posture(&claims(false)).is_ok());
++    }
+ }
+ 
+ /// A tool/function definition supplied by the client (chat-parity §2).
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index aecbdc2cd..01a629df0 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -3041,6 +3041,34 @@ pub async fn invoke_stream_sse(
+                     Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+                 ),
+         );
++        // A wide-research run from the composer's entry (EP-2 S8): absent with
++        // WIDE_RESEARCH_ENTRY_ENABLED off, for a turn that does not ask for one and for a ZDR or
++        // waived turn. Its item cap is clamped to the org's `research.max_fan_out_items`; the
++        // admission above already refused a Do turn whose enforced policy cannot be read, so a
++        // read that fails here holds the run to 0, which execution-core refuses.
++        let wide_research_enabled =
++            crate::http_routes::wide_research_entry_enabled() && req.wide_research.is_some();
++        let wide_research = if wide_research_enabled {
++            let org_cap = crate::http_routes::wide_research_org_cap(
++                &state,
++                &org_id,
++                capability_bearer.as_ref(),
++            )
++            .await
++            .unwrap_or(Some(0));
++            crate::http_routes::wide_research_request(
++                true,
++                req.wide_research.as_ref(),
++                effective_zdr
++                    || matches!(
++                        retention_class,
++                        Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
++                    ),
++                crate::http_routes::WideResearchCap::of(org_cap),
++            )
++        } else {
++            None
++        };
+         timing.hand_off("agentic");
+         return agentic_run_stream(
+             state.clone(),
+@@ -3116,6 +3144,7 @@ pub async fn invoke_stream_sse(
+                 crate::thinking::ladder_enabled(),
+             ),
+             agent_roles,
++            wide_research,
+         );
+     }
+ 
+@@ -12228,6 +12257,8 @@ fn spawn_run_dispatch(
+     // The most questions the run's `ask_user` tool may put to its owner (build plan WS14 S4); zero offers
+     // none. Decided by the caller, which knows the turn's posture and whether it is a continuation.
+     max_questions: u32,
++    // The wide-research request (EP-2 S8), item cap clamped to the org's; `None` for every other run.
++    wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
+ ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
+     let mut execution_client = state.execution_client.clone();
+     // The graded authority execution-core enforces PER CALL.
+@@ -12348,6 +12379,13 @@ fn spawn_run_dispatch(
+     );
+     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
+     run_agent_req.max_questions = max_questions;
++    // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
++    // of that cap and the server's own subagent budget, never wider than either.
++    if let Some(wide) = wide_research {
++        run_agent_req.max_subagents =
++            wide_research_max_subagents(run_agent_req.max_subagents, wide.item_cap);
++        run_agent_req.wide_research = Some(wide);
++    }
+     let run_agent_req = authenticated_run_agent_request(
+         run_agent_req,
+         execution_bearer,
+@@ -12605,9 +12643,31 @@ fn build_run_agent_request(
+         org_policy: None,
+         // The question tool's cap is decided by the caller (`spawn_run_dispatch`), as the org policy is; none here.
+         max_questions: 0,
++        // A wide-research request is set by the caller (`spawn_run_dispatch`) once the org's cap is
++        // read (EP-2 S8); none here, so every other run is the bytes it was.
++        wide_research: None,
++    }
++}
++
++/// The delegation budget of a wide-research run (EP-2 S8): its org-clamped item cap, or the server's
++/// own subagent budget when that is set and narrower. `0` in the budget means unspecified
++/// (execution-core's default), so it never widens the cap; a cap of 0 stays 0 and execution-core
++/// refuses the run.
++fn wide_research_max_subagents(budget: u32, item_cap: u32) -> u32 {
++    if budget == 0 {
++        item_cap
++    } else {
++        budget.min(item_cap)
+     }
+ }
+ 
++/// The wall clock a fresh Do run gets, in seconds: the deadline [`resolve_agentic_run_deadline`]
++/// gives it from this process's environment. The wide-research estimate (EP-2 S8) states its minutes
++/// within it.
++pub(crate) fn agentic_run_deadline_secs(pinned_to_subscription: bool) -> u64 {
++    resolve_agentic_run_deadline(pinned_to_subscription, &|key| std::env::var(key).ok()).as_secs()
++}
++
+ /// `HOOKS_DO_RUNS` (WS25-S3), read once per process so the mode cannot change under a run.
+ fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
+     static MODE: std::sync::OnceLock<crate::runtime_registries::HooksDoRunsMode> =
+@@ -13118,6 +13178,9 @@ fn agentic_run_stream(
+     // The run's agent role catalogue (EP-6 S10, `compose_agent_roles`), carried in the run
+     // context. Empty with `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` off and for a continuation.
+     agent_roles: Vec<mp_contracts::model_plane::v1::AgentRoleSpec>,
++    // The wide-research request of a turn from the composer's entry (EP-2 S8), item cap already
++    // clamped to the org's. `None` with WIDE_RESEARCH_ENTRY_ENABLED off and for a continuation.
++    wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
+ ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+     tokio::spawn(async move {
+@@ -13316,6 +13379,7 @@ fn agentic_run_stream(
+             durable_grant.as_ref(),
+             run_effort,
+             max_questions,
++            wide_research,
+         ) {
+             Ok(dispatch) => dispatch,
+             Err(error) => {
+@@ -20508,6 +20572,8 @@ pub(crate) async fn continue_run(
+             0,
+             // Nor a role catalogue: it carries no run context (EP-6 S10).
+             Vec::new(),
++            // Nor a wide-research request: the run it continues already carried its items (EP-2 S8).
++            None,
+         )
+     };
+     if !resume_enabled {
+@@ -22402,6 +22468,7 @@ mod continue_run_tests {
+             Vec::new(),
+             0,
+             Vec::new(),
++            None,
+         );
+         let frames = frames_of_stream(stream).await;
+         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+@@ -23892,6 +23959,7 @@ mod continue_run_tests {
+             Vec::new(),
+             0,
+             Vec::new(),
++            None,
+         );
+         let frames = frames_of_stream(stream).await;
+         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+@@ -25403,6 +25471,43 @@ mod agent_role_catalogue_tests {
+         }
+     }
+ 
++    /// EP-2 S8: a wide-research run delegates no wider than its org-clamped item cap, and the
++    /// server's own subagent budget can only narrow it further.
++    #[test]
++    fn a_wide_research_run_delegates_no_wider_than_its_item_cap() {
++        assert_eq!(wide_research_max_subagents(0, 10), 10, "an unset budget takes the cap");
++        assert_eq!(wide_research_max_subagents(4, 10), 4, "a narrower budget wins");
++        assert_eq!(wide_research_max_subagents(20, 10), 10, "a wider budget never widens");
++        assert_eq!(wide_research_max_subagents(8, 0), 0, "an org with wide research off stays off");
++    }
++
++    /// EP-2 S8: the wide-research request is built only behind its switch, so with the switch off
++    /// the run request carries no such field and its bytes are what they were before it existed.
++    #[test]
++    fn the_wide_research_request_is_built_only_behind_its_switch() {
++        let source = include_str!("sse.rs").replace("\r\n", "\n");
++        let start = source
++            .find("fn agentic_run_stream(")
++            .expect("the stream launch");
++        let launch = &source[start..];
++        let launch = &launch[..launch.find("\n}\n").expect("the end of the launch")];
++        assert!(
++            launch.contains("wide_research,"),
++            "the launch forwards what the invoke handler decided"
++        );
++        let handler = &source[source
++            .find("pub async fn invoke_stream_sse(")
++            .expect("the invoke handler")..];
++        let handler = &handler[..handler.find("\n}\n").expect("the end of the handler")];
++        let gate = handler
++            .find("crate::http_routes::wide_research_entry_enabled()")
++            .expect("the switch gates the request");
++        let read = handler
++            .find("crate::http_routes::wide_research_request(")
++            .expect("the request is built");
++        assert!(gate < read, "the switch is read before the request is built");
++    }
++
+     #[test]
+     fn no_catalogue_with_the_switch_off_or_on_a_zdr_or_waived_turn() {
+         let body = json!([role("analyst")]);
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs
+index 644ad2670..d049c61c1 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs	
+@@ -176,6 +176,9 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
+     ("agent_digest", Treatment::Honored),
+     ("agent_tool_capability_ids", Treatment::Honored),
+     ("agent_autonomy_cap", Treatment::Honored),
++    // EP-2 S8: a wide-research run is a Do run, refused under ZDR through the `agentic` feature it
++    // rides on; the estimate route refuses a ZDR caller the same way.
++    ("wide_research", refused_feature("agentic")),
+ ];
+ 
+ /// The feature strings the gateway reads, each with its treatment. A feature
+@@ -295,6 +298,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
+         agent_digest: _,
+         agent_tool_capability_ids: _,
+         agent_autonomy_cap: _,
++        wide_research: _,
+     } = request;
+     vec![
+         "content",
+@@ -351,6 +355,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
+         "agent_digest",
+         "agent_tool_capability_ids",
+         "agent_autonomy_cap",
++        "wide_research",
+     ]
+ }
+ 
+@@ -389,6 +394,9 @@ pub fn refusal(request: &InvokeRequest) -> Option<Refusal> {
+     if request.approved_plan_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+         return feature("agentic");
+     }
++    if request.wide_research.as_ref().is_some_and(|wide| !wide.is_null()) {
++        return feature("agentic");
++    }
+     if request.regenerate_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+         || request.edit_of_message_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+     {
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs
+index c18c7ecde..2dbe8ab5d 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs	
+@@ -352,6 +352,14 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
+             with("agent_roles", json!([{"agent_ref": "a", "version": 1}])),
+             None,
+         ),
++        // EP-2 S8 (e_zdr_token_wide_research_run_refused): a wide-research run is a Do run, so a
++        // ZDR turn asking for one is refused with the `agentic` feature, before any model call.
++        (
++            "wide_research",
++            with("wide_research", json!({"item_cap": 5, "items": ["a", "b"]})),
++            refused("agentic"),
++        ),
++        ("wide_research", with("wide_research", Value::Null), None),
+     ]
+ }
+ 

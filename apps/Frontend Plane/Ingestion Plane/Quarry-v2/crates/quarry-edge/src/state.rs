@@ -1,0 +1,183 @@
+use std::sync::Arc;
+
+use quarry_browser::session::ProfileStore;
+use quarry_runtime::answer::AnswerPipeline;
+use quarry_runtime::artifact_store::ArtifactStore;
+use quarry_runtime::driver::Driver;
+use quarry_runtime::driver_registry::DriverRegistry;
+use quarry_runtime::host_scheduler::HostScheduler;
+use quarry_runtime::ingest_client::DataPlaneIngest;
+use quarry_runtime::local_index::TantivyLocalIndex;
+use quarry_runtime::serp::SearchProvider;
+use quarry_runtime::step_receipts::StepReceiptStore;
+use quarry_runtime::usage::UsageMeter;
+use quarry_runtime::vector_index::VectorIndex;
+use quarry_runtime::vision::VisualObservationProcessor;
+use quarry_security::SecurityEngine;
+
+/// Runtime readiness is deliberately separate from process liveness. A
+/// container can be alive while silently falling back to in-memory profiles,
+/// artifacts, or history; production traffic must not be admitted in that
+/// state because a restart would lose agent/crawl state.
+#[derive(Clone, Debug)]
+pub struct ReadinessState {
+    pub durable: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    pub readiness: ReadinessState,
+    /// Append-only action receipts. The default edge wiring uses the
+    /// in-process store for development; production readiness must pair this
+    /// field with a durable implementation before claiming crash-safe replay.
+    pub receipts: Arc<dyn StepReceiptStore>,
+    /// BrowserBroker capability validator. Noop is retained for local
+    /// development; production must configure an HTTP/gRPC-backed validator.
+    pub grant_validator: Arc<dyn quarry_runtime::GrantValidator>,
+    pub require_browser_grants: bool,
+    /// WS4.H: when true a ZDR organization's durable-resource writes (schedules,
+    /// change monitors and snapshots, profile writes) are refused with
+    /// `zdr_durable_mutation_forbidden`; when false they are served and only a
+    /// `zdr.would_refuse` event is logged. See `crate::zdr_refusal`.
+    pub zdr_refuse_durable_resources: bool,
+    /// WS17.P2 owner and ACL check on `/v1/profiles*`: `off`, `observe` (logs, serves)
+    /// or `enforce` (404 for a non-owner). See `crate::profile_guard`.
+    pub profile_owner_enforce: crate::profile_guard::OwnerEnforce,
+    pub driver: Arc<dyn Driver>,
+    pub drivers: DriverRegistry,
+    /// Wave 7 — optional HTTP/3 driver. `Some` when the runtime was
+    /// built with `--features http3` and the operator opted in; `None`
+    /// otherwise. Selected per-request by `ScrapeRequest.prefer_http3`.
+    pub http3: Option<Arc<dyn Driver>>,
+    pub security: Arc<dyn SecurityEngine>,
+    pub artifacts: Arc<dyn ArtifactStore>,
+    pub control_base_url: String,
+    pub redis: Option<redis::aio::ConnectionManager>,
+    pub cache: Option<crate::cache::PageCache>,
+    pub event_sink: quarry_runtime::EventSink,
+    pub ingest: Option<Arc<dyn DataPlaneIngest>>,
+    pub profiles: Arc<dyn ProfileStore>,
+    /// WS17.E3: the data families an org erasure reaches, profiles first. Empty when
+    /// no durable profile store is wired (nothing durable to purge). Read by
+    /// `internal_routes::purge_org_profiles`.
+    pub org_erasables: Vec<Arc<dyn quarry_runtime::org_erasure::OrgErasable>>,
+    pub search: Option<Arc<dyn SearchProvider>>,
+    /// Semantic retrieval backend (Data Plane v2 `retrieval_v2` → Qdrant).
+    /// Powers `POST /v1/search/similar` (find-similar) directly, and is the
+    /// same handle fused into the hybrid `search` provider above. `Some` when
+    /// `QUARRY_EDGE__VECTOR_RETRIEVAL` is on and `DATA_PLANE_URL` is configured;
+    /// `None` makes find-similar return 501.
+    pub vector_index: Option<Arc<dyn VectorIndex>>,
+    /// W1 — operator-configured proxy pool name (from
+    /// `QUARRY_PROXY_POOL`). Empty string means "no operator pool
+    /// wired" and forces the per-run affinity resolver to the
+    /// first-party pool. Held as a `String` (not `Option`) so the
+    /// resolver stays a single-expression call in the agent hot path.
+    pub proxy_pool_name: String,
+    /// IMAGES vertical (`POST /v1/search/images`). The web `search` provider
+    /// above is the `SmartSearchRouter` and has no image concept, so image
+    /// search talks to SearXNG directly. `Some` when `SEARXNG_URL` is
+    /// configured; `None` makes the image route return 501 with a hint.
+    pub searxng_url: Option<String>,
+    /// Model Plane gateway URL (e.g. `http://model-gateway:8080`). With
+    /// `QUARRY_EDGE__MODEL_AUDIO` on, `/v1/audio` proxies to `/v1/ai/speech` +
+    /// `/v1/ai/transcribe`. Otherwise, or when unset, the route returns 501 Unsupported.
+    pub model_plane_url: Option<String>,
+    /// Bearer token for the Model Plane gateway.
+    pub model_plane_token: Option<String>,
+    /// Best-effort Model Plane title enricher shared by every `PageRunner`
+    /// this edge builds (scrape, scrape/stream, internal run_page). `Some` only
+    /// when `QUARRY_EDGE__PAGE_TITLE_ENRICH` is on (QB-T17) and a model path exists.
+    /// Holds the fingerprint-keyed title cache, so it must be process-wide,
+    /// not per-request.
+    pub page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>>,
+    /// Production Auth Core token minter. Routes use the verified JWT org to
+    /// obtain bounded Model/Data Plane service tokens.
+    pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+    /// Cycle 19 / cluster #18: Tavily-replacement answer pipeline.
+    /// Wired only when `QUARRY_EDGE__ANSWER_SYNTHESIS` is on (QB-T17), a SearchProvider
+    /// is configured and a model path exists. `/v1/answer` returns 501 Unsupported otherwise.
+    pub answer_pipeline: Option<Arc<AnswerPipeline>>,
+    /// INNH-8a: why `answer_pipeline` is `None` (the first closed gate), so a 501 on
+    /// `/v1/answer` and `answer_reason` on `/v1/search` name the exact switch.
+    pub answer_status: crate::answer_status::AnswerPipelineStatus,
+    /// Which Model Plane features this edge serves (QB-T17, see `model_plane_gate`). All off
+    /// unless switched on AND a model path exists. Routes read their own field before they
+    /// call the Model Plane.
+    pub model_plane: crate::model_plane_gate::ModelPlaneFeatures,
+    /// Cycle 19 / cluster #16: own-corpus Tantivy index. Cloned cheaply
+    /// (interior Arc). PageRunner's success path pushes new docs here.
+    pub local_index: Option<TantivyLocalIndex>,
+    /// P3 / cluster #billing — per-request usage emitter. Production
+    /// wires `NatsUsageMeter` so events land on the `usage.>` subject
+    /// that Control Plane's billing-core consumes. Tests / dev wire
+    /// `NoopUsageMeter`. Always populated; never `Option`.
+    pub usage: Arc<dyn UsageMeter>,
+    /// WS6.D-s — what each organization has left of its metered allowances and
+    /// how much capacity its plan allows. `StaticFloor` (the default) knows no
+    /// organization and changes nothing; see `crate::limits`.
+    pub limits: Arc<dyn crate::limits::LimitsResolver>,
+    /// WS7.C — the web-policy baseline and enforcement mode. Each request's
+    /// resolved policy (and the RunPolicy it implies) is decided per request
+    /// from this; see `crate::policy_baseline`.
+    pub policy: crate::policy_baseline::PolicyBaseline,
+    /// WS14.S4 — the robots.txt gate (cache of per-origin rules over the guarded
+    /// default driver). `None` when `QUARRY_EDGE__CRAWL_ROBOTS=off` and in tests
+    /// that do not exercise robots.txt; `/v1/map` and the crawl and batch page
+    /// route then behave as before.
+    pub robots: Option<Arc<quarry_runtime::RobotsGate>>,
+    /// Cycle 21 / cluster #3 — per-host adaptive scheduler shared
+    /// across handlers so concurrent scrapes coordinate. `None`
+    /// disables throttling (test harnesses).
+    pub scheduler: Option<Arc<HostScheduler>>,
+    /// D2 / cluster #14 — HMAC signer for cross-plane requests. When
+    /// `Some`, the edge stamps `X-Quarry-Sig*` headers on every
+    /// forward; when `None`, calls go out unsigned (acceptable only
+    /// in private-network single-tenant dev).
+    pub internal_signer: Option<Arc<crate::internal_auth::InternalSigner>>,
+    /// WS4.J: the ZDR run tombstone emitter. `None` (the default everywhere) emits
+    /// nothing; `Some` only when `QUARRY_EDGE__ZDR_TOMBSTONE` is on and control and
+    /// the signer are configured. Counsel review gates turning it on. See
+    /// `crate::zdr_tombstone`.
+    pub tombstones: Option<Arc<crate::zdr_tombstone::TombstoneEmitter>>,
+    /// Phase-2 visual RAG — page-image producer. `Some` when configured (CAS
+    /// bucket + Data Plane NATS + edge base URL, browser-agent feature on);
+    /// injected into every `PageRunner` so ingested pages get rendered → CAS →
+    /// `page_images.created`. `None` disables the producer.
+    pub page_renderer: Option<Arc<quarry_runtime::page_renderer::PageRenderer>>,
+    /// Optional deterministic visual observation processor. Sidecar-backed for
+    /// the OpenCV spike; absent by default so observations behave as before.
+    pub visual_processor: Option<Arc<dyn VisualObservationProcessor>>,
+    /// C30.1 / cluster #7 — durable job-history store. When `Some`,
+    /// the edge serves `/v1/runs/:id/events` locally from Postgres
+    /// instead of forwarding to control plane. Gated behind the
+    /// `postgres-queue` feature so default builds don't pull `sqlx`.
+    #[cfg(feature = "postgres-queue")]
+    pub event_history: Option<Arc<quarry_runtime::postgres_event_history::PostgresEventHistory>>,
+    /// Rust-owned durable frontier pool. Internal orchestrator queue routes
+    /// bind tenant-scoped `PostgresRequestQueue` handles from this pool.
+    #[cfg(feature = "postgres-queue")]
+    pub queue_pool: Option<sqlx::postgres::PgPool>,
+    /// C30.2 / cluster #9 — durable baseline + diff store. When
+    /// `Some`, `/v1/change/*` routes serve locally; otherwise they
+    /// return 501.
+    #[cfg(feature = "postgres-queue")]
+    pub baseline_store: Option<Arc<quarry_runtime::postgres_baseline_store::PostgresBaselineStore>>,
+    /// P7 — real chromiumoxide-backed browser driver for the agentic loop.
+    /// Acquires a leased session per `/v1/agent/runs`; one action per `/step`.
+    #[cfg(feature = "browser-agent")]
+    pub agent_driver: Arc<dyn quarry_browser::BrowserDriver>,
+    /// Process-local DNS-pinning CONNECT/HTTP authority used by every local
+    /// Chromium path. Keeping this handle in state prevents the proxy task
+    /// from being dropped while browser sessions are still live.
+    #[cfg(feature = "browser-agent")]
+    pub browser_egress_proxy: Option<Arc<quarry_runtime::PinnedBrowserEgressProxy>>,
+    /// P7 — live agent runs keyed by run_id (session + observation ctx + lease).
+    #[cfg(feature = "browser-agent")]
+    pub agent_runs: crate::agent_routes::AgentRuns,
+    /// W5 — fleet registry. In-process for dev/single-node; production
+    /// wires the orchestrator's durable fleet store. Shared across the
+    /// fleet REST surface and the agent events SSE (`?fleet_id=`).
+    pub fleets: crate::fleet_routes::FleetState,
+}

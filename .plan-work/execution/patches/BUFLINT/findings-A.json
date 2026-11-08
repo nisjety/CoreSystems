@@ -1,0 +1,842 @@
+[
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 21,
+  "type": "SERVICE_SUFFIX",
+  "message": "Service name \"SpaceAttention\" should be suffixed with \"Service\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 22,
+  "type": "COMMENT_RPC",
+  "message": "RPC \"GetSpaceAttention\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 28,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"UNREAD_RULE_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 37,
+  "type": "COMMENT_ENUM",
+  "message": "Enum \"AttentionStatus\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 38,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"ATTENTION_STATUS_OK\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 38,
+  "type": "ENUM_ZERO_VALUE_SUFFIX",
+  "message": "Enum zero value name \"ATTENTION_STATUS_OK\" should be suffixed with \"_UNSPECIFIED\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 47,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceAttentionQuery\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 48,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 49,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 50,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 58,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetSpaceAttentionRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 59,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"org_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 60,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"user_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 61,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"rule\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 66,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"PendingApproval\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 67,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"approval_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 68,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"run_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 69,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 70,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"requested_at_ms\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 71,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 74,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ThreadHeadline\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 75,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 76,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"title\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 79,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceAttentionResult\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 80,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 81,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"status\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 82,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"unread_threads\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 87,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"working_runs\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 90,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"headlines\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_attention.proto",
+  "line": 93,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetSpaceAttentionResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 25,
+  "type": "SERVICE_SUFFIX",
+  "message": "Service name \"SpaceEvents\" should be suffixed with \"Service\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 28,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"SpaceEventFrame\" should be named \"StreamSpaceEventsResponse\" or \"SpaceEventsStreamSpaceEventsResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 31,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"StreamSpaceEventsRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 32,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"org_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 33,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"user_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 34,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 37,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 41,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"generation\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 42,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"after_seq\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 45,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceEventFrame\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 46,
+  "type": "COMMENT_ONEOF",
+  "message": "Oneof \"frame\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 47,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"connected\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 48,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"event\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 49,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"heartbeat\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 50,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"cursor_too_old\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 51,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"closing\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 55,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceStreamConnected\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 56,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"generation\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 57,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"head\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 58,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"resumed\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 59,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"lease_seconds\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 60,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"heartbeat_seconds\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 67,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceStreamHeartbeat\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 68,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"head\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 69,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"generation\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 74,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceStreamCursorTooOld\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 77,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"head\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 78,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"generation\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 81,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceStreamClosing\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 84,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"reconnect\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 85,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"retry_after_ms\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 86,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"generation\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 87,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"cursor\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 95,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"seq\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 96,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"generation\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 97,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 102,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"actor_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 103,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 104,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"run_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 105,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 106,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_sequence\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 107,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"role\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 108,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"agent_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 111,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"prev_state\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 112,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"origin\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_events.proto",
+  "line": 115,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"parent_run_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 21,
+  "type": "RPC_REQUEST_STANDARD_NAME",
+  "message": "RPC request type \"SearchSpaceMessagesRequest\" should be named \"SearchMessagesRequest\" or \"SpaceHistoryServiceSearchMessagesRequest\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 21,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"SearchSpaceMessagesResponse\" should be named \"SearchMessagesResponse\" or \"SpaceHistoryServiceSearchMessagesResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 24,
+  "type": "RPC_REQUEST_STANDARD_NAME",
+  "message": "RPC request type \"ResolveSpaceMessageRequest\" should be named \"ResolveMessageRequest\" or \"SpaceHistoryServiceResolveMessageRequest\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 24,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"ResolveSpaceMessageResponse\" should be named \"ResolveMessageResponse\" or \"SpaceHistoryServiceResolveMessageResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 27,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SearchSpaceMessagesRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 28,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"org_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 29,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"user_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 30,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 31,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 32,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 43,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"since\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 44,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"until\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 55,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"text\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 56,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"matched\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 59,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SpaceMessageHit\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 60,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 61,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 62,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 63,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"role\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 64,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"author_subject_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 65,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"agent_name\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 66,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"created_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 67,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"snippet\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 68,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_title\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 71,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SearchSpaceMessagesResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 72,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"hits\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 83,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ResolveSpaceMessageRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 84,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"org_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 85,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"user_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 86,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 87,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 88,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 89,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 92,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ResolveSpaceMessageResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 93,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 94,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_history.proto",
+  "line": 95,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 36,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListSpaceArtifactsRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 37,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"org_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 38,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 43,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 44,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 50,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"thread_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 51,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"message_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 52,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"artifact_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 53,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 54,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"title\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 55,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"version\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 56,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"version_count\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 57,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"size_chars\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 58,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"agent_name\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 59,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"created_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 60,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 63,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListSpaceArtifactsResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 64,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"artifacts\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 69,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListSpaceTimelineRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 70,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"org_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 71,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 72,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 73,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 88,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListSpaceTimelineResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 91,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"pinned\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 92,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"refreshed\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/space_room.proto",
+  "line": 97,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"newest_seq\" should have a non-empty comment for documentation."
+ }
+]

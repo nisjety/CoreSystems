@@ -1613,6 +1613,10 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "browser_agent" | "browser.console" => "cap.browser.open",
         "browser.open" | "browser.observe" | "browser.close" => "cap.browser.observe",
         "browser.act" => "cap.browser.act",
+        // The Do loop's computer tools (W4-C C1): a look at the screen and one action on it. Each has its own
+        // capability, as the browser tools do, so a read never answers for an act. Migration 0038 seeds both.
+        "computer.observe" => "cap.computer.observe",
+        "computer.act" => "cap.computer.act",
         "web_search" | "web_fetch" | "web.search" | "web.read" => "cap.tool.http",
         // The long-page reader's two tools (EP-2-S10) read pages a fetch already held for this run, so they
         // carry the fetch's own class. They are named only while the reader is on: with it off they stay

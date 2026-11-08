@@ -128,6 +128,12 @@ pub const fn frame_editor(
     }
 }
 
+/// Whether a stored revision is the person's own text (an edit or a restore), so the model reads it
+/// before it revises it. A replica learns this from the table at turn start (EP-3 S4, D3-725).
+fn person_edited(editor_kind: &str) -> bool {
+    matches!(editor_kind, "user" | "restore")
+}
+
 /// One revision to append: what the turn published, and the head it moved from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedRevision {
@@ -313,6 +319,11 @@ pub async fn seed_from_table_heads(
             state
                 .artifact_versions
                 .remember_kind(thread_id, &head.artifact_id, kind);
+        }
+        if person_edited(&head.editor_kind) {
+            state
+                .artifact_versions
+                .mark_user_edited(thread_id, &head.artifact_id, head.version);
         }
     }
     metrics::counter!("mp_gateway_artifact_revision_seed_total", "outcome" => "seeded")
@@ -1021,6 +1032,62 @@ mod tests {
         assert!(lists[0].artifact_id.is_empty(), "one heads read");
         assert!(lists[0].include_content);
         assert_eq!(lists[0].org_id, "org-a");
+    }
+
+    fn head_edited_by(id: &str, version: u32, editor_kind: &str) -> ArtifactRevision {
+        ArtifactRevision {
+            editor_kind: editor_kind.to_owned(),
+            ..head(id, version)
+        }
+    }
+
+    /// Another replica's user edit reaches this replica's turn as the base the model reads first: the
+    /// head is marked, the turn's fork carries the mark, and the inventory says so.
+    #[tokio::test]
+    async fn turn_start_marks_the_persons_head_so_the_model_reads_it_first() {
+        for editor in ["user", "restore"] {
+            let fake = FakeStore {
+                heads: vec![head_edited_by("report", 4, editor)],
+                ..FakeStore::default()
+            };
+            let state = state_with(fake, ArtifactRevisionsMode::On).await;
+            seed_from_table_heads(&state, &bearer(), "org-a", "thread-a", false, false).await;
+            assert!(
+                state.artifact_versions.edited_by_user("thread-a", "report"),
+                "{editor}"
+            );
+            let turn = state.artifact_versions.fork_thread("thread-a");
+            assert!(turn.edited_by_user("thread-a", "report"), "{editor}");
+            assert!(turn
+                .inventory_context("thread-a")
+                .unwrap()
+                .contains("\"edited_by\":\"user\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_start_leaves_a_model_head_unmarked() {
+        let fake = FakeStore {
+            heads: vec![head("report", 4)],
+            ..FakeStore::default()
+        };
+        let state = state_with(fake, ArtifactRevisionsMode::On).await;
+        seed_from_table_heads(&state, &bearer(), "org-a", "thread-a", false, false).await;
+        assert_eq!(
+            state
+                .artifact_versions
+                .current_version("thread-a", "report"),
+            Some(4)
+        );
+        assert!(!state.artifact_versions.edited_by_user("thread-a", "report"));
+    }
+
+    #[test]
+    fn only_a_person_editor_marks_a_head() {
+        assert!(person_edited("user"));
+        assert!(person_edited("restore"));
+        assert!(!person_edited("model"));
+        assert!(!person_edited(""));
     }
 
     #[tokio::test]

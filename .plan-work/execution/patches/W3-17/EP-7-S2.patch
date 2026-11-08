@@ -1,0 +1,2760 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx
+index 382da7069..1e64bd0e3 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx	
+@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+ import { flush } from 'solid-js'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { ThreadGoal } from '@/shared/api/thread-goal-client'
+-import { GoalBar } from './GoalBar'
++import { GoalBar, applyGoalProgress, compactTokens, goalUsageLine } from './GoalBar'
+ import { readGoalDraft } from './GoalDialog'
+ 
+ function goal(overrides: Partial<ThreadGoal> = {}): ThreadGoal {
+@@ -89,7 +89,84 @@ describe('GoalBar', () => {
+   })
+ })
+ 
++describe('GoalBar usage line (EP-7 S2)', () => {
++  it('shows tokens against the budget and the turn against the cap', () => {
++    const { view } = mount(goal({ tokensUsed: 41_000, tokenBudget: 200_000, turnsUsed: 3, maxTurns: 10 }))
++    expect(view.container.querySelector('.verevon-chat-goal-bar__usage')?.textContent).toMatch(
++      /41k (av|of) 200k tokens - (runde|turn) 3 (av|of) 10/,
++    )
++  })
++
++  it('shows only the turn cap when the goal sets no token budget (the subscription route)', () => {
++    expect(goalUsageLine(goal({ maxTurns: 10, turnsUsed: 2 }))?.en).toBe('turn 2 of 10')
++    expect(goalUsageLine(goal())).toBeNull()
++  })
++
++  it('names why a goal stopped on its own', () => {
++    const { view, button } = mount(goal({ status: 'budget_reached', statusReason: 'token_budget' }))
++    expect(view.container.querySelector('.verevon-chat-goal-bar__stop-reason')?.textContent).toMatch(
++      /Tokenbudsjettet er brukt opp|Token budget spent/,
++    )
++    expect(button(/Fortsett|Continue/)).toBeUndefined()
++  })
++
++  it('compacts token counts', () => {
++    expect(compactTokens(950)).toBe('950')
++    expect(compactTokens(41_000)).toBe('41k')
++    expect(compactTokens(1_500_000)).toBe('1.5M')
++  })
++})
++
++describe('applyGoalProgress', () => {
++  it('takes the frame counts and status for the same goal only', () => {
++    const shown = goal({ maxTurns: 10 })
++    const next = applyGoalProgress(shown, {
++      goalId: 'goal_1',
++      turnNo: 4,
++      tokensUsed: 31_000,
++      tokenBudget: 30_000,
++      costUsedUsdMicros: 0,
++      turnsUsed: 4,
++      maxTurns: 10,
++      status: 'budget_reached',
++      statusReason: 'token_budget',
++    })
++    expect(next).toMatchObject({ status: 'budget_reached', statusReason: 'token_budget', tokensUsed: 31_000, turnsUsed: 4 })
++    expect(next?.objective).toBe(shown.objective)
++    const other = applyGoalProgress(shown, { ...progressOf('goal_2'), status: 'met' })
++    expect(other).toBe(shown)
++    expect(applyGoalProgress(shown, { ...progressOf('goal_1'), status: 'cleared' })).toBeNull()
++  })
++})
++
++function progressOf(goalId: string) {
++  return {
++    goalId,
++    turnNo: 1,
++    tokensUsed: 0,
++    costUsedUsdMicros: 0,
++    turnsUsed: 1,
++    maxTurns: 10,
++    status: 'active' as const,
++  }
++}
++
+ describe('readGoalDraft', () => {
++  it('reads the caps and refuses one out of range', () => {
++    expect(readGoalDraft('aim', '', { maxTurns: '20', tokenBudget: '30000' })).toEqual({
++      draft: { objective: 'aim', successCriteria: [], maxTurns: 20, tokenBudget: 30_000 },
++      valid: true,
++    })
++    expect(readGoalDraft('aim', '', { maxTurns: '', tokenBudget: '' }).draft).toEqual({
++      objective: 'aim',
++      successCriteria: [],
++    })
++    expect(readGoalDraft('aim', '', { maxTurns: '51', tokenBudget: '' }).valid).toBe(false)
++    expect(readGoalDraft('aim', '', { maxTurns: '0', tokenBudget: '' }).valid).toBe(false)
++    expect(readGoalDraft('aim', '', { maxTurns: '', tokenBudget: '5000001' }).valid).toBe(false)
++    expect(readGoalDraft('aim', '', { maxTurns: '2.5', tokenBudget: '' }).valid).toBe(false)
++  })
++
+   it('drops blank criteria and holds the server limits', () => {
+     expect(readGoalDraft('  Ship it ', 'one\n\n two \n')).toEqual({
+       draft: { objective: 'Ship it', successCriteria: ['one', 'two'] },
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx
+index bd8efb447..ce93e3311 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx	
+@@ -1,4 +1,5 @@
+ import { For, Show, createSignal } from 'solid-js'
++import type { ChatGoalProgressEvent } from '@/shared/api/chat-client'
+ import type { ThreadGoal, ThreadGoalStatus } from '@/shared/api/thread-goal-client'
+ import { useI18n } from '@/shared/i18n'
+ 
+@@ -14,6 +15,65 @@ const STATUS_LABEL: Record<ThreadGoalStatus, { no: string; en: string }> = {
+ /** How much of the objective the collapsed bar shows; the rest is one click away. */
+ const COLLAPSED_CHARS = 120
+ 
++/** Why a goal stopped on its own (EP-7 S2), by the closed reason the server wrote. */
++const STOP_REASON_LABEL: Record<string, { no: string; en: string }> = {
++  token_budget: { no: 'Tokenbudsjettet er brukt opp', en: 'Token budget spent' },
++  cost_budget: { no: 'Kostnadsbudsjettet er brukt opp', en: 'Cost budget spent' },
++  max_turns: { no: 'Alle runder er brukt', en: 'All turns used' },
++}
++
++/** A token count as the usage line shows it: 950, 41k, 1.5M. */
++export function compactTokens(value: number): string {
++  if (value < 1000) return String(value)
++  if (value < 1_000_000) return `${Math.round(value / 1000)}k`
++  return `${Math.round(value / 100_000) / 10}M`
++}
++
++/**
++ * The goal's spend against its caps (EP-7 S2), as one line: "41k of 200k tokens - turn 3 of 10".
++ * `null` when the goal has spent nothing and sets no cap to show.
++ */
++export function goalUsageLine(goal: ThreadGoal): { no: string; en: string } | null {
++  const parts: { no: string; en: string }[] = []
++  if (goal.tokenBudget) {
++    const used = compactTokens(goal.tokensUsed)
++    const budget = compactTokens(goal.tokenBudget)
++    parts.push({ no: `${used} av ${budget} tokens`, en: `${used} of ${budget} tokens` })
++  } else if (goal.tokensUsed > 0) {
++    const used = compactTokens(goal.tokensUsed)
++    parts.push({ no: `${used} tokens`, en: `${used} tokens` })
++  }
++  if (goal.maxTurns) {
++    parts.push({
++      no: `runde ${goal.turnsUsed} av ${goal.maxTurns}`,
++      en: `turn ${goal.turnsUsed} of ${goal.maxTurns}`,
++    })
++  }
++  if (parts.length === 0) return null
++  return { no: parts.map((part) => part.no).join(' - '), en: parts.map((part) => part.en).join(' - ') }
++}
++
++/**
++ * The goal after a `goal_progress` frame (EP-7 S2): the frame's counts and status over the goal the
++ * bar shows. A frame for another goal leaves it as it is; a goal the frame says was cleared is gone.
++ */
++export function applyGoalProgress(goal: ThreadGoal | null, event: ChatGoalProgressEvent): ThreadGoal | null {
++  if (!goal || goal.id !== event.goalId) return goal
++  if (event.status === 'cleared') return null
++  const next: ThreadGoal = {
++    ...goal,
++    status: event.status,
++    tokensUsed: event.tokensUsed,
++    turnsUsed: event.turnsUsed,
++    ...(event.tokenBudget ? { tokenBudget: event.tokenBudget } : {}),
++    ...(event.maxTurns ? { maxTurns: event.maxTurns } : {}),
++  }
++  // The reason belongs to the status the frame states: a goal still active has none.
++  if (event.statusReason) next.statusReason = event.statusReason
++  else delete next.statusReason
++  return next
++}
++
+ /**
+  * The thread goal, docked above the composer (EP-7 S1, decision D1): one line with the objective,
+  * the number of success criteria and a status chip, and the actions Continue, Edit, Pause/Resume
+@@ -41,6 +101,11 @@ export function GoalBar(props: {
+     expanded() || !long() ? props.goal.objective : `${props.goal.objective.slice(0, COLLAPSED_CHARS).trimEnd()}…`
+   const status = () => STATUS_LABEL[props.goal.status]
+   const criteriaCount = () => props.goal.successCriteria.length
++  const usage = () => goalUsageLine(props.goal)
++  const stopReason = () =>
++    props.goal.status === 'budget_reached' || props.goal.status === 'turns_reached'
++      ? STOP_REASON_LABEL[props.goal.statusReason ?? '']
++      : undefined
+ 
+   return (
+     <div class="verevon-chat-goal-bar" data-status={props.goal.status} aria-busy={props.pending ? 'true' : undefined}>
+@@ -67,7 +132,17 @@ export function GoalBar(props: {
+         <span class="verevon-chat-goal-bar__status" data-status={props.goal.status}>
+           {i18n.tr(status().no, status().en)}
+         </span>
++        <Show when={stopReason()}>
++          {(reason) => (
++            <span class="verevon-chat-goal-bar__stop-reason" data-reason={props.goal.statusReason}>
++              {i18n.tr(reason().no, reason().en)}
++            </span>
++          )}
++        </Show>
+       </div>
++      <Show when={usage()}>
++        {(line) => <p class="verevon-chat-goal-bar__usage">{i18n.tr(line().no, line().en)}</p>}
++      </Show>
+       <Show when={expanded() && criteriaCount() > 0}>
+         <ul class="verevon-chat-goal-bar__criteria-list" aria-label={i18n.tr('Kriterier for målet', 'Success criteria')}>
+           <For each={props.goal.successCriteria}>{(line) => <li>{line}</li>}</For>
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalDialog.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalDialog.tsx
+index 3ae4e07c4..45a2aa997 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalDialog.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalDialog.tsx	
+@@ -2,32 +2,70 @@ import { Show, createMemo, createSignal } from 'solid-js'
+ import { THREAD_GOAL_LIMITS, type ThreadGoal } from '@/shared/api/thread-goal-client'
+ import { useI18n } from '@/shared/i18n'
+ 
+-/** What the dialog saves: the objective and the criteria, one per line, blank lines dropped. */
+-export type GoalDraft = { objective: string; successCriteria: string[] }
++/**
++ * What the dialog saves: the objective and the criteria, one per line, blank lines dropped, and the
++ * caps (EP-7 S2) when the person set them: the turn cap and an optional metered-token budget.
++ */
++export type GoalDraft = { objective: string; successCriteria: string[]; maxTurns?: number; tokenBudget?: number }
++
++/** D11: the largest metered-token budget the server accepts. */
++export const MAX_GOAL_TOKEN_BUDGET = 5_000_000
++
++/** The caps as typed: empty means "the default turn cap" and "no token budget". */
++export type GoalBudgetText = { maxTurns: string; tokenBudget: string }
++
++/** A whole number typed into a cap field; `undefined` when empty, `NaN` when not a whole number. */
++function capValue(raw: string): number | undefined {
++  const trimmed = raw.trim()
++  if (!trimmed) return undefined
++  return /^\d+$/.test(trimmed) ? Number(trimmed) : Number.NaN
++}
++
++/** An unset cap, or a whole number from 1 to `max`. */
++function withinCap(value: number | undefined, max: number): boolean {
++  return value === undefined || (Number.isInteger(value) && value >= 1 && value <= max)
++}
+ 
+ /**
+  * The criteria field's lines as the server will store them, and whether they fit D11's limits. Pure,
+- * so the dialog and its test read one rule.
++ * so the dialog and its test read one rule. The caps are read only when the dialog shows them.
+  */
+-export function readGoalDraft(objective: string, criteriaText: string): { draft: GoalDraft; valid: boolean } {
++export function readGoalDraft(
++  objective: string,
++  criteriaText: string,
++  budget?: GoalBudgetText,
++): { draft: GoalDraft; valid: boolean } {
+   const trimmed = objective.trim()
+   const criteria = criteriaText
+     .split('\n')
+     .map((line) => line.trim())
+     .filter((line) => line.length > 0)
++  const maxTurns = budget ? capValue(budget.maxTurns) : undefined
++  const tokenBudget = budget ? capValue(budget.tokenBudget) : undefined
++  const capsValid = withinCap(maxTurns, THREAD_GOAL_LIMITS.maxTurns) && withinCap(tokenBudget, MAX_GOAL_TOKEN_BUDGET)
+   const valid =
+     trimmed.length > 0 &&
+     trimmed.length <= THREAD_GOAL_LIMITS.objectiveChars &&
+     criteria.length <= THREAD_GOAL_LIMITS.criteria &&
+-    criteria.every((line) => line.length <= THREAD_GOAL_LIMITS.criterionChars)
+-  return { draft: { objective: trimmed, successCriteria: criteria }, valid }
++    criteria.every((line) => line.length <= THREAD_GOAL_LIMITS.criterionChars) &&
++    capsValid
++  return {
++    draft: {
++      objective: trimmed,
++      successCriteria: criteria,
++      ...(maxTurns !== undefined && capsValid ? { maxTurns } : {}),
++      ...(tokenBudget !== undefined && capsValid ? { tokenBudget } : {}),
++    },
++    valid,
++  }
+ }
+ 
+ /**
+- * Set or edit the thread's goal (EP-7 S1): an objective and up to 8 success criteria, one per line.
+- * Budget fields arrive with the budget ledger (EP-7 S2). The limits are checked here so the server's
+- * refusal is the rare case; the server checks them again. Opened only by the person's own click, so
+- * it may take focus; Cancel hands nothing to the server.
++ * Set or edit the thread's goal (EP-7 S1): an objective and up to 8 success criteria, one per line,
++ * and its caps (EP-7 S2): a turn cap (default 10, at most 50) and an optional metered-token budget.
++ * The limits are checked here so the server's refusal is the rare case; the server checks them
++ * again. Opened only by the person's own click, so it may take focus; Cancel hands nothing to the
++ * server.
+  */
+ export function GoalDialog(props: {
+   goal?: ThreadGoal | null
+@@ -39,7 +77,11 @@ export function GoalDialog(props: {
+   const i18n = useI18n()
+   const [objective, setObjective] = createSignal(props.goal?.objective ?? '')
+   const [criteria, setCriteria] = createSignal((props.goal?.successCriteria ?? []).join('\n'))
+-  const read = createMemo(() => readGoalDraft(objective(), criteria()))
++  const [maxTurns, setMaxTurns] = createSignal(props.goal?.maxTurns ? String(props.goal.maxTurns) : '')
++  const [tokenBudget, setTokenBudget] = createSignal(props.goal?.tokenBudget ? String(props.goal.tokenBudget) : '')
++  const read = createMemo(() =>
++    readGoalDraft(objective(), criteria(), { maxTurns: maxTurns(), tokenBudget: tokenBudget() }),
++  )
+ 
+   return (
+     <form
+@@ -72,11 +114,47 @@ export function GoalDialog(props: {
+           placeholder={i18n.tr('Hvordan vet du at det er gjort?', 'How will you know it is done?')}
+         />
+       </label>
+-      <Show when={!read().valid && (objective().trim().length > 0 || criteria().trim().length > 0)}>
++      <div class="verevon-chat-goal-dialog__caps">
++        <label class="verevon-chat-goal-dialog__field">
++          <span>{i18n.tr('Høyst antall runder (1-50, standard 10)', 'Most turns (1-50, default 10)')}</span>
++          <input
++            type="text"
++            inputmode="numeric"
++            value={maxTurns()}
++            onInput={(event) => setMaxTurns(event.currentTarget.value)}
++            placeholder="10"
++          />
++        </label>
++        <label class="verevon-chat-goal-dialog__field">
++          <span>{i18n.tr('Tokenbudsjett (valgfritt)', 'Token budget (optional)')}</span>
++          <input
++            type="text"
++            inputmode="numeric"
++            value={tokenBudget()}
++            onInput={(event) => setTokenBudget(event.currentTarget.value)}
++            placeholder={i18n.tr('Ingen grense', 'No limit')}
++          />
++        </label>
++      </div>
++      <p class="verevon-chat-goal-dialog__note">
++        {i18n.tr(
++          'Bare målte tokens telles mot budsjettet. Med ChatGPT-abonnementet brukes ingen målte tokens, så der gjelder bare grensen for runder.',
++          'Only metered tokens count against the budget. The ChatGPT subscription spends no metered tokens, so only the turn cap applies there.',
++        )}
++      </p>
++      <Show
++        when={
++          !read().valid &&
++          (objective().trim().length > 0 ||
++            criteria().trim().length > 0 ||
++            maxTurns().trim().length > 0 ||
++            tokenBudget().trim().length > 0)
++        }
++      >
+         <p class="verevon-chat-goal-dialog__hint" role="status">
+           {i18n.tr(
+-            'Målet må ha tekst, høyst 2000 tegn, og høyst 8 kriterier på 500 tegn.',
+-            'The goal needs text, at most 2000 characters, and at most 8 criteria of 500 characters.',
++            'Målet må ha tekst, høyst 2000 tegn, høyst 8 kriterier på 500 tegn, 1 til 50 runder og et budsjett på høyst 5 000 000 tokens.',
++            'The goal needs text, at most 2000 characters, at most 8 criteria of 500 characters, 1 to 50 turns and a budget of at most 5,000,000 tokens.',
+           )}
+         </p>
+       </Show>
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.goal-progress.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.goal-progress.test.ts
+new file mode 100644
+index 000000000..cba0c3512
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.goal-progress.test.ts	
+@@ -0,0 +1,115 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { goalProgressEventOf, streamChat } from './chat-client'
++
++// The `goal_progress` frame (EP-7 S2): a settled goal turn's counts and status, read typed, with
++// unknown keys ignored and a frame the client cannot read reported rather than guessed at.
++
++function sseResponse(frames: string[]): Response {
++  const encoder = new TextEncoder()
++  const stream = new ReadableStream<Uint8Array>({
++    start(controller) {
++      for (const frame of frames) controller.enqueue(encoder.encode(frame))
++      controller.close()
++    },
++  })
++  return new Response(stream, {
++    status: 200,
++    headers: { 'Content-Type': 'text/event-stream' },
++  })
++}
++
++const SETTLED = {
++  goal_id: 'goal_1',
++  turn_no: 3,
++  tokens_used: 31_000,
++  token_budget: 30_000,
++  cost_used_usd_micros: 120_000,
++  cost_budget_usd_micros: null,
++  turns_used: 3,
++  max_turns: 10,
++  status: 'budget_reached',
++  status_reason: 'token_budget',
++  request_id: 'req-1',
++}
++
++describe('goalProgressEventOf', () => {
++  it('reads the counts and closed tokens, and leaves an unset budget out', () => {
++    expect(goalProgressEventOf({ ...SETTLED, extra_key: 'ignored' })).toEqual({
++      goalId: 'goal_1',
++      turnNo: 3,
++      tokensUsed: 31_000,
++      tokenBudget: 30_000,
++      costUsedUsdMicros: 120_000,
++      turnsUsed: 3,
++      maxTurns: 10,
++      status: 'budget_reached',
++      statusReason: 'token_budget',
++      requestId: 'req-1',
++    })
++  })
++
++  it('reads an active goal with no budget and no reason', () => {
++    const active = goalProgressEventOf({
++      goal_id: 'goal_1',
++      turn_no: 1,
++      tokens_used: 0,
++      token_budget: null,
++      cost_used_usd_micros: 0,
++      cost_budget_usd_micros: null,
++      turns_used: 1,
++      max_turns: 10,
++      status: 'active',
++      status_reason: '',
++    })
++    expect(active).toEqual({
++      goalId: 'goal_1',
++      turnNo: 1,
++      tokensUsed: 0,
++      costUsedUsdMicros: 0,
++      turnsUsed: 1,
++      maxTurns: 10,
++      status: 'active',
++    })
++  })
++
++  it('refuses a frame without a goal id or with a status this build does not know', () => {
++    expect(goalProgressEventOf({ ...SETTLED, goal_id: '' })).toBeUndefined()
++    expect(goalProgressEventOf({ ...SETTLED, status: 'exploded' })).toBeUndefined()
++  })
++
++  it('never reads a count below zero or a non-number as a count', () => {
++    const odd = goalProgressEventOf({ ...SETTLED, tokens_used: -5, turns_used: '3' })
++    expect(odd?.tokensUsed).toBe(0)
++    expect(odd?.turnsUsed).toBe(0)
++  })
++})
++
++describe('chat-client goal_progress frame (EP-7 S2)', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++  })
++
++  it('hands a readable frame to onGoalProgress and an unreadable one to onUnknownEvent', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn().mockResolvedValue(
++        sseResponse([
++          `event: goal_progress\ndata: ${JSON.stringify(SETTLED)}\n\n`,
++          `event: goal_progress\ndata: ${JSON.stringify({ ...SETTLED, status: 'exploded' })}\n\n`,
++        ]),
++      ),
++    )
++    const onGoalProgress = vi.fn()
++    const onUnknownEvent = vi.fn()
++    await streamChat({ content: 'Continue toward the goal' }, { onGoalProgress, onUnknownEvent })
++
++    expect(onGoalProgress).toHaveBeenCalledTimes(1)
++    expect(onGoalProgress.mock.calls[0]?.[0]).toMatchObject({
++      goalId: 'goal_1',
++      status: 'budget_reached',
++      tokensUsed: 31_000,
++      tokenBudget: 30_000,
++    })
++    expect(onUnknownEvent).toHaveBeenCalledWith(expect.objectContaining({ name: 'goal_progress' }))
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index ca8fbfe08..97cabe22a 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -32,6 +32,7 @@ import {
+   reconcileLocalThreads,
+ } from '@/features/chat/lib/chat-retention'
+ import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
++import type { ThreadGoalStatus } from './thread-goal-client'
+ 
+ // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
+ 
+@@ -574,6 +575,34 @@ export type ChatSandboxStateEvent = {
+   cause?: string
+   requestId?: string
+ }
++/** The statuses a `goal_progress` frame may state: a goal's, or `cleared`. */
++export type ChatGoalProgressStatus = ThreadGoalStatus | 'cleared'
++const GOAL_PROGRESS_STATUSES: readonly ChatGoalProgressStatus[] = [
++  'active',
++  'paused',
++  'met',
++  'budget_reached',
++  'turns_reached',
++  'blocked',
++  'cleared',
++]
++/**
++ * A settled goal turn (`goal_progress`, EP-7 S2, ungated): the goal's spend against its caps and its
++ * status after the turn. Ids, counts and closed tokens only; a budget the goal does not set is absent.
++ */
++export type ChatGoalProgressEvent = {
++  goalId: string
++  turnNo: number
++  tokensUsed: number
++  tokenBudget?: number
++  costUsedUsdMicros: number
++  costBudgetUsdMicros?: number
++  turnsUsed: number
++  maxTurns: number
++  status: ChatGoalProgressStatus
++  statusReason?: string
++  requestId?: string
++}
+ export type ChatErrorEvent = {
+   code: string
+   message: string
+@@ -1272,6 +1301,12 @@ export type ChatStreamHandlers = {
+    * this build does not know goes to `onUnknownEvent` instead. Nothing here resumes the run.
+    */
+   onRunParked?: (event: RunParkedFrame) => void
++  /**
++   * A goal turn was settled (EP-7 S2): the goal bar's counts and status after the turn. Read with
++   * `goalProgressEventOf`; a frame without a goal id or with a status this build does not know goes
++   * to `onUnknownEvent` instead.
++   */
++  onGoalProgress?: (event: ChatGoalProgressEvent) => void
+   /**
+    * Any SSE event this client has no case for. The gateway relays upstream
+    * events verbatim with no allowlist, so a new backend event reaches the
+@@ -1671,6 +1706,38 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
+   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
+ }
+ 
++/** A count from a frame: a finite number, never below zero; anything else is 0. */
++function frameCount(value: unknown): number {
++  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0
++}
++
++/**
++ * A `goal_progress` frame (EP-7 S2) as the SPA reads it, or `undefined` when it names no goal or a
++ * status this build does not know. A budget that is absent, `null` or not positive is "none".
++ */
++export function goalProgressEventOf(payload: Record<string, unknown>): ChatGoalProgressEvent | undefined {
++  const goalId = str(payload.goal_id)
++  const status = GOAL_PROGRESS_STATUSES.find((candidate) => candidate === payload.status)
++  if (!goalId || !status) return undefined
++  const tokenBudget = frameCount(payload.token_budget)
++  const costBudgetUsdMicros = frameCount(payload.cost_budget_usd_micros)
++  const statusReason = str(payload.status_reason)
++  const requestId = str(payload.request_id)
++  return {
++    goalId,
++    turnNo: frameCount(payload.turn_no),
++    tokensUsed: frameCount(payload.tokens_used),
++    ...(tokenBudget > 0 ? { tokenBudget } : {}),
++    costUsedUsdMicros: frameCount(payload.cost_used_usd_micros),
++    ...(costBudgetUsdMicros > 0 ? { costBudgetUsdMicros } : {}),
++    turnsUsed: frameCount(payload.turns_used),
++    maxTurns: frameCount(payload.max_turns),
++    status,
++    ...(statusReason ? { statusReason } : {}),
++    ...(requestId ? { requestId } : {}),
++  }
++}
++
+ /**
+  * A `source_scope_applied` frame as the SPA reads it. An `auto` scope arrives only with a knowledge receipt
+  * (WS18-S3), so an `auto` frame without one is not a filter and is dropped. A receipt whose mode the SPA does
+@@ -2599,6 +2666,14 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
+       else handlers.onUnknownEvent?.({ name: 'run_parked', payload })
+       break
+     }
++    case 'goal_progress': {
++      // A settled goal turn (EP-7 S2): the bar's counts. Unknown keys are ignored; a frame the
++      // client cannot read is reported, never guessed at.
++      const progress = goalProgressEventOf(payload)
++      if (progress) handlers.onGoalProgress?.(progress)
++      else handlers.onUnknownEvent?.({ name: 'goal_progress', payload })
++      break
++    }
+     case 'awaiting_approval':
+       // Agentic runs can pause at the run boundary before a derived
+       // `step_update` is available. Keep the same compatibility callback so
+diff --git a/apps/Model Plane/proto/model_plane/v1/thread_goals.proto b/apps/Model Plane/proto/model_plane/v1/thread_goals.proto
+index 6eb5d9a54..69f5d2086 100644
+--- a/apps/Model Plane/proto/model_plane/v1/thread_goals.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/thread_goals.proto	
+@@ -51,11 +51,11 @@ message ThreadGoal {
+   google.protobuf.Timestamp created_at = 13;
+   // When the goal was last changed.
+   google.protobuf.Timestamp updated_at = 14;
+-  // Metered tokens spent toward the goal (EP-7 S2); 0 until the budget ledger exists.
++  // Metered tokens spent toward the goal, the judge's included (EP-7 S2).
+   uint64 tokens_used = 15;
+-  // Cost spent toward the goal in micro-USD (EP-7 S2); 0 until the budget ledger exists.
++  // Cost spent toward the goal in micro-USD, priced turns only (EP-7 S2).
+   uint64 cost_used_usd_micros = 16;
+-  // Continuation turns taken (EP-7 S2); 0 until the budget ledger exists.
++  // Continuation turns settled against `max_turns` (EP-7 S2).
+   uint32 turns_used = 17;
+   // The completion judge's last verdict token (EP-7 S3); empty until the judge exists.
+   string last_verdict = 18;
+@@ -127,6 +127,84 @@ message ThreadGoalResponse {
+   bool found = 2;
+ }
+ 
++// EP-7 S2. Admit one continuation turn toward a goal, before its run is
++// prepared. Refused (`failed_precondition`, the message a closed code) when the
++// goal is not active (`thread_goal_not_active`), a turn is already in flight
++// (`thread_goal_turn_in_flight`), the metered-token or cost budget is spent
++// (`thread_goal_budget_reached`) or the turn cap is reached
++// (`thread_goal_turns_reached`); the last two also move the goal to its stop state.
++message ClaimGoalTurnRequest {
++  // The goal to take a turn toward.
++  string goal_id = 1;
++  // The org the goal belongs to; must match the caller's org.
++  string org_id = 2;
++  // The revision the caller last saw; a different revision is refused as
++  // `aborted` `thread_goal_revision_conflict`. 0 claims at any revision (a
++  // Continue click names the goal, not the revision it was read at).
++  uint64 expected_revision = 3;
++}
++
++// EP-7 S2. The admitted turn and what the goal still allows it.
++message ClaimGoalTurnResponse {
++  // The turn's number within the goal, 1 for the first.
++  uint32 turn_no = 1;
++  // Metered tokens the goal has left; meaningful only when `token_budget_set`.
++  uint64 tokens_remaining = 2;
++  // Micro-USD the goal has left; meaningful only when `cost_budget_set`.
++  uint64 cost_remaining_usd_micros = 3;
++  // Whether the goal has a metered-token budget.
++  bool token_budget_set = 4;
++  // Whether the goal has a cost budget.
++  bool cost_budget_set = 5;
++}
++
++// EP-7 S2. Name the run a claimed turn started, once the run exists.
++message BindGoalTurnRunRequest {
++  // The goal the turn belongs to.
++  string goal_id = 1;
++  // The org the goal belongs to; must match the caller's org.
++  string org_id = 2;
++  // The claimed turn.
++  uint32 turn_no = 3;
++  // The run the turn started. A turn binds one run; another is refused as
++  // `failed_precondition` `thread_goal_turn_mismatch`.
++  string run_id = 4;
++}
++
++// EP-7 S2. Nothing: the bind either held or was refused.
++message BindGoalTurnRunResponse {}
++
++// EP-7 S2. Settle a claimed turn from its run's usage. Idempotent on the run: a
++// second settle of a settled turn changes nothing (a late settle of a turn whose
++// lease expired adds its usage once). Counts and closed tokens only, no content.
++message SettleGoalTurnRequest {
++  // The goal the turn belongs to.
++  string goal_id = 1;
++  // The org the goal belongs to; must match the caller's org.
++  string org_id = 2;
++  // The claimed turn.
++  uint32 turn_no = 3;
++  // The run the turn started; empty for a turn that never started one.
++  string run_id = 4;
++  // One closed token: "completed", "failed", "awaiting_approval", "parked",
++  // "awaiting_input", "cancelled" or "unknown".
++  string outcome = 5;
++  // Input tokens of the run's metered calls (a subscription call counts none).
++  uint64 metered_input_tokens = 6;
++  // Output tokens of the run's metered calls.
++  uint64 metered_output_tokens = 7;
++  // The run's spend in micro-USD, or -1 when it could not be priced.
++  int64 cost_usd_micros = 8;
++  // A closed token naming how the spend was priced ("metered", "subscription");
++  // empty when unknown.
++  string cost_basis = 9;
++  // Metered tokens the completion judge spent on this turn (EP-7 S3).
++  uint64 judge_tokens = 10;
++  // Where the usage came from: "run_response", "progress" (the round tally of
++  // a run that ended without its usage), "ledger" or "none".
++  string usage_source = 11;
++}
++
+ // EP-7 S1. The thread goal store, hosted by session-core. Off unless
+ // SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`; while off every RPC
+ // answers `unavailable` `thread_goals_disabled`. Every RPC refuses a
+@@ -140,4 +218,10 @@ service ThreadGoalService {
+   rpc GetThreadGoal(GetThreadGoalRequest) returns (ThreadGoalResponse);
+   // Change an open goal under a compare-and-set on its revision.
+   rpc UpdateThreadGoal(UpdateThreadGoalRequest) returns (ThreadGoalResponse);
++  // EP-7 S2. Admit one continuation turn (one in flight per goal).
++  rpc ClaimGoalTurn(ClaimGoalTurnRequest) returns (ClaimGoalTurnResponse);
++  // EP-7 S2. Name the run a claimed turn started.
++  rpc BindGoalTurnRun(BindGoalTurnRunRequest) returns (BindGoalTurnRunResponse);
++  // EP-7 S2. Settle a turn from its run's usage and apply the stop rules.
++  rpc SettleGoalTurn(SettleGoalTurnRequest) returns (ThreadGoalResponse);
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/lib.rs b/apps/Model Plane/rust/services/model-gateway/src/lib.rs
+index 1a673a531..2b7d55e2d 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/lib.rs	
+@@ -113,6 +113,7 @@ pub mod state;
+ pub mod stream_buffer;
+ pub mod subscription_failure;
+ pub mod thinking;
++pub mod thread_goal;
+ pub mod thread_goal_routes;
+ pub mod thread_reference_tools;
+ pub mod thread_search_routes;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index ae4fc3ca3..36e44841e 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -2781,6 +2781,47 @@ pub async fn invoke_stream_sse(
+             return error_stream(&request_id, code, message, false);
+         }
+     };
++    // The goal turn ledger (EP-7 S2): a Continue turn that names its goal, and passed the check
++    // above, is admitted by session-core before any run exists. A refusal (a spent budget, the turn
++    // cap, a turn still in flight) is a typed stream error and no run is prepared. The claim settles
++    // itself on every exit of this turn ([`crate::thread_goal::GoalTurnLedger`]). Off with the goal
++    // switch, for an Ask turn and for a turn that names no goal, so those turns are unchanged.
++    let goal_turn_id = req
++        .goal_id
++        .as_deref()
++        .map(str::trim)
++        .filter(|id| !id.is_empty() && agentic_requested && crate::thread_goal_routes::enabled());
++    let mut goal_turn = match goal_turn_id {
++        Some(goal_id) => match crate::thread_goal::GoalTurnLedger::claim(
++            state.thread_goal_client.clone(),
++            &model_bearer,
++            &org_id,
++            goal_id,
++        )
++        .await
++        {
++            Ok(ledger) => {
++                // D10: what the goal has left, clamped to the org's per-run ceiling and never above
++                // it. A Do run carries no token cap of its own yet (register D2-705), so the cap is
++                // stated here and the goal stops at its next claim.
++                let cap = crate::thread_goal::goal_turn_cap(
++                    ledger.allowance(),
++                    crate::sse_events::run_ceiling::RunCeiling::resolve(
++                        None,
++                        None,
++                        org_limits.max_cost_usd,
++                        org_limits.max_tokens,
++                    ),
++                );
++                tracing::info!(request_id = %request_id, cap_tokens = ?cap.tokens, cap_usd = ?cap.usd, "goal turn claimed");
++                Some(ledger)
++            }
++            Err(refusal) => {
++                return error_stream(&request_id, refusal.code, refusal.message, refusal.retryable);
++            }
++        },
++        None => None,
++    };
+     // Images as parts of the turn (WS08-S4), decided before any run exists. With the switch off
+     // this is empty and the vision diversion below decides, as it always did. A Do turn with an
+     // image is refused here rather than silently losing its tools to that diversion.
+@@ -2994,6 +3035,11 @@ pub async fn invoke_stream_sse(
+             );
+         }
+     }
++    // The claimed goal turn names its run as soon as the run exists (EP-7 S2), so every later exit
++    // settles it against that run and counts it.
++    if let Some(ledger) = goal_turn.as_mut() {
++        ledger.bind(&session_run.run_id).await;
++    }
+     let thread_scope = session_run.thread_id.clone();
+     let prepared_ms = timing.close(crate::turn_timing::Phase::SessionPrepare, admitted_ms);
+     timing.set_run(&session_run.run_id);
+@@ -3233,6 +3279,7 @@ pub async fn invoke_stream_sse(
+             agent_roles,
+             wide_research,
+             goal_recitation,
++            goal_turn,
+         );
+     }
+ 
+@@ -12908,8 +12955,10 @@ fn hooks_do_runs_mode() -> crate::runtime_registries::HooksDoRunsMode {
+     })
+ }
+ 
++/// How a Do run ended, as the gateway reads its status. Crate-visible so the goal ledger
++/// (`thread_goal::settle_outcome`, EP-7 S2) names a settled turn by the same reading.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-enum AgenticRunOutcome {
++pub(crate) enum AgenticRunOutcome {
+     Completed,
+     Failed,
+     AwaitingApproval,
+@@ -13414,10 +13463,15 @@ fn agentic_run_stream(
+     // carried in the run context. Empty with MODEL_GATEWAY_THREAD_GOALS_ENABLED off, for a thread
+     // without an active goal and for a continuation.
+     goal_recitation: String,
++    // The claimed goal turn of a Continue turn (EP-7 S2), settled from this run's answer and
++    // answered with a `goal_progress` frame. `None` for every other turn and every continuation.
++    goal_turn: Option<crate::thread_goal::GoalTurnLedger>,
+ ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+     tokio::spawn(async move {
+         let _idem_guard = idem_guard;
++        // Held for the whole task: an exit before the run's answer settles the turn on drop.
++        let mut goal_turn = goal_turn;
+         let start = std::time::Instant::now();
+         let run_id = run.run_id.clone();
+         let thread_id = run.thread_id.clone();
+@@ -13833,6 +13887,11 @@ fn agentic_run_stream(
+                     run_id = %run.run_id,
+                     "the client stopped an agentic run; its dispatch was aborted"
+                 );
++                // A stopped goal turn is settled as cancelled when this task ends (EP-7 S2); its
++                // run started, so it still counts as a turn.
++                if let Some(ledger) = goal_turn.as_mut() {
++                    ledger.end_as("cancelled");
++                }
+                 let stopped = crate::sse_events::ChatEvent::Stopped {
+                     reason: "client cancelled".to_owned(),
+                 };
+@@ -14083,6 +14142,41 @@ fn agentic_run_stream(
+             &response.round_timing,
+         );
+ 
++        // The goal turn is settled from the run's answer, whatever the run's status (EP-7 S2): the
++        // run's metered usage, else the round tally a run that ended without usage left (register
++        // D2-005), else none; the turn counts either way. The `goal_progress` frame goes out before
++        // the run's own end frame, so the bar and the answer agree.
++        if let Some(ledger) = goal_turn.take() {
++            let progress = agent_usage.as_ref().and_then(AgentRunUsage::reported_metered);
++            let cost_usd = match (response.usage.as_ref(), agent_usage.as_ref()) {
++                (Some(usage), Some(meter)) => frame_cost_usd(&meter.total(usage).0),
++                // Without a meter the run is priced once here, so a cost budget can be enforced
++                // whether or not the progress frames are on. A goal turn is never ZDR or waived.
++                (Some(usage), None) => frame_cost_usd(
++                    &AgentRunUsage::start(&state.pricing, &model, &route)
++                        .await
++                        .total(usage)
++                        .0,
++                ),
++                (None, _) => None,
++            };
++            let settlement = crate::thread_goal::TurnSettlement::of_run(
++                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status)),
++                response.usage.as_ref(),
++                progress,
++                cost_usd,
++                crate::pricing::CostBasis::of_route(
++                    &route.provider_hint,
++                    &route.subscription_connection_id,
++                ),
++                &route.provider_hint,
++                &route.subscription_connection_id,
++            );
++            if let Some(frame) = ledger.settle(&settlement).await {
++                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
++            }
++        }
++
+         // Compaction is LOSSY and otherwise invisible: an answer built on a
+         // prompt whose earlier tool results were cleared can be worse for a
+         // reason nothing else in the stream explains. execution-core reports it;
+@@ -14937,6 +15031,27 @@ impl AgentRunUsage {
+         }
+     }
+ 
++    /// The metered tokens the run's progress reports add up to, for a goal turn whose run ended
++    /// without its usage (EP-7 S2, register D2-005); `None` when no round was reported. A report
++    /// names no leg, so the route decides: a run pinned to the subscription spends no metered token.
++    fn reported_metered(&self) -> Option<crate::thread_goal::MeteredTokens> {
++        if self.reported == RunTokens::default() {
++            return None;
++        }
++        let metered = crate::pricing::CostBasis::of_route(
++            &self.route.provider_hint,
++            &self.route.subscription_connection_id,
++        ) == crate::pricing::CostBasis::Metered;
++        Some(if metered {
++            crate::thread_goal::MeteredTokens {
++                input: self.reported.input,
++                output: self.reported.output,
++            }
++        } else {
++            crate::thread_goal::MeteredTokens::default()
++        })
++    }
++
+     /// The run's total as its final frame states it, and the rounds whose price is unknown. The
+     /// total is the sum of the legs the executor reported, which is what the ledger rows are too.
+     fn total(
+@@ -20811,6 +20926,8 @@ pub(crate) async fn continue_run(
+             None,
+             // Nor a goal recitation: it carries no run context (EP-7 S1).
+             String::new(),
++            // Nor a goal turn: a continuation resumes a run, it claims no new turn (EP-7 S2).
++            None,
+         )
+     };
+     if !resume_enabled {
+@@ -22707,6 +22824,7 @@ mod continue_run_tests {
+             Vec::new(),
+             None,
+             String::new(),
++            None,
+         );
+         let frames = frames_of_stream(stream).await;
+         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+@@ -24201,6 +24319,7 @@ mod continue_run_tests {
+             Vec::new(),
+             None,
+             String::new(),
++            None,
+         );
+         let frames = frames_of_stream(stream).await;
+         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index 5a1756c2b..d9b31da73 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -587,6 +587,25 @@ pub enum ChatEvent {
+         /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
+         resume_after: Option<String>,
+     },
++    /// A goal turn was settled (EP-7 S2): the goal's spend against its caps and its status after
++    /// the turn. A control event, ungated: the goal bar needs it whatever the client opted into.
++    /// Ids, counts and closed tokens only; the objective never rides it.
++    GoalProgress {
++        goal_id: String,
++        turn_no: u32,
++        tokens_used: u64,
++        /// The metered-token budget; `None` when the goal sets none.
++        token_budget: Option<u64>,
++        cost_used_usd_micros: u64,
++        /// The cost budget in micro-USD; `None` when the goal sets none.
++        cost_budget_usd_micros: Option<u64>,
++        turns_used: u32,
++        max_turns: u32,
++        /// A goal status token (`active`, `budget_reached`, `turns_reached`, ...).
++        status: &'static str,
++        /// The closed reason beside the status; empty when none.
++        status_reason: &'static str,
++    },
+     /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
+     /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
+     /// lease recorded one. A `steps` family frame, so only a client that asked for step detail sees it.
+@@ -710,6 +729,8 @@ impl ChatEvent {
+             | ChatEvent::Compaction { .. }
+             | ChatEvent::ContextChange { .. }
+             | ChatEvent::RunParked { .. }
++            // A goal's spend after a turn (EP-7 S2): the goal bar shows it on every client.
++            | ChatEvent::GoalProgress { .. }
+             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
+             | ChatEvent::UserQuestion { .. }
+             // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
+@@ -753,6 +774,7 @@ impl ChatEvent {
+             ChatEvent::Compaction { .. } => "compaction",
+             ChatEvent::ContextChange { .. } => "context_change",
+             ChatEvent::RunParked { .. } => "run_parked",
++            ChatEvent::GoalProgress { .. } => "goal_progress",
+             ChatEvent::Title { .. } => "title",
+             ChatEvent::FollowUps { .. } => "follow_ups",
+             ChatEvent::PlanProposed { .. } => "plan_proposed",
+@@ -1176,6 +1198,31 @@ impl ChatEvent {
+                 "reason": reason.as_str(),
+                 "resume_after": resume_after,
+             }),
++            // A budget the goal does not set is `null`, so a client reads "none" without a guess.
++            ChatEvent::GoalProgress {
++                goal_id,
++                turn_no,
++                tokens_used,
++                token_budget,
++                cost_used_usd_micros,
++                cost_budget_usd_micros,
++                turns_used,
++                max_turns,
++                status,
++                status_reason,
++            } => json!({
++                "goal_id": goal_id,
++                "turn_no": turn_no,
++                "tokens_used": tokens_used,
++                "token_budget": token_budget,
++                "cost_used_usd_micros": cost_used_usd_micros,
++                "cost_budget_usd_micros": cost_budget_usd_micros,
++                "turns_used": turns_used,
++                "max_turns": max_turns,
++                "status": status,
++                "status_reason": status_reason,
++                "request_id": request_id,
++            }),
+             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
+             ChatEvent::Error {
+                 code,
+@@ -3473,6 +3520,7 @@ mod payload_contract {
+         "Compaction",
+         "ContextChange",
+         "RunParked",
++        "GoalProgress",
+         "SandboxState",
+     ];
+ 
+@@ -3510,6 +3558,7 @@ mod payload_contract {
+             ChatEvent::Compaction { .. } => "Compaction",
+             ChatEvent::ContextChange { .. } => "ContextChange",
+             ChatEvent::RunParked { .. } => "RunParked",
++            ChatEvent::GoalProgress { .. } => "GoalProgress",
+             ChatEvent::SandboxState { .. } => "SandboxState",
+         }
+     }
+@@ -3964,6 +4013,30 @@ mod payload_contract {
+                 reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
+                 resume_after: Some(s("2026-10-20T12:00:00Z")),
+             },
++            ChatEvent::GoalProgress {
++                goal_id: s("goal_1"),
++                turn_no: 1,
++                tokens_used: 0,
++                token_budget: None,
++                cost_used_usd_micros: 0,
++                cost_budget_usd_micros: None,
++                turns_used: 1,
++                max_turns: 10,
++                status: "active",
++                status_reason: "",
++            },
++            ChatEvent::GoalProgress {
++                goal_id: s("goal_1"),
++                turn_no: 3,
++                tokens_used: 31_000,
++                token_budget: Some(30_000),
++                cost_used_usd_micros: 120_000,
++                cost_budget_usd_micros: Some(500_000),
++                turns_used: 3,
++                max_turns: 10,
++                status: "budget_reached",
++                status_reason: "token_budget",
++            },
+             ChatEvent::SandboxState {
+                 scope: "thread",
+                 state: "kept",
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/thread_goal.rs b/apps/Model Plane/rust/services/model-gateway/src/thread_goal.rs
+new file mode 100644
+index 000000000..399683803
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/thread_goal.rs	
+@@ -0,0 +1,698 @@
++//! The goal turn ledger, the gateway's half (Wave 3 EP-7 S2).
++//!
++//! A Continue turn that names its goal (`InvokeRequest.goal_id`) is admitted by session-core
++//! before its run is prepared (`ClaimGoalTurn`), names its run once the run exists
++//! (`BindGoalTurnRun`), and is settled from the run's own usage when the run answers
++//! (`SettleGoalTurn`); the settled goal rides back to the goal bar as one `goal_progress` frame.
++//! Session Core owns the record and the stop rules. This module holds the pure rules the gateway
++//! applies (the D10 cap clamp, what counts as a metered token, the outcome tokens, the refusal
++//! codes) and [`GoalTurnLedger`], which settles a claimed turn on every exit of the stream, so a
++//! turn that never reaches its run's answer frees its goal at once rather than after the lease.
++//!
++//! Owner decisions taken by their recommendation (EP-7 section 3): D2, only metered tokens count
++//! (a subscription leg counts none, so the turn cap is what bounds a subscription goal) and the
++//! judge's tokens count; D10, the run cap a goal turn may use is `min(remaining, org per-run
++//! ceiling)` per dimension, never above the org's, whatever budget the goal was given. No switch of
++//! its own: it runs only for a turn MODEL_GATEWAY_THREAD_GOALS_ENABLED already let name a goal.
++//! Counts, ids and closed tokens only: nothing here carries content.
++
++use mp_contracts::model_plane::v1::{
++    thread_goal_service_client::ThreadGoalServiceClient, BindGoalTurnRunRequest,
++    ClaimGoalTurnRequest, ClaimGoalTurnResponse, RunUsage, SettleGoalTurnRequest, ThreadGoal,
++};
++use tonic::transport::Channel;
++
++use crate::auth::VerifiedSessionBearer;
++use crate::pricing::CostBasis;
++use crate::sse::AgenticRunOutcome;
++use crate::sse_events::run_ceiling::RunCeiling;
++use crate::sse_events::ChatEvent;
++
++/// The statuses a goal can be in (the table's CHECK). A frame names only these.
++const GOAL_STATUSES: [&str; 7] = [
++    "active",
++    "paused",
++    "met",
++    "budget_reached",
++    "turns_reached",
++    "blocked",
++    "cleared",
++];
++
++/// The reasons session-core writes beside a status; anything else is sent as none.
++const STATUS_REASONS: [&str; 5] = [
++    "token_budget",
++    "cost_budget",
++    "max_turns",
++    "replaced",
++    "user_marked_met",
++];
++
++/// What a claim says the goal still allows; `None` where the goal sets no budget.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub(crate) struct GoalAllowance {
++    pub(crate) tokens: Option<u64>,
++    pub(crate) cost_usd_micros: Option<u64>,
++}
++
++impl GoalAllowance {
++    fn of_claim(claim: &ClaimGoalTurnResponse) -> Self {
++        Self {
++            tokens: claim.token_budget_set.then_some(claim.tokens_remaining),
++            cost_usd_micros: claim
++                .cost_budget_set
++                .then_some(claim.cost_remaining_usd_micros),
++        }
++    }
++}
++
++/// D10: the caps a goal turn's run may use, dimension by dimension the tighter of what the goal
++/// has left and the org's per-run ceiling. A goal with a large budget therefore never raises a run
++/// above the org's cap, and a dimension neither sets stays uncapped. `org_ceiling` is the org's
++/// ceiling alone, never one a request cap was folded into (register D2-698/699: a request cap can
++/// loosen the org ceiling, so it is not an input here).
++#[must_use]
++pub(crate) fn goal_turn_cap(remaining: GoalAllowance, org_ceiling: RunCeiling) -> RunCeiling {
++    let org_usd = org_ceiling.usd.filter(|usd| usd.is_finite() && *usd > 0.0);
++    let org_tokens = org_ceiling.tokens.filter(|tokens| *tokens > 0);
++    let goal_usd = remaining.cost_usd_micros.map(micros_to_usd);
++    RunCeiling {
++        usd: match (goal_usd, org_usd) {
++            (Some(goal), Some(org)) => Some(goal.min(org)),
++            (goal, None) => goal,
++            (None, org) => org,
++        },
++        tokens: match (remaining.tokens, org_tokens) {
++            (Some(goal), Some(org)) => Some(goal.min(org)),
++            (goal, None) => goal,
++            (None, org) => org,
++        },
++    }
++}
++
++#[allow(clippy::cast_precision_loss)] // a budget in micro-USD is far below 2^52
++fn micros_to_usd(micros: u64) -> f64 {
++    micros as f64 / 1_000_000.0
++}
++
++/// A spend in US dollars as the ledger's micro-USD; `None` for a figure that is not a spend.
++#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // checked finite and >= 0
++fn usd_to_micros(usd: f64) -> Option<u64> {
++    (usd.is_finite() && usd >= 0.0).then(|| (usd * 1_000_000.0).round() as u64)
++}
++
++/// The tokens of a run that count against a goal.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub(crate) struct MeteredTokens {
++    pub(crate) input: u64,
++    pub(crate) output: u64,
++}
++
++/// D2: the metered tokens of a run's usage. A leg a subscription served counts none, the rule of
++/// the run ceiling and cost-core; an executor that sent totals and no legs is one leg.
++#[must_use]
++pub(crate) fn metered_tokens(
++    usage: &RunUsage,
++    provider_hint: &str,
++    subscription_connection_id: &str,
++) -> MeteredTokens {
++    let route = CostBasis::of_route(provider_hint, subscription_connection_id);
++    let metered = |provider: &str| route.served_by(provider) == CostBasis::Metered;
++    if usage.legs.is_empty() {
++        return if metered(&usage.provider_used) {
++            MeteredTokens {
++                input: usage.input_tokens,
++                output: usage.output_tokens,
++            }
++        } else {
++            MeteredTokens::default()
++        };
++    }
++    usage
++        .legs
++        .iter()
++        .filter(|leg| metered(&leg.provider_used))
++        .fold(MeteredTokens::default(), |sum, leg| MeteredTokens {
++            input: sum.input.saturating_add(leg.input_tokens),
++            output: sum.output.saturating_add(leg.output_tokens),
++        })
++}
++
++/// The outcome token a settle names for how the run ended.
++#[must_use]
++pub(crate) fn settle_outcome(outcome: AgenticRunOutcome) -> &'static str {
++    match outcome {
++        AgenticRunOutcome::Completed => "completed",
++        AgenticRunOutcome::Failed => "failed",
++        AgenticRunOutcome::AwaitingApproval => "awaiting_approval",
++        AgenticRunOutcome::Parked => "parked",
++        AgenticRunOutcome::Unknown => "unknown",
++    }
++}
++
++/// What one turn is settled with.
++#[derive(Clone, Debug, PartialEq)]
++pub(crate) struct TurnSettlement {
++    outcome: &'static str,
++    tokens: MeteredTokens,
++    cost_usd_micros: Option<u64>,
++    cost_basis: &'static str,
++    usage_source: &'static str,
++}
++
++impl TurnSettlement {
++    /// A turn settled with no usage: it never reached its run's answer.
++    fn without_usage(outcome: &'static str) -> Self {
++        Self {
++            outcome,
++            tokens: MeteredTokens::default(),
++            cost_usd_micros: None,
++            cost_basis: "",
++            usage_source: "none",
++        }
++    }
++
++    /// A turn settled from its run's answer: the run's own usage when it carries one; else the
++    /// metered round tally the stream counted (`progress`, register D2-005: a failed run may end
++    /// without its usage); else none. Either way the turn counts toward the cap, so a run that
++    /// keeps failing without usage cannot loop forever. `cost_usd` is the run's priced spend.
++    pub(crate) fn of_run(
++        outcome: &'static str,
++        usage: Option<&RunUsage>,
++        progress: Option<MeteredTokens>,
++        cost_usd: Option<f64>,
++        route: CostBasis,
++        provider_hint: &str,
++        subscription_connection_id: &str,
++    ) -> Self {
++        let (tokens, usage_source) = match (usage, progress) {
++            (Some(usage), _) => (
++                metered_tokens(usage, provider_hint, subscription_connection_id),
++                "run_response",
++            ),
++            (None, Some(progress)) => (progress, "progress"),
++            (None, None) => (MeteredTokens::default(), "none"),
++        };
++        Self {
++            outcome,
++            tokens,
++            cost_usd_micros: cost_usd.and_then(usd_to_micros),
++            cost_basis: route.as_str(),
++            usage_source,
++        }
++    }
++}
++
++/// A claim's refusal, as the turn's typed stream error.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct ClaimRefusal {
++    pub(crate) code: &'static str,
++    pub(crate) message: &'static str,
++    pub(crate) retryable: bool,
++}
++
++const fn refusal(code: &'static str, message: &'static str, retryable: bool) -> ClaimRefusal {
++    ClaimRefusal {
++        code,
++        message,
++        retryable,
++    }
++}
++
++/// Session Core's refusal of a claim as the turn's error. Nothing was prepared yet, so a refused
++/// turn creates no run.
++#[must_use]
++pub(crate) fn claim_refusal(status: &tonic::Status) -> ClaimRefusal {
++    let message = status.message();
++    match status.code() {
++        tonic::Code::FailedPrecondition => match message {
++            "thread_goal_not_active" => refusal(
++                "thread_goal_not_active",
++                "This goal is not active. Resume it or set a new goal to continue.",
++                false,
++            ),
++            "thread_goal_turn_in_flight" => refusal(
++                "thread_goal_turn_in_flight",
++                "A turn toward this goal is still running. Wait for it to finish.",
++                true,
++            ),
++            "thread_goal_budget_reached" => refusal(
++                "thread_goal_budget_reached",
++                "This goal has spent its budget, so no further turn starts.",
++                false,
++            ),
++            "thread_goal_turns_reached" => refusal(
++                "thread_goal_turns_reached",
++                "This goal has used all of its turns.",
++                false,
++            ),
++            "thread_goal_space_unsupported" => refusal(
++                "thread_goal_space_unsupported",
++                "Goals are not available in a shared Space thread yet.",
++                false,
++            ),
++            "thread_goal_waived_thread" => refusal(
++                "thread_goal_waived_thread",
++                "This thread holds a run kept outside retention, so it cannot hold a goal.",
++                false,
++            ),
++            _ => unavailable(),
++        },
++        tonic::Code::Aborted => refusal(
++            "thread_goal_revision_conflict",
++            "The goal changed since it was read. Reload the thread and try again.",
++            false,
++        ),
++        // Someone else's goal reads like one that is not the thread's.
++        tonic::Code::NotFound | tonic::Code::PermissionDenied => refusal(
++            "thread_goal_mismatch",
++            "The goal this turn names is not the thread's active goal. Reload the thread and try again.",
++            false,
++        ),
++        _ => unavailable(),
++    }
++}
++
++fn unavailable() -> ClaimRefusal {
++    refusal(
++        "thread_goal_unavailable",
++        "The thread's goal could not be read. Try again.",
++        true,
++    )
++}
++
++/// The `goal_progress` frame of a settled goal, or `None` when session-core answered a status this
++/// build does not know (the frame names closed tokens only).
++#[must_use]
++pub(crate) fn progress_event(goal: &ThreadGoal, turn_no: u32) -> Option<ChatEvent> {
++    let status = GOAL_STATUSES
++        .iter()
++        .copied()
++        .find(|known| *known == goal.status)?;
++    let status_reason = STATUS_REASONS
++        .iter()
++        .copied()
++        .find(|known| *known == goal.status_reason)
++        .unwrap_or("");
++    Some(ChatEvent::GoalProgress {
++        goal_id: goal.id.clone(),
++        turn_no,
++        tokens_used: goal.tokens_used,
++        token_budget: (goal.token_budget > 0).then_some(goal.token_budget),
++        cost_used_usd_micros: goal.cost_used_usd_micros,
++        cost_budget_usd_micros: (goal.cost_budget_usd_micros > 0)
++            .then_some(goal.cost_budget_usd_micros),
++        turns_used: goal.turns_used,
++        max_turns: goal.max_turns,
++        status,
++        status_reason,
++    })
++}
++
++/// One claimed goal turn. Settled explicitly from the run's answer; any other exit of the stream
++/// (a refused start, a Stop, a follow deadline, a dispatch error) drops it, and the drop settles
++/// the turn without usage: `cancelled` before a run was bound (no turn counted), the outcome set
++/// by [`Self::end_as`] or `unknown` after. The settle on drop is best effort; a lost one is
++/// settled `lease_expired` by the goal's next claim.
++pub(crate) struct GoalTurnLedger {
++    client: ThreadGoalServiceClient<Channel>,
++    bearer: VerifiedSessionBearer,
++    org_id: String,
++    goal_id: String,
++    turn_no: u32,
++    run_id: String,
++    allowance: GoalAllowance,
++    /// The outcome a settle on drop names.
++    end: &'static str,
++    settled: bool,
++}
++
++impl GoalTurnLedger {
++    /// Claim one turn toward `goal_id` with the turn's own session bearer, so session-core's owner,
++    /// ZDR and Space checks apply to the claim as to the goal routes.
++    pub(crate) async fn claim(
++        client: ThreadGoalServiceClient<Channel>,
++        bearer: &VerifiedSessionBearer,
++        org_id: &str,
++        goal_id: &str,
++    ) -> Result<Self, ClaimRefusal> {
++        let request = crate::sse::authenticated_session_request(
++            ClaimGoalTurnRequest {
++                goal_id: goal_id.to_owned(),
++                org_id: org_id.to_owned(),
++                // A Continue click names the goal, not the revision it was read at.
++                expected_revision: 0,
++            },
++            bearer,
++        )
++        .map_err(|_| unavailable())?;
++        let claimed = client
++            .clone()
++            .claim_goal_turn(request)
++            .await
++            .map_err(|status| claim_refusal(&status))?
++            .into_inner();
++        Ok(Self {
++            client,
++            bearer: bearer.clone(),
++            org_id: org_id.to_owned(),
++            goal_id: goal_id.to_owned(),
++            turn_no: claimed.turn_no,
++            run_id: String::new(),
++            allowance: GoalAllowance::of_claim(&claimed),
++            end: "cancelled",
++            settled: false,
++        })
++    }
++
++    /// What the goal had left when this turn was claimed.
++    pub(crate) fn allowance(&self) -> GoalAllowance {
++        self.allowance
++    }
++
++    /// Name the run this turn started. A failed bind is logged and nothing more: the settle names
++    /// the run too, so the turn is still settled against it.
++    pub(crate) async fn bind(&mut self, run_id: &str) {
++        self.run_id = run_id.to_owned();
++        // From here an exit without the run's answer is a run that started and ended unknown.
++        self.end = "unknown";
++        let request = crate::sse::authenticated_session_request(
++            BindGoalTurnRunRequest {
++                goal_id: self.goal_id.clone(),
++                org_id: self.org_id.clone(),
++                turn_no: self.turn_no,
++                run_id: run_id.to_owned(),
++            },
++            &self.bearer,
++        );
++        let bound = match request {
++            Ok(request) => self
++                .client
++                .clone()
++                .bind_goal_turn_run(request)
++                .await
++                .map(|_| ()),
++            Err(status) => Err(status),
++        };
++        if let Err(status) = bound {
++            tracing::warn!(code = ?status.code(), turn_no = self.turn_no, "goal turn bind failed; the settle names the run");
++        }
++    }
++
++    /// The outcome a later drop settles with (a Stop: `cancelled`).
++    pub(crate) fn end_as(&mut self, outcome: &'static str) {
++        self.end = outcome;
++    }
++
++    /// Settle the turn from its run's answer and return the `goal_progress` frame of the settled
++    /// goal; `None` when the settle failed (logged) or answered nothing to show.
++    pub(crate) async fn settle(mut self, settlement: &TurnSettlement) -> Option<ChatEvent> {
++        self.settled = true;
++        let request = self.request(settlement);
++        let goal = send_settle(self.client.clone(), &self.bearer, request).await?;
++        progress_event(&goal, self.turn_no)
++    }
++
++    fn request(&self, settlement: &TurnSettlement) -> SettleGoalTurnRequest {
++        SettleGoalTurnRequest {
++            goal_id: self.goal_id.clone(),
++            org_id: self.org_id.clone(),
++            turn_no: self.turn_no,
++            run_id: self.run_id.clone(),
++            outcome: settlement.outcome.to_owned(),
++            metered_input_tokens: settlement.tokens.input,
++            metered_output_tokens: settlement.tokens.output,
++            cost_usd_micros: settlement
++                .cost_usd_micros
++                .map_or(-1, |micros| i64::try_from(micros).unwrap_or(i64::MAX)),
++            cost_basis: settlement.cost_basis.to_owned(),
++            // The completion judge (EP-7 S3) settles its own tokens; this turn's run spent none.
++            judge_tokens: 0,
++            usage_source: settlement.usage_source.to_owned(),
++        }
++    }
++}
++
++impl Drop for GoalTurnLedger {
++    fn drop(&mut self) {
++        if self.settled {
++            return;
++        }
++        let request = self.request(&TurnSettlement::without_usage(self.end));
++        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
++            tracing::warn!(turn_no = self.turn_no, "goal turn left unsettled; its lease will expire");
++            return;
++        };
++        let client = self.client.clone();
++        let bearer = self.bearer.clone();
++        runtime.spawn(async move {
++            send_settle(client, &bearer, request).await;
++        });
++    }
++}
++
++/// One `SettleGoalTurn` call; a failure is logged by its code and answers `None`.
++async fn send_settle(
++    mut client: ThreadGoalServiceClient<Channel>,
++    bearer: &VerifiedSessionBearer,
++    request: SettleGoalTurnRequest,
++) -> Option<ThreadGoal> {
++    let turn_no = request.turn_no;
++    let request = crate::sse::authenticated_session_request(request, bearer).ok()?;
++    match client.settle_goal_turn(request).await {
++        Ok(response) => {
++            let response = response.into_inner();
++            response.goal.filter(|_| response.found)
++        }
++        Err(status) => {
++            tracing::warn!(code = ?status.code(), turn_no, "goal turn settle failed; its lease will expire");
++            None
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use mp_contracts::model_plane::v1::RunUsageLeg;
++
++    const SUBSCRIPTION: &str = mp_contracts::agentic_subscription::PROVIDER_ID;
++
++    fn leg(provider: &str, input: u64, output: u64) -> RunUsageLeg {
++        RunUsageLeg {
++            provider_used: provider.to_owned(),
++            input_tokens: input,
++            output_tokens: output,
++            inference_rounds: 1,
++            ..Default::default()
++        }
++    }
++
++    #[test]
++    fn goal_cap_never_exceeds_org_ceiling() {
++        // Register D2-699's example: a goal with 50.0 USD left under an org cap of 5.0 runs at 5.0.
++        let org = RunCeiling {
++            usd: Some(5.0),
++            tokens: Some(100_000),
++        };
++        let large = GoalAllowance {
++            tokens: Some(5_000_000),
++            cost_usd_micros: Some(50_000_000),
++        };
++        let cap = goal_turn_cap(large, org);
++        assert_eq!(cap.usd, Some(5.0));
++        assert_eq!(cap.tokens, Some(100_000));
++        // Whatever the goal has left, no dimension rises above the org's.
++        for tokens in [0, 1, 99_999, 100_000, 100_001, u64::MAX] {
++            let cap = goal_turn_cap(
++                GoalAllowance {
++                    tokens: Some(tokens),
++                    cost_usd_micros: Some(tokens),
++                },
++                org,
++            );
++            assert!(cap.tokens.unwrap() <= 100_000, "{tokens}");
++            assert!(cap.usd.unwrap() <= 5.0, "{tokens}");
++        }
++        // A goal with no budget leaves the org's ceiling exactly as it was.
++        assert_eq!(goal_turn_cap(GoalAllowance::default(), org), org);
++    }
++
++    #[test]
++    fn goal_cap_takes_the_tighter_goal_and_fills_an_uncapped_org() {
++        let org = RunCeiling {
++            usd: Some(5.0),
++            tokens: None,
++        };
++        let small = GoalAllowance {
++            tokens: Some(30_000),
++            cost_usd_micros: Some(1_500_000),
++        };
++        let cap = goal_turn_cap(small, org);
++        assert_eq!(cap.usd, Some(1.5));
++        assert_eq!(cap.tokens, Some(30_000), "an uncapped org dimension takes the goal's");
++        // An org cap that is not positive is no cap, as `RunCeiling::resolve` reads one.
++        let unset = RunCeiling {
++            usd: Some(0.0),
++            tokens: Some(0),
++        };
++        assert_eq!(goal_turn_cap(GoalAllowance::default(), unset), RunCeiling::default());
++    }
++
++    #[test]
++    fn subscription_leg_counts_zero_metered_tokens() {
++        let usage = RunUsage {
++            legs: vec![leg(SUBSCRIPTION, 9_000, 1_000), leg("openai", 300, 200)],
++            ..Default::default()
++        };
++        assert_eq!(
++            metered_tokens(&usage, "", ""),
++            MeteredTokens {
++                input: 300,
++                output: 200
++            },
++            "only the metered leg counts"
++        );
++        let pinned = RunUsage {
++            provider_used: String::new(),
++            input_tokens: 8_000,
++            output_tokens: 2_000,
++            ..Default::default()
++        };
++        assert_eq!(
++            metered_tokens(&pinned, SUBSCRIPTION, "conn-1"),
++            MeteredTokens::default(),
++            "a subscription route with no provenance spends no metered token"
++        );
++        assert_eq!(
++            metered_tokens(&pinned, "", ""),
++            MeteredTokens {
++                input: 8_000,
++                output: 2_000
++            }
++        );
++    }
++
++    #[test]
++    fn settle_outcome_maps_every_status() {
++        assert_eq!(settle_outcome(AgenticRunOutcome::Completed), "completed");
++        assert_eq!(settle_outcome(AgenticRunOutcome::Failed), "failed");
++        assert_eq!(
++            settle_outcome(AgenticRunOutcome::AwaitingApproval),
++            "awaiting_approval"
++        );
++        assert_eq!(settle_outcome(AgenticRunOutcome::Parked), "parked");
++        assert_eq!(settle_outcome(AgenticRunOutcome::Unknown), "unknown");
++    }
++
++    #[test]
++    fn failed_run_without_usage_still_counts_a_turn() {
++        // No usage and no tally: settled with none, under the run's own outcome, which
++        // session-core counts as a turn because the run started.
++        let bare = TurnSettlement::of_run("failed", None, None, None, CostBasis::Metered, "", "");
++        assert_eq!(bare.outcome, "failed");
++        assert_eq!(bare.usage_source, "none");
++        assert_eq!(bare.tokens, MeteredTokens::default());
++        assert_eq!(bare.cost_usd_micros, None);
++        // The round tally stands in for the missing usage (register D2-005).
++        let tallied = MeteredTokens {
++            input: 700,
++            output: 50,
++        };
++        let progress =
++            TurnSettlement::of_run("failed", None, Some(tallied), None, CostBasis::Metered, "", "");
++        assert_eq!(progress.usage_source, "progress");
++        assert_eq!(progress.tokens, tallied);
++        // A run's own usage wins over the tally.
++        let usage = RunUsage {
++            legs: vec![leg("openai", 10, 5)],
++            ..Default::default()
++        };
++        let answered = TurnSettlement::of_run(
++            "completed",
++            Some(&usage),
++            Some(tallied),
++            Some(0.25),
++            CostBasis::Metered,
++            "",
++            "",
++        );
++        assert_eq!(answered.usage_source, "run_response");
++        assert_eq!(answered.tokens, MeteredTokens { input: 10, output: 5 });
++        assert_eq!(answered.cost_usd_micros, Some(250_000));
++        assert_eq!(answered.cost_basis, "metered");
++        // A turn that never reached its answer carries no usage at all.
++        assert_eq!(TurnSettlement::without_usage("cancelled").usage_source, "none");
++    }
++
++    #[test]
++    fn claim_refusals_are_typed_and_create_no_run() {
++        let refused = |code, message: &str| claim_refusal(&tonic::Status::new(code, message)).code;
++        use tonic::Code;
++        assert_eq!(
++            refused(Code::FailedPrecondition, "thread_goal_budget_reached"),
++            "thread_goal_budget_reached"
++        );
++        assert_eq!(
++            refused(Code::FailedPrecondition, "thread_goal_turns_reached"),
++            "thread_goal_turns_reached"
++        );
++        assert_eq!(
++            refused(Code::FailedPrecondition, "thread_goal_turn_in_flight"),
++            "thread_goal_turn_in_flight"
++        );
++        assert_eq!(
++            refused(Code::FailedPrecondition, "thread_goal_not_active"),
++            "thread_goal_not_active"
++        );
++        assert_eq!(refused(Code::NotFound, "x"), "thread_goal_mismatch");
++        assert_eq!(refused(Code::Aborted, "x"), "thread_goal_revision_conflict");
++        assert_eq!(refused(Code::Unavailable, "thread_goals_disabled"), "thread_goal_unavailable");
++        assert_eq!(
++            refused(Code::FailedPrecondition, "some free text"),
++            "thread_goal_unavailable",
++            "an unknown refusal never echoes its message"
++        );
++    }
++
++    #[test]
++    fn progress_frame_carries_counts_and_closed_tokens_only() {
++        let goal = ThreadGoal {
++            id: "goal_1".to_owned(),
++            objective: "secret objective".to_owned(),
++            status: "budget_reached".to_owned(),
++            status_reason: "token_budget".to_owned(),
++            token_budget: 30_000,
++            tokens_used: 31_000,
++            max_turns: 10,
++            turns_used: 3,
++            ..Default::default()
++        };
++        let frame = progress_event(&goal, 3).expect("a known status");
++        let payload = frame.payload("req-1");
++        assert_eq!(payload["goal_id"], "goal_1");
++        assert_eq!(payload["turn_no"], 3);
++        assert_eq!(payload["tokens_used"], 31_000);
++        assert_eq!(payload["token_budget"], 30_000);
++        assert!(payload["cost_budget_usd_micros"].is_null());
++        assert_eq!(payload["status"], "budget_reached");
++        assert_eq!(payload["status_reason"], "token_budget");
++        assert!(
++            !payload.to_string().contains("secret objective"),
++            "the frame never carries the goal's text"
++        );
++        let odd = ThreadGoal {
++            status: "who_knows".to_owned(),
++            ..goal.clone()
++        };
++        assert!(progress_event(&odd, 3).is_none());
++        let free_reason = ThreadGoal {
++            status_reason: "free text".to_owned(),
++            ..goal
++        };
++        assert_eq!(
++            progress_event(&free_reason, 3).unwrap().payload("r")["status_reason"],
++            ""
++        );
++    }
++}
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0092_thread_goal_turns.sql b/apps/Model Plane/rust/services/session-core/migrations/0092_thread_goal_turns.sql
+new file mode 100644
+index 000000000..b40df1a8d
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0092_thread_goal_turns.sql	
+@@ -0,0 +1,73 @@
++-- 0092: the thread goal turn ledger (Wave 3 EP-7 S2; number assigned by integration round B).
++--
++-- One row per continuation turn a goal admits: the gateway claims the turn before the run is
++-- prepared, binds the run's id once it exists, and settles it from the run's own usage when the
++-- run ends. At most one turn of a goal is unsettled at a time (the claim is taken under the goal's
++-- row lock); a claim whose lease ran out (a crashed replica) is settled `lease_expired` by the next
++-- claim. The goal's counters (`tokens_used`, `cost_used_usd_micros`, `turns_used`) are cached on
++-- `thread_goals` and written in the same transaction as the settle, so the bar reads one row.
++--
++-- Budget semantics (owner decision D2, recommendation taken): only metered tokens count, as
++-- cost-core and the run ceiling count them; a subscription turn spends none, so every goal also
++-- has its turn cap. The judge's tokens (EP-7 S3) count against the goal. At 100% no new
++-- continuation is claimed; the turn in flight finishes under its own per-run ceiling.
++--
++-- Zero Data Retention: no content. Ids, counts and closed tokens only. A goal never exists on a
++-- zero-retention or waived thread (0091), so neither does a turn. Erasure: rows go with their
++-- goal (ON DELETE CASCADE), which goes with its thread and its org.
++--
++-- Additive only: a new empty table, and three columns with constant defaults on thread_goals
++-- (a metadata-only change, no table rewrite). The verdict columns of EP-7 S3 are not folded in:
++-- S3 was not built with this slice, so they keep 0093.
++
++CREATE TABLE IF NOT EXISTS thread_goal_turns (
++    goal_id TEXT NOT NULL REFERENCES thread_goals(id) ON DELETE CASCADE,
++    -- 1 for a goal's first turn, one higher for every later claim.
++    turn_no INTEGER NOT NULL CHECK (turn_no >= 1),
++    -- The run the turn started; NULL until it is bound, and for a turn that never started one.
++    run_id TEXT NULL,
++    org_id TEXT NOT NULL,
++    claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
++    -- A claim not settled by then is settled `lease_expired` by the next claim (D11: 30 minutes).
++    claim_expires_at TIMESTAMPTZ NOT NULL,
++    settled_at TIMESTAMPTZ NULL,
++    outcome TEXT NULL
++        CHECK (outcome IS NULL OR outcome IN ('completed', 'failed', 'awaiting_approval',
++                                              'parked', 'awaiting_input', 'cancelled',
++                                              'unknown', 'lease_expired')),
++    metered_input_tokens BIGINT NOT NULL DEFAULT 0 CHECK (metered_input_tokens >= 0),
++    metered_output_tokens BIGINT NOT NULL DEFAULT 0 CHECK (metered_output_tokens >= 0),
++    -- The turn's spend in micro-USD; NULL when it could not be priced.
++    cost_usd_micros BIGINT NULL CHECK (cost_usd_micros IS NULL OR cost_usd_micros >= 0),
++    -- A closed token ("metered", "subscription", ...); empty when unknown.
++    cost_basis TEXT NOT NULL DEFAULT '' CHECK (cost_basis ~ '^[a-z_]{0,32}$'),
++    judge_tokens BIGINT NOT NULL DEFAULT 0 CHECK (judge_tokens >= 0),
++    -- Where the usage came from: the run's own answer, the round tally of a run that ended
++    -- without one (register D2-005), the cost ledger (later), or none.
++    usage_source TEXT NOT NULL DEFAULT 'run_response'
++        CHECK (usage_source IN ('run_response', 'progress', 'ledger', 'none')),
++    -- Whether the turn counted toward `max_turns` (a turn that never started a run does not).
++    counted BOOLEAN NOT NULL DEFAULT false,
++    PRIMARY KEY (goal_id, turn_no),
++    -- A settled turn always has an outcome; an open one never does.
++    CHECK ((settled_at IS NULL) = (outcome IS NULL))
++);
++
++-- A run settles one turn of a goal: the settle is idempotent on it.
++CREATE UNIQUE INDEX IF NOT EXISTS thread_goal_turns_run_idx
++    ON thread_goal_turns (goal_id, run_id)
++    WHERE run_id IS NOT NULL;
++
++-- The claim's "is a turn of this goal still open" read.
++CREATE INDEX IF NOT EXISTS thread_goal_turns_open_idx
++    ON thread_goal_turns (goal_id)
++    WHERE settled_at IS NULL;
++
++-- The cached counters, derived from the settled turns in the settle's own transaction.
++ALTER TABLE thread_goals
++    ADD COLUMN IF NOT EXISTS tokens_used BIGINT NOT NULL DEFAULT 0 CHECK (tokens_used >= 0);
++ALTER TABLE thread_goals
++    ADD COLUMN IF NOT EXISTS cost_used_usd_micros BIGINT NOT NULL DEFAULT 0
++        CHECK (cost_used_usd_micros >= 0);
++ALTER TABLE thread_goals
++    ADD COLUMN IF NOT EXISTS turns_used INTEGER NOT NULL DEFAULT 0 CHECK (turns_used >= 0);
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0092_thread_goal_turns.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0092_thread_goal_turns.down.sql
+new file mode 100644
+index 000000000..7f59f2339
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0092_thread_goal_turns.down.sql	
+@@ -0,0 +1,27 @@
++-- Reverses 0092_thread_goal_turns.sql: drops the turn ledger and the goal counters.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate! reads only the top
++-- level of migrations/. Run it by hand, against the database only, inside one transaction.
++--
++-- DESTROYS every goal's turn history and its spent counters (the goals themselves stay, with no
++-- record of what they spent). Export them first if they matter.
++--
++-- ORDER, all three steps:
++--   1. set MODEL_GATEWAY_THREAD_GOALS_ENABLED and SESSION_CORE_THREAD_GOALS_ENABLED unset (or not
++--      `true`), and recreate model-gateway and session-core;
++--   2. roll session-core back to a build without the goal turn ledger (its goal reads name the
++--      counter columns);
++--   3. run this file.
++--
++-- Safe to run twice (every DROP is IF EXISTS).
++
++BEGIN;
++
++ALTER TABLE thread_goals DROP COLUMN IF EXISTS turns_used;
++ALTER TABLE thread_goals DROP COLUMN IF EXISTS cost_used_usd_micros;
++ALTER TABLE thread_goals DROP COLUMN IF EXISTS tokens_used;
++DROP INDEX IF EXISTS thread_goal_turns_open_idx;
++DROP INDEX IF EXISTS thread_goal_turns_run_idx;
++DROP TABLE IF EXISTS thread_goal_turns;
++
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/src/thread_goals.rs b/apps/Model Plane/rust/services/session-core/src/thread_goals.rs
+index 620b7ce80..98308b057 100644
+--- a/apps/Model Plane/rust/services/session-core/src/thread_goals.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/thread_goals.rs	
+@@ -20,6 +20,16 @@
+ //! `paused` and `cleared`; `met` and the stop states belong to the EP-7 S2/S3 code paths. The
+ //! switch is `SESSION_CORE_THREAD_GOALS_ENABLED`, default off; while it is off every RPC answers
+ //! `unavailable` `thread_goals_disabled`.
++//!
++//! The budget ledger (EP-7 S2) rides the same switch: `ClaimGoalTurn` admits one continuation turn
++//! before its run is prepared (one in flight per goal, under the goal's row lock),
++//! `BindGoalTurnRun` names the run once it exists, and `SettleGoalTurn` debits the run's metered
++//! usage, idempotent on the run, and moves the goal to `budget_reached` or `turns_reached` when a
++//! cap is hit. Owner decision D2 taken by its recommendation: only metered tokens count (a
++//! subscription turn spends none), so every goal also has its turn cap; the judge's tokens count;
++//! at 100% no new turn is claimed. A claim not settled within [`CLAIM_LEASE_MINUTES`] (a crashed
++//! replica) is settled `lease_expired` by the next claim and still counts as a turn, so a turn
++//! that keeps dying can never loop past the cap.
+ 
+ use chrono::{DateTime, Utc};
+ use mp_contracts::model_plane::v1::{self as pb, thread_goal_service_server::ThreadGoalService};
+@@ -55,10 +65,38 @@ pub(crate) const WAIVED_THREAD: &str = "thread_goal_waived_thread";
+ pub(crate) const GOAL_CLOSED: &str = "thread_goal_closed";
+ pub(crate) const INVALID_GOAL: &str = "invalid_thread_goal";
+ const DISABLED: &str = "thread_goals_disabled";
++/// The budget ledger's refusals (EP-7 S2), each a `failed_precondition` message.
++pub(crate) const NOT_ACTIVE: &str = "thread_goal_not_active";
++pub(crate) const TURN_IN_FLIGHT: &str = "thread_goal_turn_in_flight";
++pub(crate) const BUDGET_REACHED: &str = "thread_goal_budget_reached";
++pub(crate) const TURNS_REACHED: &str = "thread_goal_turns_reached";
++pub(crate) const TURN_MISMATCH: &str = "thread_goal_turn_mismatch";
+ 
+ /// The statuses of a goal that is still open: at most one per thread (the partial unique index).
+ const OPEN_STATUSES: [&str; 2] = ["active", "paused"];
+ 
++/// D11: how long a claimed turn holds its goal before the next claim may settle it as
++/// `lease_expired`.
++pub(crate) const CLAIM_LEASE_MINUTES: i32 = 30;
++
++/// The outcomes a settle may name; `lease_expired` is written only by a claim.
++const SETTLE_OUTCOMES: [&str; 7] = [
++    "completed",
++    "failed",
++    "awaiting_approval",
++    "parked",
++    "awaiting_input",
++    "cancelled",
++    "unknown",
++];
++
++/// Where a settled turn's usage came from (the table's CHECK).
++const USAGE_SOURCES: [&str; 4] = ["run_response", "progress", "ledger", "none"];
++
++/// The most tokens one settle may add per count. Far above any real run, it keeps the cached
++/// counters far from a BIGINT overflow whatever a caller sends.
++const MAX_TURN_TOKENS: u64 = 1_000_000_000_000;
++
+ /// One switch for the store and for the goal facts attention reads (EP-7 S5 named it first), read
+ /// where it is used with the strict parser, so only the literal `true` turns it on.
+ pub(crate) fn thread_goals_enabled() -> bool {
+@@ -135,6 +173,69 @@ impl ThreadGoalService for ThreadGoalGrpc {
+         record_metrics("update_thread_goal", started, result.is_ok());
+         result
+     }
++
++    async fn claim_goal_turn(
++        &self,
++        request: Request<pb::ClaimGoalTurnRequest>,
++    ) -> Result<Response<pb::ClaimGoalTurnResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:write")?;
++            refuse_retention_exempt(&caller)?;
++            if !thread_goals_enabled() {
++                return Err(Status::unavailable(DISABLED));
++            }
++            claim_goal_turn(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("claim_goal_turn", started, result.is_ok());
++        result
++    }
++
++    async fn bind_goal_turn_run(
++        &self,
++        request: Request<pb::BindGoalTurnRunRequest>,
++    ) -> Result<Response<pb::BindGoalTurnRunResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:write")?;
++            refuse_retention_exempt(&caller)?;
++            if !thread_goals_enabled() {
++                return Err(Status::unavailable(DISABLED));
++            }
++            bind_goal_turn_run(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("bind_goal_turn_run", started, result.is_ok());
++        result
++    }
++
++    async fn settle_goal_turn(
++        &self,
++        request: Request<pb::SettleGoalTurnRequest>,
++    ) -> Result<Response<pb::ThreadGoalResponse>, Status> {
++        let started = Instant::now();
++        let result = async {
++            let caller = identity(&request)?;
++            authorize_operation(&caller, "session:write")?;
++            refuse_retention_exempt(&caller)?;
++            if !thread_goals_enabled() {
++                return Err(Status::unavailable(DISABLED));
++            }
++            settle_goal_turn(&self.pool, &caller, request.into_inner())
++                .await
++                .map(Response::new)
++        }
++        .await;
++        record_metrics("settle_goal_turn", started, result.is_ok());
++        result
++    }
+ }
+ 
+ /// A zero-retention or waived credential never reaches the store (defence in depth: the gateway
+@@ -565,6 +666,409 @@ pub(crate) async fn update_thread_goal(
+     })
+ }
+ 
++/// What a goal's counters say about its caps: the stop state and its closed reason, or `None`
++/// while the goal may take another turn. A spent budget is named before the turn cap, so a goal
++/// that hit both reads as out of budget. A cap that is not set never stops the goal.
++fn stop_state(goal: &GoalRow) -> Option<(&'static str, &'static str)> {
++    if goal
++        .token_budget
++        .is_some_and(|budget| goal.tokens_used >= budget)
++    {
++        return Some(("budget_reached", "token_budget"));
++    }
++    if goal
++        .cost_budget_usd_micros
++        .is_some_and(|budget| goal.cost_used_usd_micros >= budget)
++    {
++        return Some(("budget_reached", "cost_budget"));
++    }
++    if goal.turns_used >= goal.max_turns {
++        return Some(("turns_reached", "max_turns"));
++    }
++    None
++}
++
++/// The refusal a claim answers for a goal in `stop` state.
++fn stop_refusal(stop: &str) -> Status {
++    Status::failed_precondition(if stop == "turns_reached" {
++        TURNS_REACHED
++    } else {
++        BUDGET_REACHED
++    })
++}
++
++/// Whether a settled turn counts toward `max_turns`. Every turn that started a run counts, however
++/// it ended, so a run that keeps failing still exhausts the cap; a turn cancelled before any run
++/// existed (a refused or abandoned start) spent nothing and does not.
++fn turn_counts(run_bound: bool, outcome: &str) -> bool {
++    run_bound || outcome != "cancelled"
++}
++
++/// What a goal has left of a budget, never below zero.
++fn remaining(budget: Option<i64>, used: i64) -> u64 {
++    budget.map_or(0, |budget| {
++        u64::try_from(budget.saturating_sub(used)).unwrap_or(0)
++    })
++}
++
++fn check_outcome(raw: &str) -> Result<&'static str, Status> {
++    let outcome = raw.trim();
++    SETTLE_OUTCOMES
++        .iter()
++        .copied()
++        .find(|known| *known == outcome)
++        .ok_or_else(|| invalid("outcome is not a known run outcome"))
++}
++
++fn check_usage_source(raw: &str) -> Result<&'static str, Status> {
++    let source = raw.trim();
++    if source.is_empty() {
++        return Ok("run_response");
++    }
++    USAGE_SOURCES
++        .iter()
++        .copied()
++        .find(|known| *known == source)
++        .ok_or_else(|| invalid("usage_source is not a known source"))
++}
++
++/// The cost basis as the table holds it: a closed lower-case token, or empty.
++fn check_cost_basis(raw: &str) -> Result<String, Status> {
++    let basis = raw.trim();
++    if basis.len() > 32 || !basis.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
++        return Err(invalid("cost_basis is not a closed token"));
++    }
++    Ok(basis.to_owned())
++}
++
++/// A token count bounded by [`MAX_TURN_TOKENS`], as the counters' signed type.
++fn bounded_tokens(raw: u64) -> i64 {
++    i64::try_from(raw.min(MAX_TURN_TOKENS)).unwrap_or(i64::MAX)
++}
++
++/// The goal, locked, for one of its own turn writes: the caller must own its thread. A bind or a
++/// settle does not repeat the claim's Space and waiver checks, so the accounting of a turn the
++/// claim admitted is never refused afterwards.
++async fn lock_owned_goal(
++    tx: &mut Transaction<'_, Postgres>,
++    caller: &VerifiedIdentity,
++    org_id: &str,
++    goal_id: &str,
++) -> Result<GoalRow, Status> {
++    let goal: GoalRow = sqlx::query_as(&format!(
++        "SELECT {GOAL_COLUMNS} FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE"
++    ))
++    .bind(goal_id)
++    .bind(org_id)
++    .fetch_optional(&mut **tx)
++    .await
++    .map_err(internal)?
++    .ok_or_else(|| Status::not_found("thread goal not found"))?;
++    let thread = read_thread(&mut **tx, &goal.thread_id).await?;
++    if thread.org_id != org_id {
++        return Err(Status::not_found("thread goal not found"));
++    }
++    authorize_thread_owner_row(
++        caller,
++        &thread.org_id,
++        &thread.user_id,
++        thread.space(),
++        OwnerIntent::Mutate,
++    )?;
++    Ok(goal)
++}
++
++/// Move an open goal to a stop state; a goal already closed is left as it is.
++async fn close_goal(
++    tx: &mut Transaction<'_, Postgres>,
++    goal_id: &str,
++    status: &str,
++    reason: &str,
++) -> Result<Option<GoalRow>, Status> {
++    sqlx::query_as(&format!(
++        "UPDATE thread_goals
++         SET status = $2, status_reason = $3, revision = revision + 1,
++             updated_at = now(), closed_at = now()
++         WHERE id = $1 AND status IN ('active', 'paused')
++         RETURNING {GOAL_COLUMNS}"
++    ))
++    .bind(goal_id)
++    .bind(status)
++    .bind(reason)
++    .fetch_optional(&mut **tx)
++    .await
++    .map_err(internal)
++}
++
++/// Admit one continuation turn toward an active goal (EP-7 S2). Refused while another turn of the
++/// goal is in flight and once a cap is reached; reaching a cap here (a budget lowered below what was
++/// spent, or a lease that expired into the cap) also closes the goal, so the bar shows why.
++pub(crate) async fn claim_goal_turn(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::ClaimGoalTurnRequest,
++) -> Result<pb::ClaimGoalTurnResponse, Status> {
++    refuse_service_writer(caller)?;
++    let org_id = req.org_id.trim();
++    let goal_id = req.goal_id.trim();
++    if org_id.is_empty() || goal_id.is_empty() {
++        return Err(Status::invalid_argument("org_id and goal_id are required"));
++    }
++    caller.authorize_org(org_id)?;
++
++    let mut tx = pool.begin().await.map_err(internal)?;
++    let mut goal: GoalRow = sqlx::query_as(&format!(
++        "SELECT {GOAL_COLUMNS} FROM thread_goals WHERE id = $1 AND org_id = $2 FOR UPDATE"
++    ))
++    .bind(goal_id)
++    .bind(org_id)
++    .fetch_optional(&mut *tx)
++    .await
++    .map_err(internal)?
++    .ok_or_else(|| Status::not_found("thread goal not found"))?;
++    // The full write checks of a set: a claim starts new spending on the thread.
++    authorize_thread_write(&mut tx, caller, org_id, &goal.thread_id).await?;
++    if req.expected_revision != 0 {
++        check_revision(goal.revision, req.expected_revision)?;
++    }
++    if goal.status != "active" {
++        return Err(Status::failed_precondition(NOT_ACTIVE));
++    }
++
++    // A claim whose lease ran out belongs to a turn nobody will settle (a crashed replica). It is
++    // settled here, with no usage, and counts as a turn.
++    let expired = sqlx::query(
++        "UPDATE thread_goal_turns
++         SET settled_at = now(), outcome = 'lease_expired', usage_source = 'none', counted = true
++         WHERE goal_id = $1 AND settled_at IS NULL AND claim_expires_at <= now()",
++    )
++    .bind(&goal.id)
++    .execute(&mut *tx)
++    .await
++    .map_err(internal)?
++    .rows_affected();
++    if expired > 0 {
++        let expired = i32::try_from(expired).unwrap_or(i32::MAX);
++        sqlx::query(
++            "UPDATE thread_goals SET turns_used = turns_used + $2, updated_at = now() WHERE id = $1",
++        )
++        .bind(&goal.id)
++        .bind(expired)
++        .execute(&mut *tx)
++        .await
++        .map_err(internal)?;
++        goal.turns_used = goal.turns_used.saturating_add(expired);
++    }
++
++    let in_flight: bool = sqlx::query_scalar(
++        "SELECT EXISTS (SELECT 1 FROM thread_goal_turns WHERE goal_id = $1 AND settled_at IS NULL)",
++    )
++    .bind(&goal.id)
++    .fetch_one(&mut *tx)
++    .await
++    .map_err(internal)?;
++    if in_flight {
++        // The expiry above is kept: it is true whatever this claim answers.
++        tx.commit().await.map_err(internal)?;
++        return Err(Status::failed_precondition(TURN_IN_FLIGHT));
++    }
++    if let Some((stop, reason)) = stop_state(&goal) {
++        close_goal(&mut tx, &goal.id, stop, reason).await?;
++        tx.commit().await.map_err(internal)?;
++        return Err(stop_refusal(stop));
++    }
++
++    let turn_no: i32 = sqlx::query_scalar(
++        "INSERT INTO thread_goal_turns (goal_id, turn_no, org_id, claim_expires_at)
++         SELECT $1, COALESCE(MAX(turn_no), 0) + 1, $2, now() + make_interval(mins => $3)
++         FROM thread_goal_turns WHERE goal_id = $1
++         RETURNING turn_no",
++    )
++    .bind(&goal.id)
++    .bind(&goal.org_id)
++    .bind(CLAIM_LEASE_MINUTES)
++    .fetch_one(&mut *tx)
++    .await
++    .map_err(internal)?;
++    tx.commit().await.map_err(internal)?;
++    Ok(pb::ClaimGoalTurnResponse {
++        turn_no: u32::try_from(turn_no).unwrap_or_default(),
++        tokens_remaining: remaining(goal.token_budget, goal.tokens_used),
++        cost_remaining_usd_micros: remaining(
++            goal.cost_budget_usd_micros,
++            goal.cost_used_usd_micros,
++        ),
++        token_budget_set: goal.token_budget.is_some(),
++        cost_budget_set: goal.cost_budget_usd_micros.is_some(),
++    })
++}
++
++/// Name the run a claimed, unsettled turn started. A turn binds one run, and a run one turn.
++pub(crate) async fn bind_goal_turn_run(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::BindGoalTurnRunRequest,
++) -> Result<pb::BindGoalTurnRunResponse, Status> {
++    refuse_service_writer(caller)?;
++    let org_id = req.org_id.trim();
++    let goal_id = req.goal_id.trim();
++    let run_id = req.run_id.trim();
++    if org_id.is_empty() || goal_id.is_empty() || run_id.is_empty() || req.turn_no == 0 {
++        return Err(Status::invalid_argument(
++            "org_id, goal_id, turn_no and run_id are required",
++        ));
++    }
++    let turn_no = i32::try_from(req.turn_no).map_err(|_| invalid("turn_no out of range"))?;
++    caller.authorize_org(org_id)?;
++
++    let mut tx = pool.begin().await.map_err(internal)?;
++    let goal = lock_owned_goal(&mut tx, caller, org_id, goal_id).await?;
++    let bound = sqlx::query(
++        "UPDATE thread_goal_turns SET run_id = $3
++         WHERE goal_id = $1 AND turn_no = $2 AND settled_at IS NULL
++           AND (run_id IS NULL OR run_id = $3)",
++    )
++    .bind(&goal.id)
++    .bind(turn_no)
++    .bind(run_id)
++    .execute(&mut *tx)
++    .await
++    .map_err(|error| match &error {
++        // The run already settles another turn of this goal.
++        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
++            Status::failed_precondition(TURN_MISMATCH)
++        }
++        _ => internal(error),
++    })?
++    .rows_affected();
++    if bound == 0 {
++        return Err(Status::failed_precondition(TURN_MISMATCH));
++    }
++    tx.commit().await.map_err(internal)?;
++    Ok(pb::BindGoalTurnRunResponse {})
++}
++
++/// The turn row a settle reads.
++#[derive(Debug, sqlx::FromRow)]
++struct TurnRow {
++    run_id: Option<String>,
++    outcome: Option<String>,
++    usage_source: String,
++}
++
++/// Settle a claimed turn from its run's usage, then apply the stop rules. Idempotent: a settled
++/// turn is answered as it stands, except a turn the next claim settled `lease_expired` with no
++/// usage, whose late settle adds the run's usage once (the turn was already counted).
++pub(crate) async fn settle_goal_turn(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    req: pb::SettleGoalTurnRequest,
++) -> Result<pb::ThreadGoalResponse, Status> {
++    refuse_service_writer(caller)?;
++    let org_id = req.org_id.trim();
++    let goal_id = req.goal_id.trim();
++    if org_id.is_empty() || goal_id.is_empty() || req.turn_no == 0 {
++        return Err(Status::invalid_argument(
++            "org_id, goal_id and turn_no are required",
++        ));
++    }
++    let turn_no = i32::try_from(req.turn_no).map_err(|_| invalid("turn_no out of range"))?;
++    let outcome = check_outcome(&req.outcome)?;
++    let usage_source = check_usage_source(&req.usage_source)?;
++    let cost_basis = check_cost_basis(&req.cost_basis)?;
++    let input = bounded_tokens(req.metered_input_tokens);
++    let output = bounded_tokens(req.metered_output_tokens);
++    let judge = bounded_tokens(req.judge_tokens);
++    // -1 (any negative) is "could not be priced": stored as NULL and adding nothing.
++    let cost = (req.cost_usd_micros >= 0)
++        .then(|| req.cost_usd_micros.min(bounded_tokens(MAX_TURN_TOKENS)));
++    let run_id = req.run_id.trim();
++    caller.authorize_org(org_id)?;
++
++    let mut tx = pool.begin().await.map_err(internal)?;
++    let goal = lock_owned_goal(&mut tx, caller, org_id, goal_id).await?;
++    let turn: TurnRow = sqlx::query_as(
++        "SELECT run_id, outcome, usage_source FROM thread_goal_turns
++         WHERE goal_id = $1 AND turn_no = $2 FOR UPDATE",
++    )
++    .bind(&goal.id)
++    .bind(turn_no)
++    .fetch_optional(&mut *tx)
++    .await
++    .map_err(internal)?
++    .ok_or_else(|| Status::not_found("thread goal turn not found"))?;
++    if let Some(bound) = turn.run_id.as_deref() {
++        if !run_id.is_empty() && bound != run_id {
++            return Err(Status::failed_precondition(TURN_MISMATCH));
++        }
++    }
++    let run_bound = turn.run_id.is_some() || !run_id.is_empty();
++    let late = turn.outcome.as_deref() == Some("lease_expired") && turn.usage_source == "none";
++    if turn.outcome.is_some() && !late {
++        // Settled already: a retried settle changes nothing.
++        tx.commit().await.map_err(internal)?;
++        return Ok(found(goal));
++    }
++    // A late settle keeps the turn counted once (the claim counted it); a first settle counts it
++    // by the rule of [`turn_counts`].
++    let counts = !late && turn_counts(run_bound, outcome);
++    sqlx::query(
++        "UPDATE thread_goal_turns
++         SET settled_at = COALESCE(settled_at, now()), outcome = $3,
++             run_id = COALESCE(run_id, NULLIF($4, '')),
++             metered_input_tokens = $5, metered_output_tokens = $6, cost_usd_micros = $7,
++             cost_basis = $8, judge_tokens = $9, usage_source = $10,
++             counted = counted OR $11
++         WHERE goal_id = $1 AND turn_no = $2",
++    )
++    .bind(&goal.id)
++    .bind(turn_no)
++    .bind(outcome)
++    .bind(run_id)
++    .bind(input)
++    .bind(output)
++    .bind(cost)
++    .bind(&cost_basis)
++    .bind(judge)
++    .bind(usage_source)
++    .bind(counts)
++    .execute(&mut *tx)
++    .await
++    .map_err(|error| match &error {
++        sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
++            Status::failed_precondition(TURN_MISMATCH)
++        }
++        _ => internal(error),
++    })?;
++
++    let tokens = input.saturating_add(output).saturating_add(judge);
++    let mut row: GoalRow = sqlx::query_as(&format!(
++        "UPDATE thread_goals
++         SET tokens_used = tokens_used + $2,
++             cost_used_usd_micros = cost_used_usd_micros + COALESCE($3, 0),
++             turns_used = turns_used + $4, updated_at = now()
++         WHERE id = $1
++         RETURNING {GOAL_COLUMNS}"
++    ))
++    .bind(&goal.id)
++    .bind(tokens)
++    .bind(cost)
++    .bind(i32::from(counts))
++    .fetch_one(&mut *tx)
++    .await
++    .map_err(internal)?;
++    // A goal paused while its turn ran still stops on a spent cap: what was spent is spent.
++    if OPEN_STATUSES.contains(&row.status.as_str()) {
++        if let Some((stop, reason)) = stop_state(&row) {
++            if let Some(closed) = close_goal(&mut tx, &row.id, stop, reason).await? {
++                row = closed;
++            }
++        }
++    }
++    tx.commit().await.map_err(internal)?;
++    Ok(found(row))
++}
++
+ fn found(row: GoalRow) -> pb::ThreadGoalResponse {
+     pb::ThreadGoalResponse {
+         goal: Some(row.into_proto()),
+@@ -575,7 +1079,7 @@ fn found(row: GoalRow) -> pb::ThreadGoalResponse {
+ /// The columns a goal is read with, in [`GoalRow`]'s order.
+ const GOAL_COLUMNS: &str = "id, thread_id, org_id, user_id, objective, success_criteria, \
+      token_budget, cost_budget_usd_micros, max_turns, status, status_reason, revision, \
+-     created_at, updated_at";
++     created_at, updated_at, tokens_used, cost_used_usd_micros, turns_used";
+ 
+ #[derive(Debug, sqlx::FromRow)]
+ struct GoalRow {
+@@ -593,6 +1097,10 @@ struct GoalRow {
+     revision: i64,
+     created_at: DateTime<Utc>,
+     updated_at: DateTime<Utc>,
++    // The budget ledger's cached counters (EP-7 S2, migration 0092).
++    tokens_used: i64,
++    cost_used_usd_micros: i64,
++    turns_used: i32,
+ }
+ 
+ impl GoalRow {
+@@ -613,10 +1121,10 @@ impl GoalRow {
+             revision: u64::try_from(self.revision).unwrap_or_default(),
+             created_at: Some(to_proto_timestamp(self.created_at)),
+             updated_at: Some(to_proto_timestamp(self.updated_at)),
+-            // The budget ledger (EP-7 S2) and the judge (EP-7 S3) fill these; zero until then.
+-            tokens_used: 0,
+-            cost_used_usd_micros: 0,
+-            turns_used: 0,
++            tokens_used: u64::try_from(self.tokens_used).unwrap_or_default(),
++            cost_used_usd_micros: u64::try_from(self.cost_used_usd_micros).unwrap_or_default(),
++            turns_used: u32::try_from(self.turns_used).unwrap_or_default(),
++            // The judge (EP-7 S3) fills this; empty until it exists.
+             last_verdict: String::new(),
+         }
+     }
+@@ -724,6 +1232,89 @@ mod tests {
+         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+     }
+ 
++    fn counters(
++        token_budget: Option<i64>,
++        cost_budget: Option<i64>,
++        max_turns: i32,
++        used: (i64, i64, i32),
++    ) -> GoalRow {
++        GoalRow {
++            id: "goal_test".to_owned(),
++            thread_id: "thread".to_owned(),
++            org_id: ORG.to_owned(),
++            user_id: OWNER.to_owned(),
++            objective: "aim".to_owned(),
++            success_criteria: sqlx::types::Json(Vec::new()),
++            token_budget,
++            cost_budget_usd_micros: cost_budget,
++            max_turns,
++            status: "active".to_owned(),
++            status_reason: String::new(),
++            revision: 1,
++            created_at: Utc::now(),
++            updated_at: Utc::now(),
++            tokens_used: used.0,
++            cost_used_usd_micros: used.1,
++            turns_used: used.2,
++        }
++    }
++
++    #[test]
++    fn thread_goal_stop_state_names_budget_before_turns() {
++        assert_eq!(stop_state(&counters(Some(100), None, 10, (99, 0, 9))), None);
++        assert_eq!(
++            stop_state(&counters(Some(100), None, 10, (100, 0, 1))),
++            Some(("budget_reached", "token_budget"))
++        );
++        assert_eq!(
++            stop_state(&counters(None, Some(5_000), 10, (0, 5_001, 1))),
++            Some(("budget_reached", "cost_budget"))
++        );
++        assert_eq!(
++            stop_state(&counters(None, None, 3, (10_000_000, 0, 3))),
++            Some(("turns_reached", "max_turns")),
++            "no budget set: only the turn cap applies (the subscription route)"
++        );
++        assert_eq!(
++            stop_state(&counters(Some(10), None, 3, (10, 0, 3))),
++            Some(("budget_reached", "token_budget")),
++            "a goal that hit both caps reads as out of budget"
++        );
++        assert_eq!(stop_refusal("turns_reached").message(), TURNS_REACHED);
++        assert_eq!(stop_refusal("budget_reached").message(), BUDGET_REACHED);
++    }
++
++    #[test]
++    fn thread_goal_turn_counts_every_started_run() {
++        for outcome in SETTLE_OUTCOMES {
++            assert!(turn_counts(true, outcome), "{outcome} with a run counts");
++        }
++        assert!(!turn_counts(false, "cancelled"), "a start that never ran is free");
++        assert!(turn_counts(false, "failed"));
++        assert!(turn_counts(false, "unknown"));
++    }
++
++    #[test]
++    fn thread_goal_remaining_never_negative() {
++        assert_eq!(remaining(None, 10), 0);
++        assert_eq!(remaining(Some(100), 40), 60);
++        assert_eq!(remaining(Some(100), 140), 0);
++    }
++
++    #[test]
++    fn thread_goal_settle_inputs_are_closed() {
++        assert_eq!(check_outcome(" completed ").unwrap(), "completed");
++        assert!(check_outcome("lease_expired").is_err(), "only a claim writes it");
++        assert!(check_outcome("done").is_err());
++        assert_eq!(check_usage_source("").unwrap(), "run_response");
++        assert_eq!(check_usage_source("progress").unwrap(), "progress");
++        assert!(check_usage_source("guess").is_err());
++        assert_eq!(check_cost_basis("metered").unwrap(), "metered");
++        assert_eq!(check_cost_basis("").unwrap(), "");
++        assert!(check_cost_basis("Metered; drop").is_err());
++        assert_eq!(bounded_tokens(u64::MAX), bounded_tokens(MAX_TURN_TOKENS));
++    }
++
+     // The database tests below run with `--ignored` against a disposable Postgres, as the other
+     // session-core database tests do. They call the store functions directly, so the switch is not
+     // needed; `thread_goal_rpc_is_refused_while_the_switch_is_off` tests the switch.
+@@ -1001,4 +1592,230 @@ mod tests {
+         assert_eq!(refused.code(), tonic::Code::Unavailable);
+         assert_eq!(refused.message(), DISABLED);
+     }
++
++    async fn goal_with(pool: &PgPool, token_budget: u64, max_turns: u32) -> pb::ThreadGoal {
++        let thread = seed_thread(pool).await;
++        let mut request = set_request(&thread);
++        request.token_budget = token_budget;
++        request.max_turns = max_turns;
++        set_thread_goal(pool, &owner(), request)
++            .await
++            .unwrap()
++            .goal
++            .unwrap()
++    }
++
++    fn claim(goal: &pb::ThreadGoal) -> pb::ClaimGoalTurnRequest {
++        pb::ClaimGoalTurnRequest {
++            goal_id: goal.id.clone(),
++            org_id: ORG.to_owned(),
++            expected_revision: 0,
++        }
++    }
++
++    fn settle(
++        goal: &pb::ThreadGoal,
++        turn_no: u32,
++        run_id: &str,
++        tokens: u64,
++    ) -> pb::SettleGoalTurnRequest {
++        pb::SettleGoalTurnRequest {
++            goal_id: goal.id.clone(),
++            org_id: ORG.to_owned(),
++            turn_no,
++            run_id: run_id.to_owned(),
++            outcome: "completed".to_owned(),
++            metered_input_tokens: tokens,
++            metered_output_tokens: 0,
++            cost_usd_micros: -1,
++            cost_basis: "metered".to_owned(),
++            judge_tokens: 0,
++            usage_source: "run_response".to_owned(),
++        }
++    }
++
++    async fn bind(pool: &PgPool, goal: &pb::ThreadGoal, turn_no: u32, run_id: &str) {
++        bind_goal_turn_run(
++            pool,
++            &owner(),
++            pb::BindGoalTurnRunRequest {
++                goal_id: goal.id.clone(),
++                org_id: ORG.to_owned(),
++                turn_no,
++                run_id: run_id.to_owned(),
++            },
++        )
++        .await
++        .unwrap();
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_is_single_in_flight() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 0, 10).await;
++        let first = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        assert_eq!(first.turn_no, 1);
++        assert!(!first.token_budget_set);
++        let second = claim_goal_turn(&pool, &owner(), claim(&goal))
++            .await
++            .unwrap_err();
++        assert_eq!(second.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(second.message(), TURN_IN_FLIGHT);
++        bind(&pool, &goal, 1, "run-a").await;
++        settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-a", 10))
++            .await
++            .unwrap();
++        let next = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        assert_eq!(next.turn_no, 2);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn expired_claim_settles_lease_expired_then_reclaims() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 0, 10).await;
++        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        sqlx::query(
++            "UPDATE thread_goal_turns SET claim_expires_at = now() - interval '1 minute'
++             WHERE goal_id = $1",
++        )
++        .bind(&goal.id)
++        .execute(&pool)
++        .await
++        .unwrap();
++        let again = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        assert_eq!(again.turn_no, 2);
++        let (outcome, counted): (String, bool) = sqlx::query_as(
++            "SELECT outcome, counted FROM thread_goal_turns WHERE goal_id = $1 AND turn_no = 1",
++        )
++        .bind(&goal.id)
++        .fetch_one(&pool)
++        .await
++        .unwrap();
++        assert_eq!(outcome, "lease_expired");
++        assert!(counted, "an expired turn still counts toward the cap");
++        // The late settle of the expired turn adds its usage once, and no second turn.
++        let late = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-late", 500))
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        assert_eq!(late.tokens_used, 500);
++        assert_eq!(late.turns_used, 1);
++        let replay = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-late", 500))
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        assert_eq!(replay.tokens_used, 500);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn settle_idempotent_on_run_id() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 0, 10).await;
++        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        bind(&pool, &goal, 1, "run-x").await;
++        let once = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-x", 1_000))
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        let twice = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-x", 1_000))
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        assert_eq!(once.tokens_used, 1_000);
++        assert_eq!(twice.tokens_used, 1_000);
++        assert_eq!(twice.turns_used, 1);
++        let other_run = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-y", 1))
++            .await
++            .unwrap_err();
++        assert_eq!(other_run.message(), TURN_MISMATCH);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn budget_reached_moves_status() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 30_000, 10).await;
++        let admitted = claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        assert!(admitted.token_budget_set);
++        assert_eq!(admitted.tokens_remaining, 30_000);
++        bind(&pool, &goal, 1, "run-big").await;
++        let settled = settle_goal_turn(&pool, &owner(), settle(&goal, 1, "run-big", 31_000))
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        assert_eq!(settled.status, "budget_reached");
++        assert_eq!(settled.status_reason, "token_budget");
++        assert_eq!(settled.revision, goal.revision + 1);
++        let refused = claim_goal_turn(&pool, &owner(), claim(&goal))
++            .await
++            .unwrap_err();
++        assert_eq!(refused.message(), NOT_ACTIVE);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn turns_reached_moves_status() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 0, 1).await;
++        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        bind(&pool, &goal, 1, "run-one").await;
++        let mut failed = settle(&goal, 1, "run-one", 0);
++        // A failed run without usage still counts (register D2-005).
++        failed.outcome = "failed".to_owned();
++        failed.usage_source = "none".to_owned();
++        let settled = settle_goal_turn(&pool, &owner(), failed)
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        assert_eq!(settled.status, "turns_reached");
++        assert_eq!(settled.turns_used, 1);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn cancelled_start_without_run_is_not_a_turn() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 0, 1).await;
++        claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap();
++        let mut cancelled = settle(&goal, 1, "", 0);
++        cancelled.outcome = "cancelled".to_owned();
++        cancelled.usage_source = "none".to_owned();
++        let settled = settle_goal_turn(&pool, &owner(), cancelled)
++            .await
++            .unwrap()
++            .goal
++            .unwrap();
++        assert_eq!(settled.status, "active");
++        assert_eq!(settled.turns_used, 0);
++        assert_eq!(
++            claim_goal_turn(&pool, &owner(), claim(&goal)).await.unwrap().turn_no,
++            2
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn paused_goal_refuses_claim() {
++        let pool = connect().await;
++        let goal = goal_with(&pool, 0, 10).await;
++        let mut pause = update(&goal, &["status"]);
++        pause.status = "paused".to_owned();
++        update_thread_goal(&pool, &owner(), pause).await.unwrap();
++        let refused = claim_goal_turn(&pool, &owner(), claim(&goal))
++            .await
++            .unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(refused.message(), NOT_ACTIVE);
++        let other = VerifiedIdentity::user_for_test(ORG, "user-goal-other");
++        assert!(claim_goal_turn(&pool, &other, claim(&goal)).await.is_err());
++    }
+ }

@@ -1,0 +1,521 @@
+diff --git a/apps/Model Plane/rust/services/execution-core/src/browser_session.rs b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs
+index 5bb2e5a3b..3ae6d9e66 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/browser_session.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs	
+@@ -248,14 +248,53 @@ pub(crate) fn hold_for_person(run_id: &str) {
+         .insert(run_id.to_owned());
+ }
+ 
+-/// End `run_id`'s hold, if it has one.
++/// End `run_id`'s hold, if it has one. A hold that ends is a hand-back: the person had the page,
++/// so its fields may still carry what they typed (EP-1 S4).
+ pub(crate) fn end_hold(run_id: &str) {
++    if take_hold(run_id) {
++        mark_typed_by_person(run_id);
++    }
++}
++
++/// Remove `run_id`'s hold and say whether it had one.
++fn take_hold(run_id: &str) -> bool {
+     held_runs()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .remove(run_id)
++}
++
++/// The Do runs whose page a person has used since the agent last opened one (EP-1 S4). Their
++/// observations leave out the text of entry fields, so a password, one-time code or username the
++/// person typed is not read back to the model. This is defence in depth only: the guarantee is
++/// Quarry's own field-value redaction (Q-2, F-t2-021). Set on a hand-back and on any step the
++/// takeover refused; cleared by the agent's next open and by the run's end.
++fn typed_by_person_runs() -> &'static Mutex<HashSet<String>> {
++    static TYPED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
++    TYPED.get_or_init(Mutex::default)
++}
++
++fn mark_typed_by_person(run_id: &str) {
++    typed_by_person_runs()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .insert(run_id.to_owned());
++}
++
++fn forget_typed_by_person(run_id: &str) {
++    typed_by_person_runs()
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+         .remove(run_id);
+ }
+ 
++fn is_typed_by_person(run_id: &str) -> bool {
++    typed_by_person_runs()
++        .lock()
++        .unwrap_or_else(PoisonError::into_inner)
++        .contains(run_id)
++}
++
+ fn is_held_for_person(run_id: &str) -> bool {
+     held_runs()
+         .lock()
+@@ -622,6 +661,15 @@ impl From<&WireSnapshotTarget> for RefView {
+     }
+ }
+ 
++/// Whether a role is one whose text is what was typed into it, not what the page wrote: after a
++/// hand-back that text may be the person's password or one-time code (EP-1 S4).
++fn is_entry_field(role: &str) -> bool {
++    let role = role.trim();
++    ["textbox", "searchbox", "combobox", "spinbutton"]
++        .iter()
++        .any(|field| role.eq_ignore_ascii_case(field))
++}
++
+ fn clip(value: &str, max_chars: usize) -> String {
+     value.chars().take(max_chars).collect()
+ }
+@@ -634,8 +682,13 @@ fn wrap_untrusted(json: &str) -> String {
+ }
+ 
+ /// Renders one observation for the model, wrapped and capped. References are dropped from the end
+-/// until the rendering fits; the address, title and counts always remain.
+-fn page_view(host: &str, observation: &WireObservation) -> Result<String, Refusal> {
++/// until the rendering fits; the address, title and counts always remain. `typed_by_person` drops
++/// the text of every entry field, and keeps the field itself so the model can still name it.
++fn page_view(
++    host: &str,
++    observation: &WireObservation,
++    typed_by_person: bool,
++) -> Result<String, Refusal> {
+     if observation.challenge.is_some() {
+         return Err(BLOCKED);
+     }
+@@ -647,7 +700,17 @@ fn page_view(host: &str, observation: &WireObservation) -> Result<String, Refusa
+         ),
+         None => (None, None, &[][..]),
+     };
+-    let mut refs: Vec<RefView> = targets.iter().take(MAX_REFS).map(RefView::from).collect();
++    let mut refs: Vec<RefView> = targets
++        .iter()
++        .take(MAX_REFS)
++        .map(|target| {
++            let mut view = RefView::from(target);
++            if typed_by_person && is_entry_field(&view.role) {
++                view.text.clear();
++            }
++            view
++        })
++        .collect();
+     let mut refs_truncated = targets.len() > MAX_REFS;
+     let page_url = clip(&observation.url, MAX_URL_CHARS);
+     let title = clip(
+@@ -757,6 +820,7 @@ async fn open_with(
+             .await
+             .is_some_and(|control| control.person_holds())
+     {
++        mark_typed_by_person(dispatch.run_id);
+         return Err(TAKEN_OVER);
+     }
+     if let Some(previous) = dispatch.state.take_browser_session(dispatch.run_id) {
+@@ -789,6 +853,8 @@ async fn open_with(
+                 // Two opens of one run raced. The session this call did not keep is ended here.
+                 end_session(&replaced, dispatch, Some(quarry), "replaced by a new page").await;
+             }
++            // The agent's own page, on a Quarry run the person never had: its fields are the page's.
++            forget_typed_by_person(dispatch.run_id);
+             Ok(view)
+         }
+         Err(refusal) => {
+@@ -836,6 +902,9 @@ async fn establish(
+     }
+     let fence = validated.allowed_domains().to_vec();
+     let constraints = session_constraints(&fence);
++    // `StartRunParams::new` asks for no Quarry profile, and this loop never sets one: the run gets
++    // an ephemeral profile, so a login the person makes during a takeover ends with the run and its
++    // grant (EP-1 D8).
+     let started = quarry
+         .start_run(StartRunParams::new(
+             dispatch.org_id,
+@@ -863,7 +932,7 @@ async fn establish(
+     if !within_fence(&observation.url, &fence) {
+         return Err(OUTSIDE_FENCE);
+     }
+-    let view = page_view(&target.host, &observation)?;
++    let view = page_view(&target.host, &observation, false)?;
+     Ok((
+         BrowserSession {
+             grant_id: partial.grant_id.clone(),
+@@ -905,6 +974,11 @@ pub(crate) async fn observe(
+             if refusal == SESSION_LOST {
+                 end_current(dispatch, quarry, "the browser run was lost").await;
+             }
++            if refusal == TAKEN_OVER {
++                // The person holds this page, paused or not, so it is read without its fields' text
++                // until the agent opens another.
++                mark_typed_by_person(dispatch.run_id);
++            }
+             return Err(refusal);
+         }
+     };
+@@ -912,7 +986,7 @@ pub(crate) async fn observe(
+         end_current(dispatch, quarry, "the page left its fence").await;
+         return Err(OUTSIDE_FENCE);
+     }
+-    page_view(&session.host, &observation)
++    page_view(&session.host, &observation, is_typed_by_person(dispatch.run_id))
+ }
+ 
+ /// `browser.close`: end the page the run has open and release its grant. A run with no page open is
+@@ -940,11 +1014,27 @@ pub(crate) async fn release_run(
+     org_id: &str,
+     run_id: &str,
+ ) {
+-    end_hold(run_id);
++    let quarry = || QuarryAgentClient::from_env().ok().flatten();
++    release_run_with(state, broker, quarry, bearer, org_id, run_id).await;
++}
++
++/// [`release_run`] with the Quarry client given, built only for a run that holds a page. A run that
++/// ends after a hand-back closes the Quarry run like any other, so the person's login ends with it
++/// and with its revoked grant (EP-1 D8).
++async fn release_run_with(
++    state: &StateStore,
++    broker: &dyn BrowserBroker,
++    quarry: impl FnOnce() -> Option<QuarryAgentClient>,
++    bearer: &str,
++    org_id: &str,
++    run_id: &str,
++) {
++    take_hold(run_id);
++    forget_typed_by_person(run_id);
+     let Some(session) = state.take_browser_session(run_id) else {
+         return;
+     };
+-    let quarry = QuarryAgentClient::from_env().ok().flatten();
++    let quarry = quarry();
+     release(
+         broker,
+         bearer,
+@@ -1445,7 +1535,7 @@ mod tests {
+         .expect("an observation");
+         observation.snapshot = None;
+ 
+-        let text = page_view("example.com", &observation).expect("a page renders");
++        let text = page_view("example.com", &observation, false).expect("a page renders");
+ 
+         assert_eq!(
+             text.matches("</untrusted_page_content>").count(),
+@@ -1466,7 +1556,7 @@ mod tests {
+         }))
+         .expect("an observation");
+ 
+-        let text = page_view("example.com", &observation).expect("a page renders");
++        let text = page_view("example.com", &observation, false).expect("a page renders");
+ 
+         assert!(text.len() <= MAX_OBSERVATION_BYTES, "{} bytes", text.len());
+         assert!(text.contains("\"refs_truncated\":true"), "{text}");
+@@ -1765,4 +1855,267 @@ mod tests {
+         assert_eq!(resumed.reason, "control_returned");
+         assert_eq!(resumed.control_epoch, 2);
+     }
++
++    // ---- EP-1 S4: what the person typed does not come back to the model ----
++    //
++    // The typed-by-person mark is process-wide and keyed by the Do run, so each test below uses a
++    // run id of its own: tests run in parallel, and the S1 tests above mark `run-1`.
++
++    /// What the person typed into the fixture's fields during a takeover.
++    const TYPED_MARKER: &str = "s4-typed-marker";
++
++    fn dispatch_for<'a>(
++        state: &'a StateStore,
++        broker: &'a FakeBroker,
++        run_id: &'a str,
++    ) -> BrowserDispatch<'a> {
++        BrowserDispatch {
++            run_id,
++            ..dispatch(state, broker)
++        }
++    }
++
++    /// An observation of a sign-in form: every entry-field role carries the marker as its text, and
++    /// a link carries page text that must survive.
++    fn form_observation() -> serde_json::Value {
++        let field = |ref_id: &str, role: &str| {
++            json!({ "ref_id": ref_id, "role": role, "name": "Field", "text": TYPED_MARKER })
++        };
++        json!({
++            "run_id": "run-q1",
++            "step": 1,
++            "url": "https://example.com/login",
++            "title": "Sign in",
++            "snapshot": {
++                "snapshot_id": "snap-form",
++                "generation": 4,
++                "targets": [
++                    field("@e1", "textbox"),
++                    field("@e2", "searchbox"),
++                    field("@e3", "ComboBox"),
++                    field("@e4", "spinbutton"),
++                    { "ref_id": "@e5", "role": "link", "name": "Help", "text": "Forgot password" }
++                ],
++                "frames": []
++            },
++            "observed_at": "2026-11-04T00:00:00Z"
++        })
++    }
++
++    /// Mounts a run whose every step, the navigation included, reads the sign-in form, after the
++    /// first `refused` later steps meet the takeover.
++    async fn mount_form_run(server: &MockServer, refused: u64) {
++        Mock::given(method("POST"))
++            .and(path("/v1/agent/runs"))
++            .respond_with(envelope(
++                json!({ "run_id": "run-q1", "lease_id": "lease-q1" }),
++            ))
++            .mount(server)
++            .await;
++        Mock::given(method("POST"))
++            .and(path("/v1/agent/runs/run-q1/step"))
++            .respond_with(envelope(form_observation()))
++            .up_to_n_times(1)
++            .mount(server)
++            .await;
++        if refused > 0 {
++            Mock::given(method("POST"))
++                .and(path("/v1/agent/runs/run-q1/step"))
++                .respond_with(took_over(1))
++                .up_to_n_times(refused)
++                .mount(server)
++                .await;
++        }
++        Mock::given(method("POST"))
++            .and(path("/v1/agent/runs/run-q1/step"))
++            .respond_with(envelope(form_observation()))
++            .mount(server)
++            .await;
++        Mock::given(method("DELETE"))
++            .and(path("/v1/agent/runs/run-q1"))
++            .respond_with(ResponseTemplate::new(200))
++            .mount(server)
++            .await;
++    }
++
++    /// Opens the form page for `run_id` and hands it back, as a resumed takeover pause does.
++    async fn open_and_hand_back(
++        state: &StateStore,
++        broker: &FakeBroker,
++        server: &MockServer,
++        run_id: &str,
++    ) {
++        open(
++            &dispatch_for(state, broker, run_id),
++            &quarry(server),
++            "https://example.com/login",
++        )
++        .await
++        .expect("the page opens");
++        hold_for_person(run_id);
++        end_hold(run_id);
++    }
++
++    #[tokio::test]
++    async fn typed_field_text_dropped_after_handback() {
++        let server = MockServer::start().await;
++        mount_form_run(&server, 0).await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        let run_id = "run-s4-handback";
++        open_and_hand_back(&state, &broker, &server, run_id).await;
++
++        for _ in 0..2 {
++            let text = observe(&dispatch_for(&state, &broker, run_id), &quarry(&server))
++                .await
++                .expect("the page reads");
++
++            assert!(!text.contains(TYPED_MARKER), "a typed value reached the model: {text}");
++            for ref_id in ["@e1", "@e2", "@e3", "@e4"] {
++                assert!(text.contains(ref_id), "the field {ref_id} is still nameable: {text}");
++            }
++            assert!(text.contains("Forgot password"), "page text is kept: {text}");
++        }
++    }
++
++    #[tokio::test]
++    async fn field_text_kept_before_any_takeover() {
++        let server = MockServer::start().await;
++        mount_form_run(&server, 0).await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        let run_id = "run-s4-before";
++        let opened = open(
++            &dispatch_for(&state, &broker, run_id),
++            &quarry(&server),
++            "https://example.com/login",
++        )
++        .await
++        .expect("the page opens");
++
++        let observed = observe(&dispatch_for(&state, &broker, run_id), &quarry(&server))
++            .await
++            .expect("the page reads");
++
++        assert!(opened.contains(TYPED_MARKER), "{opened}");
++        assert!(observed.contains(TYPED_MARKER), "{observed}");
++        assert!(!is_entry_field("link") && !is_entry_field("button"));
++    }
++
++    #[tokio::test]
++    async fn agent_open_clears_typed_by_person() {
++        let server = MockServer::start().await;
++        mount_form_run(&server, 0).await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        let run_id = "run-s4-reopen";
++        open_and_hand_back(&state, &broker, &server, run_id).await;
++        let handed_back = observe(&dispatch_for(&state, &broker, run_id), &quarry(&server))
++            .await
++            .expect("the page reads");
++
++        let reopened = open(
++            &dispatch_for(&state, &broker, run_id),
++            &quarry(&server),
++            "https://example.com/login",
++        )
++        .await
++        .expect("the agent opens a page of its own");
++        let observed = observe(&dispatch_for(&state, &broker, run_id), &quarry(&server))
++            .await
++            .expect("the page reads");
++
++        assert!(!handed_back.contains(TYPED_MARKER), "{handed_back}");
++        assert!(reopened.contains(TYPED_MARKER), "{reopened}");
++        assert!(observed.contains(TYPED_MARKER), "{observed}");
++        assert_eq!(revoked(&broker), ["grant-1"], "the handed-back page was ended");
++    }
++
++    #[tokio::test]
++    async fn a_takeover_refusal_drops_field_text_with_the_pause_off() {
++        let server = MockServer::start().await;
++        mount_form_run(&server, 1).await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        let run_id = "run-s4-refused";
++        open(
++            &dispatch_for(&state, &broker, run_id),
++            &quarry(&server),
++            "https://example.com/login",
++        )
++        .await
++        .expect("the page opens");
++
++        let refusal = observe(&dispatch_for(&state, &broker, run_id), &quarry(&server))
++            .await
++            .expect_err("the person holds the browser");
++        let given_back = observe(&dispatch_for(&state, &broker, run_id), &quarry(&server))
++            .await
++            .expect("the page reads once it is given back");
++
++        assert_eq!(refusal, TAKEN_OVER);
++        assert!(!given_back.contains(TYPED_MARKER), "{given_back}");
++    }
++
++    #[tokio::test]
++    async fn do_loop_never_requests_persistent_profile() {
++        let server = MockServer::start().await;
++        mount_quarry(&server, "https://example.com/", "https://example.com/").await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        open(
++            &dispatch_for(&state, &broker, "run-s4-profile"),
++            &quarry(&server),
++            "https://example.com/",
++        )
++        .await
++        .expect("the page opens");
++
++        let starts: Vec<serde_json::Value> = server
++            .received_requests()
++            .await
++            .unwrap_or_default()
++            .iter()
++            .filter(|request| request.url.path() == "/v1/agent/runs")
++            .map(|request| serde_json::from_slice(&request.body).expect("a JSON start body"))
++            .collect();
++
++        assert_eq!(starts.len(), 1);
++        for key in ["profile_id", "persist_profile"] {
++            assert!(starts[0].get(key).is_none(), "{key} was sent: {}", starts[0]);
++        }
++    }
++
++    #[tokio::test]
++    async fn run_end_closes_quarry_run_after_handback() {
++        let server = MockServer::start().await;
++        mount_form_run(&server, 0).await;
++        let state = StateStore::new();
++        let broker = FakeBroker::default();
++        let run_id = "run-s4-end";
++        open_and_hand_back(&state, &broker, &server, run_id).await;
++        assert!(is_typed_by_person(run_id));
++
++        release_run_with(
++            &state,
++            &broker,
++            || Some(quarry(&server)),
++            "bearer-1",
++            "org-1",
++            run_id,
++        )
++        .await;
++
++        let closes = server
++            .received_requests()
++            .await
++            .unwrap_or_default()
++            .iter()
++            .filter(|request| request.url.path() == "/v1/agent/runs/run-q1")
++            .count();
++        assert_eq!(closes, 1, "the Quarry run that held the person's login is closed");
++        assert_eq!(revoked(&broker), ["grant-1"], "its grant is revoked");
++        assert!(state.browser_session(run_id).is_none());
++        assert!(!is_typed_by_person(run_id) && !is_held_for_person(run_id));
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs b/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs
+index 89efd0693..f8203c10b 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs	
+@@ -1989,6 +1989,8 @@ pub struct StartRunParams<'a> {
+     pub org_id: &'a str,
+     pub constraints: &'a AgentConstraints,
+     pub zdr: bool,
++    /// A persistent Quarry profile to start on. [`Self::new`] leaves it `None`, and the Do loop keeps
++    /// it so: a login made in a Do run's browser must end with that run (EP-1 D8).
+     pub profile_id: Option<String>,
+     pub grant_id: &'a str,
+     pub policy: Option<WireRequestAsk>,
+@@ -3625,6 +3627,24 @@ mod tests {
+         assert!(typed.details.is_null());
+     }
+ 
++    #[test]
++    fn start_run_params_new_asks_for_no_profile() {
++        let constraints = AgentConstraints::default();
++        let params = StartRunParams::new("org_1", &constraints, false, "g");
++        assert_eq!(params.profile_id, None);
++        let body = StartRunRequest {
++            org_id: "org_1".into(),
++            grant_id: "g".into(),
++            constraints: constraints.clone(),
++            profile_id: params.profile_id,
++            zdr: false,
++            policy: None,
++            trace: None,
++        };
++        let json = serde_json::to_value(&body).unwrap();
++        assert!(json.get("profile_id").is_none(), "{json}");
++    }
++
+     #[test]
+     fn start_run_omits_policy_and_trace_when_none() {
+         let constraints = AgentConstraints::default();

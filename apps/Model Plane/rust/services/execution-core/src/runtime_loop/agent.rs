@@ -4517,6 +4517,11 @@ async fn run_rounds(
         ));
         let released_step_replayed = std::sync::atomic::AtomicBool::new(false);
         let released_step_replayed = &released_step_replayed;
+        // EP-1 S3: the person's note on a released call, by step id. The loop frames it onto the
+        // call's result after the call is recorded, so the step record never holds it.
+        let hand_back_notes =
+            std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
+        let hand_back_notes = &hand_back_notes;
         let release_prereserved = release_prereserved.as_deref();
         let outcomes_by_slot: Vec<Option<runtime_loop::StepOutcome>> = {
             let dispatches: Vec<Option<LoopSubagentDispatch<'_, '_>>> = slots
@@ -4782,6 +4787,25 @@ async fn run_rounds(
                             org_id: &req.org_id,
                             run_id: &req.run_id,
                         });
+                    // EP-1 S3: the person's note on a released call. It is read before the
+                    // refusal check, so a refused give-back still carries it to the model.
+                    // Phase 3 frames it onto the call's result once the call is recorded, so the
+                    // step record never holds it.
+                    let person_note = if is_release
+                        && !zdr
+                        && crate::browser_session::is_do_tool(&call.name)
+                        && crate::browser_session::takeover_pause_enabled()
+                    {
+                        released_hand_back_note(ctx).await
+                    } else {
+                        None
+                    };
+                    if let Some(note) = &person_note {
+                        hand_back_notes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(step_id.clone(), note.clone());
+                    }
                     // EP-1 S1: the browser call a takeover paused runs only once the person has given
                     // the browser back. While Quarry still says the person holds it, the call is not
                     // dispatched and the model reads that the person is using the browser. EP-1 S5:
@@ -4814,7 +4838,7 @@ async fn run_rounds(
                                 && crate::browser_session::is_do_tool(&call.name)
                                 && crate::browser_session::takeover_pause_enabled() =>
                         {
-                            match released_hand_back_note(ctx).await {
+                            match person_note.clone() {
                                 Some(note) => {
                                     let quarry =
                                         crate::quarry_agent::QuarryAgentClient::from_env()
@@ -4835,10 +4859,16 @@ async fn run_rounds(
                     };
                     let outcome = if let Some(refusal) = handback_refusal {
                         Some(StepOutcome::failed(&refusal.text()))
-                    } else if let Some((look, _)) = hand_back
-                        .as_ref()
-                        .filter(|_| crate::browser_session::hand_back_answers(&call.name))
-                    {
+                    } else if let Some((look, _)) = hand_back.as_ref().filter(|_| {
+                        browser.as_ref().is_some_and(|browser| {
+                            hand_back_answers_call(
+                                browser.state,
+                                browser.run_id,
+                                &call.name,
+                                &call.arguments_json,
+                            )
+                        })
+                    }) {
                         Some(hand_back_observed(look))
                     } else {
                         Some(
@@ -4922,7 +4952,7 @@ async fn run_rounds(
                         .await,
                     )
                     .map(|dispatched| match hand_back.as_ref() {
-                        Some((look, note)) => after_hand_back(dispatched, look, note),
+                        Some((look, _)) => after_hand_back(dispatched, look),
                         None => dispatched,
                     })
                     };
@@ -4989,14 +5019,14 @@ async fn run_rounds(
 
             // EP-1 S1: a Do browser call refused because the person holds the browser pauses the run
             // on that call (switch on). The approval is the give-back: once it is consumed, the call
-            // runs again. A released call that meets the takeover again is not paused a second time,
-            // since its approval is spent and the pause would collapse onto it; the model reads the
-            // refusal and may ask again. A run that keeps no state holds no approval: it is refused.
+            // runs again. A released call that finds the person still holding the browser pauses
+            // again, on its own release step: each release runs under a later segment than the step
+            // it resumes, so the new approval is keyed apart from every earlier pause of the run.
+            // The person is asked again rather than the model told to wait. A run that keeps no
+            // state holds no approval: it is refused.
             let human_assist = if crate::browser_session::takeover_pause_enabled()
                 && ctx.depth == 0
-                && !ctx.release.as_ref().is_some_and(|release| {
-                    release.covers(&step_id, &call.name, &call.arguments_json)
-                }) {
+            {
                 crate::browser_session::takeover_step(
                     &call.name,
                     &outcome.error,
@@ -5221,14 +5251,18 @@ async fn run_rounds(
                 grounded = true;
             }
 
+            // EP-1 S3: the person's note, framed after the result it came with. The record above
+            // kept the result alone.
+            let person_note = hand_back_notes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(step_id.as_str());
+            let (output, error) =
+                model_result(outcome.output, outcome.error, person_note.as_deref());
             outcomes.push(ToolStepResult {
                 name: call.name.clone(),
-                output: outcome.output,
-                error: if outcome.error.is_empty() {
-                    None
-                } else {
-                    Some(outcome.error)
-                },
+                output,
+                error,
             });
         }
 
@@ -10182,6 +10216,19 @@ fn hand_back_note_of(approval: &pb::Approval, run_id: &str) -> Option<String> {
     is_hand_back.then(|| approval.decision_reason.clone())
 }
 
+/// Whether the hand-back's one look answers the paused call (EP-1 S3, S4): an open of the page the
+/// run holds is answered by it. The held host is read here, from the run's own session, so
+/// `run_rounds` keeps no binding of it across its awaits.
+fn hand_back_answers_call(
+    state: &crate::state::StateStore,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+) -> bool {
+    let held_host = state.browser_session(run_id).map(|session| session.host);
+    crate::browser_session::hand_back_answers(tool_name, tool_input, held_host.as_deref())
+}
+
 /// A paused observe answered by the hand-back's one look (EP-1 S3).
 fn hand_back_observed(
     look: &Result<String, crate::browser_session::Refusal>,
@@ -10193,24 +10240,42 @@ fn hand_back_observed(
 }
 
 /// The paused call's outcome after a hand-back (EP-1 S3): a call that completed is read after the
-/// fresh look and the note; a failed one keeps its refusal alone, so the closed refusal text the
-/// loop and the retry classifier read is unchanged. A look that failed still carries the note.
+/// fresh look. A failed one, or one whose look failed, is kept as it ran, so the closed refusal
+/// text the loop and the retry classifier read is unchanged. The note is not added here: it is
+/// framed onto the result the model reads (see [`model_result`]), so the recorded result never
+/// holds it.
 fn after_hand_back(
     dispatched: runtime_loop::StepOutcome,
     look: &Result<String, crate::browser_session::Refusal>,
-    note: &str,
 ) -> runtime_loop::StepOutcome {
-    if dispatched.status != "completed" {
-        return dispatched;
+    match look {
+        Ok(view) if dispatched.status == "completed" => {
+            let output = format!("{view}\n{}", dispatched.output);
+            runtime_loop::StepOutcome {
+                output,
+                ..dispatched
+            }
+        }
+        _ => dispatched,
     }
-    let output = match look {
-        Ok(view) => format!("{view}\n{}", dispatched.output),
-        Err(_) => crate::browser_session::with_person_note(dispatched.output.clone(), note),
+}
+
+/// The model's copy of a call's result (EP-1 S3): the person's note, when a give-back carried one,
+/// is framed after the result it came with. It is applied once the call is recorded, so the step
+/// record keeps the result alone. A blank note adds nothing.
+fn model_result(
+    output: String,
+    error: String,
+    person_note: Option<&str>,
+) -> (String, Option<String>) {
+    let (output, error) = match person_note {
+        Some(note) if error.is_empty() => {
+            (crate::browser_session::with_person_note(output, note), error)
+        }
+        Some(note) => (output, crate::browser_session::with_person_note(error, note)),
+        None => (output, error),
     };
-    runtime_loop::StepOutcome {
-        output,
-        ..dispatched
-    }
+    (output, (!error.is_empty()).then_some(error))
 }
 
 #[cfg(test)]
@@ -10256,27 +10321,144 @@ mod browser_hand_back {
     }
 
     #[test]
-    fn a_redispatched_call_is_read_after_the_look_and_the_note() {
-        let look = Ok("view\n<person_note>n</person_note>".to_owned());
+    fn a_redispatched_call_is_read_after_the_look() {
+        let look = Ok("view".to_owned());
         let closed = after_hand_back(
             StepOutcome::completed(r#"{"ok":true,"closed":true}"#.to_owned()),
             &look,
-            "n",
         );
-        assert_eq!(
-            closed.output,
-            "view\n<person_note>n</person_note>\n{\"ok\":true,\"closed\":true}"
-        );
+        assert_eq!(closed.output, "view\n{\"ok\":true,\"closed\":true}");
 
         let without_look = after_hand_back(
             StepOutcome::completed("out".to_owned()),
             &Err(crate::browser_session::SESSION_LOST),
-            "n",
         );
-        assert_eq!(without_look.output, "out\n<person_note>n</person_note>");
+        assert_eq!(without_look.output, "out");
 
         let failed = StepOutcome::failed(&crate::browser_session::SESSION_FAILED.text());
-        assert_eq!(after_hand_back(failed.clone(), &look, "n"), failed);
+        assert_eq!(after_hand_back(failed.clone(), &look), failed);
+    }
+
+    /// EP-1 S3: the person's note reaches the model framed after the result, and the result the
+    /// loop records never holds it.
+    #[test]
+    fn the_person_note_is_framed_for_the_model_and_never_recorded() {
+        let recorded = after_hand_back(
+            StepOutcome::completed("out".to_owned()),
+            &Ok("view".to_owned()),
+        );
+        assert!(!recorded.output.contains("person_note"), "{}", recorded.output);
+
+        assert_eq!(
+            model_result("out".to_owned(), String::new(), Some("Go on.")),
+            ("out\n<person_note>Go on.</person_note>".to_owned(), None)
+        );
+        assert_eq!(
+            model_result("out".to_owned(), String::new(), None),
+            ("out".to_owned(), None)
+        );
+        assert_eq!(
+            model_result("out".to_owned(), String::new(), Some(" \n ")),
+            ("out".to_owned(), None),
+            "a blank note adds no line"
+        );
+    }
+
+    /// EP-1 S3: a refused call still carries the note, and its refusal text stays first, so the
+    /// classifiers that read the refusal see the text they always did.
+    #[test]
+    fn a_refused_call_still_carries_the_note_after_its_refusal() {
+        let refusal = crate::browser_session::SESSION_LOST.text();
+        assert_eq!(
+            model_result(String::new(), refusal.clone(), Some("Go on.")),
+            (
+                String::new(),
+                Some(format!("{refusal}\n<person_note>Go on.</person_note>"))
+            )
+        );
+        assert_eq!(
+            model_result(String::new(), refusal.clone(), None),
+            (String::new(), Some(refusal))
+        );
+    }
+
+    /// EP-1 S1: a Do browser call that finds the person still holding the browser pauses again on
+    /// its release's own step. Each release runs under the segment after the step it resumes, so
+    /// every pause the run makes is keyed by a step that no earlier pause of the run used.
+    #[test]
+    fn a_re_pause_on_a_released_browser_call_is_keyed_apart_from_every_earlier_pause() {
+        let authority = mp_contracts::loop_fold::Authority {
+            mode: "ask".to_owned(),
+            plan_mode: false,
+            autonomy_rung: String::new(),
+            space_id: String::new(),
+            min_privacy_tier: 0,
+            provider_hint: String::new(),
+            tool_names: Vec::new(),
+            max_rounds: 4,
+        };
+        let mut paused_step = "tool_1_open-1".to_owned();
+        let mut keys = std::collections::BTreeSet::from([paused_step.clone()]);
+        for _ in 0..3 {
+            let consumed = runtime_loop::resume::Consumed {
+                tool_name: crate::browser_session::OBSERVE_TOOL.to_owned(),
+                tool_input_json: "{}".to_owned(),
+                step_id: paused_step.clone(),
+                tools: Vec::new(),
+                mode: "ask".to_owned(),
+                snapshot_authority: authority.clone(),
+                snapshot_digest: String::new(),
+                effective: authority.clone(),
+                segment: runtime_loop::resume::next_segment_no(&paused_step),
+                revision: 0,
+                original_action_fingerprint: String::new(),
+            };
+            let (_call, released_step, _release) = released_call(
+                crate::permission::RunGate::for_run("org-repause", "run-repause"),
+                &consumed,
+            )
+            .expect("a Do browser call is releasable");
+            assert!(
+                keys.insert(released_step.clone()),
+                "{released_step} keys an earlier pause of the run"
+            );
+            paused_step = released_step;
+        }
+        assert_eq!(keys.len(), 4, "the first pause and three re-pauses");
+    }
+
+    /// EP-1 S3, S4: the look answers an open of the page the run itself holds, and nothing a run
+    /// does not hold.
+    #[test]
+    fn the_look_answers_an_open_of_the_page_its_own_run_holds() {
+        let state = crate::state::StateStore::new();
+        state.replace_browser_session(
+            "run-held",
+            crate::browser_session::BrowserSession {
+                grant_id: "grant-1".to_owned(),
+                quarry_run_id: "run-q1".to_owned(),
+                lease_id: "lease-q1".to_owned(),
+                host: "example.com".to_owned(),
+                fence: vec!["example.com".to_owned()],
+            },
+        );
+        let open = r#"{"url":"https://example.com/login"}"#;
+        assert!(hand_back_answers_call(
+            &state,
+            "run-held",
+            crate::browser_session::OPEN_TOOL,
+            open
+        ));
+        assert!(
+            !hand_back_answers_call(&state, "run-other", crate::browser_session::OPEN_TOOL, open),
+            "another run's page is not answered"
+        );
+        assert!(hand_back_answers_call(
+            &state,
+            "run-held",
+            crate::browser_session::OBSERVE_TOOL,
+            "{}"
+        ));
     }
 }
 
@@ -17506,7 +17688,7 @@ mod tests {
     #[test]
     fn only_a_takeover_pause_waits_the_assist_ttl() {
         let assist = crate::browser_session::assist_ttl_seconds();
-        assert!((300..=3600).contains(&assist), "{assist}");
+        assert!((300..=1800).contains(&assist), "{assist}");
         assert_eq!(approval_ttl_seconds(CauseCode::BrowserHumanAssist), assist);
         for cause in CauseCode::ALL {
             if cause != CauseCode::BrowserHumanAssist {

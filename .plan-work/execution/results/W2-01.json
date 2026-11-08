@@ -1,0 +1,685 @@
+{
+ "batchId": "W2-01",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS26-S3",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/ooxml.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run --pool=threads src/features/chat/components/chat-markdown.test.ts src/features/chat/lib/chat-export/ooxml.test.ts src/features/chat/lib/safe-href.test.ts",
+     "outcome": "3 files, 102 tests passed (run before and after the ooxml import-extension fix). The default forks pool timed out starting its worker on this host, so the threads pool was used."
+    },
+    {
+     "command": "pnpm vitest run --pool=threads src/features/chat/lib/safe-href.test.ts",
+     "outcome": "7 tests passed (all new helper cases: javascript:, JaVaScRiPt:, tab/newline/control chars, data:, file:, blob:, vbscript:, //evil, relative, http/https/mailto accepted, trimming)"
+    },
+    {
+     "command": "pnpm vitest run --pool=threads (ChatMessages.*, ChatPanels.test.tsx, ChatLiveRunPanel.test.tsx, chat-markdown.incremental.test.ts, chat-locale-smoke.test.tsx, chat-preview-truncation.test.ts, lib/chat-export, lib/chat-accessibility.test.ts)",
+     "outcome": "28 files, 423 tests passed"
+    },
+    {
+     "command": "pnpm vitest run --pool=threads src/features/chat/components/ChatPanels.test.tsx src/features/chat/components/chat-markdown.test.ts (after WebSourceCard Show refactor)",
+     "outcome": "2 files, 158 tests passed"
+    },
+    {
+     "command": "node --experimental-strip-types --input-type=module import of chat-export/ooxml.ts",
+     "outcome": "loads under plain Node; isSafeExportHref('javascript:x')=false, isSafeExportHref(' https://a.b ')=true, isSafeExportHref('mailto:a@b.c')=true"
+    },
+    {
+     "command": "pnpm typecheck (tsc -b)",
+     "outcome": "33 errors, all in src/shared/api/quarry-client.ts (21) and src/features/support/components/RemoteSupportPage.tsx (12); none in a touched file. No HEAD copy was built, so the failing set was not diffed against HEAD."
+    },
+    {
+     "command": "pnpm eslint on safe-href.ts, safe-href.test.ts, ooxml.ts and the touched components",
+     "outcome": "0 errors. The one warning this slice introduced (ChatPanels.tsx WebSourceCard, components-return-once) was fixed; remaining warnings sit on lines this slice did not touch."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the 8 files in files_changed as one WS26-S3 change (the lead commits; nothing was staged by this slice).",
+    "Optional depth proof, not run: start a second dev server (pnpm dev --port 5174 --strictPort in the worktree), send a chat message containing [click](javascript:alert(1)) and a citation with a data: URL, then confirm no a[href^=\"javascript\"] or a[href^=\"data\"] exists in the DOM and capture a screenshot."
+   ],
+   "deviations": [
+    "No safeHref export: the row names safeHref, but the render sites use isSafeLinkHref directly so no unused export is left behind.",
+    "The user-message URL chip (ChatMessages, plan ~1010; now the link() href in the user bubble) and the bare-URL autolink in parseInline were left unguarded on purpose: USER_MESSAGE_URL and the bare-URL pattern only match https?://, so a guard there cannot fire. The row lists them, so the lead should know this was a conscious choice.",
+    "The evidence-item link in ChatMessages (plan ~3719) returns the existing inert fallback markup for an unsafe href, now in a span with the blocked class and title, instead of a generic fallback.",
+    "isSafeExportHref now also refuses control characters, a small behaviour change for export: a URL with an embedded tab or newline is now kept as plain text. Existing ooxml tests still pass.",
+    "Line numbers in the plan drifted, so every site was found by name, not by number."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/styles/global.css (optional: a rule for .verevon-chat-link-blocked; not edited, outside ownership)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not run: start a second dev server (pnpm dev --port 5174 --strictPort in the worktree), send a chat message with [click](javascript:alert(1)) and a citation with a data: URL, confirm no a[href^=\"javascript\"] or a[href^=\"data\"] in the DOM, and capture a screenshot.",
+     "Commit the 8 files (2 new, 6 modified) as one WS26-S3 change; nothing is staged or committed by this verifier.",
+     "Decide the citation-chip sink (chat-media-markdown.tsx around line 1238): add the same isSafeLinkHref guard now, or record it as a named WS26 follow-up before the chip is treated as covered.",
+     "Add the .verevon-chat-link-blocked rule to src/styles/global.css (outside this slice's ownership) if a visible blocked style is wanted."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "InlineCitationMarker in chat-media-markdown.tsx (around line 1237, href={entry.citation.url}) renders citation URLs as anchors with no scheme allowlist, and the citation URL is taken without a scheme check in chat-normalizers.ts (around line 1642); a javascript: citation URL would still become a clickable link, so confirm upstream normalisation or guard it with isSafeLinkHref (it is outside this slice's site list)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test asserts that WebSourceCard, the reasoning-popover citation, the evidence-item link or the ChatLiveRunPanel step URLs emit the inert span for an unsafe URL; only the parseInline markdown path has DOM negatives in chat-markdown.test.ts."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The plan's DoD evidence (second dev server on port 5174, a message with [click](javascript:alert(1)) and a data: citation, DOM inspection plus screenshot) was not run; it is a lead or depth step."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The class verevon-chat-link-blocked has no rule in apps/Frontend Plane/verevonv3/src/styles/global.css, so a blocked link renders as plain text with only a title tooltip; a styling rule belongs in that stylesheet, which is not in this slice's ownership."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The default vitest forks pool timed out starting its worker on this host (twice); --pool=threads runs the same suites reliably, and the lead's harness should use the same flag."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "The citation chip in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx (around line 1238, href={entry.citation.url}) renders citation URLs as anchors with no isSafeLinkHref guard, and the citation URL is taken from search payloads without a scheme check (src/shared/api/chat-client.ts around lines 1003 and 1413), so a javascript: citation URL stays clickable; the row's site list omits this sink, so it is not a required fix here, but it should get the same one-line guard in this slice or an immediate follow-up."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DOM test asserts that the inert span is emitted by WebSourceCard (ChatPanels.tsx), the ReasoningPopover citation link, the TaskStep evidence link (ChatMessages.tsx) or the two ChatLiveRunPanel step-URL sites; only the parseInline markdown path has DOM negatives in chat-markdown.test.ts."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The plan's DoD live proof (second dev server on port 5174 with --strictPort, a message containing [click](javascript:alert(1)) and a data: citation, DOM inspection and screenshot) has not been run; it is a lead or depth step."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The row names a safeHref export in safe-href.ts alongside isSafeLinkHref, but only isSafeLinkHref was created; the implementer's reasoning (no unused export) is sound, so confirm the row name is acceptable or update the ledger."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The class verevon-chat-link-blocked has no rule in src/styles/global.css (outside this slice's ownership), so a blocked link renders as plain text with only a title tooltip."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "isSafeExportHref now also refuses C0/DEL control characters, an intentional behaviour change for export that is documented in the implementer report and covered by the existing ooxml tests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The default vitest forks pool timed out on this host, so --pool=threads was needed for the plan's commands; the lead's harness should use the same flag."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "WS26-S3 (safe links on screen) is built and unit-tested with no switch: it is an unconditional render guard. The shared helper apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.ts exports isSafeLinkHref. It allows only http:, https: and mailto: after trim, refuses any C0/DEL control character, and fails closed on everything else. The export allowlist in chat-export/ooxml.ts is now an alias of it (import uses '../safe-href.ts' because ooxml.ts must load under plain Node). Unsafe model-authored targets render an inert span with class verevon-chat-link-blocked and an i18n title at: the [text](target) branch in chat-media-markdown.tsx parseInline; the citation link and the evidence-item link in ChatMessages.tsx; the reasoning-popover citation; the live-run step URLs in ChatLiveRunPanel.tsx (two sites); and WebSourceCard in ChatPanels.tsx (card body factored once; the in-app Knowledge link at ~528 is untouched). The plan's line numbers had drifted, so sites were matched by name. Lead should commit the 8 files listed in files_changed (2 new, 6 modified). Nothing was pushed, staged or committed by me."
+  },
+  {
+   "id": "WS18-S0",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 line-ending check on apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md (CRLF count vs LF count, BOM check)",
+     "outcome": "345 CRLF / 345 LF, no BOM; CRLF preserved after the round-2 edit"
+    },
+    {
+     "command": "git diff --ignore-cr-at-eol --stat on the ADR",
+     "outcome": "34 insertions, addendum only; the gap-closure plan was not touched this round"
+    },
+    {
+     "command": "Grep compose_authored_instructions under apps/Model Plane/rust/services/model-gateway/src",
+     "outcome": "callers confirmed: run_context.rs:434 (the composer call), sse.rs:6460 (the wrapper); the composer's layer order is platform, org, Space, persona (only when persona_enabled), agent (run_context.rs:146-176)"
+    },
+    {
+     "command": "no cargo or go tests run",
+     "outcome": "docs-only slice, no code changed; nothing to re-run"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: in the WS18-S0 block (the paragraph starting '**Status: implemented (decision records only; the build is WS18-S1 to S5).**'), replace the sentence 'Instruction order is unchanged (ADR-0003: platform, org, Space, agent).' with 'Instruction order is unchanged (ADR-0003): platform, org, Space, the user's personal instructions when the per-thread toggle is on, then a mentioned agent; this is the order `compose_authored_instructions` already implements.' Keep the rest of the block as in the round-1 lead_todo (CRLF, newest first, directly above '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)')."
+   ],
+   "deviations": [
+    "The round-1 deviations still apply: OD19 is marked superseded in part (not wholly), and the ledger entry is a lead_todo rather than an edit because the ledger is a shared file.",
+    "The new text cites persona.md §6.3, copied from the composer's own comment in run_context.rs. I did not verify that persona.md exists at a repo path, so the lead should check the reference before the ledger block is applied."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The ledger entry is absent from the worktree: grep of apps/Model Plane/docs/decisions/ledger.md finds no WS18 block. The lead must insert the full WS18-S0 block (the round-1 lead_todo text, which is not in this report) and must apply the round-2 sentence change. The round-2 lead_todo presumes a block that is not in the file, so it cannot be applied as a one-line replace alone. The replacement order sentence must match the addendum: platform, org, Space, the user's personal instructions when the per-thread toggle is on, then a mentioned agent.",
+     "The row's DoD says the three docs are merged and linked from the S4 PR. Merge and link are lead and PR actions that this verifier cannot confirm.",
+     "The ADR-0003 sign-off on the order (see the P1 finding) is still open and is an owner action."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The composer's persona layer (persona.md §6.3) is not in the ADR-0003 text as the ADR itself describes it; the owner should decide whether ADR-0003 gets a persona line in its own docs pass. This round deliberately did not change ADR-0003."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "DEC-28 sign-off of the ADR-0003 addendum is still not recorded anywhere (carried over from round 1)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CHAT_GAP_CLOSURE_PLAN_2026-10-01.md still refers to I21 at the wave-6 build order line, the spaces.rs step order, and the OD19 Recommended text (carried over from round 1)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The ADR addendum says 'Order unchanged' and 'makes no ADR-0003 change', but ADR-0003's own body (apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md around line 134) lists platform, org, Space, agent with no personal-instructions layer, while the addendum and composer (run_context.rs:146-176) add the personal layer between Space and agent; the owner or ADR-0003 sign-off must reconcile this before the S1 behaviour is switched on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The addendum cites 'persona.md §6.3', but apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/chat-wave2-specs-2026-09-28/persona.md has no §6.3 (only '## 6. Genuine owner decisions'); the same dangling cite is copied from the composer comment in run_context.rs and should be corrected in both."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The addendum header says 'Status: decided', but DEC-28 sign-off of the ADR-0003 addendum is not recorded anywhere; it rests on the default-taken decision and should carry an explicit sign-off line later."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "OD19 is marked 'Superseded in part' rather than superseded as the row states; this is the more accurate reading because OD19 has other open items, so the row wording should be read as 'superseded for the projects item'."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CHAT_GAP_CLOSURE_PLAN_2026-10-01.md still refers to I21 in the OD19 Recommended text and elsewhere (carried over from earlier rounds); this is cleanup, not a blocker."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Round 2 fixes applied to the ADR addendum only. (1) The 'Order unchanged' bullet now states the order the composer implements: platform, org, Space, the user's personal instructions when the per-thread toggle is on, then a mentioned agent's own character. It says the addendum records the existing composer's order and makes no ADR-0003 change, and that where another document lists the order differently, this order is the one to implement. (2) The 'One composer' bullet now names the current callers (run_context.rs and sse.rs) and calls scheduled runs (WS20 D8) a future caller instead of listing them as present. The ledger block (not edited, shared file) must change its order phrase to match, see lead_todo. The gap-closure plan edits from round 1 are unchanged and still stand."
+  },
+  {
+   "id": "WS19-S0",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/good_budget.docx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/broken_missing_rel_target.docx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/good_budget.xlsx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/good_deck.pptx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/good_page.pdf",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/broken_truncated_zip.xlsx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/broken_formula_missing_sheet.xlsx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/broken_literal_div0.xlsx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/broken_empty_deck.pptx",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/office/broken_zero_pages.pdf",
+    "apps/Model Plane/scripts/verify-office-render.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "bash -n \"apps/Model Plane/scripts/verify-office-render.sh\" (after the profile edit)",
+     "outcome": "passed (syntax only; the script was not executed because it needs docker, which this slice may not run)"
+    },
+    {
+     "command": "python3 -I zipfile.testzip and relationship-target check on good_budget.docx and broken_missing_rel_target.docx (scratch generator regenerated the corpus; only the two docx bytes changed)",
+     "outcome": "passed: good_budget.docx has no relationship in word/_rels/document.xml.rels and every target resolves; broken_missing_rel_target.docx has exactly one missing target, word/media/absent.png, as intended"
+    },
+    {
+     "command": "Simulated the profile heredoc (unquoted, MACRO_LEVEL=3, LINK_UPDATE=0) and parsed the output as XML",
+     "outcome": "passed: well-formed; values 3, 0, 0, 0 for MacroSecurityLevel and the Writer, Calc and Impress Link keys"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib sandbox",
+     "outcome": "passed: 33 passed, 0 failed, 1231 filtered out (no Rust source changed)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the live spike from the worktree: bash \"apps/Model Plane/scripts/verify-office-render.sh\" (docker, lead only). Gates: good files convert, cold start <= 25 s, peak RSS <= 1 GiB, only lo in the netns, /skills and root read-only. The info line now prints the macro and link settings for the one-page result.",
+    "Confirm the registry values against the installed LibreOffice before trusting the link-update claim: Link = 0 is taken as Never, and the Impress Content/Update path is assumed, not verified. A failed or no-op setting should be recorded as a finding, not hidden.",
+    "Record the one-page result in MODEL_PLANE_STATUS.md and the D5 entry in docs/decisions/ledger.md (lead-owned files).",
+    "Commit the two new paths and the fixtures directory (untracked today). The corpus generator stays out of the repo."
+   ],
+   "deviations": [
+    "The broken docx (broken_missing_rel_target.docx) was also regenerated, so its dangling styles relationship is gone too. This was a side effect of the shared generator and leaves exactly the intended single defect, the missing media target.",
+    "The corpus generator (gen_office_corpus.py) lives in the scratchpad, not the repo, and was edited there. The repo fixtures are the only committed artifact."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/MODEL_PLANE_STATUS.md (the one-page spike result; lead-owned)",
+    "apps/Model Plane/docs/decisions/ledger.md (the D5 entry; lead-owned)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live run of bash \"apps/Model Plane/scripts/verify-office-render.sh\" (docker, lead only): the four good fixtures convert to a %PDF, cold start <= 25 s, peak RSS <= 1 GiB, the sandbox network has only lo, and /skills and the root are read-only.",
+     "One-page spike result recorded in apps/Model Plane/MODEL_PLANE_STATUS.md (lead-owned): image MB delta on the real image, cold and warm seconds, peak RSS, /skills mount result, and macro and link-update settings with evidence of effect.",
+     "D5 entry in apps/Model Plane/docs/decisions/ledger.md (lead-owned): LibreOffice in the sandbox image or sidecar, decided from the live result.",
+     "Confirm the LibreOffice registry values (MacroSecurityLevel 3, Link 0 for Writer, Calc, Impress) against the installed package and record any no-op setting as a finding.",
+     "Commit of the script and fixtures directory (lead only; the verifier does not commit)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The LibreOffice-under-bwrap spike has still not been run. Cold start, RSS, the /skills read-only result and the D5 decision are all unmeasured."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The LibreOffice registry values are unverified. MacroSecurityLevel 3 (highest) and Link 0 (Never) for Writer, Calc and Impress come from memory of LibreOffice's officecfg schema, not from the installed package. A wrong value would make the macro/link DoD line false while the info line still prints. The live run must check the effect, not just the file."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The good docx is a minimal OOXML with no styles, settings or fontTable part. LibreOffice should open it, but a rejection would look like a D5 failure. Check it in the live run as a fixture defect first."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The profile dir is pre-created with only registrymodifications.xcu. The cold run still includes LibreOffice's first-run profile init, which is what the 25 s gate measures, so the budget is not understated. Confirm this on the live run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Peak RSS still comes from /usr/bin/time %M and should be cross-checked against /proc VmHWM before the 1 GiB gate is trusted. Fonts are still only liberation and dejavu, so S4 font substitution and image size will differ."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The LibreOffice-under-bwrap spike has not been run live, so the cold start (25 s), peak RSS (1 GiB), /skills read-only and netns-only-lo results and the D5 decision are all unmeasured; the lead must run bash \"apps/Model Plane/scripts/verify-office-render.sh\" with docker."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The macro (MacroSecurityLevel 3) and link-update (Link 0) registry settings written at apps/Model Plane/scripts/verify-office-render.sh:119-132 are only printed as info; nothing checks that LibreOffice honours them, and the Impress Content/Update path is unverified against the installed package, so the one-page result must show the effect (for example a linked-image or macro document) and not just the file."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The spike container runs --privileged (script line 36), while the production execution-core image runs without CAP_SYS_ADMIN and with the default seccomp profile, so a pass here does not prove the production constraints; the D5 result must state this caveat (the same pattern is used by verify-sandbox-isolation.sh)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Peak RSS comes from /usr/bin/time %M on the bwrap child, which reports the largest single waited process rather than the sum over the soffice tree; cross-check against /proc VmHWM or cgroup memory.peak before trusting the 1 GiB gate."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The image-size delta is measured with df inside a throwaway debian:bookworm-slim container (script lines 48-57), not on the Model Plane execution-core image, so it is not the image MB delta the plan DoD asks for; record it as an approximation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The good_budget.docx fixture has no styles, settings or fontTable part; if LibreOffice rejects it in the live run, treat it as a fixture defect first (the implementer already flagged this)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Lead-owned files still needed: apps/Model Plane/MODEL_PLANE_STATUS.md (one-page spike result) and apps/Model Plane/docs/decisions/ledger.md (D5 entry), plus the commit of the script and the fixtures directory, which are untracked today."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The worktree holds many uncommitted changes from other slices (git status shows them outside this slice's ownership set), so the lead must stage only apps/Model Plane/scripts/verify-office-render.sh and apps/Model Plane/rust/services/execution-core/tests/fixtures/office/ when committing WS19-S0."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority"
+   ],
+   "notes": "Both required fixes are applied. (1) The good docx no longer has the dangling styles relationship. The corpus generator is in the scratchpad, and I removed the styles relationship there and regenerated; only the two docx files changed bytes, so I copied both. The broken docx now has exactly one defect, the missing media target, which is the one its name says. The other eight fixtures are byte-identical to the regenerated output. (2) The SPIKE block writes /work/lo-profile/user/registrymodifications.xcu before the first conversion, after the existing profile-exists check. It sets MacroSecurityLevel 3 and Link 0 for Writer, Calc and Impress, chowns the profile to 10001, and prints an info line with the values. The live spike was NOT run (docker is the lead's). The tree is still untracked: nothing was committed, staged, pushed or reset. The user's request to commit and merge all Model Plane work is the lead's step, so I left it to the lead."
+  },
+  {
+   "id": "WS20-S0",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/DEV_AUTHORITY_HANDOFF_MATRIX.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/plans/model-plane-chat-build-plan-2026-10-14.md"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 ws20s0_fix.py (scratchpad script): asserts each file is all CRLF before editing, asserts each anchor occurs exactly once, rewrites every line as CRLF",
+     "outcome": "ok on both files; all three required fixes applied"
+    },
+    {
+     "command": "git diff --stat and git diff on the two owned files, read with cat -A",
+     "outcome": "matrix 9 lines changed, plan 10 lines changed; the diff shows only the intended lines and no whole-file rewrite"
+    },
+    {
+     "command": "No test command applies: docs-only slice (plan DoD n/a)",
+     "outcome": "not run"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert this block immediately before the line '## 2026-10-23 - Pending items dock above the composer in one tray (WS14-S1)'. Block text: '## 2026-10-23 - Scheduled runs: the stored-consent read contract amends the draft-only ruling (WS20-S0, ADR-0006)' then a status paragraph: 'Status: proposed (docs only; flips to implemented after WS20 S6 evidence).' The owner's 2026-09-28 ruling 'scheduled runs are draft-only' is amended, not reversed (plan DEC-16 (b)). v1 still gives a scheduled run no effect: a schedule may carry a stored-consent contract whose tools are class read only; browser, process, shell, code, MCP, memory or skill write, schedule tools and any tool with an approval floor are never delegable. Control signs contract_digest, contract_expires_at and the class ceiling; capability-core verifies the body against the tool registry. Expiry is required (default 30 days, maximum 90, SCHEDULE_CONTRACT_MAX_DAYS); renewal is a new consent, never a bare re-enable. A write the run wants is withheld and shown in the transcript with its argument digest, and the owner continues in chat, as a draft does today. Rejected: a generic task-runner principal (DEC-16 (c), the shortcut in docs/system-run-context.md) and the token-exchange shortcut (D10). A scheduled run keeps its service identity; no human bearer is minted or stored; its loop is one new branch of ExecuteScheduledStep, not a third loop. ZDR: the 2026-10-03 own-connection waiver clause 'never scheduled or unattended' stays true. Every schedule decision refuses ZDR, and the result and agent lanes refuse ZDR and waived runs before they claim. Contracts and notifications carry tool names, dates and digests, never content. S4-S8 wait on the owner's review of this entry (decision D1, plan default taken). Each WS20 slice adds its own switch, default off; this entry adds none.'. Place it with the 2026-10-23 entries; the file is headed 'Newest first' but is not in that order.",
+    "Commit (lead): docs(model-plane): record the WS20 stored-consent contract as ADR-0006 and add the handoff rows. Two owned files plus the ledger block above.",
+    "Owner: D1 (DEC-16 (b)) still needs an explicit owner yes before S4 starts; the default was taken, not ruled."
+   ],
+   "deviations": [
+    "Round 2 scope only: three fixes, no other edits. Round 1 deviations still apply: plan anchors found by text, ADR-0006 recorded as a ledger entry, not a new ADR file, and the S5 row's v3 vs v2 step-claim mismatch is left to the plan (matrix follows S5 v2)."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead must apply the shared-edit to C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md: insert the ADR-0006 block before the heading '## 2026-10-23 - Pending items dock above the composer in one tray (WS14-S1)' at line 184. The file is fully CRLF (5023 of 5023 lines), so the inserted lines must be CRLF. The S0 row's 'ledger entry' deliverable is absent from the worktree until this happens.",
+     "Owner decision D1 (DEC-16 (b), amend not reverse) is answered only by the taken default; the S0 DoD says 'D1 answered', so an explicit owner yes is required before S4 starts.",
+     "The ZDR clause restatement required by the S0 row ('never scheduled or unattended' stays true) exists only in the lead_todo ledger block; grep of the matrix finds no ZDR text, so this closes only when the lead applies the block.",
+     "Commit the two owned files and the ledger block together so the plan and matrix references to the 2026-10-23 ADR-0006 entry are not dangling.",
+     "Optional, not required by the row: a dated Build ledger entry for WS20-S0 is absent from the plan's Build ledger at the end of the file (docs-only, so no evidence row applies)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner must explicitly accept DEC-16 (b) before WS20 S4 starts; the default was taken, not ruled."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Plan section 2.5 ADR-0006 row now points at the ledger; the earlier 'UNATTENDED_RUN_AUTHORITY_ADR' name survives only in .plan-work notes (read-only for this slice)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The plan's S0 row says the matrix holds 'v3' step-decision rows while S5 defines v2 claims; one should be corrected in the plan before S5 is built."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The lead_todo ledger block says 'Each WS20 slice adds its own switch, default off', but plan S8 sets CRON_CONTRACT_GUARDS_ENABLED to default true and S3 defaults VITE_SCHEDULE_RESULTS on once S1 is on; the lead should narrow the sentence to the authority switches S4-S6 before pasting it, and S8's default-true guard needs a decision before S8 is built."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The matrix bullet says a missing contract 'fails closed' with failed_precondition and no inference at step, but plan S5 makes EXECUTION_CORE_SCHEDULED_CONTRACT_REQUIRED default false, so by default a contracted schedule whose step context lacks the contract still takes the legacy tool-free lane; reword the bullet or make S5 refuse unconditionally."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The matrix's never-delegable sentence lists browser, process, shell, MCP and write tools but omits code_interpreter, schedule tools, and any tool with approval_floor other than none, all of which plan S4 NON_DELEGABLE lists explicitly."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The S0 row says 'contract/step-decision v3 rows' while plan S5 defines DECISION_VERSION v2 and schema sha256:space-scheduled-step-v2; the matrix correctly follows v2, so the S0 row text should be corrected in the plan."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Plan lines 111, 138, 287, 1166 and 2198 now cite the 2026-10-23 ledger entry, which does not exist in the worktree until the lead applies the shared-edit, so the commit must include the ledger block."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The S0 row asks for cross-references to CHAT_GAP lines 68 and 457, and the build plan's ownership line now cites L68 but OD9 at L457 is not pointed back to the ledger entry, and CHAT_GAP itself is outside the owned set."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Section 2.5 now records ADR-0006 as a ledger entry instead of a file path, a deviation from the S0 row's 'writes the ADR' wording that the implementer noted; it is acceptable for a docs-only slice but should be stated in the commit message."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr"
+   ],
+   "notes": "Round 2 fixes applied. (1) Matrix last bullet now fails closed: a missing, mismatched or expired contract is refused at create (Control-bound check, S4), at fire before Temporal start with contract_expired (S5), and at step with failed_precondition, no inference, no effect (S5); only a schedule with no contract stays draft-only. (2) Matrix table row 'Unattended stored consent (WS20 S4-S6)': SCHEDULE_CONTRACT_MAX_DAYS removed from the default-off list and stated separately as a numeric expiry cap, default 90, not a switch. (3) Plan section 2.5 ADR-0006 row: path now points at apps/Model Plane/docs/decisions/ledger.md (2026-10-23 entry, ADR-0006, proposed). The DEC-16 row, the [RECONCILE] line and section 2.6 row 10 from round 1 are unchanged. Nothing committed, staged, pushed or run in docker. The ledger entry is still not written by me (shared file; text in lead_todo)."
+  },
+  {
+   "id": "WS21-S0",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\browser-domain-canonical.json (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\Quarry-v2\\docs\\CROSS_PLANE_INTEGRATION.md",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\orchestrator-core\\README.md"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 -I gen_golden.py <worktree>/apps/Model Plane/api/contracts/browser-domain-canonical.json (generator in the scratchpad, not in the repo)",
+     "outcome": "wrote 41 vectors; a duplicate-id assertion passed"
+    },
+    {
+     "command": "python3 -I json.load of browser-domain-canonical.json",
+     "outcome": "valid JSON, 41 vectors: 11 accept, 30 reject"
+    },
+    {
+     "command": "GOWORK=off GOFLAGS= go run . <golden> in a scratchpad module holding a copy of browser-broker grant.go maxAllowedDomains (line 29), NormalizeAllowedDomains and isCanonicalDomain (lines 307-354)",
+     "outcome": "checked 41 vectors, failures 0. This shows the golden matches the broker's current normaliser source; it is not a test inside the browser-broker package"
+    },
+    {
+     "command": "CRLF/LF count before and after the two doc edits",
+     "outcome": "CROSS_PLANE_INTEGRATION.md 226 CRLF / 226 LF and orchestrator-core README 265 / 265 before and after; CRLF kept"
+    },
+    {
+     "command": "git diff --stat on the two docs",
+     "outcome": "2 files, 4 insertions, 4 deletions; the golden is an untracked new file"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert a new entry at the top, above the line '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)', titled '## 2026-10-23 - Browser policy is layered, Do browser tools carry no ids, and Ask stays read-only (WS21-S0)', with status 'decided (DEC-19, DEC-20); docs and golden only, no runtime change'. Body: org-core is the site policy of record (admin block/read/act lists and per-user preferences, pulled by revision); the browser-broker resolves it at grant mint from the verified principal so no caller can widen a grant; Quarry is the final enforcer; execution-core resolves only to ask or deny before a consent card. Do browser tools are server-bound: the model sees browser.open{url}, browser.observe{}, browser.act{action}, browser.close{} and never a grant, run or lease id; the explicit-id form stays on the ExecuteStep path. Site consent is the cause browser_site_consent with options allow this run, remember at read or act, deny; a risky action keeps a once-only cause. The grant is minted under the user's delegated broker bearer, never from request JSON; the grant store is QRY's decision and the first build runs in memory. Rejected alternatives: broker-only, Control-only and Quarry-only policy (DEC-19 options a-c), and model-carried grant_id/quarry_run_id/lease_id (DEC-20). Golden: apps/Model Plane/api/contracts/browser-domain-canonical.json, 41 vectors. Ask mode stays read-only.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add a row to the table whose header is 'Capability | Canonical Owner | Storage | Relay / Enforcement | Async | Duplication verdict' (place it after the Watches row): '| Browser site policy and Do grant derivation (WS21, DEC-19/20) | **Control org-core** owns the site record; **Model Plane browser-broker** mints the grant from the verified principal; execution-core only pre-resolves ask or deny | Postgres in org-core (planned, WS21-S3); broker grants in memory until QRY picks the store | Quarry ValidateGrant and the domain fence enforce every action | consent cards via WS13 cause browser_site_consent (planned) | one owner per record; grant derivation vs grant store = QRY (DEC-20); not built yet |'.",
+    "shared-edit apps/master-ownership-matrix.md: add a row to the table with header 'Tool / feature | Quarry v2 | Data Plane | Model Plane | App Shell | Rust | Go | Python' (place it after the 'Browser actions' row): '| Browser site policy (block / read / act, per user and per org) | **Enforcer** (domain fence, final check) | — | **Owner of grant mint** (browser-broker, from the verified principal); policy of record is Control org-core, not a column | — | `quarry-browser` fence | `browser-broker` mint; org-core record (planned WS21-S3) | — |'.",
+    "The Quarry doc CROSS_PLANE_INTEGRATION.md is tagged live-only in the plan: after the live-only work lands, re-apply the three edits (item 5, the BrowserBroker port row, and the grpcurl health-check port) to the live checkout C:/dev/CoresSystem, and do not overwrite the live file wholesale.",
+    "Commit suggestion for the lead (after the shared edits): 'docs(model-plane): record the layered browser policy and pin the browser-domain golden (WS21-S0)'. No rebuild, no deploy, no docker needed for this slice.",
+    "Stage the new untracked file apps/Model Plane/api/contracts/browser-domain-canonical.json with the three edited files."
+   ],
+   "deviations": [
+    "The plan says fix 'agent-browser drift' in the Quarry doc; the doc has no such literal text, so the fix was the AcquireGrant issuer wording and the broker port (9090 to 9095), which the code supports. The plan's row names only line 60 of the doc; the port fixes are the same drift class, added because cmd/main.go and compose both use 9095.",
+    "The orchestrator-core README config table has other stale defaults (not fixed; outside the browser row). See depth_findings.",
+    "The doc was edited in the worktree; the plan tags it live-only, so the lead must reconcile it with the live checkout (see lead_todo)."
+   ],
+   "needs_other_files": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs line 31: the doc comment example endpoint 'http://browser-broker:9090' does not match the broker's :9095 listener; comment-only fix, not edited (not owned)."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The decisions-ledger entry, the capability-ownership-matrix row and the master-ownership-matrix row are not applied. The lead applies the shared-edit lines from the implementer's report. Insert the WS21-S0 ledger entry directly above the 2026-10-21 'Do runs inherit the Ask run context' heading and below the WS10-S0 2026-10-23 Model entitlements entry, because scripts/tests/ownership-docs-contract.test.mjs asserts the topmost ledger heading is that entitlements entry.",
+     "The Quarry doc CROSS_PLANE_INTEGRATION.md was edited in the worktree, but the plan row tags the item-5 fix as a live-only edit after land. The three edits (item 5, the BrowserBroker port row 9090 to 9095, and the health-check port) must be re-applied to the live file C:/dev/CoresSystem, not copied over it wholesale.",
+     "Nothing is staged or committed. Stage exactly the three owned paths: the two modified docs and the new untracked apps/Model Plane/api/contracts/browser-domain-canonical.json. The worktree has about 38 other modified or staged paths from other slices, and browser-broker grant.go changed against HEAD during this review, so stage by path.",
+     "node --test scripts/tests/ownership-docs-contract.test.mjs reports 46 of 50 passing. The 4 failures are WS10-S0 shared-edit items the lead still has to apply (rule 19, the inference-core row, the capability-matrix model-entitlement row, the ledger top entry). None of them is caused by WS21-S0."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No committed test reads browser-domain-canonical.json; the 41-vector check was a scratchpad copy of the broker normaliser, so WS21-S4 must vendor the golden into browser-broker testdata and add a test that runs it against the real NormalizeAllowedDomains."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The broker counts raw entries against the 32-entry cap, so 33 copies of one host is refused although it dedupes to one entry; the golden pins this as current behaviour, and the owner or broker should decide whether to dedupe before the cap before S4 request validation depends on it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The four other canonicalizers (Quarry, execution-core, model-gateway, gateway BFF) are not checked against this golden; each needs its own golden test in S4, S5a or S10 before the browser policy is switched on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "orchestrator-core README config table has other stale defaults: TEMPORAL_HOST localhost:7233 (code: TEMPORAL_ADDRESS temporal:7233), SESSION_CORE_ADDR localhost:50051 (code session-core:9091), EXECUTION_CORE_ADDR localhost:50052 (code execution-core:9093), CAPABILITY_CORE_ADDR localhost:50053 (code capability-core:9092), SANDBOX_MANAGER_ADDR localhost:50054 (code sandbox-manager:9094), LETTA_BRIDGE_ADDR localhost:50056 (code letta-bridge:9096)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Quarry doc health-check line still names host model-plane-broker, while the compose service is browser-broker; only the port was changed, and the hostname needs confirming against the production overlay."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The broker counts raw entries against the 32-entry cap, so 33 copies of one host is refused although it dedupes to one entry; the golden pins this, and the owner should decide dedupe-before-cap before WS21-S4 request validation depends on it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No committed test reads browser-domain-canonical.json; the 41-vector pass was a scratch copy of the normaliser, so WS21-S4 must vendor the golden into browser-broker testdata and run it against the real NormalizeAllowedDomains, and add the contracts/README table row and .sha256 pin when the first consumer lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The golden has no vectors for Unicode case folding into ASCII (U+212A Kelvin sign folds to k), Unicode whitespace trim (U+00A0), or a numeric non-IP host such as 999.1.1.1 that the normaliser accepts, so Go, Rust and TypeScript consumers could diverge silently; pin these before S4."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The Quarry doc health-check line still names host model-plane-broker, which no compose service or Quarry deploy file uses (the compose service is browser-broker), so the port was fixed on a line whose hostname is still wrong."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The Quarry code comment at crates/quarry-runtime/src/grpc/browser_broker.rs:31 still gives the example endpoint browser-broker:9090 against the broker's :9095 listener; it is comment-only and outside the owned set."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The orchestrator-core README config table still has stale defaults outside the browser row: SESSION_CORE_ADDR localhost:50051, EXECUTION_CORE_ADDR localhost:50052, CAPABILITY_CORE_ADDR localhost:50053, SANDBOX_MANAGER_ADDR localhost:50054 and LETTA_BRIDGE_ADDR localhost:50056 (README lines 248-253)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new golden is CRLF on all 506 lines in the worktree, while contracts/README asks for LF with one trailing newline and hashes LF-normalised content; normalise it to LF when the pin is added in S4 or S10."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Docs and fixture only; no runtime change, no docker, no DB, no commit or stage. Drift fixed: Quarry CROSS_PLANE_INTEGRATION.md item 5 said the Model Plane issues grants via AcquireGrant with no caveat (now: broker issues, Quarry only validates, no production caller yet, the Quarry acquire() helper has no caller); the broker port in the table and the health-check line changed from 9090 to 9095 (cmd/main.go listens on :9095, compose maps 9095). orchestrator-core README BROWSER_BROKER_ADDR default changed from localhost:50055 to browser-broker:9095 (config.go:84) with a note that no activity calls it yet. The golden pins the broker normaliser: 32-entry cap, trim plus lower-case, LDH labels, no IP literals, no trailing dot, all-or-nothing, sorted, deduped after preprocessing; the cap counts raw entries. Found no previous partial edits in owned files. The plan's phrase \"agent-browser drift\" did not match any literal text in the Quarry doc; the drift there was the AcquireGrant issuer wording and the port."
+  },
+  {
+   "id": "WS23-S0",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib integration_tools",
+     "outcome": "ok. 20 passed; 0 failed; 1238 filtered out"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -p execution-core --lib current_gating_table_is_pinned",
+     "outcome": "integration_tools::tests::current_gating_table_is_pinned ... ok (1 passed)"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib",
+     "outcome": "no warnings mentioning integration_tools"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: WS23 D4 connected-app reads go in CONNECTOR_CLASS_TOOLS under RetrievalScope::Auto only, reversing the neither-bucket note at tool_loop.rs (DEC-26); WS23 D1 read tool is read_provider_action with a closed operation enum and no body field, execute_provider_action stays the write tool; WS23 D8 connector content is trust class ConnectorContent (external, framed and screened), reversing OrgInternal in provenance.rs; WS23 wording: connection = one provider account row in integration-corev2, connector = the chat-facing chip/feature.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add one row for connected-app reads (read_provider_action, WS23): execution-core integration_tools.rs builds the call; integration-corev2 owns connections and the operation catalogue; model-gateway Ask path is WS23 S5. Match the existing table columns.",
+    "Live check (not done here): confirm the deployed registry grants for model-execution (scopes and ingestion audience) as the S0 row asks; this is the S8 blocker evidence and needs the live stack, not docker from this slice."
+   ],
+   "deviations": [
+    "The pin test also asserts the ask-mode decision through permission::is_risky_call, not only operation_is_write, because the gating table is the pair of those two functions; the row only named classification.",
+    "Did not touch the live model-execution registry grants; no live access in wave mode, so that check is a lead item."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live check that the deployed model-execution registry row grants the scopes and ingestion audience the S0 row asks for (needs the live stack, not verified here).",
+     "Lead must write the four ledger entries and the capability-ownership-matrix line into apps/Model Plane/docs/decisions/ledger.md and apps/Model Plane/docs/capability-ownership-matrix.md, since this batch was not allowed to edit them."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The live model-execution registry row was not inspected; S8 cannot be claimed until the lead verifies its scopes and ingestion-audience grants against the live registry."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "current_gating_table_is_pinned covers the catalogue as it stands; a mutation check that a new catalogue read flips the pin was not run (wave mode)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CATALOG summaries for gmail.messages and mail.messages still say no server-side query filter is implemented (integration_tools.rs around lines 102 and 111); the S2 slice rewrites them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "current_gating_table_is_pinned only checks a fixed list of names, so adding a new CATALOG entry (or a read added with a new name) is not caught, and the doc comment's claim that a catalogue edit is always a deliberate change overstates what the test enforces; iterate CATALOG and compare the full (operation, is_write) set against a literal table."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The two new assertion blocks in current_gating_table_is_pinned (around lines 1080 and 1109 of integration_tools.rs) are not rustfmt-clean, and the plan's section 6.4 gate is cargo fmt --all -- --check; reformat those two spots (the file already had about 10 pre-existing rustfmt diffs at HEAD, so only the new lines need fixing)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The S0 row's live check of the model-execution registry grants was not done; the repo config (apps/Control Plane/config/plane-service-principals.json, model-execution) lists only integration:read and shipping:read on the ingestion audience, so S8 stays blocked until the lead confirms the live registry."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The four ledger entries and the one capability-ownership-matrix line are not written; the lead_todo entries describe their content but do not give the exact lines the lead asked for ('shared-edit <file>: <exact lines>'), so the lead must author the text before the batch closes."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The from_env doc says INGESTION_SERVICE_API_KEY is sent as x-service-api-key but does not say the header goes to the Auth Core token endpoint POST {AUTH_CORE_URL}/api/ingestion/internal-token (integration_tools.rs around line 550), not to integration-corev2; name the endpoint."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "During this verification a grep over apps/Model Plane/deploy/.env echoed one line containing the MODEL_EXECUTION_SERVICE_API_KEY value into this session's tool output; the value was not used or repeated in this report, but the lead should treat it as exposed in the transcript and rotate it if it is live."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The untracked directory apps/Model Plane/rust/services/execution-core/tests/fixtures/office/ (created 2026-10-23 17:22:46) is not part of this slice's report and sits outside its ownership set; the lead should confirm it belongs to another batch before any commit."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Added test current_gating_table_is_pinned in the existing tests module of integration_tools.rs. It pins catalogued reads (pages.list, ads.insights, mail.messages incl. microsoft prefix, gmail.messages incl. google prefix, drive.files, calendar.events) as Some(false) and ungated via permission::is_risky_call. It pins uncatalogued operations (mail.messages.get, gmail.messages.get, drive.file.content, sharepoint.sites, sharepoint.drives, profile, microsoft.profile, google.profile) as None and gated. It also checks mail.send stays a gated write. Corrected stale docs only: the module doc's execute_provider_action paragraph now describes is_risky_call per-operation gating (it said is_risky_tool, which is now only the name-based fail-safe), and the from_env doc now names INGESTION_SERVICE_API_KEY sent as x-service-api-key with INGESTION_SERVICE_ID as x-service-id, and states None when the key is unset (the doc claimed INTEGRATION_COREV2_INTERNAL_KEY / x-internal-api-key, which the code does not read). No runtime change. File is CRLF throughout (1521 CRLF, 1521 LF) and the CRLF style is preserved. Nothing committed or staged. The stale summaries at CATALOG lines ~102 and ~111 were left for S2 as the row assigns."
+  }
+ ]
+}

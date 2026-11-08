@@ -47625,6 +47625,358 @@ so it
   font-style: italic;
 }
 
+/* Chat — the thread goal (EP-7 S1; its S4 and S6 blocks render inside the same bar).
+   The bar docks above the composer and is one line in the common case; criteria, usage, the
+   auto-continue and away blocks wrap beneath it. Every status and stop reason is a word first and
+   only tinted second, so the state never depends on telling two shades apart. */
+.verevon-chat-goal-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 10px 14px;
+  border-radius: var(--chat-r-lg, 16px);
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+  font-size: 12.5px;
+}
+
+.verevon-chat-goal-bar[aria-busy='true'] {
+  opacity: 0.85;
+}
+
+.verevon-chat-goal-bar__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.verevon-chat-goal-bar__label {
+  color: var(--verevon-text-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verevon-chat-goal-bar__objective {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-goal-bar__more {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--verevon-a-earth);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.verevon-chat-goal-bar__criteria,
+.verevon-chat-goal-bar__usage {
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+}
+
+.verevon-chat-goal-bar__usage {
+  margin: 0;
+}
+
+.verevon-chat-goal-bar__status,
+.verevon-chat-goal-bar__stop-reason,
+.verevon-chat-goal-bar__auto-stopped {
+  padding: 2px 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  color: var(--verevon-j-text-soft);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.verevon-chat-goal-bar__status[data-status='active'] {
+  border-color: var(--verevon-a-earth);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-goal-bar__status[data-status='paused'],
+.verevon-chat-goal-bar__status[data-status='cleared'] {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-goal-bar__status[data-status='blocked'],
+.verevon-chat-goal-bar__status[data-status='budget_reached'],
+.verevon-chat-goal-bar__status[data-status='turns_reached'],
+.verevon-chat-goal-bar__stop-reason,
+.verevon-chat-goal-bar__auto-stopped {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.verevon-chat-goal-bar__criteria-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.verevon-chat-goal-bar__actions button,
+.verevon-chat-goal-bar__auto-toggle,
+.verevon-chat-goal-bar__stop,
+.verevon-chat-goal-bar__away-toggle,
+.verevon-chat-goal-bar__away-start {
+  padding: 4px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-i-surface);
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 140ms ease, opacity 140ms ease;
+}
+
+.verevon-chat-goal-bar button:hover:not(:disabled) {
+  filter: brightness(0.96);
+}
+
+.verevon-chat-goal-bar button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.verevon-chat-goal-bar__actions .verevon-chat-goal-bar__continue {
+  border-color: transparent;
+  background: var(--verevon-a-earth);
+  color: #fff;
+}
+
+.verevon-chat-goal-bar__auto {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__auto-toggle[aria-checked='true'] {
+  border-color: var(--verevon-a-earth);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-goal-bar__countdown {
+  color: var(--verevon-text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-chat-goal-bar__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__away {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--verevon-border);
+}
+
+.verevon-chat-goal-bar__away-summary,
+.verevon-chat-goal-bar__away-none {
+  margin: 0;
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__away-runs {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__away-runs li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.verevon-chat-goal-bar__away-runs a {
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-goal-bar__away-drafts {
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-goal-bar__away-form {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: var(--chat-r-sm, 8px);
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__away-form legend {
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.verevon-chat-goal-bar__away-form label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.verevon-chat-goal-bar__away-form input,
+.verevon-chat-goal-bar__away-form select {
+  padding: 3px 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+  background: var(--verevon-i-surface);
+  color: var(--verevon-text);
+  font: inherit;
+}
+
+.verevon-chat-goal-bar__away-form input[type='number'] {
+  width: 5.5em;
+}
+
+.verevon-chat-goal-bar__away-start {
+  justify-self: start;
+}
+
+.verevon-chat-goal-entry {
+  padding: 4px 12px;
+  border: 1px dashed var(--verevon-border);
+  border-radius: 999px;
+  background: none;
+  color: var(--verevon-text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-goal-entry:hover {
+  color: var(--verevon-text);
+}
+
+.verevon-chat-goal-dialog {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: var(--chat-r-lg, 16px);
+  background: var(--verevon-surface-soft);
+  box-shadow: var(--verevon-chat-shadow);
+  color: var(--verevon-text);
+  font-size: 13px;
+}
+
+.verevon-chat-goal-dialog__field {
+  display: grid;
+  gap: 4px;
+  color: var(--verevon-j-text-soft);
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.verevon-chat-goal-dialog__field textarea,
+.verevon-chat-goal-dialog__field input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: var(--chat-r-sm, 8px);
+  background: var(--verevon-i-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  font-weight: 400;
+}
+
+.verevon-chat-goal-dialog__field textarea {
+  resize: vertical;
+}
+
+.verevon-chat-goal-dialog__caps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.verevon-chat-goal-dialog__note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+}
+
+.verevon-chat-goal-dialog__hint {
+  margin: 0;
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-dialog__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.verevon-chat-goal-dialog__actions button {
+  padding: 6px 16px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-i-surface);
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-chat-goal-dialog__actions button[type='submit'] {
+  border-color: transparent;
+  background: var(--verevon-a-earth);
+  color: #fff;
+}
+
+.verevon-chat-goal-dialog__actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.verevon-chat-goal-bar :is(button, a, input, select, textarea):focus-visible,
+.verevon-chat-goal-dialog :is(button, input, select, textarea):focus-visible,
+.verevon-chat-goal-entry:focus-visible {
+  outline: 2px solid var(--verevon-a-earth);
+  outline-offset: 2px;
+}
+
 /* Chat — the plan-approval control.
    A plan-mode turn described what it would do; this is where a person decides
    how much of it the agent may actually do, and says why. The rung buttons are

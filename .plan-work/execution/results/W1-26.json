@@ -1,0 +1,174 @@
+{
+ "batchId": "W1-26",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS02-S10.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/prompt_tier.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "[cwd: apps/Model Plane/rust] CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib openai (run in the background before the last edits, then again on the final file)",
+     "outcome": "NOT RUN. The lib test target does not compile (exit 101) with exactly 5 errors, all 'cache_scope_key' missing on provider::InferRequest: openai.rs:465 and :485 (E0609), :1818 and :1846 (E0560), :1842 (E0609). provider/mod.rs and grpc.rs still lack the field (lead shared edits, fix 3). No test ran, so neither new test has a result."
+    },
+    {
+     "command": "[cwd: apps/Model Plane/rust] CARGO_INCREMENTAL=0 cargo test -p mp-contracts (all targets), after a touch of inference.proto and prompt_tier.rs (mtime only)",
+     "outcome": "PASS, exit 0. Log shows 'Compiling mp-contracts v0.1.0'. Lib: 'test result: ok. 215 passed; 0 failed'. The 12 integration binaries each report ok (5, 1, 12, 8, 14, 3, 3, 13, 2, 1, 5, 5 passed). Doc tests: 'test result: ok. 2 passed'."
+    },
+    {
+     "command": "[cwd: apps/Model Plane/rust] CARGO_INCREMENTAL=0 cargo test -p mp-contracts --lib cache_scope_key",
+     "outcome": "PASS: 'test result: ok. 4 passed; 0 failed; 211 filtered out'. Names: prompt_tier::tests::cache_scope_key_is_32_lowercase_hex_and_deterministic, cache_scope_key_needs_both_identifiers, cache_scope_key_separates_org_from_thread_and_pairs_from_each_other, cache_scope_key_is_bound_to_its_versioned_domain."
+    },
+    {
+     "command": "[cwd: apps/Model Plane/rust] CARGO_INCREMENTAL=0 cargo test -p execution-core --lib round_names, after a touch of agent.rs",
+     "outcome": "PASS: log shows 'Compiling execution-core v0.1.0'. 'test result: ok. 2 passed; 0 failed; 1430 filtered out' (a_round_names_its_thread_scope_and_a_subagent_its_own; the_round_names_its_stable_and_context_messages_for_the_provider_cache)."
+    },
+    {
+     "command": "[cwd: apps/Model Plane/rust] CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib tool_loop, after a touch of sse.rs and tool_loop.rs",
+     "outcome": "PASS: log shows 'Compiling model-gateway v0.1.0'. 'test result: ok. 212 passed; 0 failed; 2153 filtered out'."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/provider/mod.rs: after line 171 (`pub prompt_tiers: mp_contracts::prompt_tier::PromptTierPlan,`) and before the image_parts doc comment (line 172), add the doc comment `/// Provider prompt-cache routing key from the proto (mp-contracts prompt_tier::cache_scope_key); empty names none. Read only by the OpenAI adapter, behind INFERENCE_OPENAI_PROMPT_CACHE_KEY, on the first-party endpoint, and never on a ZDR request.` and the field `pub cache_scope_key: String,`",
+    "shared-edit apps/Model Plane/rust/services/inference-core/src/grpc.rs: in the Ok(provider::InferRequest { ... }) literal that starts at line 1228, after the prompt_tiers expression (its last line `.unwrap_or_default(),` is line 1257) and before `org_id: principal.org_id.clone(),` (line 1258), add `cache_scope_key: req.cache_scope_key.clone(),`",
+    "After both shared edits, from apps/Model Plane/rust run `CARGO_INCREMENTAL=0 cargo test -p inference-core --lib openai`. Expect prompt_cache_key_sent_only_when_enabled_and_not_zdr and openai_zdr_body_has_no_prompt_cache_key to pass. Quote the 'test result:' line and the 'Compiling inference-core' line. Nothing in openai.rs has run yet.",
+    "After the shared edits, also run `CARGO_INCREMENTAL=0 cargo check -p inference-core --all-targets`. The integration tests under inference-core/tests/ (span_attribution_test.rs, model_entitlement_chain_test.rs, fallback_test.rs, connection_zdr_capabilities_contract.rs, cache_test.rs) build provider::InferRequest literals. They appear to use ..Default::default() but that is unverified, and the lib run does not compile them.",
+    "buf regen for apps/Model Plane/proto so go/gen/model_plane/v1/inference.pb.go carries InferRequest.cache_scope_key (field 19). No Go code reads it. Additivity check: diff the tags against `git show HEAD:apps/Model Plane/proto/model_plane/v1/inference.proto` (one new field at 19; the stale 'Tag 19 is reserved' comment on image_parts was removed). buf breaking stays vacuous until the WS12-S2 baseline lands.",
+    "Confirm the D7 scope: the gate sends the key only to the first-party default endpoint, and Azure and UnifiedAzureAi stay off until staging verifies acceptance.",
+    "Live proof (lead only, not run here): after the gate lands, enable INFERENCE_OPENAI_PROMPT_CACHE_KEY on staging for the first-party OpenAI route only, and compare the cache hit rate against the S8 baseline."
+   ],
+   "deviations": [
+    "Status partial: the openai.rs gate, the switch and both named tests are written, but nothing in openai.rs has run, because the inference-core lib test target needs the two lead shared edits in lead_todo.",
+    "post_chat calls a new request_body helper in place of build_request_body, and the key is added inside that helper. This is the lead's 'insert after build_request_body' in the loop, moved into a helper so the tests run the same code path post_chat runs.",
+    "sends_prompt_cache_key is a separate gate method. It trims trailing slashes from the default base before comparing, the same normalization chat_completions_url applies, so 'https://api.openai.com/v1/' counts as first-party.",
+    "No shape check on the key (32 lowercase hex, optionally ':sub') at the gate: it is not one of the three required fixes, so it is recorded as a depth finding instead."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs (add pub cache_scope_key: String to provider::InferRequest after prompt_tiers, line 171)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/grpc.rs (map cache_scope_key: req.cache_scope_key.clone() in the provider::InferRequest literal, after line 1257)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs (lead shared edit, outside the slice's ownership set): add `pub cache_scope_key: String,` to provider::InferRequest after `pub prompt_tiers: mp_contracts::prompt_tier::PromptTierPlan,` (line 171). Why: without it inference-core does not compile, neither lib nor lib test. Re-run confirmed 'could not compile `inference-core` (lib test) due to 5 previous errors', all E0609/E0560 on cache_scope_key at openai.rs:465, 485, 1818, 1842, 1846. So neither named test (prompt_cache_key_sent_only_when_enabled_and_not_zdr, openai_zdr_body_has_no_prompt_cache_key) has run.",
+     "apps/Model Plane/rust/services/inference-core/src/grpc.rs (lead shared edit): in the `provider::InferRequest { ... }` literal, after the prompt_tiers expression (around line 1250-1257), map `cache_scope_key: req.cache_scope_key.clone(),`. Why: without it the proto field never reaches the adapter, so the switch stays dead even when it is on. Then re-run `cargo test -p inference-core --lib openai` and `cargo check -p inference-core --all-targets`, and quote the 'Compiling inference-core' and 'test result:' lines."
+    ],
+    "dod_gaps": [
+     "buf regen of the Go bindings so go/gen/model_plane/v1/inference.pb.go carries InferRequest.cache_scope_key = 19 (lead only; buf breaking stays vacuous until the WS12-S2 baseline exists).",
+     "D7 enablement decision: the gate sends the key only to the first-party default endpoint (provider_id None, OpenAi flavor, default base). Azure and UnifiedAzureAi stay off until staging confirms they accept the parameter.",
+     "Live proof (lead only): enable INFERENCE_OPENAI_PROMPT_CACHE_KEY on staging for the first-party OpenAI route and show a cache hit rate no lower than the S8 best run (S2 view evidence)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Both named openai tests are unrun until the two lead shared edits land (provider/mod.rs field, grpc.rs mapping). The lib target fails only with the 5 missing-field errors."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The adapter sends req.cache_scope_key as given. No shape check (32 lowercase hex, optionally ':sub') runs at the gate, so a caller bug could send non-derived text to OpenAI. Add the check before the switch is enabled anywhere."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "D7 scope: the key goes only to the first-party default endpoint (provider_id None, OpenAi flavor, default base). Azure and UnifiedAzureAi stay off until staging verifies acceptance. Lead to confirm."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The named tests check the body that request_body builds, which is what post_chat sends. They do not check the HTTP send, because wiremock cannot reach the first-party default base. The wire path is covered only by construction."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The key crosses gRPC on ZDR requests too (a hash of ids). The adapter's !req.zdr check is the only guard that keeps it out of provider bodies, so that check must not be removed or moved."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins that the answer call (sse.rs), the tool-round decision call (tool_loop.rs) and execution-core populate cache_scope_key from org and thread. Only the agent.rs round_cache_scope_key helper has a test."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Lead only, after the gate lands: enable INFERENCE_OPENAI_PROMPT_CACHE_KEY on staging for the first-party OpenAI route only, and compare the cache hit rate with the S8 baseline."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "openai.rs sends_prompt_cache_key forwards req.cache_scope_key verbatim with no shape check (32 lowercase hex, optional ':sub'). A caller bug could put non-derived text, possibly content, into a provider body. Add the check before the switch is enabled anywhere."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins that sse.rs (answer call), tool_loop.rs (decision call) and the agent.rs round literal set cache_scope_key from org/thread. Only the round_cache_scope_key helper is unit-tested, so a regression that drops the field at a call site would go unnoticed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The key travels over gRPC on ZDR requests too (an id hash, not content). The adapter's `!req.zdr` check in sends_prompt_cache_key is the only guard that keeps it out of the provider body, and only openai_zdr_body_has_no_prompt_cache_key protects that check. That test is not yet runnable."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The named openai tests check request_body, which post_chat uses, not the HTTP send. The wire path is covered only because post_chat calls the same helper."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "language.rs and translation.rs also build OpenAiProvider::new, so they read the switch too. Their requests carry no cache_scope_key (Default), so nothing is sent. Worth confirming if those callers ever start setting the field."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -p inference-core --lib openai (CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "FAIL: compile error, 'could not compile inference-core (lib test) due to 5 previous errors': E0609/E0560 'cache_scope_key' missing on provider::InferRequest at openai.rs:465,485,1818,1842,1846. No test ran, so prompt_cache_key_sent_only_when_enabled_and_not_zdr and openai_zdr_body_has_no_prompt_cache_key are unrun.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p mp-contracts (all targets)",
+      "outcome": "PASS: 'Compiling mp-contracts' shown; lib 'test result: ok. 215 passed; 0 failed', all 12 integration binaries ok, doc tests 'ok. 2 passed; 0 failed'.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p mp-contracts --lib cache_scope_key",
+      "outcome": "PASS: 'test result: ok. 4 passed; 0 failed; 211 filtered out' (determinism, both identifiers needed, org/thread/pair separation, versioned domain).",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --lib round_names",
+      "outcome": "PASS: 'Compiling execution-core' shown; 'test result: ok. 2 passed; 0 failed; 1430 filtered out'.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib tool_loop",
+      "outcome": "PASS: 'Compiling model-gateway' shown; 'test result: ok. 212 passed; 0 failed; 2153 filtered out'.",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p inference-core --lib (compile check of touched crate)",
+      "outcome": "FAIL: 'could not compile inference-core (lib) due to 2 previous errors' (E0609 no field cache_scope_key on InferRequest in openai.rs non-test code). Non-test library build is broken, not only the test target.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Fixes 1 and 2 are written in openai.rs. Fix 3 is a lead shared edit that has not landed, so nothing in openai.rs has run yet. openai.rs: INFERENCE_OPENAI_PROMPT_CACHE_KEY is read with parse_enabled (only the literal 'true' enables), defaults off, and is stored in OpenAiProvider.prompt_cache_key by the three constructors (new, new_azure, new_azure_ai_unified). post_chat now builds each attempt's body through request_body, which adds prompt_cache_key only when sends_prompt_cache_key holds: switch on, !req.zdr, non-empty req.cache_scope_key, provider_id None, and an OpenAi flavor whose base is the default after trimming trailing slashes. Otherwise the body is byte-identical to build_request_body's output. The two named tests are in mod tests (prompt_cache_key_sent_only_when_enabled_and_not_zdr, openai_zdr_body_has_no_prompt_cache_key). On the final file, rustc reports only the 5 missing-field errors, so the rest type-checks; borrow checking of the bodies that contain those errors has not run. openai.rs stays CRLF (2159 CRLF, 0 bare LF). The six changed files have no mixed line endings. Git's LF-to-CRLF warning on prompt_tier.rs and sse.rs refers to files that are LF throughout. The three previously NOT VERIFIED runs now have results (execution-core round_names, model-gateway tool_loop, mp-contracts). I touched inference.proto, prompt_tier.rs, agent.rs, sse.rs and tool_loop.rs (mtime only, no content change) so each crate's log shows 'Compiling'. No DB tests were written and none were run."
+  }
+ ]
+}

@@ -1,0 +1,894 @@
+{
+ "batchId": "W3-15",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-2-S5",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-1",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ComposerTrays.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ResearchPlanCard.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts"
+   ],
+   "notes": "The slice is built dark behind DEEP_RESEARCH_PLAN_TURN (gateway, strict literal \"true\") and VITE_DEEP_RESEARCH_PLAN_TURN (SPA). Nothing was compiled or run. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-2-S5.patch (84 KB).\n\nGateway:\n- InvokeRequest gains `research_phase` and `research_plan`, both raw `Option<Value>`. With the switch off a body parses exactly as before.\n- deep_research.rs has:\n  - `research_phase()`, which returns `ResearchPhase` OneShot, Plan or Run(ClientPlan).\n  - `clamp_client_plan`. It normalizes each entry and cuts it to 200 chars, drops implausible entries, de-dups case-insensitively, reads at most 64 raw entries and keeps at most `max_sub_queries()`. Answers become one line, \"Brukerens presiseringer: ...\", PII-redacted when the turn redacts and cut to 1,000 chars.\n  - `plan_only()`: one plan inference with a question-asking prompt variant, at most 3 questions, and no Quarry call.\n  - `run_deep_research(.., client_plan, ..)`: a non-empty edited plan skips the plan inference; an empty one falls back to the model plan. Clarifications reach only the synthesis prompt.\n  - `plan_sub_queries` was split into `plan_raw` (shared retry) plus parse.\n- sse.rs:\n  - The plan turn emits the new `research_plan` control event (ungated), clears tool_defs, skips the forced search and adds a context note so the model writes a short \"Her er planen\" line.\n  - `session_flow::with_research_plan` stores the `research_plan` metadata key on the streaming completion path. It is skipped on ZDR or waived turns (D12); waived deep research is refused upstream anyway.\n- The ZDR table classifies both new fields as Inert. Under ZDR the plan turn is refused through `deep_research`; this is covered by rows in tests/zdr_feature_table.rs that name e_zdr_token_deep_research_plan_turn_refused.\n- I hand-edited the golden (MP and FE copies plus .sha256) and the generated TS for `research_plan`.\n\nSPA:\n- chat-client: wire `research_phase`/`research_plan`, only on a deep-research turn that is not zero-retention, conversation-only, support read-only or subscription-backed. Also the `research_plan` case and the `onResearchPlan` handler.\n- ResearchPlanCard: edit, remove, add up to the cap, question fields, Start and Cancel, and a readOnly mode.\n- The card is docked in ComposerTrays behind an approval and a run's question.\n- The controller sends `research_phase: 'plan'` on composer deep research while the VITE flag is on. Start re-sends the question with `research_phase: 'run'` and the edited plan.\n- Actions `chat.research_plan_start` and `chat.research_plan_cancel` are registered.\n\nWhy partial: the reload rendering of the stored plan as a read-only card needs chat-normalizers/ChatMessages (not mine), and the card is not mounted until the ChatPage shared-edit below is applied.",
+   "deviations": [
+    "Assumed D1 = (a) research state lives in the stream and in assistant message metadata (`research_plan` key); no durable run, no new table, no migration.",
+    "Assumed D7 = clarifying questions (max 3) live in the plan card and travel back in the run request as answers, not in the WS14 question store.",
+    "Assumed D12 = research_plan is streamed but not persisted on ZDR or waived turns (with_research_plan gets effective_zdr || retention_class.is_some()).",
+    "Assumed OD-1 = accept research state in message metadata, no durable run (same as D1/D2 recommendation).",
+    "Golden e_zdr_token_deep_research_plan_turn_refused was NOT added to zdr-posture-matrix.json (lead rule: feature refusals never get a posture row, they would duplicate e_zdr_default_route); it is two named rows in tests/zdr_feature_table.rs instead, and zdr-refusals.json is unchanged (refusal reuses `deep_research`).",
+    "Design names the split `run_with_plan`; I kept the single entry `run_deep_research` with a new `client_plan: Option<&ClientPlan>` parameter (its only caller is sse.rs), so there is no dead wrapper.",
+    "The plan turn's short assistant line is written by the turn's model from a context note (no tools), not a fixed string, so it follows the user's language; this costs the second model call the design's risk note already counts.",
+    "The research plan rides the ComposerTrays as explicit props (like the WS14 question), not as a new DockedTray kind, because lib/composer-trays.ts is not in this slice.",
+    "Dropped a `pending` state on the card: Start clears the card immediately and the run's own steps show progress."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs: in the test helper `make_request` struct literal, directly after the line `            deep_research: false,` add `            research_phase: None,` and `            research_plan: None,` (InvokeRequest gained two fields; the literal will not compile otherwise).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, directly after `      WIDE_RESEARCH_ENTRY_ENABLED: ${WIDE_RESEARCH_ENTRY_ENABLED:-false}` add `      # EP-2 S5: deep research shows an editable plan first (research_phase plan|run). Only the literal true.` and `      DEEP_RESEARCH_PLAN_TURN: ${DEEP_RESEARCH_PLAN_TURN:-false}`.",
+    "owner: apps/Model Plane/deploy/.env.example gets `DEEP_RESEARCH_PLAN_TURN=false`; apps/Frontend Plane/verevonv3/.env.example gets `VITE_DEEP_RESEARCH_PLAN_TURN=false`.",
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml: next to `      VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}` add `      VITE_DEEP_RESEARCH_PLAN_TURN: ${VITE_DEEP_RESEARCH_PLAN_TURN:-false}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/vite-env.d.ts: after `\treadonly VITE_PLAN_EXECUTE_ENABLED?: string;` add `\treadonly VITE_DEEP_RESEARCH_PLAN_TURN?: string;` (tab-indented like its neighbours).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: in the `useChatController()` destructure after `    skipPendingQuestion,` add `    pendingResearchPlan,` `    startResearchPlan,` `    cancelResearchPlan,`; on `<ComposerTrays ...>` after `onSkipQuestion={() => void skipPendingQuestion()}` add `                researchPlan={pendingResearchPlan()}` `                onStartResearchPlan={(edit) => void startResearchPlan(edit)}` `                onCancelResearchPlan={cancelResearchPlan}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after `  'chat.wide_research_start': exempt('no_owner_executor', 'external_write'),` add `  'chat.research_plan_start': exempt('no_owner_executor', 'external_write'),` and `  'chat.research_plan_cancel': exempt('ui_state_only', 'context_write'),`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: after the `// +1 after EP-10-S1 registered approvals.preview ...` comment add `    // +2 after EP-2-S5 registered chat.research_plan_start and chat.research_plan_cancel, the deep-research plan card.` and raise `toHaveLength(277)` by 2 (on top of whatever the other batch slices add).",
+    "guard: regenerate the agent-action-admission golden and the prompt-tool manifest for the two new chat actions.",
+    "guard: after merging every slice that touches the SSE golden, regenerate apps/Model Plane/api/contracts/sse-event-payloads.json with `MP_UPDATE_GOLDEN=1` (sse_events payload_contract test), copy it over the FE vendored copy, refresh both .sha256 pins (mine: 86fdd057d9881c6896f0f1677b51aa299e0e87bec6813ff5c55b6ccdf2507535 for this slice alone) and the pinned digest at scripts/tests/zdr-contract-sync.test.sh:203, then `pnpm gen:chat-events` to confirm chat-event-payloads.generated.ts matches my hand edit.",
+    "guard: run `python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\"` (no --check) to rewrite apps/Model Plane/docs/sse-event-taxonomy.md for the new `research_plan` event (script itself needs no change).",
+    "shared-edit apps/Model Plane/docs/ZDR.md section 5.5: after the line `The viewer's \"more\" read is Data Plane's ACL'd chunk read and stores nothing.` add a paragraph: `The deep-research plan turn (EP-2-S5, behind DEEP_RESEARCH_PLAN_TURN): the plan turn streams a research_plan event (sub-queries, up to three clarifying questions, the sub-query cap) and searches nothing; the assistant message metadata keeps the same plan under research_plan only on a persistent turn, erased with the message by the GDPR path. A ZDR turn is refused before either phase through deep_research (no new refusal key); a waived turn is refused deep research at the route, and session_flow::with_research_plan would store nothing for it anyway (D12). The run turn's answers are user text: redacted like the message when the turn redacts, bounded to 1,000 characters, and sent only to the synthesis inference.`",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add newest-first entry `## 2026-11-04 - Deep research state lives in the stream and in message metadata, not on a durable run (EP-2 S5, D1, D2, D7, D12, OD-1)` with body `**Status: implemented dark (DEEP_RESEARCH_PLAN_TURN, default off), compile-only.** The plan turn and the run turn are two ordinary turns: the plan reaches the client in a research_plan control event and comes back in the run request (research_phase run, research_plan), where model-gateway re-clamps it like a model plan (length 200, plausibility, case-insensitive de-dup, count <= DEEP_RESEARCH_MAX_SUB_QUERIES; an emptied plan falls back to the model plan). Clarifying questions (<= 3) live in the plan card, not the WS14 question store, because no run exists to pause (D7). The plan is kept as message metadata research_plan on persistent turns only (D12). No table, no migration, no proto. Supersedes nothing.`"
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts and ChatMessages.tsx: read message metadata `research_plan` on reload and render ResearchPlanCard with `readOnly` once a later run turn exists (design S5 test 'reload shows the persisted plan card as read-only').",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (mount props, see lead_todo).",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (test literal, see lead_todo)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D1 = (a) research plan state in the stream and assistant message metadata only (no durable run, no table); owner must confirm before DEEP_RESEARCH_PLAN_TURN is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D7 = clarifying questions (max 3) are asked by the plan inference and answered in the plan card, carried back in research_plan.answers, never stored in the WS14 question store."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D12 = research_plan metadata is not persisted on ZDR or waived turns (with_research_plan), while the event still streams; owner of ZDR must acknowledge."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed OD-1 = accept research state in message metadata with no durable run; unattended research (OD8) would need design option (c)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 'plan turn makes no Quarry call' and 'run turn makes no plan inference' checks are structural unit tests (edited_sub_queries, plan_only has no Quarry path), not AppState-mocked end-to-end tests; the live proof must show both via the Quarry log and the inference log."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Reload does not yet render the stored research_plan as a read-only card: chat-normalizers.ts/ChatMessages.tsx must read metadata.research_plan and mount ResearchPlanCard readOnly when a later run turn exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Start re-sends the original question as a new user turn, so the transcript shows the question twice and the run turn drops any inlined attachment text (modelContent) of the plan turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The plan turn clears every tool and relies on a context note for its short answer; a model that ignores the note could answer from its own knowledge on the plan turn, so the live proof should check the plan-turn text."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Owed: plan turn then edited run turn on the dev stack with both switches on, capturing both SSE transcripts, showing a removed sub-query never searched and an added one searched (Quarry log), and research_plan in the stored message metadata on a persistent turn only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ComposerTrays 'Also waiting' line does not name a research plan hidden behind an approval or a question; add a TRAY_NAME entry once the plan becomes a DockedTray kind."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-2-S9",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-2",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts"
+   ],
+   "notes": "The slice is written but nothing has been compiled or run (code-first order). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-2-S9.patch (79 KB). It was cut from model-plane 2c6a53008 after the allowed detach. Every file keeps its original line endings: the Rust and proto files are CRLF, the FE files are LF.\n\n- **Proto:** `LineageEdge` gains `goal_summary` = 5, `batch_id` = 6 and `status` = 7, each commented. These are the numbers round A reserved; no migration.\n- **session-core:** `fetch_lineage_for_thread` now also reads `status` and `metadata` and fills the new fields. A new `subagent_edge_metadata_text` helper reads values back from the metadata; an edge stored with `{}` reads back empty. `lineage_edge_from_row` is filled too. The live attach event's edge is unchanged (`..Default::default()`), and so are the four `compute_max_depth` test literals.\n- **session-core tests:** a unit test for the readback, and a real-Postgres `#[ignore]` test in `plan_gate_pg`. It checks goal, batch and status, that an old edge comes back empty, and that a detached edge reads `detached`.\n- **Gateway:** `lineage_value` emits `goal_summary`, `batch_id` and `status` only when they are non-empty, so the JSON for old edges is byte-identical. `wide_research_request` accepts `{retry_of_child_run_id, batch_id}`. It drops the body's items, sets `item_cap` to min(1, org cap), and returns no request for a malformed id: anything that is not printable ASCII, is empty, or is over 128 / 256 characters. Tests cover all three.\n- **execution-core budget:** new switch `WIDE_RESEARCH_CHILD_BUDGET_ENFORCED` (only the literal `\"true\"` enables it) and `WIDE_RESEARCH_CHILD_TOKEN_BUDGET` (default 400,000).\n  - Each fan-out item's child records its metered tokens (input + output; 0 for the subscription provider) through `UsageTally::metering_into`.\n  - The total spent by finished children is checked once an item holds its permit and before it claims a ceiling slot.\n  - Enforced, the item ends `FanOutItemResult::budget_reached` and never starts. Not enforced, the overspend is logged once and nothing else changes.\n  - The merged digest gains a `budget: N of M item(s) were not started ...` line only when some item ended `budget_reached`.\n- **execution-core retry:** a retry is first admitted by the existing `admit_wide_research` (ZDR, switch and cap 0). `retry_wide_research_plan` then reads the child run with `GetRun` under the person's session bearer, so session-core's run-owner check applies. It accepts only a fan-out child in the same thread with a goal, and gives the same single refusal in every other case. `spawn_research_fan_out` uses the request's `batch_id` for a retry.\n- **execution-core tests:** pure tests in `research_fan_out.rs`; agent-level tests for retry and for budget enforced vs logged. The budget tests return early if the concurrency env is not 4. The mock `Recorder` gained a `run_agent_id` field.\n- **FE:** `orchestration-client` adds `LineageEdgeSummary`, `normalizeLineageEdges` and `getLineageEdges`. `ChatWideResearchPanel` takes optional `threadId` and `onRetryItem` props. With `threadId`, it seeds cards from the lineage: every edge in a batch this run started, retries in that batch included, with status from `getRun` of the child. Failed, refused and unknown cards show a \"Prøv igjen\" button only when `onRetryItem` is given. Five new vitest cases.\n- **Action contract:** `chat.wide_research_retry_item` (risk medium, not reversible), input `{childRunId, batchId}`.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment block, directly after the line `WIDE_RESEARCH_FAN_OUT_CONCURRENCY: ${WIDE_RESEARCH_FAN_OUT_CONCURRENCY:-4}`, add:\n      # Wave 3 EP-2 S9: the token budget all children of one fan-out call may spend (metered tokens; subscription rounds count 0). Only the literal true enforces it; off, a spent budget is logged and every item still starts.\n      WIDE_RESEARCH_CHILD_BUDGET_ENFORCED: ${WIDE_RESEARCH_CHILD_BUDGET_ENFORCED:-false}\n      WIDE_RESEARCH_CHILD_TOKEN_BUDGET: ${WIDE_RESEARCH_CHILD_TOKEN_BUDGET:-400000}",
+    "shared-edit apps/Model Plane/deploy/.env.example (owner edits this file): add `WIDE_RESEARCH_CHILD_BUDGET_ENFORCED=false` and `WIDE_RESEARCH_CHILD_TOKEN_BUDGET=400000` beside WIDE_RESEARCH_FAN_OUT_CONCURRENCY, with the comment 'EP-2 S9 child token budget; only literal true enforces'.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add at the top of the entries (newest first, after the first '---'): '## 2026-11-04 - Wide research: separate child token budget, no confirm gate; per-item retry reads the item back from the child run (EP-2 S9, D4)' / '**Status: built behind `WIDE_RESEARCH_CHILD_BUDGET_ENFORCED` (default off: logged only); not deployed, no live proof.** One fan-out call holds its children to `WIDE_RESEARCH_CHILD_TOKEN_BUDGET` metered tokens (default 400,000; subscription rounds count 0 but still count rounds). Before each item starts, the metered tokens of the call's FINISHED children are compared to the budget; items not started end `budget_reached` and the digest says how many. A started item is never stopped, so in-flight children can overshoot the budget. A retry (`wide_research.retry_of_child_run_id`) is a one-item wide-research run in the same batch; execution-core reads the item from the child run under the person's session bearer (session-core run-owner check) and only from a fan-out item of the same thread. `LineageEdge` reads back goal_summary=5, batch_id=6, status=7 from data session-core already stores, so the grid survives reload. No migration. Supersedes nothing.'",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `  'chat.wide_research_start': exempt('no_owner_executor', 'external_write'),` add `  'chat.wide_research_retry_item': exempt('no_owner_executor', 'external_write'),`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: after the comment line `// +1 after EP-10-S1 registered approvals.preview, the owner's write-approval preview.` add `// +1 after EP-2-S9 registered chat.wide_research_retry_item, the wide-research grid's per-item retry.` and raise the `expect(ids).toHaveLength(...)` count by 1 (277 -> 278 on this base; add 1 to whatever the merged count is).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: in `export type WideResearchStart` add `/** A one-item retry (EP-2 S9): the child run whose item runs again; execution-core reads the item back. */ retryOfChildRunId?: string` and `/** The fan-out batch the retry joins. */ batchId?: string`; in `wideResearchWire` return `{ retry_of_child_run_id: start.retryOfChildRunId, ...(start.batchId ? { batch_id: start.batchId } : {}) }` (and no items/item_cap) when `start.retryOfChildRunId` is non-empty; widen its return type accordingly.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx line ~1092: change `<ChatWideResearchPanel runId={liveRunId()} />` to `<ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />`. Add `onRetryItem` only once the composer send path carries `wideResearch` (S8's WideResearchStart is not mounted on this base). It should send an agentic turn with `wideResearch: { retryOfChildRunId, batchId }` and a goal like 'Prøv igjen: <goalSummary>'.",
+    "regenerate: proto bindings for orchestration.proto (Go under MP/go/gen/model_plane/v1 plus Python), and the agent-action-admission golden (new action chat.wide_research_retry_item).",
+    "optional CSS (styles/global.css, not owned): a `.verevon-wide-research__retry` rule (small ghost button) next to `.verevon-wide-research__pill--error`; the button renders with browser defaults until then."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (retry wire fields)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (pass threadId and onRetryItem to ChatWideResearchPanel)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (classify the new action)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts (registry count)"
+   ],
+   "deviations": [
+    "Only failed, refused and unknown cards can be retried. An item stopped by the budget never started, so it has no child run, lineage edge or card; it is named only in the run's answer and cannot be retried from the grid.",
+    "On reload the retry card appears beside the original failed card rather than replacing it, because the edge does not record which child it retried.",
+    "The live lineage attach event keeps its old edge shape (the new fields are default-empty there); only the lineage read fills them.",
+    "An agent-level test was added for the pinned subscription route counting 0 spend; the zero rule is tested in the pure `metered_tokens` test.",
+    "The real-Postgres lineage test calls `fetch_lineage_for_thread` and `store::attach_subagent` directly inside the `plan_gate_pg` harness. It does not go through the gRPC handler."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The child budget checks only finished children, so with concurrency 4 up to four in-flight children can overshoot it, and a child that fails mid-round reports no usage for that round; the docs must state this before WIDE_RESEARCH_CHILD_BUDGET_ENFORCED is switched on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Still owed: 10 items with a small WIDE_RESEARCH_CHILD_TOKEN_BUDGET and enforcement on (expect about 4-6 run and the rest budget_reached in the digest), one retry through the gateway, and a page reload mid-run and after; capture SSE, the lineage JSON with goal_summary/batch_id/status, and screenshots."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Retry is not reachable from the UI until ChatPage passes onRetryItem and chat-client sends retry_of_child_run_id/batch_id; the composer send path does not carry wideResearch on this base (WideResearchStart is not mounted)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A retry's item is the child run's stored goal, which is the model-written fan-out item text (cut by durable_goal), not necessarily the person's original pasted item."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The agent-level budget tests assume WIDE_RESEARCH_FAN_OUT_CONCURRENCY is unset (4) and return early otherwise; the real-Postgres lineage test is #[ignore] and needs a scratch DATABASE_URL."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The lineage readback now exposes edge goal_summary to the thread owner through the gateway; it is the owner's own stored delegation goal, and no fan-out runs under ZDR, so no new ZDR surface appears, but the ZDR.md row for lineage should say so at flip time (S11)."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-2-S6",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-3",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx"
+   ],
+   "notes": "The slice is built dark behind DEEP_RESEARCH_SECOND_PASS, which defaults off and is read with the strict parser (only the literal \"true\" turns it on). Nothing was compiled or run, following the code-first order. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-2-S6.patch (105 KB, not empty).\n\n**What runs when the switch is on.** The steps below run in `deep_research.rs`, after phase 3 (the first read) and before citations are emitted:\n1. A D11 window guard (`second_pass_window`) checks the time left. The pass must end SYNTHESIS_TIMEOUT before the earlier of two limits: the wall clock, or the earliest bearer `exp` minus 30 s. The `exp` is read from the inference and session bearers by decoding the JWT payload; an opaque token sets no limit. The pass starts only if a ledger call, one search round and one read batch fit in that window.\n2. One plan-tier inference produces the ledger (`ledger_prompt`, page heads cut to 2,000 chars, `InferPurpose::ResearchPlan`, timeout 30 s).\n3. The ledger is parsed against the closed v1 schema (`parse_research_ledger`). A ledger without version 1 is rejected. Claims with an unknown status are rejected. The server reassigns claim ids and cuts claim text to 300 chars. Source numbers the report cannot cite are dropped, and a status is lowered when too few sources are left to support it. At most 24 claims are kept.\n4. Gap queries are re-clamped against the plan: at most 4, and no duplicates.\n5. A gap search runs only if needed: when the first read fell short, or when some claim is single_source, conflict or unsupported.\n6. The gap search and reads go through the same audited `search_sub_queries` and `read_pages`. They may only spend the page and attempt budget the first pass left (`second_pass_budget`). A property test checks that the two passes together never exceed the run's budget.\n7. `number_and_bound` now continues numbering after pages that already have a number, so a `[n]` that has already streamed never moves. With the switch off, numbering behaves exactly as before.\n8. If time is left, the ledger is labelled again over both passes (`pass_count` 2).\n9. Coverage is merged across both passes.\n\n**What the report and receipt get.** The synthesis prompt (`synthesis_prompt_with_ledger`) gets a sentence saying whether the second pass ran or why it was skipped, plus the ledger and a rule that sends unsupported claims to \"Kunne ikke verifiseres\". The receipt (`research_receipt_with_second_pass`) gains `passes`, `gap_queries`, `second_pass_skipped` and `claims_by_status`. The work steps `deep-research-gaps` and `deep-research-pass2` reuse the existing step events.\n\n**Provenance.** The stamp gains `passes`, `ledger_digest` (sha256 of the ledger JSON), `claims_by_status`, `research_ledger`, and a `pass` field on each source. All of these are left out when unset.\n\n**Persistence.** The ledger is stored inside the provenance stamp, under the artifact's `provenance.research_ledger` key. That means `persistable_artifacts` already strips it on ZDR and waived turns, and it is erased together with the message. `turn_evidence_metadata` and `sse.rs` did not change.\n\n**With the switch off**, every prompt, receipt, frame and number is identical to before; tests check the None paths against the old functions.\n\n**Frontend.**\n- `ArtifactProvenance` exports `researchPassFacts` and shows a pass line and claim counts by status.\n- `SourcesPanel` takes an optional `secondPassNumbers` and groups read sources by pass. Without it the panel renders unchanged.\n- Data reaches these components only after the two lead_todo shared edits (`chat-client.ts` parser and `ChatPage.tsx` wiring).\n\n**Tests written, not run:** `deep_research::tests::second_pass` (24 tests), one sse_events test and two session_flow tests (ledger kept on a normal turn, stripped on a ZDR or waived turn), plus Vitest cases in `ChatPanels.test.tsx` and `ArtifactProvenance.test.tsx`.\n\n**Matrix row.** I first edited the text of the existing posture-matrix row `e_waived_research_metadata_not_persisted` and then reverted it, so its `.sha256` file and other agents' merges stay clean. The row already covers the provenance stamp, which is where the ledger is stored. No new matrix row was added, since this is not a resolver-input row.",
+   "deviations": [
+    "Assumed D1 = (a) research state in the stream and assistant message metadata, no durable run, no new table",
+    "Assumed D2 = closed JSON research_ledger v1 (<=24 claims of <=300 chars, <=4 gaps, pass_count), persisted only on non-ZDR non-waived turns, erased with the message",
+    "Assumed D11 = guard: second pass starts only if min(wall clock, earliest bearer exp - 30 s) minus SYNTHESIS_TIMEOUT leaves room for one ledger call, one search round and one read batch; otherwise skipped and the coverage line names the reason",
+    "Assumed D12 = refuse: the ledger is not persisted on a waived (or ZDR) turn; it still streams on the report frame",
+    "Assumed OD-1 = D1(a)+D2 closed ledger schema, no durable run",
+    "The ledger is stored nested under the report artifact's provenance.research_ledger rather than as a top-level message-metadata key, so the existing D12 provenance strip covers it without touching sse.rs (not this slice's file)",
+    "A second-pass run stamps its report with provenance even when MODEL_GATEWAY_CITATION_PASSAGES is off (the stamp carries the ledger); documented on CITATION_PASSAGES_ENV",
+    "Ledger is re-labelled over both passes with a second plan-tier call when the window allows, so the cost is up to +2 plan-tier calls, not the design's +1",
+    "Not built: synthesis extracts via select_passages over the full parked body when S2's reader and handles are on (needs tool_loop handle access, not this slice's file)",
+    "zdr-posture-matrix.json left unchanged (edited and then reverted): the existing e_waived_research_metadata_not_persisted row covers the stamp the ledger rides, and changing its text needs its .sha256 regenerated"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D1 assumed (a): deep research state stays in-stream plus message metadata with no durable run; owner must confirm before DEEP_RESEARCH_SECOND_PASS is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D2 assumed: closed research_ledger v1 stored under artifacts[].provenance.research_ledger on non-ZDR non-waived turns only; the ZDR owner must acknowledge it, and the ledger needs a row in MP/docs/ZDR.md."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D11 assumed: second-pass bearer-window guard reads the JWT exp of the inference and session bearers and skips the pass unless 90 s of work plus 180 s of synthesis fit before min(wall clock, exp - 30 s)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D12 assumed: waived and ZDR turns stream the ledger on the report frame but persistable_artifacts strips it with the provenance stamp."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1 assumed (D1+D2 recommendation); S6 enablement waits on the owner's confirmation."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With default caps (410 s wall clock, 180 s synthesis reserve, 30 s bearer margin and ~300 s delegated bearer) the D11 guard will skip the second pass on most runs whose first read took more than ~40 s; the live proof must record how often the pass actually runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The second pass may only spend the page target the first pass left, so a run that met its 16-page target never gap-reads even when the ledger shows conflicts; the receipt says budget-spent, but the owner may want a separate small gap allowance."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "run_second_pass (the network orchestration: window, ledger call, gap search, reads, relabel) has no unit test with a mock inference client and Quarry; only its pure parts are tested."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof needed: a question with a known conflicting figure across sources; capture the gaps/pass2 steps, receipt passes/gap_queries/claims_by_status, the report's Kunne ikke verifiseres section, artifacts[].provenance.research_ledger in session-core message metadata (non-ZDR org), and the turn ending inside the wall clock."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The ledger is not passed to unsynthesized_context_message, so if synthesis fails after a second pass, the answering model gets the corpus without the claim routing."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Synthesis extracts still use the first 4,000 chars of each page; the design's select_passages over the full parked body when S2 and handles are on is not built."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Some new test lines in deep_research.rs exceed 100 columns; run cargo fmt on model-gateway after the batch."
+    }
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: in type ResearchProvenance add optional `passes?: number; ledger_digest?: string; claims_by_status?: Record<string, number>; research_ledger?: unknown` and make sources `{ number: number; url: string; title: string; pass?: number }[]`; in parseResearchProvenance keep them: in the sources flatMap return `[{ number, url, title: str(source?.title) ?? '', ...(typeof source?.pass === 'number' ? { pass: source.pass } : {}) }]`, and in the returned object add `...(typeof record.passes === 'number' ? { passes: record.passes } : {}), ...(str(record.ledger_digest) ? { ledger_digest: str(record.ledger_digest) } : {}), ...(objectValue(record.claims_by_status) ? { claims_by_status: objectValue(record.claims_by_status) as Record<string, number> } : {}), ...(record.research_ledger !== undefined ? { research_ledger: record.research_ledger } : {})`. Without this edit the parser drops these fields and the frontend never shows pass grouping or claim counts. The existing `toEqual(stamp)` test in chat-client.cited-passage.test.ts still passes because its stamp has none of these fields.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: add `import { researchPassFacts } from './ArtifactProvenance'`; after `const sourceBadgeRead = ...` (~line 732) add `const secondPassNumbers = createMemo(() => { for (const item of [...artifactItems()].reverse()) { const facts = researchPassFacts((item.artifact as { provenance?: unknown }).provenance); if (facts) return facts.secondPassNumbers } return [] as number[] })`; change line ~1029 to `<SourcesPanel grounding={latestGrounding()} sources={evidenceSources()} secondPassNumbers={secondPassNumbers()} />`",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block, beside DEEP_RESEARCH_* / MODEL_GATEWAY_CITATION_PASSAGES, add `DEEP_RESEARCH_SECOND_PASS: ${DEEP_RESEARCH_SECOND_PASS:-false}`",
+    "owner (not lead): apps/Model Plane/deploy/.env.example gains `DEEP_RESEARCH_SECOND_PASS=false` with comment `# EP-2-S6 claim ledger + gap-driven second pass for deep research; only literal true enables`",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (newest first): '2026-11-04 Deep research state lives in the stream and in message metadata, not on a durable run (EP-2 D1, D2; assumed under OD-1 pending owner): the closed research_ledger v1 {version:1, claims[<=24]{id,text<=300,status supported|single_source|conflict|unsupported,sources[n]}, gaps[<=4], pass_count} rides the report artifact provenance stamp (provenance.research_ledger + ledger_digest + claims_by_status + passes), is stored only on non-ZDR non-waived turns, erased with the message, never indexed or fed to memory/learning; the second pass is behind DEEP_RESEARCH_SECOND_PASS (default off) and its D11 guard starts it only if min(wall clock, earliest bearer exp - 30 s) leaves room for a ledger call, a search round, a read batch and synthesis.'",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in the deep-research / message-metadata rows add 'research_ledger (EP-2-S6): claim ledger in artifacts[].provenance.research_ledger of the assistant message metadata; deep research is refused under ZDR; a waived turn streams it on the report frame and session_flow::persistable_artifacts strips it with the stamp (D12); erased by the message GDPR path; never indexed or fed to memory.'",
+    "guard: cargo test -q -p model-gateway --lib deep_research::tests::second_pass, --lib sse_events::tests::research_ledger_streams_on_the_stamp_and_is_stripped_with_it, --lib session_flow (the two new ledger tests), --test zdr_posture_matrix; cargo fmt the model-gateway files; pnpm exec vitest run src/features/chat/components/ChatPanels.test.tsx src/features/chat/components/ArtifactProvenance.test.tsx",
+    "No proto, migration, SSE taxonomy or generated-code change: steps reuse StepUpdate, and the provenance keys are additive optional fields in an existing JSON object."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-4",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/migrations/0102_approval_descriptor_revision.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0102_approval_descriptor_revision.down.sql",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
+   ],
+   "deviations": [
+    "The migration is 0102_approval_descriptor_revision, not 0074. On model-plane, 0074 is already 0074_approval_gate_context. Round B C-B2 renumbers round A's reservation into 0100-0104, and 0102 is the free number there.",
+    "DecideApprovalRequest.edit is field 13, not 9. Fields 9-11 are the Space member decide and 12 is rule_proposed on this branch. Approval.revision=25, ApprovalStateChanged 11/12 and ConsumeApprovalResponse 8/9 are as planned.",
+    "The edit-and-grant path is a new store fn, decide_approval_with_edit, rather than a new parameter on decide_approval_recorded. Its other callers are left unchanged, and both share decide_approval_inner, which takes Option<&ApprovalEdit>, so it is one transaction.",
+    "The ConsumeApprovalResponse fields ship as 0 and empty from session-core. The consume path that fills them is EP-10-S5's work.",
+    "No zdr-posture-matrix row was added. The ZDR edit refusal falls under the existing decide-route row plus the approval_continuation feature (hard rule). The waived refusal reuses refuse_zdr_or_waived_question_caller, so zdr_posture_matrix.rs and zdr-posture-matrix.json are untouched.",
+    "model-gateway grpc.rs is untouched: no new RPC, and every new proto field is optional."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/Cargo.toml: under [dependencies] next to `mp-contracts = { path = \"../../crates/mp-contracts\" }` add `mp-scrub = { path = \"../../crates/mp-scrub\" }`. The edited approval reason is scrubbed with mp_scrub::scrub_string (K3-16), and Cargo.lock gains the edge.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: three pb::ConsumeApprovalResponse literals with no default spread do not compile with the new fields 8/9: the mock consume_approval `Ok(Response::new(pb::ConsumeApprovalResponse { ... authority: Some(mock_snapshot()),` (~line 13232), fn consume_of (~17558) and the descriptor-based consume helper (~26461). Add `..Default::default()` after the `authority:` line in each.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: two ConsumeApprovalResponse literals without a spread (~22810 in the winner mock's `Some(first) =>` arm, after `authority: None,`; ~22956 after `authority: Some(mp_contracts::model_plane::v1::ApprovedAuthority::default()),`). Add `..Default::default()` to each.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}` to the environment of the session-core, model-gateway and execution-core service blocks.",
+    "The owner adds APPROVAL_EDIT_ENABLED=false to apps/Model Plane/deploy/.env.example (do not edit it here).",
+    "guard: in apps/Model Plane/proto run buf lint, buf breaking --against proto/baseline.binpb and buf generate (Go bindings for ApprovalEdit, DecideApprovalRequest.edit=13, Approval.revision=25, ApprovalStateChanged.revision=11/edited_fields=12, ConsumeApprovalResponse.revision=8/original_action_fingerprint=9).",
+    "guard: compile session-core (lib and bin tests), model-gateway (lib and --test orchestration_http_test) and the BFF (`cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets decide_body_accepts_edit_and_refuses_unknown_keys`). Run the real-PG `#[ignore]` set in session-core with the DB harness: `cargo test -p session-core --bin session-core approval_edit_db_tests -- --ignored --test-threads=1`.",
+    "Deploy order when it ships: execution-core (S5) first, then session-core (runs migration 0102), then model-gateway. The switch stays off until the S10 proof."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/Cargo.toml",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until EP-10-S5 ships, an edited loop-mode approval cannot be consumed: execution-core's ConsumeApproval sends the fold's original fingerprint, which no longer matches d.action_fingerprint, so it fails closed. A cold approval's delivery worker would run the edited input. APPROVAL_EDIT_ENABLED must stay off in session-core and model-gateway until S5 is deployed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The approval_decided audit outbox body (audit_publisher::build_approval_decision_body) does not carry revision or edited_fields. Only the ApprovalStateChanged event and approvals.metadata.revision record them, so the durable audit row does not show that a grant was edited."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "An edit replayed after its own successful grant (for example through the BFF mg_post_decide_with_retry on a lost response) gets 409 approval_changed rather than an idempotent 200. The SPA (S6) must treat 409 as 'reload the approval' and read approval.revision."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "edited_approval_reason in session-core rebuilds both of execution-core's reason wordings (loop 'The agent would ... Approve to let it send.' and cold \"provider write '<op>' requires approval: ...\") by prefix detection. Move one shared reason builder into mp_contracts::provider_writes so the two planes cannot drift."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "MAX_APPROVAL_REVISIONS=3 can never be reached in practice, because an edit grants in its own transaction and so leaves the REQUESTED state. revision is 0 or 1 unless an edit-without-grant flow is added later; fourth_revision_is_refused covers it only by setting revision=3 directly in SQL."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "S4 DoD is not live-proven. On a rebuilt stack with the switch on: an edited grant stores revision 1, a new action_fingerprint and original_action_fingerprint, the reason names the new subject, ApprovalStateChanged lists the edited field names, and a stale base returns 409 approval_changed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Not-editable cases (no descriptor such as browser_human_assist, a non-mail operation, a Gmail raw draft, a waived run, a descriptor that does not reproduce its fingerprint) all map to FAILED_PRECONDITION not_editable, which the gateway returns as 422. revision_limit is 409, a Space member editing is 403 edit_owner_only, and the switch off is 403 approval_edit_disabled."
+    }
+   ],
+   "notes": "EP-10-S4 is built in code only; nothing was compiled or run. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-10-S4.patch (8 files, about 108 KB). Session-core: decide_approval_with_edit locks the approval FOR UPDATE OF a and the descriptor FOR UPDATE, then checks: owner, pending, unexpired, persistent run; a descriptor exists; fewer than 3 revisions; base_fingerprint equals the stored fingerprint; the tool is execute_provider_action and the operation is an editable mail send; the descriptor reproduces its own fingerprint. It then applies mp_contracts::approval_edit::apply_edit, rebuilds the fingerprint with mp_contracts::approval_descriptor, enforces the 64 KiB cap and re-encrypts with the same AAD. The descriptor UPDATE is a compare-and-set on the old fingerprint and keeps the original as a hash only. It also recomputes the scrubbed reason and cause.call_digest and writes metadata.revision {n, edited_fields, at}, then the existing grant compare-and-set runs, all in one transaction. The handler refuses an edit before any lookup: switch off is FAILED_PRECONDITION approval_edit_disabled, a non-grant is edit_requires_grant, a non-once scope or a rule proposal is edit_requires_once, an unknown patch key is invalid_patch. It refuses waived and ZDR callers before the member lookup and Space members with edit_owner_only. Approval.revision comes from metadata, and ApprovalStateChanged carries revision and field names only. Gateway: DecideApprovalBody.edit {patch, base_fingerprint} with deny_unknown_fields is checked before GetApproval. Mapping: 409 approval_changed and revision_limit, 422 for edit-contract codes and not_editable, 403 approval_edit_disabled and edit_owner_only, all with details as an object. Step-up applies unchanged, and approval_value adds revision only when it is above 0. BFF: accepts edit {patch, baseFingerprint} with unknown keys refused and forwards {patch, base_fingerprint}; it allows an edit only on a once approval and refuses a patch over 64 KiB. Tests added: session-core unit tests (edit_error_codes_map_to_invalid_argument, audit_event_carries_field_names_only, switch, scope and grant refusals, migration text) and 13 real-PG #[ignore] tests in approval_edit_db_tests (one transaction, fingerprint and original hash, stale base, concurrent edits, non-mail and raw, no descriptor per C-B4, thread scope and rule, waived, fourth revision, not found, invalid patch, replay, erasure with the run). model-gateway: lib unit tests plus 5 orchestration_http_test integration tests (off by default 403, forwarded when on, thread scope 422, 409, step-up). BFF: decide_body_accepts_edit_and_refuses_unknown_keys. Line endings were measured and kept: CRLF for the source files, LF for the migrations.",
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-3-S3",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-5",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/artifact_revision_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/artifacts.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.server-revisions.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx"
+   ],
+   "notes": "Built on top of S2, which is already on model-plane. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-3-S3.patch (107 KB). Nothing was compiled or run.\n\nThe switch is S2's existing MODEL_GATEWAY_ARTIFACT_REVISIONS (strict off|shadow|on, default off). Only `on` changes behaviour. With off or shadow, the routes answer 404 and the capabilities are all false. The SSE frame carries no editor key and the turn path is the same as before: in off mode the seed and commit calls return before any network call.\n\nGateway:\n- New artifact_revision_routes.rs adds GET /v1/threads/:thread_id/artifacts (heads, no text), GET .../artifacts/:artifact_id/revisions (paged with before_version and limit, at most 20 per page) and GET /v1/chat/composer-capabilities. It is merged into the authed router with one line.\n- Error mapping: a ZDR credential gets 412 through require_non_zdr_durable_mutation. NotFound and PermissionDenied are both answered as 404 thread_not_found. Session-core's artifact_revisions_disabled answers 404 artifact_history_unavailable.\n- In `on` mode, seed_from_table_heads raises ArtifactVersionStore to the table heads, text included, at turn start, before the metadata rehydration runs.\n- In `on` mode, commit_turn_revisions appends at the commit lock. A revision_mismatch ends the turn with the existing artifact_revision_conflict. Other refusals are only counted. The append that S2 makes after the save now runs only in shadow mode (writes_after_save).\n- ChatEvent::Artifact gains editor: Option<String> and with_editor(). The published frame names \"model\" only in `on` mode for a stored turn.\n\nBFF: new chat/artifacts.rs is a pass-through for the three routes. It encodes the path segments, relays only before_version and limit, sets no-store on every answer and adds no forged headers.\n\nFE:\n- chat-client adds ArtifactEditorKind, parses `editor` from the SSE frame, and adds listArtifactRevisions and getComposerCapabilities. A failed capabilities read counts as nothing offered.\n- chat-artifacts adds mergeServerRevisions (the server wins on an equal version). artifactVersions now keeps the server attribution when the streamed frame names no editor.\n- The panel takes an optional history={threadId,temporary} prop. It fetches only on the chat surface, for a thread that is not temporary, when artifact_history is true, and only for document, code or html. The stepper labels read \"v3 · Verevon\", \"v2 · deg/you\" and \"v5 · gjenopprettet fra v2\". An \"Earlier versions\" button pages back. When no editor is known the old label is kept.\n- Action chat.list_artifact_revisions is registered and the registry count goes to 278.",
+   "deviations": [
+    "Assumed OD-1 = (c) two stores, two owners, linked only by a one-way promote (artifact revisions are thread-owned in session-core)",
+    "Assumed OD-2 = (b) session-core table artifact_revisions, dual-written, message metadata unchanged (S2's table; no proto change and no migration in S3)",
+    "Assumed OD-8 = thread-wide artifact head; a branch switch does not move the artifact (row default)",
+    "has_more is returned inside data ({data:{revisions,has_more}} / {data:{artifacts,has_more}}), not in meta as the design says, because the SPA's requestJson unwraps data and drops meta",
+    "composer-capabilities reports artifact_editing, context_refs, thread_references and selection_edit as false: no server half exists yet, and each later EP-3 slice wires its own field",
+    "The ArtifactsPanel history prop is optional. ChatPage still mounts the panel without it, so nothing fetches until the lead applies the shared edit in lead_todo",
+    "In `on` mode the table append moves from after the save to the commit lock (before the assistant message is saved), so session-core cannot resolve source_message_id for those revisions"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: in the artifacts tab (Match activeTab() === 'artifacts'), replace `<ArtifactsPanel items={artifactItems()} />` with `<ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} />`. Leave the empty fallback `<ArtifactsPanel items={[]} />` unchanged.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after `'chat.open_cited_passage': exempt('no_owner_executor', 'read'),` add `  'chat.list_artifact_revisions': exempt('no_owner_executor', 'read'),`",
+    "Regenerate the agent-action-admission golden and its copies (MP api/contracts, FE contracts, capability-core testdata, execution-core and model-gateway fixtures) for the new action chat.list_artifact_revisions, and the prompt-tool manifest if it lists actions.",
+    "SSE payload golden: I hand-edited apps/Model Plane/api/contracts/sse-event-payloads.json (artifact.keys.editor, string, optional) and its .sha256 (now 6e74587f...). Regenerate it with MP_UPDATE_GOLDEN=1 cargo test -p model-gateway payload_contract, merged with the EP-2 slices' changes to the same file. Then refresh the FE copy apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json(+.sha256), chat-event-payloads.generated.ts and the pinned digest in scripts/tests/zdr-contract-sync.test.sh line ~203.",
+    "Run the taxonomy check: python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check. No new event name was added, so it should pass.",
+    "EP-3-S4 in this batch also lists artifact_revision_routes.rs as a new file. If both patches add it, merge by hand: keep S3's router() and the read handlers, and append S4's write routes."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (pass the history prop)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (MODEL_ACCESS entry)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts (normalizeArtifact should keep a valid `editor` so the live frame's attribution reaches the stepper before the history read)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1 assumed (c): artifact revisions are thread-owned in session-core and the Space canvas is Data-owned, linked only by a one-way promote; this needs the owner's ledger entry and the Space session's acknowledgement on overlap-space row 13 before the switch goes to on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-2 assumed (b): the session-core artifact_revisions table is dual-written next to an unchanged metadata.artifacts, and S3's on mode makes that table the cross-replica compare-and-set."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-8 assumed: the artifact head is thread-wide and a branch switch does not move it; revisit when SESSION_CORE_MESSAGE_VERSIONS_ENABLED flips (D2-620..623)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "In on mode the table append runs at the commit lock before the assistant message is saved, so a turn that then stops (run not live, or a later Stop) leaves an orphan revision with an empty source_message_id, and session-core's outbox resolution never fills it in."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In on mode only revision_mismatch fails the turn; an unreachable or disabled store is counted and the turn proceeds, so the cross-replica guarantee lapses silently during a store outage (watch mp_gateway_artifact_revision_writes_total{outcome=failed})."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A multi-artifact turn that conflicts on its second artifact has already appended the first, so the table can hold a revision of a turn that failed with artifact_revision_conflict."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Turn-start seeding reads at most 50 heads (session-core's cap), so a thread with more artifacts seeds the rest from metadata only, and those keep single-replica protection."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not yet proven live with MODEL_GATEWAY_ARTIFACT_REVISIONS=on and SESSION_CORE_ARTIFACT_REVISIONS_ENABLED=true: three-turn create and revise, reload plus a second browser showing v1..v3 'Verevon', a HAR of the revisions call, one SSE capture with editor, a ZDR token answered 412, and two gateway replicas racing one artifact."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The sse.rs wiring (seed before rehydrate, the commit-lock conflict path, editor on the published frame) is covered only by unit tests of the artifact_revisions helpers, not by an end-to-end invoke_stream_sse test with a mock session-core."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "chat-normalizers.normalizeArtifact (not owned here) drops the SSE `editor`, so a live turn's label shows only after the history read; it should keep a valid editor."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "EP-3-S4 in the same batch also creates artifact_revision_routes.rs, so the 3-way merge of the two patches will conflict on that new file."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-3-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-6",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/artifact_edit_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactEditor.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactEditor.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.edit.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "The slice is built dark, nothing was compiled or run, and the patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-3-S4.patch (102,523 bytes).\n\nWhat it does:\n- **Gateway routes.** New module `artifact_edit_routes.rs` adds two routes:\n  - `PUT /v1/threads/:thread_id/artifacts/:artifact_id` with body `{content, title?, expected_version}`.\n  - `POST /v1/threads/:thread_id/artifacts/:artifact_id/restore` with body `{version, expected_version}`.\n- **Order of checks on both routes:**\n  1. Switch off: 404 `artifact_editing_unavailable`.\n  2. ZDR credential: 412, via the existing `require_non_zdr_durable_mutation`.\n  3. Bad body: 400 `invalid_artifact_edit`.\n  4. A run on the thread is running (read with session-core `ListRuns`, `status_filter=running`): 409 `artifact_edit_run_active`. If the run state cannot be read, it fails closed with 503.\n  5. Head read with `GetArtifactRevision` version 0. Unknown or not owned: 404 `artifact_not_found`. Kind other than document, code or html (deck included, C-B8): 422 `artifact_edit_kind_unsupported`.\n  6. Stale `expected_version`: 409 `revision_mismatch` with `details.head_version`, so no write.\n  7. `AppendArtifactRevision` with editor `user` or `restore`, sent under `lock_commit`. An aborted `revision_mismatch` re-reads the head and returns the same 409.\n- **Refusals mapped from session-core:** Space thread gives 403 `artifact_edit_space_thread` (OD-9). Waived thread gives 403 `artifact_edit_waived_thread` (OD-11). `revision_missing` and `artifact_revision_limit` give 409. A typed ZDR refusal keeps its catalogue body (412). All errors use `{error:{code,message,details}}` with details as an object.\n- **Restore** copies the old revision's text and title and keeps the head's kind.\n- **After a successful save,** `record_user_revision` sets this replica's head to the version session-core assigned, so the next turn reads the person's text.\n- **Switch.** `MODEL_GATEWAY_ARTIFACT_EDITING` turns on only for the literal `true` (`parse_editing`/`editing_from_env`). `true` while `MODEL_GATEWAY_ARTIFACT_REVISIONS` is not `on` fails startup.\n- **`artifacts.rs`:** adds `user_version` to the stored artifact, plus `record_user_revision`, `mark_user_edited` (also the hook for S3's turn-start seeding) and `edited_by_user`. `fork_thread` carries the mark into the turn. `inventory_context` adds `\"edited_by\":\"user\"` and one sentence telling the model to start from `read_artifact`, only when an artifact carries a person's edit; otherwise the text is byte-identical.\n- **`http_routes.rs`:** one added line, `.merge(crate::artifact_edit_routes::router())`, after the fork route.\n- **Frontend:**\n  - `ArtifactEditor.tsx`: textarea, Save/Cancel, a conflict banner with \"load newest\" and \"overwrite\" (overwrite only after an explicit click, against the new head), a confirm before discarding unsaved text, a `beforeunload` guard while dirty, and no storage writes.\n  - `ChatArtifactPanel.tsx`: new optional `editing` prop (`ArtifactEditing`). Edit appears on the newest revision and Restore on older ones, only with `enabled`, surface `chat`, not temporary, not a Space thread, a text kind, and content present. The list is locked while the editor is open. Saved revisions are folded in locally. The provenance stamp is hidden on the person's revisions (R7).\n  - `chat-client.ts`: `saveArtifactRevision`, `restoreArtifactRevision`, `artifactConflictHeadVersion`, type `SavedArtifactRevision`.\n  - Registry: `chat.save_artifact_revision` (risk medium) and `chat.restore_artifact_revision` (risk low). The count test is now 279.\n- **Tests written:**\n  - Gateway, in `artifact_edit_routes.rs`: `editing_flag_requires_revisions_on`, `put_appends_user_revision`, `put_with_stale_expected_version_is_409_with_head`, `restore_copies_old_content_as_new_version`, `restore_of_missing_version_is_409`, `edit_refused_for_zdr_credential`, `edit_refused_for_waived_thread`, `edit_refused_for_space_thread`, `edit_refused_while_run_streams`, `next_turn_reads_user_version`, plus tests for the deck refusal, a head moved during the save, the 404 while off, an unknown artifact and content bounds.\n  - Gateway, in `artifacts.rs`: `inventory_marks_user_edit`, `next_turn_reads_user_version`, `a_zero_user_version_changes_nothing`.\n  - Frontend: `save_sends_expected_version`, `conflict_banner_offers_reload_and_overwrite`, `dirty_guard_on_close`, `no_edit_on_room_surface`, `no_edit_for_pdf_image_binary`, `no_edit_in_temporary_thread`.\n\nWith the switch off the routes answer 404. With no `editing` prop the panel renders as before. The model prompt is unchanged unless a person's edit exists.\n\nThe code depends on lead_todo items to compile: the `AppState.artifact_editing_enabled` field (`state.rs`), the `lib.rs` module registration, and the `model-access.ts` entries. The BFF needs pass-through routes before the SPA can reach the new endpoints.",
+   "deviations": [
+    "Assumed OD-1 = (c) two stores linked only by promote: artifact revisions stay thread-owned in session-core",
+    "Assumed OD-2 = (b) session-core artifact_revisions table is the compare-and-set authority; metadata unchanged",
+    "Assumed OD-9 = refuse edits in Space-origin threads with 403 artifact_edit_space_thread (session-core's failed_precondition mapped)",
+    "Assumed OD-11 = refuse edits on a thread holding a waived run with 403 artifact_edit_waived_thread (session-core's artifact_revisions_waived_thread mapped)",
+    "The routes live in a NEW module artifact_edit_routes.rs, not artifact_revision_routes.rs: EP-3-S3 creates that file in the same batch, and two new-file creations of one path cannot 3-way merge.",
+    "tool_loop.rs is unchanged: the 'if the person edited the artifact, start from read_artifact' guidance goes into inventory_context and is only emitted when an artifact carries a user edit, so the static update_artifact description (and the prompt-tool manifest) stays byte-identical with the switch off.",
+    "artifact_revisions.rs is unchanged: the editing switch parse sits in artifact_edit_routes.rs to stay clear of S3's concurrent edits to that file.",
+    "Run-active check reads session-core ListRuns(thread_id, status_filter=running) rather than the in-process CancelRegistry (which has no thread id), so it holds across replicas; it fails closed with 503 artifact_edit_run_state_unavailable.",
+    "The panel is not wired to the composer capabilities: ArtifactsPanel takes an optional editing prop that S3's getComposerCapabilities result must feed (lead_todo)."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs: add `pub mod artifact_edit_routes;` in alphabetical order (before `pub mod artifact_revisions;`).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs: (1) after the field `pub artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode,` add `/// `MODEL_GATEWAY_ARTIFACT_EDITING`, read once at startup after the revision mode (EP-3 S4). Off answers the edit routes 404.` + `pub artifact_editing_enabled: bool,`; (2) in `AppState::new()` after `artifact_revisions_mode: crate::artifact_revisions::ArtifactRevisionsMode::Off,` add `artifact_editing_enabled: false,`; (3) in from_env right after `let artifact_revisions_mode = crate::artifact_revisions::ArtifactRevisionsMode::from_env()?;` add `// Editing over a shadow or absent revision table would save text no turn reads: refuse the boot.` + `let artifact_editing_enabled = crate::artifact_edit_routes::editing_from_env(artifact_revisions_mode)?;`; (4) in BOTH from_env branches after `state.artifact_revisions_mode = artifact_revisions_mode;` add `state.artifact_editing_enabled = artifact_editing_enabled;`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after `'chat.save_thread_snapshot': exempt(...)` add `'chat.save_artifact_revision': exempt('no_owner_executor', 'context_write'),` and `'chat.restore_artifact_revision': exempt('no_owner_executor', 'context_write'),`; then regenerate the agent-action-admission golden.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (model-gateway block, under line `MODEL_GATEWAY_ARTIFACT_REVISIONS: ${MODEL_GATEWAY_ARTIFACT_REVISIONS:-off}`): add `MODEL_GATEWAY_ARTIFACT_EDITING: ${MODEL_GATEWAY_ARTIFACT_EDITING:-false}`; the owner adds the .env.example line.",
+    "BFF pass-through (EP-3-S3 owns apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs and chat/artifacts.rs): add `PUT /api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}` -> MG `PUT /v1/threads/{thread_id}/artifacts/{artifact_id}` and `POST .../artifacts/{artifact_id}/restore` -> MG `POST .../restore`, JSON body forwarded verbatim, no header forging, cache-control no-store, plus pass-through tests.",
+    "Wire the panel: where ArtifactsPanel is mounted for the chat page, pass `editing={{ enabled: capabilities.artifact_editing, threadId, temporary, spaceThread, onSaved }}` from S3's getComposerCapabilities; onSaved should fold the revision into the turn artifact via mergeArtifactVersion.",
+    "EP-3-S3: S3's composer-capabilities route should report artifact_editing from state.artifact_editing_enabled; S3's turn-start seeding should call ArtifactVersionStore::mark_user_edited(thread, id, version) for heads whose editor_kind is user or restore, so other replicas emit edited_by.",
+    "Guard: run `cargo fmt` on artifact_edit_routes.rs and artifacts.rs (CRLF files, written by hand); the 3-way merge with S3/S5 will conflict on action-registry.ts/action-registry.test.ts (count line: S4 adds +2) and ChatArtifactPanel.tsx/chat-client.ts.",
+    "Run: cargo test -q -p model-gateway --lib artifact_edit_routes; cargo test -q -p model-gateway --lib artifacts; pnpm exec vitest run src/features/chat/components/ArtifactEditor.test.tsx src/features/chat/components/ChatArtifactPanel.edit.test.tsx src/shared/actions/action-registry.test.ts; tsc6 -p tsconfig.app.json."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/artifacts.rs",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1 assumed (c): artifact revisions stay a session-core thread store and the Space canvas stays Data-owned; owner and Space-session acknowledgement are needed before MODEL_GATEWAY_ARTIFACT_EDITING is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-2 assumed (b): the session-core artifact_revisions table is the compare-and-set authority for user edits, and record_user_revision overwrites this replica's in-memory head with the table's version."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-9 assumed refuse: Space-origin threads get 403 artifact_edit_space_thread (session-core enforces it, the panel hides Edit when spaceThread is true)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-11 assumed refuse: a thread holding a waived run gets 403 artifact_edit_waived_thread, mapped from session-core's artifact_revisions_waived_thread."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Other replicas only see a user edit (content and edited_by mark) once S3's turn-start seeding reads table heads and calls mark_user_edited; until then a run on another replica can revise from the pre-edit text and its commit fails only if the on-mode CAS is wired."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The run-active check reads durable run status 'running' only; a turn whose run is still 'queued' while streaming would pass, and the backstop is the commit's artifact_revision_conflict."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof with revisions=on and editing=true is still owed: edit (v2 user), model keeps the paragraph (v3), restore v1 (v4), stale second tab gets the conflict banner, plus ZDR/waived/Space negatives and SQL rows with editor_kind."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Provenance is hidden only for revisions saved in this panel session; after a reload the panel needs S3's editorKind on server revisions to keep hiding a model provenance stamp on user revisions (provenance_hidden_on_user_revision after EP-2 S5)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The dirty guard covers Cancel, the artifact list and page unload, but not closing the Output panel or switching the chat tab, which unmounts the editor and drops unsaved text."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "artifact_edit_routes.rs carries its own revision JSON serializer, which likely duplicates the one S3 adds in artifact_revision_routes.rs; fold them into one after the merge."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-3-S5",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_093c57c8-beb-7",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/context_refs.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Model Plane/api/contracts/zdr-refusals.json",
+    "apps/Model Plane/api/contracts/zdr-refusals.json.sha256",
+    "apps/Model Plane/rust/services/model-gateway/src/context_refs.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_refusal_inventory.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-context-refs.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.context-refs.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/ComposerContextChips.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/composer-slash-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ContextRefPicker.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "Built EP-3-S5 dark behind MODEL_GATEWAY_CONTEXT_REFS_ENABLED. Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-15/EP-3-S5.patch (100 KB, 25 files). Nothing was compiled or run; per the code-first order the guard compiles.\n\nWhat is built:\n- mp-contracts/context_refs.rs: a std-only validator. At most 20 refs, at most 20 thread refs, at most 1 selection. Ids must be ASCII-safe, duplicates are refused, and labels are cut to 120 characters. Tests are included.\n- model-gateway/context_refs.rs: the resolver.\n  - ZDR turns are refused with the feature `context_references`.\n  - A document ref narrows `knowledge_search` through `Filters.document_ids`, using a per-run registry that is dropped with the turn.\n  - A space ref must equal the thread's own Space, otherwise `context_ref_space_mismatch`.\n  - A skill ref is merged into skill ids.\n  - Thread and artifact_selection refs are refused with `context_ref_unsupported` (until S7/S6), and a Do turn refuses both.\n  - Document and skill refs are refused on conversation-only or web-only turns, so a ref is never silently dropped.\n  - The HTTP body uses the typed envelope with `details` as an object. Tests are included.\n- `InvokeRequest.context_refs`: raw JSON, so parsing is unchanged when the switch is off.\n- zdr_features: new row, guard and refusal.\n- tool_loop: `knowledge_search` reads the filter.\n- session_flow: a task-local scope writes `metadata.context_refs` as `{kind,id,label}` only. Tests are included.\n- ZDR catalogue: feature added in all four contract files with recomputed sha256. No posture-matrix row is added; refusal rows stay out of the matrix by rule.\n- FE: `chat-context-refs.ts` contract; `chat-client` sends `context_refs` only when non-empty and never on zdr/temporary or subscription turns, and reads `metadata.context_refs` back. Also built: the first composer slash registry (C-B10, `composer-slash-registry.ts`), ComposerContextChips (atomic chips, \"+ Kontekst\" button, `/kontekst`) mounted in one line, ContextRefPicker (Documents, Skills and the own Space only), chips on user messages, and the registry actions `chat.set_context_refs` and `chat.pick_context_ref` (count 279). FE is hidden until the catalogue advertises the `context_refs` capability.\n\nStatus is partial because the stream wiring sits in sse.rs, which is not mine; until the guard applies the lead_todo edits, refs resolve nowhere. Line endings were measured per file: Rust files are CRLF, FE files are LF.",
+   "deviations": [
+    "Assumed OD-4 = picker button plus /kontekst slash command; no character trigger, @ stays reserved for Space",
+    "Assumed OD-7 = owner's own origin=chat threads only, max 20 thread refs, resolved lazily; in this slice every thread ref is refused (context_ref_unsupported) because S7 is not built, so the OD-7 checks (Space, ZDR/waived, current thread) are not coded yet",
+    "Switch off: refs are left unread (byte-identical, per the owner's hard rule) instead of the design's context_refs_disabled refusal; the design test flag_off_refuses_non_empty_refs is written as flag_off_leaves_non_empty_refs_unread",
+    "A ZDR turn with any context_refs is refused whatever the switch says (needed by the zdr_features table, which classifies on the request alone)",
+    "No send action exists in action-registry, so instead of extending one I added chat.set_context_refs (turn chips, like chat.set_connector_scope) plus chat.pick_context_ref; kind 'thread' is left out of the schema until S7",
+    "The picker has no Threads tab (the server refuses thread refs until S7), and its Space tab shows only when a Space id is passed (the composer has none yet)",
+    "Added a refusal of document and skill refs on conversation-only or web-only turns (not in the design) so a ref is never silently dropped",
+    "New files outside the named list: composer-slash-registry.ts (C-B10 registry) and shared/actions/chat-context-refs.ts (action contract)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (invoke stream, right after the connector_selection match block that ends with the `Err(ConnectorSelectionRefusal::Malformed)` arm and before `let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();`): insert\n    // Typed context references (Wave 3 EP-3 S5), checked before any run or model call. With the switch off the\n    // field is never read, so the turn is the one it was before.\n    let context_refs = match crate::context_refs::resolve(\n        crate::context_refs::enabled(),\n        req.context_refs.as_ref(),\n        &crate::context_refs::TurnFacts {\n            zdr: turn_posture.zdr(),\n            waived: turn_posture.is_waived(),\n            agentic: features.iter().any(|feature| feature == \"agentic\"),\n            knowledge: !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly,\n            space_id: req.space_context.as_ref().or(req.space_append_context.as_ref()).map(|context| context.space_id.as_str()).filter(|id| !id.is_empty()),\n        },\n    ) {\n        Ok(resolved) => resolved,\n        Err(crate::context_refs::ContextRefRefusal::Zdr) => {\n            return zdr_refusal_stream(&request_id, crate::context_refs::ContextRefRefusal::zdr_refusal());\n        }\n        Err(crate::context_refs::ContextRefRefusal::Typed { code, message, .. }) => {\n            return error_stream(&request_id, code, message, false);\n        }\n    };",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (same fn, the `crate::session_flow::prepare_managed_run_authenticated_with_receipt(` call that starts `let session_run = match`): wrap it as `let session_run = match crate::session_flow::with_user_context_refs(context_refs.as_ref(), crate::session_flow::prepare_managed_run_authenticated_with_receipt( ...unchanged args... )).await {` (one extra closing paren before `.await`)",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (fetch_skill_context call in the same fn): replace the argument `&req.skill_ids,` with `&crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (same fn): just before the comment `// The tool phase and the first inference call run INSIDE this task` add `let context_ref_documents = crate::context_refs::register_turn_documents(&session_run.run_id, context_refs.as_ref());`; and as the first line inside the following `tokio::spawn(async move {` next to `let _active_stream = active_stream;` add `let _context_ref_documents = context_ref_documents;`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs (test helper make_request, InvokeRequest literal ~line 623): after `wide_research: None,` add `context_refs: None,`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (cases() vec, after the row `(\"wide_research\", with(\"wide_research\", Value::Null), None),`): add `// EP-3 S5: a ZDR turn carrying context references is refused before any network call.` then `(\"context_refs\", with(\"context_refs\", json!([{\"kind\": \"document\", \"id\": \"doc-1\"}])), refused(\"context_references\")),` and `(\"context_refs\", with(\"context_refs\", json!([])), None),`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: after `| 'run_inspection'` add `| 'context_references'`; after the `run_inspection: {...}` copy row add `context_references: { no: 'referanser til dokumenter, samtaler eller utvalg', en: 'references to documents, threads or selections' },`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts: in ChatTurn after `retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope` (the field documented 'Per-turn retrieval-source filter this turn was SENT with') add `/** The context chips this turn was sent with (EP-3 S5): kind, id and label only. */` + `contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]`; in the send-options type after `connectorScope?: string[]` (line ~715) add `/** See \\`ChatInvokeRequest.contextRefs\\`. Per-turn, like \\`connectorScope\\`. */` + `contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts (messageToTurn): after `retrievalScope: msg.retrievalScope,` add `contextRefs: msg.contextRefs,`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: (a) in sendContent's userTurn literal after `retrievalScope: options.retrievalScope ?? retrievalScope(),` add `contextRefs: options.contextRefs,`; (b) in the request object after `connectorScope: options.connectorScope,` (~3307) add `contextRefs: options.contextRefs,`; (c) in the composer-submit sendContent options after `connectorScope: payload.connectorScope,` (~3683) add `contextRefs: payload.contextRefs,`",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (model-gateway env, after the WIDE_RESEARCH_ENTRY_ENABLED line): `# EP-3 S5: typed context references on the send (document, skill, own Space). Only the literal true.` + `MODEL_GATEWAY_CONTEXT_REFS_ENABLED: ${MODEL_GATEWAY_CONTEXT_REFS_ENABLED:-false}`",
+    "shared-edit apps/Model Plane/docs/ZDR.md feature/refusal table: add a row `| **Context references on the send (EP-3 S5)** | No reference resolved on a ZDR or temporary turn | Built dark behind MODEL_GATEWAY_CONTEXT_REFS_ENABLED (off). A ZDR turn carrying any context_refs is refused before any network call with zdr_feature_not_supported, feature context_references (whatever the switch says). metadata.context_refs stores {kind,id,label} only, never on a ZDR turn (no message is written). |`",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (newest first, CRLF): 'Context tokens use a picker and a slash command, never @' (EP-3 OD-4, assumed default 2026-11-04, pending owner confirmation)",
+    "Guard: regenerate the agent-action-admission golden and the prompt-tool manifest (action-registry gained chat.set_context_refs and chat.pick_context_ref); run bash scripts/tests/zdr-contract-sync.test.sh (both zdr-refusals.json copies and .sha256 were hand-edited to the generator's shape)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-4 assumed = picker button plus /kontekst, no character trigger; needs the owner's confirmation and a ledger entry before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-7 assumed = owner's own origin=chat threads only, max 20, lazy; S5 refuses every thread ref, so S7 must code the OD-7 refusals (Space, ZDR/waived, current thread) on the server."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "When the switch is off, non-ZDR refs are ignored (byte-identical rule) rather than refused with the design's context_refs_disabled, so a stale client with refs on a switched-off gateway loses them silently; the owner should pick one."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The FE stays hidden until a chat model in the catalogue lists the `context_refs` capability; nothing emits it yet (inference-core list_models must add it when MODEL_GATEWAY_CONTEXT_REFS_ENABLED is on)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "On a Do turn, document and skill refs are admitted, but only the Ask-loop knowledge_search and fetch_skill_context use them, so execution-core runs drop them silently until RunAgentRequest carries them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Document narrowing reaches only the model-called knowledge_search tool; the pre-answer grounding retrieval (`retrieval::retrieve_checked`) is not narrowed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needs a live check that retrieval-engine honours Filters.document_ids for chat search and that the threads-messages route forwards metadata.context_refs to the SPA."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The per-run document registry is process-local (keyed by run_id), so a tool round on another gateway replica would not see the narrowing; it is fine today because tool rounds run in the stream task."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The picker's Space tab never shows because DashboardComposer has only `spaceScoped: boolean`, with no Space id or label to pass to ComposerContextChips."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The new error codes (context_refs_invalid, context_ref_unsupported, context_ref_space_mismatch) have no Norwegian copy in FE src/shared/i18n/errors.ts, so the SPA shows the English server message."
+    }
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/ZDR.md",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way (EP-2-S5, EP-2-S9, EP-2-S6, EP-10-S4, EP-3-S3, EP-3-S4, EP-3-S5)",
+    "outcome": "All 7 patches are in. Three patches (EP-3-S3, S4, S5) were refused at first because action-registry.ts was still unmerged. I resolved the conflicts, ran git add on the resolved files, and re-applied the three in order. No markers and no .rej files are left. 'git reset -q' was run; there are 0 unmerged and 0 staged files, and 73 tracked files plus the slices' new untracked files are changed.",
+    "clean": true
+   },
+   {
+    "command": "buf lint (apps/Model Plane/proto)",
+    "outcome": "No finding on the new fields or messages. The orchestration.proto:1753 'status' finding was there before (SubagentStopped).",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against baseline.binpb",
+    "outcome": "exit 0",
+    "clean": true
+   },
+   {
+    "command": "buf generate (buf.gen.local2.yaml + buf.gen.py-remote.yaml)",
+    "outcome": "Only orchestration.pb.go and orchestration_pb2.py differ, and both were copied in. orchestration_grpc.pb.go is unchanged.",
+    "clean": true
+   },
+   {
+    "command": "bash apps/Model Plane/scripts/tests/go-gen-drift.sh",
+    "outcome": "48 generated Go files match",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 passed. The golden was regenerated and copied to 4 places. The new sha is 6bf63685fa16883dffbe05991329a6af46d8f4d47fb4c181401cb102fabc8c47, written to the .sha256 file and the zdr-contract-sync pin.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "9 passed; the manifest is unchanged",
+    "clean": true
+   },
+   {
+    "command": "pnpm gen:chat-events",
+    "outcome": "The file was regenerated. It differs from the merged hand edits by one added line, `editor?: string`, from EP-3-S3.",
+    "clean": true
+   },
+   {
+    "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py",
+    "outcome": "FAILS on the script's own parser: \"unsupported #[cfg(test)] item 'Scripted(VecDeque<Vec<u8>>),'\" in mcp_http.rs:142. That file is untouched by this batch, so the failure was already there. sse-event-taxonomy.md was not rewritten for the new research_plan event.",
+    "clean": false
+   },
+   {
+    "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+    "outcome": "177 passed, 8 failed. All 8 failures are files this batch did not touch: usage-envelopes, quarry-token-claims, space-denial-codes, space-surface and run-trace-envelope vendored .sha256 files. The admission, sse-event-payloads and zdr-refusals rows pass.",
+    "clean": false
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished, 0 errors. Warnings only; new ones are 2 unused axum::Json in artifact_edit_routes.rs tests (943, 1124).",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished, 0 errors (warnings were already there)",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (gen, pkg/zdrrefusal, capability-core, orchestrator-core, sandbox-manager, cost-core, bridge-core, browser-broker, letta-bridge, nats-provisioner)",
+    "outcome": "all clean",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "0 errors after one fix. The expected baseline error in schedule-contract.test.ts did not appear either.",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "slice": "EP-2-S5 + EP-2-S9 + EP-3-S4 (merge)",
+    "what": "Resolved the 3-way conflicts and kept every slice: the chatResearchPlanStart/Cancel inputs, chatWideResearchRetryItemInput and chatSave/RestoreArtifactRevision inputs, plus the entries chat.research_plan_start, chat.research_plan_cancel and chat.wide_research_retry_item."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "slice": "EP-3-S3",
+    "what": "Escaped the unescaped apostrophes in the label and description of chat.list_artifact_revisions ('artifact's', 'person's', 'panel's', 'gateway's'). Without this the file did not parse."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "all FE registry slices",
+    "what": "Merged the count comments: +1 S3, +2 S4, +2 EP-3-S5, +2 EP-2-S5, +1 EP-2-S9. toHaveLength goes from 277 to 285."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "slice": "EP-2-S5 + EP-2-S6 (merge)",
+    "what": "Synthesis now calls synthesis_prompt_with_ledger(&with_clarifications(question, client_plan...), &sources, &coverage, second_pass.as_ref()). Both test modules, plan_turn and second_pass, are kept."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "slice": "EP-2-S6 + EP-3-S3 (merge)",
+    "what": "Kept both tests. Added `editor: None` to S6's ChatEvent::Artifact literal, because S3 added the field."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "slice": "EP-2-S5 + EP-3-S5 (merge)",
+    "what": "Kept both new test blocks: the research-plan test and the context-refs tests."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "slice": "EP-3-S3 + EP-3-S4 (merge)",
+    "what": "Merged by hand. Both imports are kept (mergeServerRevisions, mergeArtifactVersion), as are both types (ArtifactHistorySource, ArtifactEditing). ArtifactsPanel takes both the history and editing props and keeps the history effect and the editorOpen signal. ArtifactViewer takes historyThreadId, editing and onEditorOpenChange. The artifact memo folds saved revisions over the server-merged artifact. The 'Earlier versions' button and the Edit/Restore buttons are all kept."
+   },
+   {
+    "file": "apps/Model Plane/api/contracts/sse-event-payloads.json(.sha256) + FE copy",
+    "slice": "EP-2-S5 + EP-3-S3",
+    "what": "The 3-way merge of the golden was clean (research_plan plus artifact.editor). The sha conflict was resolved to the merged digest 37a19708e935df12e7797b717ba57ae64726f9bdb61c38778e9a1eedcbd16aca. The FE copy, both .sha256 files and the zdr-contract-sync pin were updated."
+   },
+   {
+    "file": "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json(.sha256), apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json(.sha256), scripts/tests/zdr-contract-sync.test.sh",
+    "slice": "EP-3-S5",
+    "what": "Copied the hand-edited catalogue to the two vendored copies that had not been updated. Their .sha256 files and the zdr-refusals pin now read 2153c4f8...0915."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "slice": "EP-3-S5",
+    "what": "MODEL_ACCESS is an exhaustive Record<ActionId>, but the slice gave no entries for its two new actions. I added chat.set_context_refs as exempt('agent_cannot_self_govern','context_write') (like set_connector_scope) and chat.pick_context_ref as exempt('no_owner_executor','read')."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx",
+    "slice": "EP-2-S6",
+    "what": "The test indexed passes[0]/passes[1] without optional chaining, which gave TS2532 under noUncheckedIndexedAccess. Changed to passes[n]?."
+   }
+  ],
+  "still_broken": [
+   "apps/Model Plane/docs/sse-event-taxonomy.md was not regenerated for the new research_plan event (EP-2-S5). gen-sse-event-taxonomy.py fails on an existing #[cfg(test)] enum variant in model-gateway/src/mcp_http.rs:142, which this batch did not touch. The script needs to learn that shape first.",
+   "The SSE golden was merged by hand and not regenerated. The task forbids cargo test apart from the manifest step, so MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden was not run. The lead should run it and confirm that digest 37a19708... does not change.",
+   "EP-3-S4 BFF pass-through is not built: PUT and POST .../restore in apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs and chat/artifacts.rs are missing. That is design work, not a shared edit.",
+   "EP-3-S4 editing wiring in ChatPage.tsx is not built: `editing={{ enabled, threadId, temporary, spaceThread, onSaved }}` needs capability plumbing (artifact_editing in getComposerCapabilities) and a mergeArtifactVersion fold. The two EP-3-S3 follow-ups are also not done: report artifact_editing from the composer-capabilities route, and call mark_user_edited at turn start.",
+   "EP-2-S9: onRetryItem on ChatWideResearchPanel is not wired. The builder said to wait until the composer send path carries wideResearch.",
+   "EP-2-S5 needs_other_files is not done: chat-normalizers.ts and ChatMessages.tsx should render the stored research_plan as a read-only ResearchPlanCard on reload. EP-3-S3 also needs chat-normalizers.ts normalizeArtifact to keep `editor`. Neither has exact lines.",
+   "Optional CSS .verevon-wide-research__retry (EP-2-S9) is not added."
+  ],
+  "notes": "The batch now compiles: the Model Plane Rust workspace, the verevonv3 gateway, every Go module and the verevonv3 tsc6 app check all have 0 errors. Nothing is committed. I made two kinds of git write: the patch applies, plus git add on resolved files so the next 3-way could run, and the one final `git reset -q`. The index is empty.\n\nShared edits I applied, keeping each file's line endings:\n- **Model Plane docker-compose.yml:** DEEP_RESEARCH_PLAN_TURN, MODEL_GATEWAY_CONTEXT_REFS_ENABLED, DEEP_RESEARCH_SECOND_PASS and MODEL_GATEWAY_ARTIFACT_EDITING in model-gateway. APPROVAL_EDIT_ENABLED in model-gateway, session-core and execution-core. WIDE_RESEARCH_CHILD_BUDGET_ENFORCED and WIDE_RESEARCH_CHILD_TOKEN_BUDGET in execution-core. All default false or 400000, and every name matches the env::var read in code.\n- **Small Rust edits:** normalize.rs test literal (research_phase, research_plan, context_refs). session-core Cargo.toml gets mp-scrub (Cargo.lock edge added by cargo). model-gateway lib.rs gets `pub mod artifact_edit_routes`. state.rs gets artifact_editing_enabled: the field, new(), from_env and both branches.\n- **agent.rs:** `..Default::default()` added to the 3 ConsumeApprovalResponse literals.\n- **sse.rs:** 2 ConsumeApprovalResponse literals. The context_refs resolve block goes after connector_selection, and the with_user_context_refs wrapper goes around prepare_managed_run_authenticated_with_receipt. The args inside the wrapper keep their old indentation; I did not run rustfmt. The merged_skill_ids argument and the register_turn_documents guard are also in.\n- **Tests:** zdr_feature_table.rs gets the 2 context_refs rows.\n- **verevonv3:** docker-compose.yml and vite-env.d.ts get VITE_DEEP_RESEARCH_PLAN_TURN. In ChatPage.tsx: the research-plan destructure and ComposerTrays props (S5), secondPassNumbers memo plus the researchPassFacts import (S6), the ArtifactsPanel history prop (S3), and ChatWideResearchPanel threadId (S9). model-access.ts gets entries for all 9 new actions. chat-client.ts gets the WideResearchStart retry fields and the wideResearchWire retry branch (S9), and the ResearchProvenance passes/ledger fields and parser (S6). zdr-refusals.ts gets context_references. chat-types.ts, chat-normalizers.ts and use-chat-controller.ts get contextRefs (EP-3-S5).\n- **apps/Model Plane/docs/ZDR.md:** the EP-2-S5 and EP-2-S6 paragraphs in 5.5, and the EP-3-S5 feature table row.\n\nSkipped, as instructed: every docs/decisions/ledger.md entry (EP-2-S5, EP-2-S9, EP-2-S6 and EP-3-S5 OD-4) and every .env.example line. The owner still needs to add DEEP_RESEARCH_PLAN_TURN, VITE_DEEP_RESEARCH_PLAN_TURN, WIDE_RESEARCH_CHILD_BUDGET_ENFORCED, WIDE_RESEARCH_CHILD_TOKEN_BUDGET, DEEP_RESEARCH_SECOND_PASS, APPROVAL_EDIT_ENABLED, MODEL_GATEWAY_ARTIFACT_EDITING and MODEL_GATEWAY_CONTEXT_REFS_ENABLED.\n\nRegenerated:\n- Go orchestration.pb.go and Python orchestration_pb2.py. These are written with LF; the earlier guards copied the files the same way.\n- The agent-action-admission golden, 5 copies.\n- chat-event-payloads.generated.ts.\n\nzdr-posture-matrix.json was not touched, so step 4b did not apply.\n\nrustfmt --check shows large drift across the model-gateway crate that was already there, so I formatted nothing.\n\nThe deploy order for EP-10-S4 is still execution-core, then session-core (migration 0102), then model-gateway.",
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (+ copies in apps/Model Plane/api/contracts, capability-core internal/api/testdata, execution-core tests/fixtures, model-gateway tests/fixtures; .sha256 and zdr-contract-sync pin)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts",
+   "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 + FE copy and its .sha256 + zdr-contract-sync pin (merged golden, digest recomputed, not regenerated by cargo)",
+   "zdr-refusals.json vendored copies (go/pkg/zdrrefusal, quarry-runtime fixtures) + .sha256 + pin",
+   "prompt_tool_manifest (ran, no change)"
+  ],
+  "shared_edits_applied": [
+   "apps/Model Plane/rust/services/model-gateway/src/normalize.rs: research_phase/research_plan/context_refs in make_request (EP-2-S5, EP-3-S5)",
+   "apps/Model Plane/deploy/docker-compose.yml: DEEP_RESEARCH_PLAN_TURN, MODEL_GATEWAY_CONTEXT_REFS_ENABLED, DEEP_RESEARCH_SECOND_PASS, MODEL_GATEWAY_ARTIFACT_EDITING, APPROVAL_EDIT_ENABLED x3, WIDE_RESEARCH_CHILD_BUDGET_ENFORCED/TOKEN_BUDGET",
+   "apps/Frontend Plane/verevonv3/docker-compose.yml: VITE_DEEP_RESEARCH_PLAN_TURN",
+   "apps/Frontend Plane/verevonv3/src/vite-env.d.ts: VITE_DEEP_RESEARCH_PLAN_TURN",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: S5 plan card wiring, S6 secondPassNumbers, S3 history prop, S9 threadId",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: 9 new action entries",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: count 285 with comments",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: S9 retry wire fields, S6 provenance fields",
+   "apps/Model Plane/rust/services/session-core/Cargo.toml: mp-scrub",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: 3x ..Default::default()",
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs: 2x ..Default::default(); EP-3-S5 context_refs resolve, with_user_context_refs wrap, merged_skill_ids, register_turn_documents",
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs: pub mod artifact_edit_routes",
+   "apps/Model Plane/rust/services/model-gateway/src/state.rs: artifact_editing_enabled (field, new, from_env, both branches)",
+   "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs: context_refs rows",
+   "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: context_references",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts: contextRefs on ChatTurn and SendOptions",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts: contextRefs",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: contextRefs x3",
+   "apps/Model Plane/docs/ZDR.md: EP-2-S5 and EP-2-S6 paragraphs in 5.5, EP-3-S5 table row"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries (EP-2-S5, EP-2-S9, EP-2-S6, EP-3-S5 OD-4): lead books",
+   "apps/Model Plane/deploy/.env.example and apps/Frontend Plane/verevonv3/.env.example lines: owner",
+   "EP-3-S4 BFF pass-through routes in apps/gateway domains chat.rs/chat/artifacts.rs: needs design, not an exact edit",
+   "EP-3-S4 ChatPage editing prop wiring and S3 capability/mark_user_edited follow-ups: needs design",
+   "EP-2-S9 onRetryItem in ChatPage: builder deferred it",
+   "EP-2-S9 optional CSS in styles/global.css",
+   "EP-2-S5/EP-3-S3 chat-normalizers/ChatMessages reload rendering (needs_other_files, no exact lines)",
+   "gen-sse-event-taxonomy.py rewrite: script fails on existing mcp_http.rs shape"
+  ]
+ }
+}

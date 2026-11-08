@@ -43,7 +43,7 @@ use crate::run_phase::ERROR_CODE_TRAILER;
 use crate::thread_export::ERROR_REASON_TRAILER;
 
 /// The environment switch for the import. Default off, read by the strict parser the other
-/// switches share, so only the literal `true` turns it on.
+/// switches share, so only `true`, in any case, turns it on.
 pub(crate) const ENABLED_ENV: &str = "SESSION_THREAD_IMPORT_ENABLED";
 
 /// The largest file an import reads (D11). The gateway holds its body to the same limit.
@@ -821,7 +821,9 @@ mod tests {
     fn the_switch_is_off_unless_it_reads_true() {
         assert!(!mp_contracts::loop_fold::switch_from(None));
         assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
-        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("TRUE")));
     }
 
     // The ignored database tests below run with `--ignored` against a disposable Postgres, as the

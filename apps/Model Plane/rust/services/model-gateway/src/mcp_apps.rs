@@ -13,7 +13,12 @@
 //! The uri is not part of the tool digest in v1 (D11): the app runs in the
 //! opaque-origin sandbox with no network and no ambient authority, so a changed
 //! uri changes only what is drawn. Network domains an app declares are reported
-//! as `needs_network`, never honoured (D12): the frame's CSP stays as it is.
+//! as `needs_network`. With `MCP_APPS_NETWORK_ENABLED` on, the response also
+//! carries the frame's policy, built by [`crate::mcp_app_csp`] from what the app
+//! declares and what the org's `mcp_apps.network_origins` allows. The frame route
+//! (`GET /v1/mcp-apps/frame`, Wave 4 W4-D M1c) serves the app as a document with
+//! that policy in it. The SPA keeps its no-network policy until it draws the frame
+//! from that route (D12).
 //!
 //! Every extension key lives in this file, because the extension is young and
 //! its `_meta` keys may still move (checked against the 2026-01-26 revision:
@@ -77,6 +82,26 @@ pub fn enabled() -> bool {
     *ENABLED.get_or_init(|| enabled_from_env_value(std::env::var(ENABLED_VAR).ok().as_deref()))
 }
 
+/// The switch that serves the frame's policy and the origins it grants on the resource response and in the frame
+/// document (Wave 4 W4-D M1). Only the literal `true` turns it on; off, the resource response is exactly what it was
+/// before the switch existed, and the frame keeps the no-network policy.
+pub const NETWORK_ENABLED_VAR: &str = "MCP_APPS_NETWORK_ENABLED";
+
+/// `MCP_APPS_NETWORK_ENABLED`: only the literal `true` turns it on.
+#[must_use]
+pub fn network_enabled_from_env_value(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The process's `MCP_APPS_NETWORK_ENABLED`, read once so it cannot change under a request.
+#[must_use]
+pub fn network_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        network_enabled_from_env_value(std::env::var(NETWORK_ENABLED_VAR).ok().as_deref())
+    })
+}
+
 /// The `ui://` uri a raw `tools/list` entry names as its app, or `None` when it
 /// names none, names another scheme, or names something malformed.
 #[must_use]
@@ -133,6 +158,8 @@ pub struct AppResource {
     pub uri: String,
     pub html: String,
     pub needs_network: bool,
+    /// The origins the app declares in `_meta.ui.csp`, validated. Granted only by [`crate::mcp_app_csp::build`].
+    pub declared: crate::mcp_app_csp::DeclaredCsp,
 }
 
 /// Why an app could not be read. Each maps to one typed error code; none
@@ -295,6 +322,7 @@ pub fn app_resource_from_read(uri: &str, result: &Value) -> Result<AppResource, 
         uri: uri.to_owned(),
         html,
         needs_network: declares_network(content.get("_meta")),
+        declared: crate::mcp_app_csp::DeclaredCsp::from_meta(content.get("_meta")),
     })
 }
 
@@ -403,6 +431,26 @@ pub async fn read_app_resource(
     );
     cache.insert(org_id, server_id, Arc::clone(&resource));
     Ok(resource)
+}
+
+/// The `data` of `GET /v1/mcp-apps/resource`. With the network switch off it is `{uri, html, needs_network}`, as before
+/// the switch existed. With it on, `csp` (the frame's policy) and `network_origins` (the origins that policy names) are
+/// added.
+#[must_use]
+pub fn resource_body(
+    resource: &AppResource,
+    network: Option<&crate::mcp_app_csp::AppCsp>,
+) -> Value {
+    let mut body = serde_json::json!({
+        "uri": resource.uri,
+        "html": resource.html,
+        "needs_network": resource.needs_network,
+    });
+    if let Some(csp) = network {
+        body["csp"] = Value::String(csp.policy.clone());
+        body["network_origins"] = serde_json::json!(csp.origins);
+    }
+    body
 }
 
 /// The typed upstream failure; the server's own text is logged by length only.
@@ -642,6 +690,7 @@ mod tests {
             uri: "ui://a".to_owned(),
             html: "<p>x</p>".to_owned(),
             needs_network: false,
+            declared: crate::mcp_app_csp::DeclaredCsp::default(),
         });
         cache.insert(ORG, SERVER, Arc::clone(&resource));
         assert_eq!(cache.get(ORG, SERVER, "ui://a"), Some(resource.clone()));
@@ -651,6 +700,72 @@ mod tests {
         let expired = AppResourceCache::new(Duration::ZERO);
         expired.insert(ORG, SERVER, resource);
         assert_eq!(expired.get(ORG, SERVER, "ui://a"), None);
+    }
+
+    #[test]
+    fn network_switch_parses_strictly() {
+        assert!(network_enabled_from_env_value(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("1"),
+            Some(" true"),
+            Some("yes"),
+        ] {
+            assert!(!network_enabled_from_env_value(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn declared_origins_are_kept_on_the_resource_and_grant_nothing_by_themselves() {
+        let meta = json!({ "ui": { "csp": { "connectDomains": ["https://api.example.test"] } } });
+        let resource = app_resource_from_read("ui://a", &html_read("ui://a", "<p>app</p>", meta))
+            .expect("read");
+        assert_eq!(resource.declared.connect, ["https://api.example.test"]);
+        let built = crate::mcp_app_csp::build(&resource.declared, &[]);
+        assert!(built.origins.is_empty());
+    }
+
+    #[test]
+    fn resource_body_is_unchanged_with_the_switch_off() {
+        let resource = AppResource {
+            uri: "ui://a".to_owned(),
+            html: "<p>x</p>".to_owned(),
+            needs_network: true,
+            declared: crate::mcp_app_csp::DeclaredCsp::default(),
+        };
+        assert_eq!(
+            resource_body(&resource, None),
+            json!({ "uri": "ui://a", "html": "<p>x</p>", "needs_network": true })
+        );
+    }
+
+    #[test]
+    fn resource_body_names_the_policy_and_its_origins_with_the_switch_on() {
+        let declared = crate::mcp_app_csp::DeclaredCsp::from_meta(Some(
+            &json!({ "ui": { "csp": { "connectDomains": ["https://api.example.test"] } } }),
+        ));
+        let resource = AppResource {
+            uri: "ui://a".to_owned(),
+            html: "<p>x</p>".to_owned(),
+            needs_network: true,
+            declared: declared.clone(),
+        };
+        let allowed = ["https://api.example.test".to_owned()];
+        let granted = crate::mcp_app_csp::build(&declared, &allowed);
+        let body = resource_body(&resource, Some(&granted));
+        assert_eq!(body["uri"], "ui://a");
+        assert_eq!(body["csp"].as_str(), Some(granted.policy.as_str()));
+        assert!(body["csp"]
+            .as_str()
+            .is_some_and(|csp| csp.contains("connect-src https://api.example.test;")));
+        assert_eq!(body["network_origins"], json!(["https://api.example.test"]));
+        let locked = crate::mcp_app_csp::build(&declared, &[]);
+        assert_eq!(
+            resource_body(&resource, Some(&locked))["network_origins"],
+            json!([])
+        );
     }
 
     #[test]

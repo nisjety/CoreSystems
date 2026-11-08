@@ -1,0 +1,1776 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.test.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.test.tsx
+new file mode 100644
+index 000000000..bb39c8c3d
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.test.tsx	
+@@ -0,0 +1,159 @@
++// @vitest-environment jsdom
++
++// EP-11 S9: the skill library lists what the registry already lets this person see, by where it
++// comes from. A tab never widens anything; an admin's publish is the existing promotion copy.
++
++import { fireEvent, render, waitFor } from '@solidjs/testing-library'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++import type { Skill } from '@/shared/api/skills-client'
++
++const reads = vi.hoisted(() => ({
++  listSkills: vi.fn(),
++  createSkill: vi.fn(),
++  session: { current: {} as object },
++}))
++
++vi.mock('@/shared/session/session-store', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/shared/session/session-store')>()),
++  getSession: () => reads.session.current,
++}))
++
++vi.mock('@/shared/api/skills-client', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/shared/api/skills-client')>()),
++  listSkills: reads.listSkills,
++  createSkill: reads.createSkill,
++}))
++
++import { canPublishToOrg, libraryTier, SkillLibrary, skillsInTier } from './SkillLibrary'
++
++function skill(id: string, fields: Partial<Skill> = {}): Skill {
++  return {
++    id,
++    org_id: 'org-1',
++    name: `Skill ${id}`,
++    description: '',
++    content: 'body',
++    trigger_keywords: [],
++    trigger_file_patterns: [],
++    tool_restrictions: [],
++    enabled: true,
++    scope: 'org',
++    review_state: 'accepted',
++    ...fields,
++  }
++}
++
++const rows: Skill[] = [
++  skill('org-1'),
++  skill('mine-1', { scope: 'user', owner_user_id: 'user-1' }),
++  skill('shared-1', { scope: 'user', owner_user_id: 'user-2', shared_with: ['user-1'] }),
++  skill('space-1', { scope: 'space' as Skill['scope'] }),
++  skill('proposal-1', { scope: 'user', owner_user_id: 'user-1', review_state: 'proposed' }),
++]
++
++function signIn(role: 'member' | 'admin') {
++  reads.session.current = {
++    status: 'authenticated',
++    user: { id: 'user-1' },
++    activeOrg: { id: 'org-1', name: 'Aquatiq', role },
++    permissions: [],
++  }
++}
++
++beforeEach(() => {
++  signIn('member')
++  reads.listSkills.mockReset()
++  reads.listSkills.mockResolvedValue({ skills: rows })
++  reads.createSkill.mockReset()
++})
++
++describe('libraryTier', () => {
++  it('puts each row under exactly one tab for its viewer', () => {
++    expect(libraryTier(rows[0]!, 'user-1')).toBe('org')
++    expect(libraryTier(rows[1]!, 'user-1')).toBe('mine')
++    expect(libraryTier(rows[2]!, 'user-1')).toBe('shared')
++    expect(libraryTier(rows[3]!, 'user-1')).toBe('space')
++    // Another viewer never sees someone else's skill as their own.
++    expect(libraryTier(rows[1]!, 'user-2')).toBe('shared')
++    expect(libraryTier(rows[1]!, '')).toBe('shared')
++  })
++
++  it('keeps a scope it does not know out of Mine and Organisation', () => {
++    expect(libraryTier(skill('x', { scope: 'team' as Skill['scope'], owner_user_id: 'user-1' }), 'user-1')).toBe(
++      'shared',
++    )
++  })
++
++  it('leaves proposals to the Læring inbox and lists no row under Verevon', () => {
++    expect(skillsInTier(rows, 'mine', 'user-1').map((s) => s.id)).toEqual(['mine-1'])
++    expect(skillsInTier(rows, 'verevon', 'user-1')).toEqual([])
++  })
++})
++
++describe('canPublishToOrg', () => {
++  it('offers the promotion only to an admin, for an accepted skill a member shared', () => {
++    expect(canPublishToOrg(rows[2]!, 'user-1', true)).toBe(true)
++    expect(canPublishToOrg(rows[2]!, 'user-1', false)).toBe(false)
++    expect(canPublishToOrg(rows[1]!, 'user-1', true)).toBe(false)
++    expect(canPublishToOrg(rows[0]!, 'user-1', true)).toBe(false)
++    expect(canPublishToOrg(rows[3]!, 'user-1', true)).toBe(false)
++  })
++})
++
++describe('SkillLibrary', () => {
++  it('shows the tab a person picks and nothing from the other tabs', async () => {
++    const { container, getByText, unmount } = render(() => <SkillLibrary />)
++    await waitFor(() => expect(container.querySelector('[data-skill-id="mine-1"]')).not.toBeNull())
++    expect(container.querySelector('[data-skill-id="org-1"]')).toBeNull()
++    expect(container.querySelector('[data-skill-id="proposal-1"]')).toBeNull()
++
++    fireEvent.click(getByText('Organisasjon'))
++    await waitFor(() => expect(container.querySelector('[data-skill-id="org-1"]')).not.toBeNull())
++    expect(container.querySelector('[data-skill-id="mine-1"]')).toBeNull()
++
++    fireEvent.click(getByText('Rom'))
++    await waitFor(() => expect(container.querySelector('[data-skill-id="space-1"]')).not.toBeNull())
++    unmount()
++  })
++
++  it('never offers a member the publish button', async () => {
++    const { container, getByText, queryByText, unmount } = render(() => <SkillLibrary />)
++    fireEvent.click(getByText('Delt med meg'))
++    await waitFor(() => expect(container.querySelector('[data-skill-id="shared-1"]')).not.toBeNull())
++    expect(queryByText('Publiser til organisasjonen')).toBeNull()
++    unmount()
++  })
++
++  it("lets an admin publish a shared skill as the existing promotion copy", async () => {
++    signIn('admin')
++    reads.createSkill.mockResolvedValue({ id: 'skill_new' })
++    const { container, getByText, unmount } = render(() => <SkillLibrary />)
++    fireEvent.click(getByText('Delt med meg'))
++    await waitFor(() => expect(container.querySelector('[data-skill-id="shared-1"]')).not.toBeNull())
++    fireEvent.click(getByText('Publiser til organisasjonen'))
++    await waitFor(() => expect(reads.createSkill).toHaveBeenCalledTimes(1))
++    expect(reads.createSkill.mock.calls[0]).toEqual([
++      'org-1',
++      {
++        name: 'Skill shared-1',
++        description: '',
++        content: 'body',
++        trigger_keywords: [],
++        enabled: false,
++        scope: 'org',
++        promoted_from: 'shared-1',
++      },
++    ])
++    unmount()
++  })
++
++  it('says what the Verevon tab holds instead of listing rows', async () => {
++    const { container, getByText, unmount } = render(() => <SkillLibrary />)
++    await waitFor(() => expect(reads.listSkills).toHaveBeenCalledWith('org-1'))
++    fireEvent.click(getByText('Verevon'))
++    await waitFor(() => expect(getByText(/Verevons egne ferdigheter er innebygd/)).toBeTruthy())
++    expect(container.querySelector('[data-skill-id]')).toBeNull()
++    unmount()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.tsx b/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.tsx
+new file mode 100644
+index 000000000..437895e81
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/skills/components/SkillLibrary.tsx	
+@@ -0,0 +1,231 @@
++import { createMemo, createSignal, For, Show } from 'solid-js'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import { createSkill, listSkills, type Skill } from '@/shared/api/skills-client'
++import { translateApiError, useI18n } from '@/shared/i18n'
++import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
++import { getSession } from '@/shared/session/session-store'
++import { hasWorkspaceAdminAccess } from '@/shared/session/access'
++
++/**
++ * The skill library (EP-11 S9): every skill this person can see, by where it comes from. Mine and
++ * Shared with me are people's own skills, Space holds skills that steer only one Space's threads,
++ * Organisation the org's own, and Verevon the first-party skills built into the platform.
++ *
++ * The library reads; it decides nothing. What a turn may use is still settled on the server (the
++ * skill's scope and owner, and the organisation's `ext.skills` policy), so a tab here can never
++ * widen it. An admin may publish a skill someone shared with them to the organisation: the
++ * existing promotion, which copies it as a new, disabled org skill.
++ */
++
++export type LibraryTier = 'mine' | 'shared' | 'space' | 'org' | 'verevon'
++
++export const LIBRARY_TIERS: readonly LibraryTier[] = ['mine', 'shared', 'space', 'org', 'verevon']
++
++/**
++ * Where a listed skill belongs for this viewer. The registry stores no `verevon` row (first-party
++ * skills live in the gateway), so a row is one of the other four. A scope this build does not know
++ * is shown as nobody's own: it can only land under Shared with me, never under Mine or Organisation.
++ */
++export function libraryTier(skill: Skill, viewerId: string): Exclude<LibraryTier, 'verevon'> {
++  // The registry's type names the two scopes it had before Space skills; a Space row says so.
++  const scope: string = skill.scope ?? 'org'
++  if (scope === 'org') return 'org'
++  if (scope === 'space') return 'space'
++  if (scope === 'user' && viewerId !== '' && skill.owner_user_id === viewerId) return 'mine'
++  return 'shared'
++}
++
++/** The rows a library tab lists. Proposals and declined learned skills belong to the Læring inbox. */
++export function skillsInTier(skills: readonly Skill[], tier: LibraryTier, viewerId: string): Skill[] {
++  if (tier === 'verevon') return []
++  return skills.filter(
++    (skill) =>
++      skill.review_state !== 'proposed' &&
++      skill.review_state !== 'rejected' &&
++      libraryTier(skill, viewerId) === tier,
++  )
++}
++
++/**
++ * Whether an admin may publish this skill to the organisation: an accepted skill a member shared,
++ * as the promotion route requires. The server checks it again.
++ */
++export function canPublishToOrg(skill: Skill, viewerId: string, isAdmin: boolean): boolean {
++  return (
++    isAdmin &&
++    skill.scope === 'user' &&
++    skill.review_state === 'accepted' &&
++    skill.owner_user_id !== viewerId &&
++    (skill.shared_with?.length ?? 0) > 0
++  )
++}
++
++export function SkillLibrary() {
++  const i18n = useI18n()
++  const session = getSession()
++  const orgId = createMemo(() => session.activeOrg?.id ?? '')
++  const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
++  const viewerId = session.user?.id ?? ''
++  const [tier, setTier] = createSignal<LibraryTier>('mine')
++  const [busySkillId, setBusySkillId] = createSignal<string | null>(null)
++  const [actionError, setActionError] = createSignal<string | null>(null)
++  const [published, setPublished] = createSignal<string | null>(null)
++
++  const [skills, { refetch }] = createResource(
++    () => orgId() || undefined,
++    (id) => listSkills(id).then((result) => result.skills),
++  )
++  const visible = createMemo(() => skillsInTier(skills() ?? [], tier(), viewerId))
++
++  const tierLabel = (value: LibraryTier): string => {
++    switch (value) {
++      case 'mine':
++        return i18n.tr('Mine', 'Mine')
++      case 'shared':
++        return i18n.tr('Delt med meg', 'Shared with me')
++      case 'space':
++        return i18n.tr('Rom', 'Space')
++      case 'org':
++        return i18n.tr('Organisasjon', 'Organisation')
++      case 'verevon':
++        return 'Verevon'
++    }
++  }
++
++  const emptyText = (value: LibraryTier): string => {
++    switch (value) {
++      case 'mine':
++        return i18n.tr('Du har ingen egne ferdigheter ennå.', 'You have no skills of your own yet.')
++      case 'shared':
++        return i18n.tr('Ingen har delt en ferdighet med deg.', 'No one has shared a skill with you.')
++      case 'space':
++        return i18n.tr(
++          'Ferdigheter for et rom gjelder bare samtaler i det rommet. Ingen er tilgjengelige her ennå.',
++          'Space skills apply only to conversations in that Space. None are available here yet.',
++        )
++      case 'org':
++        return i18n.tr('Organisasjonen har ingen ferdigheter ennå.', 'The organisation has no skills yet.')
++      case 'verevon':
++        return i18n.tr(
++          'Verevons egne ferdigheter er innebygd og brukes når de passer. De kan ikke endres her.',
++          "Verevon's own skills are built in and used when they fit. They cannot be changed here.",
++        )
++    }
++  }
++
++  const publish = async (skill: Skill) => {
++    const id = orgId()
++    if (!id || busySkillId()) return
++    setBusySkillId(skill.id)
++    setActionError(null)
++    setPublished(null)
++    try {
++      // The copy starts disabled: an admin turns it on once they have read it.
++      await createSkill(id, {
++        name: skill.name,
++        description: skill.description,
++        content: skill.content,
++        trigger_keywords: skill.trigger_keywords,
++        enabled: false,
++        scope: 'org',
++        promoted_from: skill.id,
++      })
++      setPublished(skill.id)
++      await refetch()
++    } catch (err) {
++      setActionError(
++        translateApiError(err, i18n.tr, {
++          no: 'Kunne ikke publisere ferdigheten til organisasjonen.',
++          en: 'Could not publish the skill to the organisation.',
++        }),
++      )
++    } finally {
++      setBusySkillId(null)
++    }
++  }
++
++  return (
++    <section class="verevon-settings-section" aria-label={i18n.tr('Ferdighetsbibliotek', 'Skill library')}>
++      <SectionHeader
++        title={i18n.tr('Ferdighetsbibliotek', 'Skill library')}
++        description={i18n.tr(
++          'Alle ferdigheter du kan se, etter hvor de kommer fra.',
++          'Every skill you can see, by where it comes from.',
++        )}
++      />
++      <div class="verevon-run-history__tabs" role="tablist" aria-label={i18n.tr('Bibliotek', 'Library')}>
++        <For each={LIBRARY_TIERS}>
++          {(value) => (
++            <button
++              type="button"
++              role="tab"
++              aria-selected={tier() === value}
++              data-tier={value}
++              onClick={() => setTier(value)}
++            >
++              {tierLabel(value)}
++            </button>
++          )}
++        </For>
++      </div>
++      <div role="tabpanel" aria-label={tierLabel(tier())}>
++        <Show when={skills.loading}>
++          <p class="verevon-settings-subnote" role="status" aria-busy="true">
++            {i18n.tr('Laster…', 'Loading…')}
++          </p>
++        </Show>
++        <Show when={skills.error}>
++          <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++            {i18n.tr('Kunne ikke laste ferdighetene.', 'Could not load the skills.')}
++          </p>
++        </Show>
++        <Show when={actionError()}>
++          {(message) => (
++            <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++              {message()}
++            </p>
++          )}
++        </Show>
++        <Show when={!skills.loading && !skills.error}>
++          <Show
++            when={visible().length > 0}
++            fallback={<p class="verevon-settings-subnote">{emptyText(tier())}</p>}
++          >
++            <ul class="verevon-settings-list">
++              <For each={visible()}>
++                {(skill) => (
++                  <li data-skill-id={skill.id}>
++                    <strong>{skill.name}</strong>
++                    <Show when={skill.description}>
++                      <span class="verevon-settings-help"> {skill.description}</span>
++                    </Show>
++                    <Show when={!skill.enabled}>
++                      <span class="verevon-trust-chip">{i18n.tr('Av', 'Off')}</span>
++                    </Show>
++                    <Show when={canPublishToOrg(skill, viewerId, isAdmin())}>
++                      <SettingsButton
++                        type="button"
++                        disabled={busySkillId() !== null}
++                        onClick={() => void publish(skill)}
++                      >
++                        {i18n.tr('Publiser til organisasjonen', 'Publish to organisation')}
++                      </SettingsButton>
++                    </Show>
++                    <Show when={published() === skill.id}>
++                      <span class="verevon-settings-help" role="status">
++                        {i18n.tr(
++                          'Kopiert til organisasjonen, slått av til den er lest.',
++                          'Copied to the organisation, off until it is read.',
++                        )}
++                      </span>
++                    </Show>
++                  </li>
++                )}
++              </For>
++            </ul>
++          </Show>
++        </Show>
++      </div>
++    </section>
++  )
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go
+index c2f3a6248..0988ad5b5 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go	
+@@ -419,6 +419,11 @@ func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, or
+ 	if err := rows.Scan(&scope, &ownerUserID); err != nil {
+ 		return err
+ 	}
++	// A Space skill (EP-11 S9) is changed by a Space decision, never by an org role or by owning
++	// it; none can be verified yet, so it is refused whatever the caller holds.
++	if scope == spaceSkillScope {
++		return errSpaceSkillDecisionRequired
++	}
+ 	isOwner := ownerUserID != "" && ownerUserID == callerID
+ 	if scope == "org" || isAdmin || isOwner {
+ 		return nil
+@@ -510,6 +515,11 @@ func (h *SkillsHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
+ 		if s.Scope == "" {
+ 			s.Scope = "org"
+ 		}
++		// EP-11 S9 (D7): off, "space" stays an invalid scope; on, it needs a Space decision.
++		if s.Scope == spaceSkillScope && skillSpaceScopeEnabled() {
++			writeSpaceSkillDecisionRequired(w)
++			return
++		}
+ 		if !validSkillScope(s.Scope) {
+ 			jsonErr(w, "invalid skill scope", http.StatusUnprocessableEntity)
+ 			return
+@@ -810,6 +820,10 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
+ 		jsonErr(w, err.Error(), http.StatusForbidden)
+ 		return
+ 	}
++	if errors.Is(err, errSpaceSkillDecisionRequired) {
++		writeSpaceSkillDecisionRequired(w)
++		return
++	}
+ 	if errors.Is(err, errSkillLintRefused) {
+ 		writeSkillLintRefusal(w, lintFindings)
+ 		return
+@@ -843,6 +857,10 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
+ 		jsonErr(w, err.Error(), http.StatusForbidden)
+ 		return
+ 	}
++	if errors.Is(err, errSpaceSkillDecisionRequired) {
++		writeSpaceSkillDecisionRequired(w)
++		return
++	}
+ 	if !writeSingleScopedMutation(w, "agent skill", result, err) {
+ 		return
+ 	}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope.go b/apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope.go
+new file mode 100644
+index 000000000..8984469f7
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope.go	
+@@ -0,0 +1,45 @@
++package api
++
++import (
++	"errors"
++	"net/http"
++	"os"
++)
++
++// Space skills (EP-11 S9). A skill of scope "space" steers only the turns of threads inside one
++// Space; session-core lists it only for a thread it resolves to that Space itself. Who may write
++// one is a Space decision, not an org role: capability-core must not trust a Space role the
++// client or the BFF asserts (EP-11 D7). Control has no decision kind for "Space skill write"
++// yet, so every write that would create, change or delete a Space skill is refused here with
++// a typed code until one exists and a verifier for it is wired.
++
++const (
++	spaceSkillScope    = "space"
++	skillSpaceScopeEnv = "SKILL_SPACE_SCOPE"
++
++	// spaceSkillDecisionRequiredCode is the typed refusal of a Space skill write.
++	spaceSkillDecisionRequiredCode = "space_skill_decision_required"
++)
++
++// errSpaceSkillDecisionRequired ends a change to a Space skill inside its transaction, before its
++// statement, so nothing is written.
++var errSpaceSkillDecisionRequired = errors.New("a Space skill changes only under a Control-signed Space decision")
++
++// SkillSpaceScopeFromLookup reads SKILL_SPACE_SCOPE strictly: only the literal "true" turns the
++// Space scope on. Off, a body naming scope "space" is an invalid scope, as it always was.
++func SkillSpaceScopeFromLookup(lookup func(string) string) bool {
++	return lookup(skillSpaceScopeEnv) == "true"
++}
++
++// skillSpaceScopeEnabled is read where it is used, as the version switch is in session-core,
++// so a create needs no handler field.
++func skillSpaceScopeEnabled() bool {
++	return SkillSpaceScopeFromLookup(os.Getenv)
++}
++
++// writeSpaceSkillDecisionRequired answers a Space skill write with the typed envelope. A 403:
++// the caller's org role is not what decides it.
++func writeSpaceSkillDecisionRequired(w http.ResponseWriter) {
++	writeTypedError(w, http.StatusForbidden, spaceSkillDecisionRequiredCode,
++		"a Space skill can be written only with a Control-signed Space decision, which this deployment cannot verify yet")
++}
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope_test.go b/apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope_test.go
+new file mode 100644
+index 000000000..01a0c9ad9
+--- /dev/null
++++ b/apps/Model Plane/go/services/capability-core/internal/api/skill_space_scope_test.go	
+@@ -0,0 +1,78 @@
++package api
++
++import (
++	"encoding/json"
++	"net/http"
++	"testing"
++)
++
++func TestSkillSpaceScopeReadsOnlyTheLiteralTrue(t *testing.T) {
++	for value, want := range map[string]bool{"true": true, "": false, "1": false, "TRUE": false, "on": false} {
++		if got := SkillSpaceScopeFromLookup(func(string) string { return value }); got != want {
++			t.Errorf("SKILL_SPACE_SCOPE=%q read as %v, want %v", value, got, want)
++		}
++	}
++}
++
++// requireSpaceDecisionRefusal checks the typed envelope of a refused Space skill write.
++func requireSpaceDecisionRefusal(t *testing.T, code int, body []byte) {
++	t.Helper()
++	if code != http.StatusForbidden {
++		t.Fatalf("status = %d, body=%s, want 403", code, body)
++	}
++	var envelope struct {
++		Error struct {
++			Code    string         `json:"code"`
++			Message string         `json:"message"`
++			Details map[string]any `json:"details"`
++		} `json:"error"`
++	}
++	if err := json.Unmarshal(body, &envelope); err != nil {
++		t.Fatalf("body is not the typed envelope: %v (%s)", err, body)
++	}
++	if envelope.Error.Code != spaceSkillDecisionRequiredCode || envelope.Error.Details == nil {
++		t.Fatalf("refusal = %+v, want code %q with object details", envelope.Error, spaceSkillDecisionRequiredCode)
++	}
++}
++
++// EP-11 S9 (D7): no Space skill is written on an org role. With the scope on, a create of one is
++// refused before the database, even for an admin; a change or delete of one is refused under
++// the row lock, before its statement, even for an admin. Off, "space" is an invalid scope as before.
++func TestSpaceSkillWriteNeedsDecision(t *testing.T) {
++	t.Run("create, switch off", func(t *testing.T) {
++		t.Setenv(skillSpaceScopeEnv, "")
++		database := &recordingDatabase{}
++		response := serveSkill(t, database, adminToken, http.MethodPost, "/api/v1/skills",
++			`{"name":"room skill","content":"body","scope":"space"}`)
++		if response.Code != http.StatusUnprocessableEntity {
++			t.Fatalf("status = %d, body=%s, want 422 (invalid scope, as before)", response.Code, response.Body.String())
++		}
++		if database.databaseCalls() != 0 {
++			t.Fatalf("a refused create must never reach the database, got %d calls", database.databaseCalls())
++		}
++	})
++	t.Run("create, switch on", func(t *testing.T) {
++		t.Setenv(skillSpaceScopeEnv, "true")
++		for name, token := range map[string]func(mcpTokenSigner) string{"member": writeToken, "admin": adminToken} {
++			database := &recordingDatabase{}
++			response := serveSkill(t, database, token, http.MethodPost, "/api/v1/skills",
++				`{"name":"room skill","content":"body","scope":"space","scope_id":"room-1"}`)
++			requireSpaceDecisionRefusal(t, response.Code, response.Body.Bytes())
++			if database.databaseCalls() != 0 {
++				t.Fatalf("%s: a refused create must never reach the database, got %d calls", name, database.databaseCalls())
++			}
++		}
++	})
++	for _, test := range skillEditAndDelete {
++		t.Run(test.name+" of a Space skill", func(t *testing.T) {
++			for name, token := range map[string]func(mcpTokenSigner) string{"member": writeToken, "admin": adminToken} {
++				database := ownedSkillDatabase(spaceSkillScope, "")
++				response := serveSkill(t, database, token, test.method, "/api/v1/skills/sk-1", test.body)
++				requireSpaceDecisionRefusal(t, response.Code, response.Body.Bytes())
++				if len(database.execs) != 0 || database.commits != 0 {
++					t.Fatalf("%s: a refused change must write and commit nothing: execs=%#v commits=%d", name, database.execs, database.commits)
++				}
++			}
++		})
++	}
++}
+diff --git a/apps/Model Plane/proto/model_plane/v1/sessions.proto b/apps/Model Plane/proto/model_plane/v1/sessions.proto
+index 170786e5d..2b6a4b01e 100644
+--- a/apps/Model Plane/proto/model_plane/v1/sessions.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/sessions.proto	
+@@ -1166,6 +1166,14 @@ message ListAgentSkillsRequest {
+   // presets (the gateway's match cache, recovery, the learning review) can
+   // never see one. An unknown kind is refused as invalid_argument.
+   repeated string kinds = 4;
++  // EP-11 S9. The thread the turn runs in. While session-core's
++  // SKILL_SPACE_SCOPE is on and the caller owns this thread, session-core reads
++  // the thread's own Space (threads.space_id, never a Space the caller names)
++  // and adds that Space's skills to the answer. Empty, unknown, not the
++  // caller's, or not in a Space: no Space skill is returned. Ignored while the
++  // switch is off. (Round B reserved field 5 as `space_id`; it carries the
++  // thread instead, so the Space is always resolved server-side.)
++  string thread_id = 5;
+ }
+ 
+ message AgentSkill {
+@@ -1218,6 +1226,11 @@ message AgentSkill {
+ 
+ message ListAgentSkillsResponse {
+   repeated AgentSkill skills = 1;
++  // EP-11 S9. The Space session-core resolved `thread_id` to, set whenever it
++  // did so and listed that Space's skills (rows with scope "space"; possibly
++  // none). The gateway caches those rows under this Space alone, apart from the
++  // org's and the caller's own. Empty: no Space was resolved.
++  string space_id = 2;
+ }
+ 
+ // --- ListConversation (G7 transcript source) ---
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/skills.rs b/apps/Model Plane/rust/services/model-gateway/src/skills.rs
+index bc33dd68e..e3f66f82d 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/skills.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/skills.rs	
+@@ -122,6 +122,14 @@ pub struct SkillStore {
+     // Whether the first-party Office skills are listed for every org (WS19-S9). Read
+     // once, when the store is built, so a running process never changes its answers.
+     builtin_office: bool,
++    // Space skills (EP-11 S9), keyed by (org_id, space_id) and never put in `inner`: no
++    // org list, match, get or pick can reach them. Only a turn whose thread session-core
++    // resolved to that Space reads its shelf, through `space_skills_for`.
++    spaces: Arc<DashMap<(String, String), Vec<Skill>>>,
++    // (org_id, caller, thread_id) -> when session-core last answered for that thread and
++    // the Space it resolved ('' for none). The Space comes from session-core's thread row,
++    // never from the request, so this is the only way a turn finds a shelf.
++    thread_spaces: Arc<DashMap<(String, String, String), (std::time::Instant, String)>>,
+ }
+ 
+ impl SkillStore {
+@@ -180,7 +188,12 @@ impl SkillStore {
+     ) {
+         let mut org_ids = BTreeSet::new();
+         let mut user_ids = BTreeSet::new();
+-        for agent in pulled.into_iter().filter(owner_accepted) {
++        // A Space row never joins the org's or a caller's bucket (EP-11 S9): it is cached
++        // on its Space's shelf by `refresh_space`, or not at all.
++        for agent in pulled
++            .into_iter()
++            .filter(|agent| owner_accepted(agent) && !is_space_row(agent))
++        {
+             let ids = match crate::ownership::Scope::from_wire(&agent.scope) {
+                 crate::ownership::Scope::Org => &mut org_ids,
+                 crate::ownership::Scope::User => &mut user_ids,
+@@ -214,6 +227,68 @@ impl SkillStore {
+         );
+     }
+ 
++    /// Whether session-core's answer for this caller's thread (EP-11 S9) is recent enough to
++    /// reuse: same TTL as the org pull, so a Space skill edit, or a thread leaving a Space,
++    /// lands within it.
++    #[must_use]
++    pub fn is_thread_space_loaded(&self, org_id: &str, caller_user_id: &str, thread_id: &str) -> bool {
++        self.thread_spaces
++            .get(&(org_id.to_owned(), caller_user_id.to_owned(), thread_id.to_owned()))
++            .is_some_and(|entry| entry.0.elapsed() < skill_cache_ttl())
++    }
++
++    /// Record session-core's answer for one thread (EP-11 S9): the Space it resolved the
++    /// thread to (`space_id`, empty for none) and that Space's skills. The shelf is replaced
++    /// whole, so a deleted Space skill leaves it. Only accepted Space rows are kept; any
++    /// other row in `pulled` is ignored here (the org and the caller's own go through
++    /// `refresh_learned`).
++    pub fn refresh_space(
++        &self,
++        org_id: &str,
++        caller_user_id: &str,
++        thread_id: &str,
++        space_id: &str,
++        pulled: &[AgentSkill],
++    ) {
++        if !space_id.is_empty() {
++            let shelf: Vec<Skill> = pulled
++                .iter()
++                .filter(|agent| owner_accepted(agent) && is_space_row(agent))
++                .cloned()
++                .map(|agent| {
++                    let origin = agent.origin.clone();
++                    let mut skill = agent_skill_to_skill(agent);
++                    skill.source_path = format!("{LEARNED_SOURCE_PREFIX}space:{space_id}:{origin}");
++                    skill
++                })
++                .collect();
++            self.spaces
++                .insert((org_id.to_owned(), space_id.to_owned()), shelf);
++        }
++        self.thread_spaces.insert(
++            (org_id.to_owned(), caller_user_id.to_owned(), thread_id.to_owned()),
++            (std::time::Instant::now(), space_id.to_owned()),
++        );
++    }
++
++    /// The Space skills a turn in this thread may use (EP-11 S9): its Space's shelf when
++    /// session-core resolved the thread to a Space for this caller, else nothing.
++    #[must_use]
++    pub fn space_skills_for(&self, org_id: &str, caller_user_id: &str, thread_id: &str) -> Vec<Skill> {
++        let Some(space_id) = self
++            .thread_spaces
++            .get(&(org_id.to_owned(), caller_user_id.to_owned(), thread_id.to_owned()))
++            .map(|entry| entry.1.clone())
++            .filter(|space_id| !space_id.is_empty())
++        else {
++            return Vec::new();
++        };
++        self.spaces
++            .get(&(org_id.to_owned(), space_id))
++            .map(|shelf| shelf.value().clone())
++            .unwrap_or_default()
++    }
++
+     fn list(&self, org_id: &str) -> Vec<Skill> {
+         let mut out: Vec<Skill> = self
+             .inner
+@@ -258,6 +333,11 @@ fn skill_usable(
+     skill: &Skill,
+     caller_user_id: &str,
+ ) -> bool {
++    // The org's `ext.skills` (EP-11 S9) narrows before ownership is asked. Off, or not
++    // enforced, it permits everything, so this is the check it always was.
++    if !org_ext_skills_permit(org_id, skill) {
++        return false;
++    }
+     if skill.source_path.starts_with(LEARNED_SOURCE_PREFIX) {
+         ownership.usable(
+             org_id,
+@@ -450,6 +530,152 @@ pub fn owner_accepted(a: &AgentSkill) -> bool {
+     a.review_state.is_empty() || a.review_state == "accepted"
+ }
+ 
++/// Whether a session-core row is a Space skill (EP-11 S9). Such a row is cached on its
++/// Space's shelf only, never in the org's or a caller's bucket.
++fn is_space_row(a: &AgentSkill) -> bool {
++    a.scope.eq_ignore_ascii_case("space")
++}
++
++/// Environment switch for Space skills at the gateway (EP-11 S9): the match-cache pull names
++/// the turn's thread so session-core can add that thread's Space skills. Off, the pull is the
++/// request it always was and no Space shelf is read.
++pub const SKILL_SPACE_SCOPE_ENV: &str = "SKILL_SPACE_SCOPE";
++
++/// Whether Space skills are on: only the literal `true`.
++#[must_use]
++pub fn space_scope_from(raw: Option<&str>) -> bool {
++    raw == Some("true")
++}
++
++/// [`space_scope_from`] for this process.
++#[must_use]
++pub fn space_scope_enabled() -> bool {
++    space_scope_from(std::env::var(SKILL_SPACE_SCOPE_ENV).ok().as_deref())
++}
++
++/// Environment switch for the org's `ext.skills` (EP-11 S9). Off, the policy key is not read
++/// and every skill is offered as before.
++pub const SKILL_EXT_POLICY_ENV: &str = "SKILL_EXT_POLICY_ENFORCED";
++
++/// Whether `ext.skills` is enforced: only the literal `true`.
++#[must_use]
++pub fn ext_policy_from(raw: Option<&str>) -> bool {
++    raw == Some("true")
++}
++
++/// [`ext_policy_from`] for this process, read once so it cannot change under a request.
++#[must_use]
++pub fn ext_policy_enforced() -> bool {
++    static ENFORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENFORCED.get_or_init(|| ext_policy_from(std::env::var(SKILL_EXT_POLICY_ENV).ok().as_deref()))
++}
++
++/// The org's `ext.skills` setting (org-agent-policy-schema.json): which authored skills may
++/// steer its turns. First-party skills (builtin, disk-loaded, operator-pushed) are not
++/// authored in the org and are never narrowed by it.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum ExtSkills {
++    /// No authored skill at all.
++    None,
++    /// The org's own skills only: a person's private or shared skill and a Space skill are
++    /// skipped.
++    ApprovedOnly,
++    /// Every skill the caller may use, as before the key was enforced.
++    Any,
++}
++
++impl ExtSkills {
++    /// Reads a policy token. Anything but `approved_only` and `any` is `None`, the schema's
++    /// fail-closed value, so an unreadable token can only narrow.
++    #[must_use]
++    pub fn from_token(token: &str) -> Self {
++        match token {
++            "any" => Self::Any,
++            "approved_only" => Self::ApprovedOnly,
++            _ => Self::None,
++        }
++    }
++}
++
++/// The `ext.skills` a turn of this org is held to. `None` when the switch is off, so nothing
++/// changes. On, it is the setting of the policy the turn's admission left in the cache, and
++/// [`ExtSkills::None`] when no policy is held (it could not be read inside its bound, or
++/// `ORG_AGENT_POLICY_MODE` does not read it): an org whose policy cannot be seen gets no
++/// authored skills rather than all of them.
++#[must_use]
++pub fn held_ext_skills(
++    enforced: bool,
++    cache: &crate::org_agent_policy::OrgPolicyCache,
++    org_id: &str,
++) -> Option<ExtSkills> {
++    if !enforced {
++        return None;
++    }
++    Some(
++        cache
++            .policy(org_id)
++            .map_or(ExtSkills::None, |policy| ExtSkills::from_token(&policy.ext_skills)),
++    )
++}
++
++/// Whether `ext` lets this skill reach a turn. The tier is read from the provenance the cache
++/// stamped: `session-core:org:` is an org skill, any other `session-core:` source a person's
++/// or a Space's; everything else is first-party.
++#[must_use]
++pub fn ext_skills_permits(ext: ExtSkills, skill: &Skill) -> bool {
++    if !skill.source_path.starts_with(LEARNED_SOURCE_PREFIX) {
++        return true;
++    }
++    match ext {
++        ExtSkills::Any => true,
++        ExtSkills::ApprovedOnly => skill
++            .source_path
++            .starts_with(&format!("{LEARNED_SOURCE_PREFIX}org:")),
++        ExtSkills::None => false,
++    }
++}
++
++/// [`ext_skills_permits`] for this process's switch and the shared policy cache.
++fn org_ext_skills_permit(org_id: &str, skill: &Skill) -> bool {
++    held_ext_skills(
++        ext_policy_enforced(),
++        crate::org_agent_policy::shared_cache(),
++        org_id,
++    )
++    .is_none_or(|ext| ext_skills_permits(ext, skill))
++}
++
++/// Space skills a turn may use (EP-11 S9), with the org's `ext.skills` applied. A Space skill
++/// carries no ownership record: session-core already decided the caller's thread is in the
++/// Space, which is the whole of its visibility rule.
++#[must_use]
++pub fn usable_space_skills(org_id: &str, shelf: Vec<Skill>) -> Vec<Skill> {
++    shelf
++        .into_iter()
++        .filter(|skill| org_ext_skills_permit(org_id, skill))
++        .collect()
++}
++
++/// Keyword matches among a Space's skills, scored like [`handle_match_skills`] scores the
++/// org's, so the two lists can be merged by score.
++#[must_use]
++pub fn match_space_skills(shelf: &[Skill], query: &str) -> Vec<SkillMatch> {
++    let query_terms: Vec<String> = query
++        .to_lowercase()
++        .split_whitespace()
++        .filter(|t| t.len() >= 3)
++        .map(str::to_string)
++        .collect();
++    shelf
++        .iter()
++        .map(|s| SkillMatch {
++            score: score(&query_terms, s),
++            skill: Some(s.clone()),
++        })
++        .filter(|m| m.score > 0.0 && m.score >= m.skill.as_ref().map_or(0.0, |s| s.min_score))
++        .collect()
++}
++
+ /// Derive an [`Ownership`](crate::ownership::Ownership) record from a
+ /// session-core [`AgentSkill`]'s `scope`/`owner_user_id`/`shared_with`
+ /// fields (SKILL-1).
+@@ -1782,3 +2008,186 @@ mod skill_pin_tests {
+         assert!(rendered.get("instruction").is_none());
+     }
+ }
++
++#[cfg(test)]
++mod ext_skills_tests {
++    use super::*;
++    use crate::org_agent_policy::{OrgPolicy, OrgPolicyCache};
++
++    fn agent(id: &str, scope: &str, owner: &str) -> AgentSkill {
++        AgentSkill {
++            id: id.into(),
++            name: format!("deploy {id}"),
++            content: format!("deploy runbook {id}"),
++            trigger_keywords: vec!["deploy".into()],
++            enabled: true,
++            origin: "user".into(),
++            scope: scope.into(),
++            owner_user_id: owner.into(),
++            review_state: "accepted".into(),
++            ..Default::default()
++        }
++    }
++
++    fn cache_with(org: &str, ext_skills: Option<&str>) -> OrgPolicyCache {
++        let cache = OrgPolicyCache::new();
++        let settings = match ext_skills {
++            Some(mode) => serde_json::json!({ "ext.skills": { "mode": mode } }),
++            None => serde_json::json!({}),
++        };
++        let settings = settings.as_object().cloned().unwrap_or_default();
++        cache.store(org, OrgPolicy::from_settings(1, "sha256:1", &settings), std::time::Instant::now());
++        cache
++    }
++
++    /// The skills alice may use in org `o`, with `ext` applied as the turn applies it.
++    fn usable_under(ext: Option<ExtSkills>) -> Vec<String> {
++        let store = SkillStore::default();
++        let ownership = crate::ownership::OwnershipStore::new();
++        store.refresh_learned(
++            &ownership,
++            "o",
++            "alice",
++            vec![agent("org-1", "org", ""), agent("mine-1", "user", "alice")],
++        );
++        store.upsert(
++            "o",
++            Skill {
++                id: "disk-1".into(),
++                name: "disk".into(),
++                body: "deploy".into(),
++                source_path: "skills/disk.md".into(),
++                ..Default::default()
++            },
++        );
++        let mut ids: Vec<String> = store
++            .list("o")
++            .into_iter()
++            .filter(|s| skill_usable(&ownership, "o", s, "alice"))
++            .filter(|s| ext.is_none_or(|ext| ext_skills_permits(ext, s)))
++            .map(|s| s.id)
++            .collect();
++        ids.sort();
++        ids
++    }
++
++    #[test]
++    fn the_switches_read_only_the_literal_true() {
++        for off in [None, Some(""), Some("TRUE"), Some(" true"), Some("1"), Some("false")] {
++            assert!(!ext_policy_from(off), "{off:?}");
++            assert!(!space_scope_from(off), "{off:?}");
++        }
++        assert!(ext_policy_from(Some("true")));
++        assert!(space_scope_from(Some("true")));
++    }
++
++    #[test]
++    fn ext_skills_switch_off_changes_nothing() {
++        let cache = cache_with("o", Some("none"));
++        assert_eq!(held_ext_skills(false, &cache, "o"), None);
++        assert_eq!(usable_under(None), ["disk-1", "mine-1", "org-1"]);
++    }
++
++    #[test]
++    fn ext_skills_approved_only_skips_user_skills() {
++        let cache = cache_with("o", Some("approved_only"));
++        let ext = held_ext_skills(true, &cache, "o");
++        assert_eq!(ext, Some(ExtSkills::ApprovedOnly));
++        assert_eq!(usable_under(ext), ["disk-1", "org-1"], "a member's private skill is skipped");
++        let space_skill = Skill {
++            id: "space-1".into(),
++            source_path: format!("{LEARNED_SOURCE_PREFIX}space:room-a:user"),
++            ..Default::default()
++        };
++        assert!(!ext_skills_permits(ExtSkills::ApprovedOnly, &space_skill), "a Space skill is skipped");
++        // `any` (the schema default, and a document that omits the key) is today's behaviour.
++        assert_eq!(held_ext_skills(true, &cache_with("o", Some("any")), "o"), Some(ExtSkills::Any));
++        assert_eq!(held_ext_skills(true, &cache_with("o", None), "o"), Some(ExtSkills::Any));
++        assert_eq!(usable_under(Some(ExtSkills::Any)), ["disk-1", "mine-1", "org-1"]);
++    }
++
++    #[test]
++    fn ext_skills_none_keeps_first_party_skills_only() {
++        let ext = held_ext_skills(true, &cache_with("o", Some("none")), "o");
++        assert_eq!(ext, Some(ExtSkills::None));
++        assert_eq!(usable_under(ext), ["disk-1"]);
++        let builtin = Skill {
++            id: "builtin:office/xlsx".into(),
++            source_path: "builtin:office/xlsx".into(),
++            ..Default::default()
++        };
++        assert!(ext_skills_permits(ExtSkills::None, &builtin));
++    }
++
++    #[test]
++    fn ext_skills_policy_unreadable_fails_closed() {
++        // No policy held for the org (unreadable past its bound, or never read): no authored skills.
++        let empty = OrgPolicyCache::new();
++        assert_eq!(held_ext_skills(true, &empty, "o"), Some(ExtSkills::None));
++        // Another org's policy is never borrowed.
++        assert_eq!(held_ext_skills(true, &cache_with("other", Some("any")), "o"), Some(ExtSkills::None));
++        // A token this build cannot read is the schema's fail-closed value.
++        assert_eq!(ExtSkills::from_token("approved"), ExtSkills::None);
++        assert_eq!(ExtSkills::from_token(""), ExtSkills::None);
++        assert_eq!(usable_under(Some(ExtSkills::None)), ["disk-1"]);
++    }
++
++    #[test]
++    fn space_bucket_never_leaks_into_org_bucket() {
++        let store = SkillStore::default();
++        let ownership = crate::ownership::OwnershipStore::new();
++        let pulled = vec![agent("org-1", "org", ""), agent("space-a-1", "space", "")];
++        // One pull for alice's Space thread carries both; each half goes to its own place.
++        store.refresh_learned(&ownership, "o", "alice", pulled.clone());
++        store.refresh_space("o", "alice", "thread-a", "room-a", &pulled);
++        let org_ids: Vec<String> = store.list("o").into_iter().map(|s| s.id).collect();
++        assert_eq!(org_ids, ["org-1"], "a Space skill never enters the org bucket");
++        assert!(ownership.get("o", crate::ownership::KIND_SKILL, "space-a-1").is_none());
++        let matched = handle_match_skills(
++            &store,
++            MatchSkillsRequest {
++                request_id: "t".into(),
++                org_id: "o".into(),
++                query: "deploy runbook".into(),
++                limit: 10,
++                min_score: 0.0,
++            },
++            &ownership,
++            "alice",
++        )
++        .expect("match");
++        assert!(matched
++            .matches
++            .iter()
++            .all(|m| m.skill.as_ref().is_some_and(|s| s.id != "space-a-1")));
++        assert!(
++            resolve_requested_skills(&store, "o", &ownership, "alice", &["space-a-1".to_owned()], 4)
++                .is_empty(),
++            "a Space skill cannot be picked through the org catalogue"
++        );
++
++        // In its own thread the Space shelf is there, stamped with its Space.
++        let shelf = store.space_skills_for("o", "alice", "thread-a");
++        assert_eq!(shelf.len(), 1);
++        assert_eq!(shelf[0].id, "space-a-1");
++        assert_eq!(shelf[0].source_path, "session-core:space:room-a:user");
++        assert!(store.is_thread_space_loaded("o", "alice", "thread-a"));
++        // Another thread, another caller, another org: nothing.
++        store.refresh_space("o", "alice", "personal", "", &[agent("org-1", "org", "")]);
++        assert!(store.space_skills_for("o", "alice", "personal").is_empty());
++        assert!(store.space_skills_for("o", "bob", "thread-a").is_empty());
++        assert!(store.space_skills_for("other", "alice", "thread-a").is_empty());
++        // A second Space's shelf is its own.
++        store.refresh_space("o", "bob", "thread-b", "room-b", &[agent("space-b-1", "space", "")]);
++        let b: Vec<String> = store
++            .space_skills_for("o", "bob", "thread-b")
++            .into_iter()
++            .map(|s| s.id)
++            .collect();
++        assert_eq!(b, ["space-b-1"]);
++        assert_eq!(store.space_skills_for("o", "alice", "thread-a")[0].id, "space-a-1");
++        // A Space skill is matched only through its own shelf.
++        assert_eq!(match_space_skills(&shelf, "deploy runbook").len(), 1);
++        assert!(match_space_skills(&shelf, "unrelated words").is_empty());
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index ae1eb0379..3a6cb7c4e 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -3768,6 +3768,7 @@ pub async fn invoke_stream_sse(
+         capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
+         &org_id,
+         &user_id,
++        &session_run.thread_id,
+         &req.content,
+         &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
+     )
+@@ -8229,6 +8230,7 @@ async fn fetch_skill_context(
+     capability_bearer: Option<&str>,
+     org_id: &str,
+     user_id: &str,
++    thread_id: &str,
+     query: &str,
+     requested: &[String],
+ ) -> SkillContext {
+@@ -8237,10 +8239,20 @@ async fn fetch_skill_context(
+     if org_id.trim().is_empty() {
+         return SkillContext::default();
+     }
++    // EP-11 S9: with Space skills on, the pull names the turn's thread and session-core adds
++    // the skills of that thread's own Space. Off, the thread is not sent and no shelf is read.
++    let space_thread = if crate::skills::space_scope_enabled() {
++        thread_id.trim()
++    } else {
++        ""
++    };
+     // §G7 read path: pull this org's LEARNED skills (session-core agent_skills)
+     // into the match cache, re-pulling once the cached copy goes stale so an
+     // operator's edit or deletion lands without a gateway restart.
+-    if !state.skills.is_loaded(org_id, user_id) {
++    if !state.skills.is_loaded(org_id, user_id)
++        || (!space_thread.is_empty()
++            && !state.skills.is_thread_space_loaded(org_id, user_id, space_thread))
++    {
+         if let Ok(request) = authenticated_session_request(
+             ListAgentSkillsRequest {
+                 org_id: org_id.to_owned(),
+@@ -8248,6 +8260,7 @@ async fn fetch_skill_context(
+                 for_user_id: String::new(),
+                 // EP-11 S6: no kinds = skills only; a template or preset is never matched or injected.
+                 kinds: Vec::new(),
++                thread_id: space_thread.to_owned(),
+             },
+             bearer,
+         ) {
+@@ -8261,13 +8274,23 @@ async fn fetch_skill_context(
+                 // cache must also FORGET skills the operator deleted, or a
+                 // removed skill keeps steering answers indefinitely. The pull is
+                 // this caller's, so it replaces only this caller's share, and
+-                // ownership (SKILL-1) is recorded from the same pull.
+-                Ok(resp) => state.skills.refresh_learned(
+-                    &state.ownership,
+-                    org_id,
+-                    user_id,
+-                    resp.into_inner().skills,
+-                ),
++                // ownership (SKILL-1) is recorded from the same pull. Space rows
++                // go to their Space's shelf alone, never into either bucket.
++                Ok(resp) => {
++                    let listed = resp.into_inner();
++                    if !space_thread.is_empty() {
++                        state.skills.refresh_space(
++                            org_id,
++                            user_id,
++                            space_thread,
++                            &listed.space_id,
++                            &listed.skills,
++                        );
++                    }
++                    state
++                        .skills
++                        .refresh_learned(&state.ownership, org_id, user_id, listed.skills);
++                }
+                 Err(error) => {
+                     tracing::warn!(%error, %org_id, "list_agent_skills failed; matching disk-loaded skills only");
+                 }
+@@ -8286,9 +8309,60 @@ async fn fetch_skill_context(
+         requested,
+         MAX_REQUESTED_SKILLS,
+     );
++    // The Space's shelf (EP-11 S9), empty outside a Space thread and while the switch is off.
++    // A picked id the org catalogue did not hold may name one of its skills.
++    let space_skills = if space_thread.is_empty() {
++        Vec::new()
++    } else {
++        crate::skills::usable_space_skills(
++            org_id,
++            state.skills.space_skills_for(org_id, user_id, space_thread),
++        )
++    };
++    let mut requested_skills = requested_skills;
++    for raw in requested {
++        if requested_skills.len() >= MAX_REQUESTED_SKILLS {
++            break;
++        }
++        let id = raw.trim();
++        if requested_skills.iter().any(|s| s.id == id) {
++            continue;
++        }
++        if let Some(skill) = space_skills.iter().find(|s| s.id == id) {
++            requested_skills.push(skill.clone());
++        }
++    }
+     let requested_ids: Vec<String> = requested_skills.iter().map(|s| s.id.clone()).collect();
+     let mut chosen: Vec<Skill> = requested_skills;
+-    if let Ok(matched) = crate::skills::handle_match_skills(
++    if !space_skills.is_empty() {
++        // Org and Space matches compete on one score, so a Space thread gets the same number of
++        // keyword matches as any other, not more.
++        let mut matches = crate::skills::match_space_skills(&space_skills, query);
++        if let Ok(matched) = crate::skills::handle_match_skills(
++            &state.skills,
++            MatchSkillsRequest {
++                request_id: String::new(),
++                org_id: org_id.to_owned(),
++                query: query.to_owned(),
++                limit: MAX_INJECTED_SKILLS,
++                min_score: 0.0,
++            },
++            &state.ownership,
++            user_id,
++        ) {
++            matches.extend(matched.matches);
++        }
++        matches.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
++        for skill in matches
++            .into_iter()
++            .filter_map(|m| m.skill)
++            .take(usize::try_from(MAX_INJECTED_SKILLS).unwrap_or(0))
++        {
++            if !chosen.iter().any(|c| c.id == skill.id) {
++                chosen.push(skill);
++            }
++        }
++    } else if let Ok(matched) = crate::skills::handle_match_skills(
+         &state.skills,
+         MatchSkillsRequest {
+             request_id: String::new(),
+@@ -26375,4 +26449,19 @@ mod authored_kinds_tests {
+         assert!(!literal.contains("\"template\""), "the match cache must never name templates: {literal}");
+         assert!(!literal.contains("\"preset\""), "the match cache must never name presets: {literal}");
+     }
++
++    /// EP-11 S9: the pull names the turn's thread only while Space skills are on, never a Space
++    /// id, and Space rows are cached on their own shelf before the org refresh sees the list.
++    #[test]
++    fn space_skills_follow_the_thread_behind_the_switch() {
++        let source = include_str!("sse.rs");
++        let start = source.find("async fn fetch_skill_context(").expect("fetch_skill_context is in sse.rs");
++        let body = &source[start..];
++        let body = &body[..body.find("async fn skill_bundle_summaries(").expect("the next fn")];
++        assert!(body.contains("if crate::skills::space_scope_enabled() {"));
++        assert!(body.contains("thread_id: space_thread.to_owned(),"));
++        assert!(!body.contains("space_id: "), "the pull never names a Space");
++        assert!(body.contains("state.skills.refresh_space("));
++        assert!(body.contains("crate::skills::usable_space_skills("));
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0111_agent_skills_space_scope.sql b/apps/Model Plane/rust/services/session-core/migrations/0111_agent_skills_space_scope.sql
+new file mode 100644
+index 000000000..97995c676
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0111_agent_skills_space_scope.sql	
+@@ -0,0 +1,62 @@
++-- 0111: the Space scope of agent_skills (Wave 3 EP-11 S9).
++--
++-- Reserved as 0099 in round B; numbered 0111 so it applies after 0109, which adds the
++-- scope_id column this file constrains (on a fresh database 0099 would run first and fail on
++-- the missing column). 0110 is left to EP-11 S5, whose reserved 0097 has the same need.
++--
++-- A Space skill (scope 'space') steers only the turns of threads inside its Space; scope_id
++-- names that Space. The CHECK pair makes the two columns one fact: a Space row always names
++-- its Space, and no org or user row ever does, so a Space id can never widen an org or user
++-- skill and a Space row without a Space cannot exist. A Space row has no owner: the Space
++-- holds it (its author is the revision's actor), so no person's own-skill read can select it.
++--
++-- Who may write a Space row is not decided here. capability-core refuses every Space write
++-- until Control signs a "Space skill write" decision (EP-11 D7), and session-core lists Space
++-- rows only for a thread it resolves to that Space itself (SKILL_SPACE_SCOPE, default off). No
++-- writer creates one today, so this file changes no existing row and no read.
++--
++-- Additive: an older session-core never writes 'space'. Its list does not know the scope,
++-- though, and a service caller listing with an empty user would match a Space row's empty
++-- owner, so roll session-core back over Space rows only together with
++-- revert/0111_agent_skills_space_scope.down.sql, which deletes them and restores the
++-- two-scope CHECK. While no Space row exists (every switch off) the older image is safe.
++--
++-- Content: a Space skill is org configuration, like any skill, erased with the skill, with
++-- the organization (gdpr.rs deletes every agent_skills row of the org) and by owner. Zero
++-- Data Retention: ZDR credentials cannot write agent_skills at either writer.
++
++-- NOT VALID first, VALIDATE second, as 0058 and 0109 do: a validated CHECK scans the table
++-- under ACCESS EXCLUSIVE. Dropping the old CHECK and adding the wider one in the same
++-- transaction leaves no moment without a scope CHECK.
++ALTER TABLE agent_skills DROP CONSTRAINT IF EXISTS agent_skills_scope_chk;
++ALTER TABLE agent_skills
++    ADD CONSTRAINT agent_skills_scope_chk
++    CHECK (scope IN ('org', 'user', 'space')) NOT VALID;
++ALTER TABLE agent_skills VALIDATE CONSTRAINT agent_skills_scope_chk;
++
++DO $$
++BEGIN
++    IF NOT EXISTS (
++        SELECT 1 FROM pg_constraint WHERE conname = 'agent_skills_scope_id_chk'
++    ) THEN
++        ALTER TABLE agent_skills
++            ADD CONSTRAINT agent_skills_scope_id_chk
++            CHECK ((scope = 'space') = (scope_id <> '')) NOT VALID;
++    END IF;
++    IF NOT EXISTS (
++        SELECT 1 FROM pg_constraint WHERE conname = 'agent_skills_space_owner_chk'
++    ) THEN
++        ALTER TABLE agent_skills
++            ADD CONSTRAINT agent_skills_space_owner_chk
++            CHECK (scope <> 'space' OR owner_user_id = '') NOT VALID;
++    END IF;
++END
++$$;
++ALTER TABLE agent_skills VALIDATE CONSTRAINT agent_skills_scope_id_chk;
++ALTER TABLE agent_skills VALIDATE CONSTRAINT agent_skills_space_owner_chk;
++
++-- The Space list reads one Space's rows of one org; partial, so it costs nothing while no
++-- Space row exists.
++CREATE INDEX IF NOT EXISTS agent_skills_space_idx
++    ON agent_skills (org_id, scope_id)
++    WHERE scope = 'space';
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0111_agent_skills_space_scope.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0111_agent_skills_space_scope.down.sql
+new file mode 100644
+index 000000000..0de517e62
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0111_agent_skills_space_scope.down.sql	
+@@ -0,0 +1,34 @@
++-- Reverses 0111_agent_skills_space_scope.sql.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate!
++-- reads only the top level of migrations/. Run it by hand, against the database
++-- only, inside one transaction.
++--
++-- DESTROYS every Space skill (rows of scope 'space', with their versions through
++-- 0108's delete path; their revision log keeps a `deleted` entry). Org and user
++-- skills are untouched. Export the Space skills first if they matter:
++--
++--   SELECT * FROM agent_skills WHERE scope = 'space';
++--
++-- Run it before revert/0109_authored_behaviour_kind.down.sql, which drops the
++-- scope_id column this file's CHECK reads.
++--
++-- ORDER, all three steps:
++--   1. set SKILL_SPACE_SCOPE unset (or not `true`) for session-core, capability-core
++--      and model-gateway, so nothing lists or writes a Space row;
++--   2. run this file;
++--   3. delete the 0111 row from _sqlx_migrations so the next boot re-applies it.
++--
++-- Safe to run twice (IF EXISTS).
++
++BEGIN;
++SELECT set_config('mp.actor_kind', 'system', true), set_config('mp.actor_id', 'revert:0111', true);
++DELETE FROM agent_skills WHERE scope = 'space';
++DROP INDEX IF EXISTS agent_skills_space_idx;
++ALTER TABLE agent_skills DROP CONSTRAINT IF EXISTS agent_skills_space_owner_chk;
++ALTER TABLE agent_skills DROP CONSTRAINT IF EXISTS agent_skills_scope_id_chk;
++ALTER TABLE agent_skills DROP CONSTRAINT IF EXISTS agent_skills_scope_chk;
++ALTER TABLE agent_skills
++    ADD CONSTRAINT agent_skills_scope_chk
++    CHECK (scope IN ('org', 'user'));
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index 7a44dd650..3d51ac189 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -10085,10 +10085,21 @@ impl SessionCore for SessionService {
+             } else {
+                 caller.user_id().unwrap_or_default().to_owned()
+             };
++            // EP-11 S9: a Space skill reaches only a turn in its own Space. The Space
++            // is read from the caller's own thread row, never taken from the request,
++            // and only while SKILL_SPACE_SCOPE is on; off, no Space row is listed.
++            let space_id = if skill_space_scope_enabled() {
++                skill_space_of_thread(&self.pool, &caller, &req.org_id, &req.thread_id).await?
++            } else {
++                None
++            };
+             // A grantee sees only a skill its owner has accepted: a proposal is
+             // private to its owner even if a share was written onto the row.
+-            // `scope DESC` puts a user's own skill before an org skill of the
+-            // same name.
++            // `scope DESC` puts a user's own skill before a Space or org skill of
++            // the same name. A Space row has no owner, so it is kept out of the
++            // owner branch explicitly: a service caller listing with an empty user
++            // would otherwise match it. `$5` is '' when no Space was resolved, and
++            // no Space row has an empty scope_id (migration 0111).
+             let rows: Vec<SkillRow> = sqlx::query_as(
+                 "SELECT id, name, description, content, trigger_keywords,
+                         trigger_file_patterns, tool_restrictions, enabled, origin,
+@@ -10099,8 +10110,10 @@ impl SessionCore for SessionService {
+                         version, digest, kind, settings
+                  FROM agent_skills
+                  WHERE org_id = $1 AND (NOT $2 OR enabled)
+-                   AND (scope = 'org' OR owner_user_id = $3
+-                        OR (shared_with ? $3 AND review_state = 'accepted'))
++                   AND ((scope <> 'space'
++                         AND (scope = 'org' OR owner_user_id = $3
++                              OR (shared_with ? $3 AND review_state = 'accepted')))
++                        OR (scope = 'space' AND scope_id = $5))
+                    AND kind = ANY($4)
+                  ORDER BY name, scope DESC",
+             )
+@@ -10108,6 +10121,7 @@ impl SessionCore for SessionService {
+             .bind(req.enabled_only)
+             .bind(&caller_user_id)
+             .bind(&kinds)
++            .bind(space_id.as_deref().unwrap_or_default())
+             .fetch_all(&self.pool)
+             .await
+             .map_err(|e| {
+@@ -10143,7 +10157,10 @@ impl SessionCore for SessionService {
+                     settings_json: row.settings.0.to_string(),
+                 })
+                 .collect();
+-            Ok(Response::new(pb::ListAgentSkillsResponse { skills }))
++            Ok(Response::new(pb::ListAgentSkillsResponse {
++                skills,
++                space_id: space_id.unwrap_or_default(),
++            }))
+         }
+         .await;
+         record_metrics("list_agent_skills", started, result.is_ok());
+@@ -13111,6 +13128,51 @@ fn agent_skill_kinds(kinds: &[String]) -> Result<Vec<String>, Status> {
+     Ok(wanted)
+ }
+ 
++/// The switch that lets `ListAgentSkills` return Space skills (EP-11 S9). Read where it is
++/// used, like the version switch; only the literal `true` turns it on.
++const SKILL_SPACE_SCOPE_ENV: &str = "SKILL_SPACE_SCOPE";
++
++fn skill_space_scope_enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(SKILL_SPACE_SCOPE_ENV).ok().as_deref())
++}
++
++/// The Space whose skills a `ListAgentSkills` caller may be given: the Space of the thread
++/// it names, when that thread is in the caller's org, belongs to the caller and sits in a
++/// Space. The thread is the only input; a Space id never comes from the request, so a caller
++/// cannot ask for another Space's skills by naming it. A service caller has no thread of its
++/// own and gets none, and so does a thread that is unknown or someone else's: those answer
++/// with no Space rather than an error, because skills are advisory and the turn goes on.
++#[allow(clippy::result_large_err)]
++async fn skill_space_of_thread(
++    pool: &PgPool,
++    caller: &VerifiedIdentity,
++    org_id: &str,
++    thread_id: &str,
++) -> Result<Option<String>, Status> {
++    let thread_id = thread_id.trim();
++    let Some(user_id) = caller.user_id().filter(|user| !user.is_empty()) else {
++        return Ok(None);
++    };
++    if thread_id.is_empty() {
++        return Ok(None);
++    }
++    let row: Option<(String,)> = sqlx::query_as(
++        "SELECT space_id FROM threads
++         WHERE id = $1 AND org_id = $2 AND user_id = $3
++           AND space_id IS NOT NULL AND space_id <> ''",
++    )
++    .bind(thread_id)
++    .bind(org_id)
++    .bind(user_id)
++    .fetch_optional(pool)
++    .await
++    .map_err(|error| {
++        warn!(%error, "list_agent_skills: thread Space lookup failed");
++        Status::internal(error.to_string())
++    })?;
++    Ok(row.map(|(space_id,)| space_id))
++}
++
+ fn encode_ledger_cursor(at: DateTime<Utc>, id: &str) -> String {
+     format!("{}:{id}", at.timestamp_micros())
+ }
+@@ -17787,6 +17849,7 @@ mod tests {
+                     enabled_only: true,
+                     for_user_id: String::new(),
+                     kinds: Vec::new(),
++                    thread_id: String::new(),
+                 },
+             ))
+             .await
+@@ -17807,6 +17870,7 @@ mod tests {
+                     enabled_only: false,
+                     for_user_id: String::new(),
+                     kinds: Vec::new(),
++                    thread_id: String::new(),
+                 },
+             ))
+             .await
+@@ -17832,6 +17896,7 @@ mod tests {
+                     enabled_only: true,
+                     for_user_id: String::new(),
+                     kinds: Vec::new(),
++                    thread_id: String::new(),
+                 },
+             ))
+             .await
+@@ -20631,6 +20696,44 @@ mod tests {
+         assert!(handler.contains("agent_skill_kinds(&req.kinds)?"));
+     }
+ 
++    /// EP-11 S9: the list reads its Space from the caller's thread, only behind the switch,
++    /// and keeps Space rows out of the owner branch (a Space row has an empty owner, which
++    /// a service caller's empty user would otherwise match).
++    #[test]
++    fn space_rows_listed_only_for_the_threads_own_space() {
++        let source = include_str!("grpc.rs");
++        let handler = &source[source
++            .find("async fn list_agent_skills(")
++            .expect("the handler")..];
++        let handler = &handler[..handler
++            .find("async fn list_conversation(")
++            .expect("the next handler")];
++        assert!(handler.contains("if skill_space_scope_enabled()"));
++        assert!(handler.contains("skill_space_of_thread(&self.pool, &caller, &req.org_id, &req.thread_id)"));
++        assert!(handler.contains("AND ((scope <> 'space'"));
++        assert!(handler.contains("OR (scope = 'space' AND scope_id = $5))"));
++        assert!(!handler.contains("req.space_id"), "a Space id is never read from the request");
++        let lookup = &source[source
++            .find("async fn skill_space_of_thread(")
++            .expect("the lookup")..];
++        let lookup = &lookup[..lookup.find("fn encode_ledger_cursor(").expect("the next fn")];
++        assert!(lookup.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3"));
++        assert!(lookup.contains("caller.user_id()"));
++        let migration = include_str!("../migrations/0111_agent_skills_space_scope.sql");
++        assert!(migration.contains("CHECK (scope IN ('org', 'user', 'space'))"));
++        assert!(migration.contains("CHECK ((scope = 'space') = (scope_id <> ''))"));
++        assert!(migration.contains("CHECK (scope <> 'space' OR owner_user_id = '')"));
++    }
++
++    #[test]
++    fn skill_space_scope_switch_reads_only_true() {
++        assert!(!mp_contracts::loop_fold::switch_from(None));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++        assert_eq!(super::SKILL_SPACE_SCOPE_ENV, "SKILL_SPACE_SCOPE");
++    }
++
+     /// EP-11 S6: migration 0109 replaces the version body with the same field list
+     /// as 0108, reading the real `kind` and `settings`. Their column defaults equal
+     /// 0108's constants, so no existing digest moves.
+@@ -20776,6 +20879,7 @@ mod tests {
+                         enabled_only: false,
+                         for_user_id: String::new(),
+                         kinds,
++                        thread_id: String::new(),
+                     },
+                 ))
+                 .await
+@@ -21924,6 +22028,226 @@ mod tests {
+     // #[ignore]d so plain `cargo test` (no DB) skips it; run with a DB:
+     //   DATABASE_URL=… cargo test --bin session-core -- --ignored list_agent_skills_scope
+ 
++    // EP-11 S9: Space skills. Each test seeds its own org; they set SKILL_SPACE_SCOPE and
++    // run under the DB harness's --test-threads=1.
++
++    async fn space_skill_pool() -> Option<sqlx::PgPool> {
++        let url = std::env::var("DATABASE_URL").ok()?;
++        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
++        sqlx::migrate!("./migrations")
++            .run(&pool)
++            .await
++            .expect("migrate");
++        Some(pool)
++    }
++
++    fn space_skill_service(pool: &sqlx::PgPool) -> super::SessionService {
++        super::SessionService {
++            pool: pool.clone(),
++            retrieval_client: None,
++            graph_client: None,
++            knowledge_client: None,
++            letta_memory: None,
++            audit_publisher: None,
++            auth: None,
++            grant_columns: crate::grpc::ThreadGrantColumns::present(),
++        }
++    }
++
++    async fn seed_space_skill(pool: &sqlx::PgPool, id: &str, org_id: &str, space_id: &str) {
++        sqlx::query(
++            "INSERT INTO agent_skills
++                (id, org_id, name, description, content, trigger_keywords,
++                 trigger_file_patterns, tool_restrictions, enabled, origin,
++                 scope, scope_id, owner_user_id, shared_with, created_at, updated_at)
++             VALUES ($1,$2,$1,'d','c','[]','[]','[]',true,'user','space',$3,'','[]',now(),now())",
++        )
++        .bind(id)
++        .bind(org_id)
++        .bind(space_id)
++        .execute(pool)
++        .await
++        .expect("seed Space skill");
++    }
++
++    /// A thread of `user_id`, inside `space_id` when it is not empty.
++    async fn seed_skill_thread(pool: &sqlx::PgPool, id: &str, org_id: &str, user_id: &str, space_id: &str) {
++        if space_id.is_empty() {
++            sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1,$1,$2,$3)")
++                .bind(id)
++                .bind(org_id)
++                .bind(user_id)
++                .execute(pool)
++                .await
++                .expect("seed thread");
++            return;
++        }
++        sqlx::query(
++            "INSERT INTO threads
++             (id, session_key, org_id, user_id, space_id, space_decision_ref,
++              recipient_audience_ref, recipient_audience_revision,
++              recipient_audience_hash, privacy_policy_ref,
++              resource_authorization_ref, authority_revision, origin)
++             VALUES ($1,$1,$2,$3,$4,'decision-'||$1,'audience-'||$1,1,$5,
++                     'privacy-'||$1,'resource-'||$1,1,'space')",
++        )
++        .bind(id)
++        .bind(org_id)
++        .bind(user_id)
++        .bind(space_id)
++        .bind(format!("sha256:{}", "c".repeat(64)))
++        .execute(pool)
++        .await
++        .expect("seed Space thread");
++    }
++
++    async fn list_skills_in_thread(
++        svc: &super::SessionService,
++        identity: VerifiedIdentity,
++        org_id: &str,
++        thread_id: &str,
++    ) -> pb::ListAgentSkillsResponse {
++        let mut request = Request::new(pb::ListAgentSkillsRequest {
++            org_id: org_id.to_owned(),
++            enabled_only: true,
++            for_user_id: String::new(),
++            kinds: Vec::new(),
++            thread_id: thread_id.to_owned(),
++        });
++        request.extensions_mut().insert(identity);
++        svc.list_agent_skills(request)
++            .await
++            .expect("list_agent_skills")
++            .into_inner()
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn space_skill_needs_scope_id() {
++        let Some(pool) = space_skill_pool().await else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return;
++        };
++        let sfx = std::process::id();
++        let org_id = format!("ssn-org-{sfx}");
++        let insert = |id: String, scope: &'static str, scope_id: &'static str, owner: &'static str| {
++            let pool = pool.clone();
++            let org_id = org_id.clone();
++            async move {
++                sqlx::query(
++                    "INSERT INTO agent_skills
++                        (id, org_id, name, description, content, trigger_keywords,
++                         trigger_file_patterns, tool_restrictions, enabled, origin,
++                         scope, scope_id, owner_user_id, shared_with, created_at, updated_at)
++                     VALUES ($1,$2,$1,'d','c','[]','[]','[]',true,'user',$3,$4,$5,'[]',now(),now())",
++                )
++                .bind(id)
++                .bind(org_id)
++                .bind(scope)
++                .bind(scope_id)
++                .bind(owner)
++                .execute(&pool)
++                .await
++            }
++        };
++        assert!(
++            insert(format!("ssn-nospace-{sfx}"), "space", "", "").await.is_err(),
++            "a Space row must name its Space"
++        );
++        assert!(
++            insert(format!("ssn-orgwith-{sfx}"), "org", "space-a", "").await.is_err(),
++            "an org row must not name a Space"
++        );
++        assert!(
++            insert(format!("ssn-userwith-{sfx}"), "user", "space-a", "u1").await.is_err(),
++            "a user row must not name a Space"
++        );
++        assert!(
++            insert(format!("ssn-owned-{sfx}"), "space", "space-a", "u1").await.is_err(),
++            "a Space row has no owner"
++        );
++        assert!(
++            insert(format!("ssn-ok-{sfx}"), "space", "space-a", "").await.is_ok(),
++            "a Space row naming its Space, without an owner, is accepted"
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn space_skill_not_listed_outside_its_space() {
++        let Some(pool) = space_skill_pool().await else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return;
++        };
++        std::env::set_var("SKILL_SPACE_SCOPE", "true");
++        let sfx = std::process::id();
++        let org_id = format!("sso-org-{sfx}");
++        let user = format!("sso-user-{sfx}");
++        let (space_a, space_b) = (format!("sso-space-a-{sfx}"), format!("sso-space-b-{sfx}"));
++        seed_space_skill(&pool, &format!("sso-skill-a-{sfx}"), &org_id, &space_a).await;
++        seed_space_skill(&pool, &format!("sso-skill-b-{sfx}"), &org_id, &space_b).await;
++        let (thread_a, personal) = (format!("sso-thread-a-{sfx}"), format!("sso-personal-{sfx}"));
++        seed_skill_thread(&pool, &thread_a, &org_id, &user, &space_a).await;
++        seed_skill_thread(&pool, &personal, &org_id, &user, "").await;
++        let svc = space_skill_service(&pool);
++        let as_user = || VerifiedIdentity::user_for_test(&org_id, &user);
++
++        let in_a = list_skills_in_thread(&svc, as_user(), &org_id, &thread_a).await;
++        let names: Vec<&str> = in_a.skills.iter().map(|s| s.name.as_str()).collect();
++        assert_eq!(in_a.space_id, space_a, "the Space is the thread's own");
++        assert!(names.contains(&format!("sso-skill-a-{sfx}").as_str()), "{names:?}");
++        assert!(!names.contains(&format!("sso-skill-b-{sfx}").as_str()), "another Space's skill leaked: {names:?}");
++
++        let outside = list_skills_in_thread(&svc, as_user(), &org_id, &personal).await;
++        assert!(outside.space_id.is_empty());
++        assert!(outside.skills.iter().all(|s| s.scope != "space"), "a personal thread lists no Space skill");
++        let no_thread = list_skills_in_thread(&svc, as_user(), &org_id, "").await;
++        assert!(no_thread.skills.iter().all(|s| s.scope != "space"), "no thread, no Space skill");
++        // A service caller with an empty user must not match a Space row's empty owner.
++        let service = VerifiedIdentity::service_for_test_as(&org_id, "service:capability-core", &["session:read"], false);
++        let as_service = list_skills_in_thread(&svc, service, &org_id, &thread_a).await;
++        assert!(as_service.skills.iter().all(|s| s.scope != "space"), "a service caller lists no Space skill");
++
++        std::env::set_var("SKILL_SPACE_SCOPE", "false");
++        let switched_off = list_skills_in_thread(&svc, as_user(), &org_id, &thread_a).await;
++        assert!(switched_off.space_id.is_empty());
++        assert!(switched_off.skills.iter().all(|s| s.scope != "space"), "switch off, no Space skill");
++        std::env::remove_var("SKILL_SPACE_SCOPE");
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn space_skill_not_listed_for_non_member_thread() {
++        let Some(pool) = space_skill_pool().await else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return;
++        };
++        std::env::set_var("SKILL_SPACE_SCOPE", "true");
++        let sfx = std::process::id();
++        let org_id = format!("ssm-org-{sfx}");
++        let (member, outsider) = (format!("ssm-member-{sfx}"), format!("ssm-outsider-{sfx}"));
++        let space = format!("ssm-space-{sfx}");
++        seed_space_skill(&pool, &format!("ssm-skill-{sfx}"), &org_id, &space).await;
++        let thread = format!("ssm-thread-{sfx}");
++        seed_skill_thread(&pool, &thread, &org_id, &member, &space).await;
++        let svc = space_skill_service(&pool);
++
++        // Naming another person's Space thread does not reach that Space.
++        let outsider_view =
++            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&org_id, &outsider), &org_id, &thread).await;
++        assert!(outsider_view.space_id.is_empty());
++        assert!(outsider_view.skills.iter().all(|s| s.scope != "space"), "{:?}", outsider_view.skills);
++        // Nor does a caller of another org naming the thread.
++        let other_org = format!("ssm-other-org-{sfx}");
++        let foreign =
++            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&other_org, &member), &other_org, &thread).await;
++        assert!(foreign.skills.iter().all(|s| s.scope != "space"));
++        let member_view =
++            list_skills_in_thread(&svc, VerifiedIdentity::user_for_test(&org_id, &member), &org_id, &thread).await;
++        assert_eq!(member_view.space_id, space, "the thread's owner gets its Space");
++        std::env::remove_var("SKILL_SPACE_SCOPE");
++    }
++
+     #[tokio::test]
+     #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+     async fn list_agent_skills_scope_enforcement_against_real_pg() {
+@@ -22030,6 +22354,7 @@ mod tests {
+                     enabled_only: false,
+                     for_user_id: String::new(),
+                     kinds: Vec::new(),
++                    thread_id: String::new(),
+                 });
+                 request
+                     .extensions_mut()
+@@ -22095,6 +22420,7 @@ mod tests {
+                     enabled_only: false,
+                     for_user_id,
+                     kinds: Vec::new(),
++                    thread_id: String::new(),
+                 });
+                 request.extensions_mut().insert(identity);
+                 svc.list_agent_skills(request)

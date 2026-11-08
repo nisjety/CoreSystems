@@ -28,7 +28,7 @@ import {
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
-import { getThreadContext } from '@/shared/api/chat-client'
+import { getComposerCapabilities, getThreadContext } from '@/shared/api/chat-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
 import {
@@ -97,8 +97,12 @@ import {
   type BrowserDockVisiblePosition,
 } from '@/features/browser/dock/browser-dock-state'
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
+import { createSettledFoldChoices } from '../lib/settled-fold-choices'
+import { chapterEntries, turnSelector } from '../lib/chapter-toc'
+import { createReaderAppearance, readerPolishEnabled, readerSpacingFor } from '../lib/reader-polish'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
+import { ReaderTools } from './ReaderTools'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -110,6 +114,7 @@ export default function ChatPage() {
     evidenceSources,
     latestGrounding,
     artifactItems,
+    foldSavedArtifactRevision,
     latestScreen,
     liveRunId,
     runPanelCollapsed,
@@ -124,6 +129,7 @@ export default function ChatPage() {
     handleApprovalDecision,
     handleEditedApprovalDecision,
     refreshApprovalsForRun,
+    giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
     copyTurn,
@@ -138,6 +144,10 @@ export default function ChatPage() {
     branchAt,
     finalExchangeVersion,
     selectExchangeVersion,
+    rewindPlanFor,
+    rewindOfferFor,
+    rewindTo,
+    undoRewind,
     startNewChat,
     state,
     activeTab,
@@ -185,6 +195,7 @@ export default function ChatPage() {
     dismissConnectIntent,
     acceptConnectorSuggestion,
     pendingQuestion,
+    parkedTurnId,
     questionPending,
     questionError,
     answerPendingQuestion,
@@ -215,9 +226,16 @@ export default function ChatPage() {
   const [projectContext] = createResource(projectRef, (spaceRef) => readProjectContext(spaceRef))
   // WS25-S11. The org's effective mode cap; the composer lists only the modes at or below it.
   const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
+  // EP-3 S4. The gateway's own answer on whether the Output panel may edit an artifact; `artifactEditing` is false until it says otherwise.
+  const [composerCapabilities] = createResource(() => getComposerCapabilities())
+  const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
   // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
   // switch off the rules change nothing, so the transcript renders as it did.
   const transcriptDensity = createTranscriptDensity()
+  // F-t3-098, behind `VITE_CHAT_READER_POLISH`. The text size, the dyslexia-friendly font and the spacing the workspace
+  // carries, and the outline of the answers. With the switch off the attributes are empty and no outline is built.
+  const readerAppearance = createReaderAppearance()
+  const chapters = createMemo(() => (readerPolishEnabled ? chapterEntries(state.turns) : []))
   const projectName = () => {
     if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
     const context = projectContext()
@@ -595,10 +613,19 @@ export default function ChatPage() {
     }),
   )
 
+  // Settled-turn folding (EP-14 S1). The turn a run is still on, or one whose run parked, is never folded. A run
+  // holds the latest assistant turn while it streams, waits, or is held by an open question.
+  const settledFoldChoices = createSettledFoldChoices()
+  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled
+    ? foldPlan(state.turns, {
+        activeTurnId: isStreaming() || liveRunId() || pendingQuestion() ? latestAssistantTurnId() : null,
+        parkedTurnId: parkedTurnId(),
+      })
+    : undefined))
+
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
-  const settledFolds = createMemo(() => (settledFoldEnabled && transcriptDensity.rules().foldSettled ? foldPlan(state.turns, { activeTurnId: (isStreaming() || liveRunId()) ? state.turns.at(-1)?.id : undefined }) : undefined))
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
@@ -638,6 +665,16 @@ export default function ChatPage() {
     requestAnimationFrame(() => {
       if (!listElement || !anchor?.isConnected) return
       listElement.scrollTop += anchor.getBoundingClientRect().top - topBefore
+    })
+  }
+  // The outline's jump. A turn the window has left out is mounted first, by making it the focused turn, which the window
+  // always keeps mounted. The turn then goes to the top of the list, and takes the focus when it can hold it.
+  const jumpToChapter = (turnId: string): void => {
+    if (virtualizeTranscript) setFocusedTurnId(turnId)
+    requestAnimationFrame(() => {
+      const turn = threadElement?.querySelector<HTMLElement>(turnSelector(turnId))
+      turn?.scrollIntoView?.({ block: 'start' })
+      turn?.focus({ preventScroll: true })
     })
   }
   const measureViewport = () => {
@@ -1085,7 +1122,18 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel items={artifactItems()} history={{ threadId: state.threadId ?? '', temporary: temporaryChat() || isActiveThreadTemporary() }} onAskAboutSelection={askAboutArtifactSelection} />
+            <ArtifactsPanel
+              items={artifactItems()}
+              history={{ threadId: state.threadId ?? '', temporary: artifactTemporary() }}
+              editing={{
+                enabled: composerCapabilities()?.artifactEditing === true,
+                threadId: state.threadId ?? '',
+                temporary: artifactTemporary(),
+                spaceThread: spaceScoped(),
+                onSaved: foldSavedArtifactRevision,
+              }}
+              onAskAboutSelection={askAboutArtifactSelection}
+            />
           </Show>
         </Show>
       </Match>
@@ -1274,6 +1322,7 @@ export default function ChatPage() {
         planApproval={row().planApproval}
         docked={row().docked}
         settledFold={row().settledFold}
+        settledFoldChoices={settledFoldChoices}
         onSelectFollowUp={setInput}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {
@@ -1286,6 +1335,11 @@ export default function ChatPage() {
         version={row().version}
         isLatest={row().isLatest}
         onSelectVersion={selectExchangeVersion}
+        // A rewind on a server-versioned thread (WS17 S9): what it would hide, and the undo it leaves under the answer.
+        rewindPlan={rewindPlanFor(row().turn.id)}
+        onRewind={() => void rewindTo(row().turn.id)}
+        rewindUndo={rewindOfferFor(row().turn.id)}
+        onUndoRewind={() => void undoRewind()}
         editLocked={row().editLocked}
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
@@ -1331,6 +1385,7 @@ export default function ChatPage() {
       <section
         class="verevon-chat-section"
         data-transcript-process={transcriptDensity.rules().showProcess ? undefined : 'hidden'}
+        {...readerAppearance.attributes(readerSpacingFor(transcriptDensityEnabled, transcriptDensity.level()))}
         aria-label={i18n.tr('Verevon chat-arbeidsflate', 'Verevon chat workspace')}
       >
         <Show when={hasMessages()}>
@@ -1355,6 +1410,14 @@ export default function ChatPage() {
           />
           <Show when={transcriptDensityEnabled}>
             <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
+          </Show>
+          <Show when={readerPolishEnabled}>
+            <ReaderTools
+              chapters={chapters()}
+              dyslexiaFont={readerAppearance.dyslexiaFont()}
+              onDyslexiaFont={readerAppearance.setDyslexiaFont}
+              onJump={jumpToChapter}
+            />
           </Show>
         </Show>
         <Show when={hasMessages() && state.threadId && !isActiveThreadTemporary()}>
@@ -1589,6 +1652,7 @@ export default function ChatPage() {
         meter={activeRunTurn()?.meter}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
+        onBrowserGiveBack={(runId, note) => void giveBackBrowserRun(runId, note)}
         navigation={liveRailNavigation()}
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}

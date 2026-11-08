@@ -30,7 +30,6 @@ use mp_contracts::zdr_refusal::Refusal;
 use mp_ids::new_ulid;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest as _, Sha256};
 use sqlx::PgPool;
 use std::time::Instant;
 use tonic::metadata::MetadataValue;
@@ -41,7 +40,7 @@ use crate::grpc::{record_metrics, to_proto_timestamp};
 use crate::run_phase::ERROR_CODE_TRAILER;
 
 /// The environment switch for the snapshot store. Default off, read by the strict parser the
-/// other switches share, so only the literal `true` turns it on.
+/// other switches share, so only `true`, in any case, turns it on.
 pub(crate) const ENABLED_ENV: &str = "SESSION_THREAD_SHARES_ENABLED";
 
 /// What every RPC answers while the switch is off; the gateway maps it to its own 404.
@@ -228,7 +227,6 @@ pub(crate) async fn create_snapshot(
             "the conversation is too large to share as one snapshot",
         ));
     }
-    let digest = format!("sha256:{:x}", Sha256::digest(text.as_bytes()));
     let snapshot_id = format!("snap_{}", new_ulid());
 
     let mut tx = pool.begin().await.map_err(internal)?;
@@ -255,9 +253,11 @@ pub(crate) async fn create_snapshot(
     }
     // The owner, org and thread come from the thread row, never from the request, and the row must
     // still be the caller's: a thread deleted or moved since the export read inserts nothing.
+    // The digest is taken from the stored text, so it can be checked against `body::text`.
     let row: Option<SnapshotRow> = sqlx::query_as(
         "INSERT INTO thread_share_snapshots (id, org_id, thread_id, owner_id, title, body, body_digest)
-         SELECT $1, t.org_id, t.id, t.user_id, $5, $6, $7
+         SELECT $1, t.org_id, t.id, t.user_id, $5, $6::jsonb,
+                'sha256:' || encode(sha256(convert_to($6::jsonb::text, 'UTF8')), 'hex')
            FROM threads t
           WHERE t.id = $2 AND t.org_id = $3 AND t.user_id = $4
          RETURNING id, thread_id, title, body_digest, created_at, revoked_at",
@@ -268,7 +268,6 @@ pub(crate) async fn create_snapshot(
     .bind(owner)
     .bind(&title)
     .bind(&body)
-    .bind(&digest)
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
@@ -547,6 +546,7 @@ fn internal(error: sqlx::Error) -> Status {
 mod tests {
     use super::*;
     use serde_json::json;
+    use sha2::{Digest as _, Sha256};
 
     const ORG: &str = "org-share";
     const OWNER: &str = "user-share-owner";
@@ -687,8 +687,9 @@ mod tests {
     fn the_switch_is_off_unless_it_reads_true() {
         assert!(!mp_contracts::loop_fold::switch_from(None));
         assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
-        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
+        assert!(!mp_contracts::loop_fold::switch_from(Some("yes")));
         assert!(mp_contracts::loop_fold::switch_from(Some("true")));
+        assert!(mp_contracts::loop_fold::switch_from(Some("TRUE")));
     }
 
     #[test]
@@ -876,6 +877,26 @@ mod tests {
         .await
         .unwrap();
         assert!(listed.snapshots.is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn digest_is_the_sha256_of_the_stored_body_text() {
+        let pool = connect().await;
+        let thread = new_ulid();
+        seed_thread(&pool, &thread).await;
+        append(&pool, &thread, "user", "question").await;
+        let snapshot = create(&pool, &owner(), &thread).await.unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT body::text FROM thread_share_snapshots WHERE id = $1")
+                .bind(&snapshot.snapshot_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            snapshot.body_digest,
+            format!("sha256:{:x}", Sha256::digest(stored.as_bytes()))
+        );
     }
 
     #[tokio::test]

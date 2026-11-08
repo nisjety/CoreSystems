@@ -36,12 +36,22 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_ELEMENT_FILTER?: string;
 	/** "true" shows the in-page find overlay (searches loaded DOM text). Default off. */
 	readonly VITE_BROWSER_FIND?: string;
+	/** "true" shows the replay slider and auto-play over the browser timeline (F-t3-050 R1). Default off. */
+	readonly VITE_BROWSER_REPLAY_SCRUBBER?: string;
 	/** "1" compiles in the product-scene runtime (src/demo). Never set in production. */
 	readonly VITE_SCENE_MODE?: string;
 	readonly VITE_PLAN_EXECUTE_ENABLED?: string;
 	readonly VITE_DEEP_RESEARCH_PLAN_TURN?: string;
 	readonly VITE_CHAT_PROJECTS_ENABLED?: string;
 	readonly VITE_CHAT_VISION_AS_PARTS_ENABLED?: string;
+	/** "true" draws a tool call's terminal output and workspace file in the computer panel's viewers (EP-1 W4-B P1). Default off. */
+	readonly VITE_CHAT_COMPUTER_PANEL?: string;
+	/** "true" folds settled agent turns to one row (EP-14 S1). Default off. */
+	readonly VITE_CHAT_SETTLED_FOLD?: string;
+	/** "true" shows the reader's outline and dyslexia-friendly font, and applies the stored text size (F-t3-098). Default off. */
+	readonly VITE_CHAT_READER_POLISH?: string;
+	/** "true" shows thumbs and reasons on agent run answers and scheduled results (F-t3-078). Default off. */
+	readonly VITE_AGENT_RESULT_FEEDBACK?: string;
 	readonly VITE_QUOTA_READOUT?: string;
 	readonly VITE_QUOTA_READOUT_METRIC?: string;
 	/** "1"/"0" forces the Space command palette on/off; unset is on in dev only (WS13-S6). */

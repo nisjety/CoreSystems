@@ -116,16 +116,23 @@ export const FAMILY_BY_TOOL: Record<string, ToolFamily> = {
   'subagent.research_fan_out': 'generic',
   'plan.propose': 'generic',
   'browser.observe': 'generic',
+  'browser.console': 'generic',
   'browser.close': 'generic',
 }
 
-/** The family a tool takes when no name above matches, read from the intent its result gives. */
+/**
+ * The family a tool takes when no name above matches, read from the intent its result gives. A browser step and a
+ * workspace file tool read and change alike, so their intent names no verb: they stay generic, with the name as object.
+ */
 const FAMILY_BY_INTENT: Record<ToolIntent, ToolFamily> = {
   terminal: 'command',
   search: 'search',
   read: 'read',
   diff: 'change',
   generic: 'generic',
+  browser: 'generic',
+  process: 'command',
+  file: 'generic',
 }
 
 export function toolFamily(name: string, intent: ToolIntent): ToolFamily {

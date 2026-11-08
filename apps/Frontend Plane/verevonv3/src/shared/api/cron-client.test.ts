@@ -61,6 +61,22 @@ describe('listCronSchedules features', () => {
   })
 })
 
+describe('listCronSchedules creator scope', () => {
+  it('asks only for the caller’s own schedules when told to (creator=self)', async () => {
+    mockedRequest.mockResolvedValue({ schedules: [] })
+    await listCronSchedules('org-1', { creator: 'self' })
+    expect(mockedRequest).toHaveBeenLastCalledWith('/api/v1/cron?creator=self', {
+      headers: { 'x-verevon-org-id': 'org-1' },
+    })
+  })
+
+  it('sends no creator filter for the org list, so the default request is unchanged', async () => {
+    mockedRequest.mockResolvedValue({ schedules: [] })
+    await listCronSchedules('org-1')
+    expect(mockedRequest).toHaveBeenLastCalledWith('/api/v1/cron', { headers: { 'x-verevon-org-id': 'org-1' } })
+  })
+})
+
 describe('listScheduleFires', () => {
   it('asks for the last five fires of one schedule and unwraps the data envelope', async () => {
     const fire = { id: 'fire_1', status: 'completed', withheld_effects: 0 }

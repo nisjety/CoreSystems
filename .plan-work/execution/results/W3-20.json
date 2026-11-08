@@ -1,0 +1,590 @@
+{
+ "batchId": "W3-20",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-9-C3",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-1",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/retention_sweeper.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_erasure.rs"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-9-C3.patch (1243 lines, base model-plane 0adce54fb). Not compiled or run (code-first order).\n\nWhat it does now:\n- With SESSION_RETENTION_SWEEP=enforce, sweep_org takes an Erasure (letta adapter, WorkspaceEraser, daily cap) and deletes; off/dry_run work exactly as before. The mode parser is unchanged and an unknown value still means dry_run. The run row records mode 'enforce' and the real `deleted`.\n- Deletes go in batches of DELETE_BATCH=100. Before each batch, org-core is asked again about exactly those ids. A changed revision or no answer stops the pass.\n- Each thread gets its own transaction: lock with SELECT ... FOR UPDATE OF t, then re-check that the thread is still idle and personal with no open run (if not, it counts as skipped_active). Then delete_residual_rows, grpc::delete_thread_rows, and DELETE threads, then commit.\n- delete_residual_rows removes three thread-bound tables delete_thread_rows does not: scheduled_step_receipts (no FK cascade, so it must go before runs), cron_fires and skill_revisions. The remaining registered tables are already covered by delete_thread_rows or by an FK cascade, and the threads-delete trigger redacts space_event_log.\n- After each commit it runs memory_erasure::erase_semantic_copies, then the WorkspaceEraser. Both are counted (confirmed / unconfirmed / first reason) in the audit details.\n- Per-org cap: DEFAULT_DAILY_CAP=10000 over a rolling 24h, counted from recorded enforce rows. SESSION_RETENTION_SWEEP_DAILY_CAP can lower it, never raise it.\n- If a pass stops after it has deleted something, it still records its counts, with the reason in audit details.stopped (the table's CHECK allows error_code only with zero counts). If nothing was deleted yet, it writes the existing zero-count error row.\n- run() refuses to delete (stays dry) when the letta configuration is invalid. When letta is simply absent, deletes are counted unconfirmed, as the user delete path does. grpc.rs and main.rs are unchanged; run(pool, mode) keeps its signature.\n\nData Plane inventory (first task): no chat-derived content reaches Data Plane v2 bound to a thread.\n- Chat attachments stay inline with the turn (model-gateway attachment_policy).\n- /v1/documents and execution-core workspace_promote (which has no caller yet) create documents owned by a person, not by a thread.\n- session-core stores no document id per thread.\nSo no Data Plane call is made, and this is stated in the module docs.\n\nTests:\n- Unit: split_batch, daily_cap_from, the production workspace eraser, the enforce audit body.\n- memory_erasure source contract: the sweeper deletes, then commits, then propagates, all inside one fn.\n- Real-PG #[ignore] tests:\n  - every THREAD_BOUND_TABLES table is empty for a deleted thread, and propagation runs after the commit (the mock eraser sees the thread gone from another connection);\n  - a held thread is kept, and so is a hold placed between the page check and the batch check;\n  - the cap holds across two passes;\n  - an unreachable re-check deletes nothing;\n  - a thread that becomes active again is skipped.",
+   "needs_other_files": [
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go (DeleteThreadWorkspace refuses every service principal; it needs a session-core service erase path, org-scoped and owner-free, before the sweeper can erase workspaces)",
+    "apps/Model Plane/rust/services/session-core/src/retention_sweeper.rs gets a real sandbox-manager WorkspaceEraser (with service token minting) once that path exists"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF): newest-first entry 'EP-9 C3 retention sweeper delete mode (2026-11-04)': SESSION_RETENTION_SWEEP=enforce deletes through grpc::delete_thread_rows plus residual scheduled_step_receipts/cron_fires/skill_revisions, one transaction per thread with a lock and an idle re-check; letta and workspace propagation after commit, counted, never retried; batches of 100 with a hold re-check before each; per-org cap 10000 per rolling 24h (env SESSION_RETENTION_SWEEP_DAILY_CAP can only lower it); a pass that stops after deleting records its counts with audit details.stopped; Data Plane inventory found no thread-bound chat content, so no Data Plane deletion; sandbox workspace erasure is not reachable (DeleteThreadWorkspace is user-only) and is reported as workspace_unconfirmed=workspace_erasure_unavailable; enforce is turned on per environment only after one dry-run week the owner reviewed.",
+    "Owner (not builder): add SESSION_RETENTION_SWEEP_DAILY_CAP (optional, default 10000) to the session-core .env.example notes.",
+    "Guard: cargo test -q -p session-core --bin session-core retention_sweep and memory_erasure; the ignored real-PG set with --ignored --test-threads=1 against a scratch DB. The file was not rustfmt-clean before this slice and may need cargo fmt on the touched file."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Thread sandbox workspaces are never erased by the sweeper: sandbox-manager DeleteThreadWorkspace rejects service principals, so every enforce delete leaves the thread's workspace rows and blobs and counts them workspace_unconfirmed until sandbox-manager adds a service erase path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The run row and audit event are written once at the end of an org's pass, after the per-thread deletes committed, so a crash mid-pass or a failed record() leaves committed deletes with no retention_sweep_runs row, and those deletes also do not count against the daily cap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A hold placed after a batch's re-check but before that batch's last thread is deleted (a window of up to 100 thread deletes) is not seen; only per-thread re-checks would close it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "skill_revisions rows caused by a run of the deleted thread are deleted (they hold skill snapshots), which shortens that skill's undo history; the user delete path keeps them, so the two paths now differ on this table."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The sweeper's letta propagation is proven only with letta absent (counted unconfirmed); no test drives a confirmed delete through a mock letta-bridge."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Dev stack proof still owed: 3 seeded old threads, one held, enforce pass deletes 2, psql counts before/after, the audit event, and the letta-bridge memory gone."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "scheduled_step_receipts references runs without a cascade and grpc::delete_thread_rows does not delete it, so a user delete_thread of a thread that has scheduled step receipts probably fails with an FK error today (the sweeper deletes those receipts first)."
+    }
+   ],
+   "deviations": [
+    "No production sandbox-manager client was built: the RPC refuses service principals, so the production eraser reports every workspace as unconfirmed instead of claiming erasure.",
+    "The daily cap is a rolling 24 hours counted from recorded enforce rows, not a calendar day.",
+    "Reasons for a pass stopped after deletes are audit-only (details.stopped), because the run table's error_code CHECK allows only zero-count rows and the slice allows no migration."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-11-S2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-2",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0108_agent_skill_versions.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0108_agent_skill_versions.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/skill_versions.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/proto/model_plane/v1/skill_versions.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/skills_versions_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/store.go",
+    "apps/Model Plane/go/services/capability-core/internal/skillbundle/store_skill_versions_test.go",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/skills-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/SkillsSection.versions.test.tsx"
+   ],
+   "notes": "The slice is built: code plus tests, nothing run, as ordered. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-11-S2.patch (113,539 bytes, all LF).\n\n**Migration 0096 (number reserved in round B)**\n- Adds version, digest and bundle_sha256 to agent_skills, and a new agent_skill_versions table (PK skill_id+version, index on org_id+owner_user_id).\n- Two SQL functions: agent_skill_version_body and agent_skill_digest. The digest is sha256 hex of the body's jsonb text over the D2 field list; kind and settings are the constants 'skill' and '{}' until S6.\n- A BEFORE trigger is the only writer of version and digest. It throws away whatever a writer sends for them, and cuts version+1 when an accepted row's digest moves.\n- An AFTER trigger writes the version row with the mp.actor_kind/mp.actor_id settings. On a skill delete it removes the skill's versions under mp.version_erasure and then puts the setting back.\n- An immutability trigger refuses every UPDATE, and every DELETE unless mp.version_erasure='on'.\n- A v1 backfill runs with actor system / migration:0096. The revert file is in migrations/revert.\n\n**session-core**\n- skill_versions.rs adds SkillVersionService (List/GetAgentSkillVersion). Reads use the list_agent_skills visibility rule. A service caller may read for for_user_id. A skill the caller cannot see reads as `gone`.\n- grpc.rs gets only the registration line and its import. list_agent_skills now returns version and digest.\n- The gdpr org purge deletes versions under the erasure setting, before the skills, and counts them in PurgeSummary.agent_skill_versions. The total test goes from 35 to 36.\n\n**Proto**\n- AgentSkill gets version=19 and digest=20.\n- The new skill_versions.proto (round B C-B6) is added to the build.rs list.\n\n**capability-core** (everything behind SKILL_VERSIONS_API, strict \"true\")\n- skillRow gets Version (*int32, omitempty) and Digest. These are selected only while the switch is on, so with it off every SQL statement and body is as before.\n- The route GET /api/v1/skills/{id}/versions is mounted only while the switch is on. It uses get's visibility rule (pinned by a test), errors use the typed envelope, and pages are limit/before_version.\n- skillbundle.Store.WithSkillVersions stamps bundle_sha256 inside the Put/Delete transaction, with the uploader named as actor.\n\n**Frontend**\n- BFF pass-through GET /api/v1/skills/{skill_id}/versions, forwarding only limit and before_version.\n- New listSkillVersions client and a new action contract, skills.versions.list.\n- SkillsSection shows v{n} and a read-only History drawer (date, actor, 12-character digest, LCS line diff). These show only when the row carries a version, so with the switch off nothing renders and nothing is requested.\n\n**Tests written (not run)**\n- Unit: digest_field_list_is_pinned and 3 others.\n- 13 ignored PG tests covering the design's list, plus visibility and the switch.\n- Go route, switch and stamp tests; a BFF pass-through test; SkillsSection.versions.test.tsx.",
+   "deviations": [
+    "A version is cut when the digest differs from the row's last versioned digest. The design also said 'or OLD.review_state <> accepted': a proposal still cuts v1 on accept, but a rejected-then-reaccepted row with unchanged text no longer gets a duplicate version.",
+    "session-core's SkillVersionService is also gated by SKILL_VERSIONS_API, the same name as capability-core; the design named the switch only for the HTTP route. While off, both RPCs answer unavailable skill_versions_disabled.",
+    "The proto adds fields the design did not list: for_user_id (ListAgentSkillVersionsRequest=5, GetAgentSkillVersionRequest=4) for the 'service reads for a user' rule, include_content=6 and has_more=2 for paging, and Get's version=0 reads the newest. created_at is an RFC 3339 string, as AgentSkill.updated_at is.",
+    "Handlers live in src/skill_versions.rs, per the slice file list, not skill_versions_grpc.rs as the design body says.",
+    "The bundle bundle_sha256 stamp in store.go runs only while SKILL_VERSIONS_API is on, so with every switch off the behaviour is byte-identical. The design did not gate it.",
+    "ListAgentSkills now always returns version and digest. These are additive proto fields that depend on the migration, which has no switch per the design."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: after the `.route(\"/v1/skills/:id\", get(get_skill_proxy).patch(patch_skill_proxy).delete(delete_skill_proxy),)` block add `.route(\"/v1/skills/:id/versions\", get(list_skill_versions_proxy))`. After delete_skill_proxy add: `/// EP-11 S2: a skill's immutable versions (capability-core GET /api/v1/skills/{id}/versions, 404 while SKILL_VERSIONS_API is off). Only the paging parameters pass.\\nasync fn list_skill_versions_proxy(State(s): State<AppState>, Extension(c): Extension<Claims>, bearer: VerifiedCapabilityBearer, Path(id): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> Result<Json<Value>, HttpJsonError> { let mut path = format!(\"skills/{id}/versions\"); let paging: Vec<String> = [\"limit\", \"before_version\"].iter().filter_map(|key| q.get(*key).filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())).map(|v| format!(\"{key}={v}\"))).collect(); if !paging.is_empty() { path.push('?'); path.push_str(&paging.join(\"&\")); } proxy_to_capability_core(&s, &c, &bearer, &path, \"GET\", None).await }`. Import axum::extract::Query if it is not already imported. Without this route the BFF history call reaches a model-gateway 404.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `'skills.save_from_message': exempt('agent_cannot_self_govern', 'context_write'),` add `'skills.versions.list': exempt('no_owner_executor', 'read'),`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: in the registry count test, add the comment line `// +1 after EP-11-S2 registered skills.versions.list, the Skills page's history read.` before `expect(ids).toHaveLength(...)`, and raise that count by 1 (304 in this tree, before the batch merges).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}` to the environment of capability-core AND session-core.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF): add the newest-first entry 'Skill versions are immutable, cut by digest change of an accepted row; the session-core trigger is their single writer (EP-11 D2, D10; owner 2026-11-04)'.",
+    "Guard: regenerate the proto bindings (buf generate for Go and Python: sessions.proto AgentSkill 19/20 and the new skill_versions.proto), then run buf lint and buf breaking.",
+    "Guard: regenerate the agent-action-admission golden and its copies (MP api/contracts, capability-core testdata, execution-core and model-gateway fixtures, FE src/shared/api/contracts) for the new action skills.versions.list.",
+    "Owner: .env.example gets SKILL_VERSIONS_API=false (not edited here)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof still to run: edit an org skill twice; psql shows v1-v3 with digests; a manual UPDATE agent_skill_versions fails with skill_version_immutable; the History drawer lists three entries with SKILL_VERSIONS_API=true on capability-core, session-core and the model-gateway route."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The capability-core integration test TestBundlePutCutsVersion (design) is not written: it needs a database that carries both session-core 0096 and the capability-core skill_bundles migrations. The lead should add it, or prove it live with a bundle upload on an accepted skill."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ignored PG test backfill_gives_every_accepted_skill_v1 uses SET LOCAL session_replication_role = replica to write a pre-0096 row, which needs a superuser in the session-core DB-test harness."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Rolling session-core back without the revert file breaks nothing, but rolling back after the revert file without first rolling back the image breaks ListAgentSkills (it now selects version and digest). The revert header states this order."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The future per-user erasure path (register D1-643) must delete agent_skill_versions by owner_user_id under mp.version_erasure='on', or the immutability trigger refuses it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Rejecting and then re-accepting a skill with unchanged text keeps its version: the cut follows only a digest change against the last versioned digest. A text restore still writes a new version, per D2."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The BFF test assumes proxy_model_json_with_capability returns the upstream body unwrapped (body[\"versions\"]); check this when the guard runs the gateway tests."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-11-S7",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-3",
+   "files_changed": [
+    "apps/Model Plane/go/services/capability-core/internal/api/learn_command.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/learn_command_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/consumer.go",
+    "apps/Model Plane/go/services/capability-core/internal/sessionreview/learn_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/learning/learning.go",
+    "apps/Model Plane/go/services/capability-core/internal/learning/learn_test.go",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Model Plane/api/contracts/zdr-refusals.json",
+    "apps/Model Plane/api/contracts/zdr-refusals.json.sha256",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/learning.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-actions-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/LearningSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/LearningSection.test.tsx"
+   ],
+   "notes": "The slice code is written and nothing has been run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-11-S7.patch (88,577 bytes, 16 files). The status is partial because four things outside my files are still needed: the main.go wiring, the Rust catalogue features, the action dispatcher and the composer registration (all in lead_todo).\n\nHow it works:\n- **capability-core (`internal/api/learn_command.go`):** `POST /api/v1/learning/learn` is mounted only when `LEARN_COMMAND_ENABLED` is the literal \"true\". With it off the mux answers its own 404, the same as before.\n- **Checks, in order:** person principal only; ZDR principal refused (412 `zdr_feature_not_supported`, feature `learn_command`, details object); body and 500-character note bounds; thread ownership via `ResolveThreadOwner`. Then `sessionreview.Learner.Prepare` runs.\n- **Learner (`consumer.go`):** asks `GetMemoryControls` before any transcript read. It fails closed when the controls client is missing. Refusals: `zdr` maps to the ZDR refusal, paused/off gives 409, org not opted in gives 403. It then reads the transcript through the same transcript source and cost gate, with `MinUserTurns` forced to 0. The transcript bound, the per-user and per-org caps (shared keys) and `budget_unavailable` still apply. When the cost controls are off it uses the default caps with no counter, so it refuses rather than run uncounted.\n- **After the checks:** 202 `{data:{state:\"queued\"}}`. `LearnJob.Run` then runs after the response under `context.WithoutCancel` with a 100 s timeout. It uses `learning.LearnReviewPrompt` (`ReviewPrompt` plus an addendum) and appends the note as a JSON-quoted block after the transcript, never in the system prompt. It writes through the existing `skillsink` (`UpsertAgentSkill`, origin `background_review`), and each reason gets the `learn:` prefix, clamped to 300 characters.\n- **model-gateway:** `POST /v1/learning/learn` is added at the end of the router.\n  - `learn_command_refusal` refuses ZDR and waived claims with `learn_command`.\n  - A `ReadThreadForReference` OUTLINE call with limit 1, on the user's session bearer, checks the thread before anything is read. Its refusals map as: `thread_reference_retention` (ZDR or waived run) to the ZDR refusal; not_chat and archived to 422; not_found and permission_denied to 404.\n  - It then forwards `{thread_id, note}` to capability-core with the capability bearer and relays the answer. A bodiless 404 becomes `learn_command_disabled`.\n- **BFF:** `POST /api/v1/learning/learn` forwards `{threadId, note}` with the model, session and capability tokens.\n- **SPA:** `LEARN_ACTION` (`__learn`, builtin 'learn') is deliberately not in `BUILTIN_ACTIONS`, so the composer is unchanged until it registers the command. Also added: `learnCommandAvailable` (hidden on temporary/ZDR chats, unsaved threads, and when `learning_allowed` is false), `requestLearnFromThread`, the `learning.learn_from_thread` contract, and a \"Bedt om av deg / Requested by you\" chip in `LearningSection` that strips the `learn:` prefix from reasons.\n\nDeviations are listed separately. No proto or migration was added.",
+   "deviations": [
+    "No zdr-posture-matrix.json rows added (slice summary said six): the owner hard rule forbids feature-refusal rows in the posture matrix; refusals live in zdr-refusals.json features, the MG route code and docs/ZDR.md (lead_todo).",
+    "Thread-origin and waived-run gates live in model-gateway (ReadThreadForReference on the person's session bearer), not in capability-core: capability-core's service identity cannot read thread origin or run retention class without a proto change, and the slice allows none. capability-core checks ownership (ResolveThreadOwner) and memory controls (reason zdr covers ZDR orgs).",
+    "/learn always runs under the caps: with LEARNING_REVIEW_COST_CONTROLS off it still applies default caps and, with no counter store wired, refuses as budget_unavailable.",
+    "The composer's `__learn` item is not wired into DashboardComposer (not my file); chat-actions-client exports LEARN_ACTION, learnCommandAvailable and requestLearnFromThread for that registration.",
+    "No /learn seeded case added to internal/learning/eval: replay.go replays RUN_COMPLETED envelopes only and is not my file.",
+    "transcript.go needed no change."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: in FEATURES, after the legal_hold Feature entry and before the closing `];`, append:\n    // EP-11 S7: /learn sends a thread's transcript to the review model and keeps what it distils, so a\n    // ZDR or waived caller, and a thread holding a ZDR or waived run, is refused before any read.\n    Feature {\n        key: \"learn_command\",\n        label: \"learning from this conversation\",\n    },\n    // EP-11 S1/S8: saving, editing or importing a skill is configuration a ZDR credential cannot write.\n    Feature {\n        key: \"skill_authoring\",\n        label: \"saving or editing skills\",\n    },\n(Required: feature_not_supported debug_asserts the key; api/contracts/zdr-refusals.json is already edited to match and its .sha256 is now 422af9d1fe92dafeffc255fcc551dbc47dce69698d267e06e24a56fb94a2b920. Regenerate with MP_UPDATE_GOLDEN=1 if the golden diff disagrees.)",
+    "Copy apps/Model Plane/api/contracts/zdr-refusals.json and its .sha256 byte-identically to apps/Model Plane/go/pkg/zdrrefusal/, apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json and apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json, matching each copy's existing sha file convention.",
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: just after `api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)`, add (also importing llmreviewer is not needed):\n\tlearnOn := api.LearnCommandAPIFromLookup(os.Getenv) && learningReviewEnabled()\n\tvar learner *sessionreview.Learner\n\tif learnOn && sessionClient != nil && inferenceClient != nil && memoryClient != nil {\n\t\tlearnOpts := []sessionreview.Option{sessionreview.WithMemoryControls(memoryClient)}\n\t\tif cost, costOn, costErr := sessionreview.CostControlsFromLookup(os.Getenv); costErr == nil && costOn {\n\t\t\tlearnOpts = append(learnOpts, sessionreview.WithCostControls(cost))\n\t\t}\n\t\tlearner = sessionreview.NewLearner(sessionClient, inferenceClient, os.Getenv(\"LEARNING_REVIEW_MODEL\"), learnOpts...)\n\t}\n\tapi.NewLearnCommandHandler(learnOn, runClient, learner).Register(protectedMux)\n(Check memoryClient's static type is mpv1.MemoryServiceClient; WithMemoryControls takes it structurally.)",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml, capability-core environment, after `LEARNING_REVIEW_MAX_PER_ORG_PER_DAY: ${LEARNING_REVIEW_MAX_PER_ORG_PER_DAY:-100}`:\n      # EP-11 S7 /learn: a person's request to distil one thread into a skill proposal. Off unless\n      # exactly true; it also needs LEARNING_REVIEW_ENABLED and a review counter (else budget_unavailable).\n      LEARN_COMMAND_ENABLED: ${LEARN_COMMAND_ENABLED:-false}",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in the feature table after the `**Legal holds (EP-9 C1)**` row, add:\n| **/learn (EP-11 S7)** | Refused for ZDR and waived callers and threads | model-gateway refuses a ZDR or waived token, and a thread holding a ZDR or waived run (thread reference read), with zdr_feature_not_supported, feature learn_command, before any transcript read or model call; capability-core refuses a ZDR principal and a ZDR org (memory controls reason zdr) the same way (no posture-matrix row). Proposals are disabled, owner-scoped, origin background_review, erased like WS07 proposals. Built dark behind LEARN_COMMAND_ENABLED (off). |",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the `'learning.undo': exempt('agent_cannot_self_govern', 'destructive'),` line, add `  'learning.learn_from_thread': exempt('agent_cannot_self_govern', 'context_write'),`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: in the id-count test, add the comment line `    // +1 after EP-11-S7 registered learning.learn_from_thread, the /learn command.` and raise `toHaveLength(N)` by 1 (304 to 305 on this base, after the other batch bumps).",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs + handlers.rs: dispatch `learning.learn_from_thread` like `learning.undo` does, calling `crate::domains::learning::learn_from_thread` with `LearnBody { thread_id: input.threadId, note: input.note }` (or tell me the dispatcher pattern and I will add it).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx: register a `/learn` command in `slashRegistry` (id `builtin:__learn`, name `learn`, aliases [`lær`, `laer`], label LEARN_ACTION.name, description no `Lær av denne samtalen: Verevon foreslår en ferdighet.` / en LEARN_ACTION.description). Register it only while `learnCommandAvailable({threadId, temporaryChat: temporaryChat(), zeroRetention, learningAllowed})` is true, with learningAllowed from the memory controls. Its run calls `requestLearnFromThread(threadId, note)` (note = the rest of the line) and shows the typed refusal; add the composer test `learn_hidden_on_temporary_chat`.",
+    "Regenerate the agent-action-admission golden copies and the prompt-tool manifest for the new action learning.learn_from_thread (guard step).",
+    "Guard compile and test: go test ./internal/api/... ./internal/sessionreview/... ./internal/learning/... and go vet in capability-core; cargo test -p model-gateway --all-targets learn and zdr_feature_table (needs the zdr_refusal.rs edit first); the BFF learning tests; vitest for src/shared/api/chat-actions-client.test.ts and LearningSection.test.tsx."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/ZDR.md",
+    "apps/Model Plane/go/services/capability-core/internal/learning/eval/replay.go"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "capability-core cannot check thread origin or waived runs itself: a user holding a capability-core bearer who calls POST /api/v1/learning/learn directly (skipping model-gateway's ReadThreadForReference check) can /learn their own Space or agent-run thread, or a thread with a waived run in an org that has since turned ZDR off. Close this by adding origin and retention to ResolveThreadOwnerResponse (additive proto) or a service-callable thread posture read."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "/learn is refused as budget_unavailable on every stack until a ReviewBudget (Redis counter) is wired in capability-core main, because /learn always counts against the caps; switch-on needs that store."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live-prove that GetMemoryControls answers reason zdr (learning_allowed false) for a ZDR org's waived credential, since capability-core relies on it for waived threads behind the gateway check; then run the design's flow F: opted-in /learn gives a proposal with the 'Requested by you' chip, opted-out gives a typed refusal and no inference-core cost line."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway's thread check reuses ReadThreadForReference with a sentinel current_thread_id 'learn-command' and reads one outline line that it discards; a dedicated content-free thread posture RPC would remove both the sentinel and the read."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No deterministic /learn case in internal/learning/eval: replay.go only replays RUN_COMPLETED envelopes, so the design's seeded /learn case needs a replay entry point for LearnRequest."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The review after the 202 runs in a goroutine inside the request process, so a capability-core restart drops a queued /learn without a trace beyond the log; the cap slot is already counted, and the user sees no proposal and no error."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The skill_authoring feature key is added to the catalogue per the design but has no caller yet (S1/S8 should use it), and LEARN_COMMAND_ENABLED should be registered only together with LEARNING_REVIEW_ENABLED so the review-model kill switch also stops /learn (encoded in the main.go lead_todo)."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S7",
+   "status": "blocked",
+   "files_changed": [],
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-4",
+   "notes": "Blocked on WS14-S5's executor input pause, which is still not built (queue: WS14-S5 partial, remaining \"the executor input pause and apply on resume (agent.rs/resume.rs/mod.rs) / the gateway continue branch and awaiting_input frame / ...\"). Checked at HEAD 0adce54fb (model-plane): no RunStatus::AwaitingInput or \"awaiting_input\" anywhere in execution-core, PauseKind::Input is never written by the loop, and grpc.rs::run_agent refuses every question continuation with question_resume_unavailable. With no pause, an admitted form would produce a resume question while the run keeps going and the gateway holds the call until expiry, so letting allow_elicitation become true is unsafe, and the resume half would have no caller (dead code). I did not build the pause myself: it also needs state.rs, fold.rs, grpc.rs, session-core run status and the gateway frame, and none of those files belong to this slice.\nAlready on model-plane, from the W3-10/W3-12 lead commits, in apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs: the MCP_DO_ELICITATION strict switch, ElicitationRun plus allow_elicitation_when (depth 0, not ZDR, not waived, parkable, not Space, under MAX_QUESTIONS_PER_RUN), proxy_request(allow_elicitation), McpProxyOutcome::Elicitation, GovernedMcp::proxy(allow_elicitation), GovernedMcp::answer_elicitation, elicitation_question (resume delivery, origin mcp_elicitation, label, TTL = hold left, key {run}:{step}:elicit:<n>), elicitation_reply (accept/decline/cancel) and the answer_outcome mcp_elicitation_expired mapping. Tests for these exist: allow_elicitation_false_when_switch_off, allow_elicitation_false_for_subagent_and_space_runs, question_cap_counts_elicitations, and the reply and expiry tests.\nIn runtime_loop/mod.rs, execute_governed_mcp passes false and cancels any form the gateway sends anyway (cancel_unasked_form). With the switch off, behaviour is byte-identical to before. I made no edits, so the patch at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-4-S7.patch is empty (0 bytes) and only exists so the batch finds the file.",
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs (remove the question_resume_unavailable refusal once the apply on resume exists: WS14-S5)",
+    "apps/Model Plane/rust/services/execution-core/src/state.rs (an AwaitingInput run status: WS14-S5)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs (save a PauseKind::Input fold with pause_ref = question id: WS14-S5)"
+   ],
+   "lead_todo": [
+    "Re-queue EP-4-S7 after WS14-S5's exec half lands. Remaining S7 work: (1) agent.rs computes mcp_gateway::ElicitationRun {depth, zdr, waived, parkable, space_scoped, questions_asked} per run and gets allow_elicitation to execute_governed_mcp, through a run-scoped registry like permission::run_view so execute_step_inner's signature does not change; (2) mod.rs execute_governed_mcp passes that flag to GovernedMcp::proxy and, on Elicitation, calls CreateRunQuestion with mcp_gateway::elicitation_question(...) and returns WS14-S5's input-pause outcome with the tool text from elicitation_waiting_text; (3) resume.rs consumes the answered question, calls GovernedMcp::answer_elicitation(elicitation_reply(q)) and maps Output, a further Elicitation (ordinal+1) and mcp_elicitation_expired to the step's tool result; (4) tests named in the design: pending_form_creates_a_resume_question_with_server_origin, retry_returns_the_same_question, answer_is_mapped_and_sent_as_accept, skip_sends_decline, expiry_sends_cancel, lost_held_call_is_a_tool_error.",
+    "Make sure WS14-S5's pause record can carry the gateway's elicitation_id across the pause: loop_fold::PendingPause has only pause_ref, step_id, call and action_fingerprint. Either add a fold extension key or keep it on the question (pause_ref = question id)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execute_governed_mcp sends allow_elicitation=false and cancels any form; S7 cannot be switched on until WS14-S5 has an executor input pause (a run status, a PauseKind::Input fold and an apply on resume), because a form without a pause would leave a resume question open while the run continues."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "WS14-S5 needs to decide where the gateway's elicitation_id lives across the pause (fold extension or question record), because PendingPause has no field for it and S7's resume step must have it to call AnswerMcpElicitation."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The S7 golden e_waived_run_mcp_elicitation_not_advertised is still owed; per the zdr-posture-matrix rule it goes in zdr_features.rs, the feature table and docs/ZDR.md (not a matrix row), since execute_mcp already refuses waived routes before any call."
+    }
+   ],
+   "deviations": [
+    "No code written: the slice's required pause type (WS14-S5) does not exist, and building it lies outside this slice's files."
+   ],
+   "outcome": "needs-attention",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S8",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-5",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_apps.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs"
+   ],
+   "notes": "The slice is built, code and tests only. Nothing was compiled or run, as ordered. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-4-S8.patch (1105 lines). HEAD was detached to model-plane 0adce54fb before editing. Every file touched is LF and stays LF.\n\n- **New `mcp_apps.rs`:**\n  - Switch `MCP_APPS_ENABLED`: only the literal \"true\" turns it on, read once at startup.\n  - `ui_resource_for` returns the `ui://` uri a tool declares. Checked against the MCP Apps 2026-01-26 spec: it reads `_meta.ui.resourceUri` and the deprecated flat `_meta[\"ui/resourceUri\"]`, and rejects any other scheme, whitespace or control characters, and uris over 2 KiB.\n  - `authorize` makes the same checks as `handle_proxy_mcp_tool`: the server is usable by this user, enabled, the tool is allowlisted, and the transport is `http`. It finds the server through the public `handle_list_mcp_servers`, so `runtime_registries.rs` is not changed. Every refusal is `not_found`.\n  - `declared_uri` reads the uri from a fresh `tools/list`.\n  - `app_resource_from_read` keeps only the content entry for exactly the declared uri. That entry must be `text/html` (a `profile` parameter is allowed), at most 512 KiB, and UTF-8, as text or as a base64 blob checked for size before decoding.\n  - `needs_network` is true when `_meta.ui.csp` lists connect, resource or frame domains. The HTML is passed on unchanged.\n  - `AppResourceCache` keeps documents in memory for 60 s, keyed by (org, server, uri), at most 256 entries.\n  - `read_app_resource` puts these together. Logs carry ids and lengths only.\n  - Errors are typed: `not_found` 404, `too_large` and `unsupported_mime` 422, `mcp_unavailable` 502. The MCP server's own text is never put in the answer.\n- **`mcp_http.rs`:** adds `list_tools_raw` (same paging as `list_tools`), `read_resource` (request id 4) and a `jsonrpc_result` helper. `McpToolDef` and the digest are unchanged.\n- **`http_routes.rs`:** `GET /v1/mcp-apps/resource?server_id=&tool=` is added at the end of `proxy_routes`. Its checks run in this order:\n  1. 404 `not_found` while the switch is off.\n  2. ZDR token refused as `feature_not_supported` with `mcp_execution`.\n  3. 400 `invalid_request` when either name is empty or longer than 256 bytes.\n  4. 401 when the capability credential is missing.\n  5. The registry is refreshed from capability-core and the server's stored OAuth token is resolved; a failed refresh answers 503 `registry_unavailable`.\n  6. The read, answering `{data:{uri, html, needs_network}}`.\n- **BFF `mcp.rs`:** a pass-through for `/api/v1/mcp-apps/resource`. It forwards only `server_id` and `tool` (URL-encoded) through the existing `proxy_tool_surface` and adds no headers.\n\nTests written:\n- `mcp_apps`: `switch_parses_strictly`, `only_ui_scheme_is_accepted`, `other_users_private_server_is_not_found`, `tool_not_in_allowlist_is_refused`, `disabled_server_is_not_found`, `uri_not_declared_by_the_tool_is_refused`, `oversized_resource_is_refused`, `non_html_is_refused`, `network_domains_are_reported_not_honoured`, `cache_is_keyed_by_org_server_and_uri_and_expires`, `errors_map_to_typed_codes`.\n- `mcp_http`: `jsonrpc_result_takes_the_result_or_the_error_message`.\n- `http_routes::mcp_app_resource_route_tests`: `route_404_when_switch_off`, `zdr_token_is_refused`, `server_and_tool_are_required`, `needs_a_capability_credential`.\n- BFF: the router pin now includes the new route, plus `the_mcp_app_read_forwards_only_the_two_names` and `the_mcp_app_read_sends_no_scoping_header_of_its_own`.\n\nNo proto, migration or zdr-posture-matrix change.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: on the model-gateway service environment add `MCP_APPS_ENABLED: ${MCP_APPS_ENABLED:-false}` (EP-4 S12 flips it; default off)",
+    "Guard: compile and run `cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib mcp_apps`, `cargo test -q -p model-gateway --lib mcp_app_resource_route_tests`, `cargo test -q -p model-gateway --lib mcp_http`, the api_key_route_fence_tests (new route must be refused for api-key principals), and `cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets`; also cargo fmt --check on the five files (not formatted by tool)",
+    "Docs at S12 (not this slice): MP/docs/ZDR.md row 'MCP App resources - read-through, 60 s memory cache, refused as mcp_execution on ZDR tokens'; capability-ownership-matrix row 'MCP App resources - model-gateway read-through, never stored'; no zdr-posture-matrix row (feature refusal reuses mcp_execution)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D11 security nod is still required before switch-on: the ui:// uri is not in the tool digest, so a server can change what an approved tool's app draws without re-approval."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof pending: fixture server with one ui:// app tool, curl through the BFF returns the HTML, an org-B user gets 404 not_found, and a ZDR token gets zdr_feature_not_supported/mcp_execution."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each read opens a fresh MCP session and runs a full tools/list before the cache is consulted (fresh discovery is required), so a transcript showing many apps costs one session per frame per redraw; the 60 s cache saves only the resources/read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The _meta keys were checked against the MCP Apps 2026-01-26 spec text (resourceUri nested; flat ui/resourceUri deprecated 'removed before GA'); re-check at S12 because both are read and the legacy key may disappear."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The route hydrates the MCP registry from capability-core with the caller's capability bearer on every read, as GET /v1/mcp/servers does, so it needs the x-capability-authorization credential and adds one capability-core round trip per read."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "read_app_resource's network composition (connect, tools/list, cache, resources/read) has no unit test; only its pure parts and the route's pre-network branches are tested, so the composition rests on the live proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A content entry with a missing mimeType is refused as unsupported_mime even though the spec only says the listing SHOULD carry it; servers that omit it on read will not render."
+    }
+   ],
+   "deviations": [
+    "The registry server is found via the public handle_list_mcp_servers instead of McpRegistry.inner (private, in runtime_registries.rs, which is not this slice's file)",
+    "Added error codes beyond the design's three: invalid_request (400, missing/oversized names), capability_credential_required (401), registry_unavailable (503), mcp_unavailable (502 upstream failure)",
+    "too_large and unsupported_mime answer 422; a disabled server and a non-allowlisted tool answer not_found (404) rather than a distinct code, so nothing about unusable servers leaks"
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S1",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-6",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+   ],
+   "notes": "EP-12-S1 built code-first and dark (nothing compiled or run). session-core run_origin_stamp.rs (new): origin_at_birth(user_id, inherited) carries today's stamp rule moved out of grpc.rs; inherited_origin reads the parent's metadata on the caller's transaction, org-scoped, returning None unless SESSION_RUN_ORIGIN_INHERIT is literal true (inherit_enabled uses mp_contracts::loop_fold::switch_from) and the parent stamp is a closed token. grpc.rs start_run_inner calls inherited_origin after the retention inheritance and binds origin_at_birth; the old run_origin_at_birth and its test are removed. model-gateway http_routes.rs: run_detail_value delegates to run_detail_value_with(run, origin_field), which adds a top-level origin (null for an unknown stamp) only when MODEL_GATEWAY_RUN_ORIGIN_FIELD is on. Switches off: stamp and projection are byte-identical to before. Line endings stay LF (index and worktree are LF on this tree). Patch staged in this worktree and written to C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-12-S1.patch (4 files, 331 insertions, 27 deletions). The Done-when needs the terminalization shared-edit in lead_todo, because subagents do not go through start_run_inner.",
+   "needs_other_files": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/src/terminalization.rs (REQUIRED for the S1 Done-when: execution-core subagents start through StartManagedRun, whose insert_managed_run_started writes no metadata). (a) In fn insert_managed_run_started, directly after the line `    let residency = super::grpc::configured_residency();` (line 580), insert this block: `    // EP-12 S1: a child run inherits its parent's origin token behind` / `    // SESSION_RUN_ORIGIN_INHERIT. A managed run is not stamped at birth, so a run` / `    // with no inherited origin keeps the {} it has always stored.` / `    let inherited_origin = crate::run_origin_stamp::inherited_origin(` / `        &mut **transaction,` / `        &request.org_id,` / `        &persisted.parent_run_id,` / `        crate::run_origin_stamp::inherit_enabled(` / `            std::env::var(crate::run_origin_stamp::INHERIT_ENV)` / `                .ok()` / `                .as_deref(),` / `        ),` / `    )` / `    .await?;` / `    let origin_metadata = match inherited_origin {` / `        Some(origin) => {` / `            serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })` / `        }` / `        None => serde_json::json!({}),` / `    };`. (b) In the INSERT column list (line 598) replace `                          turn_origin, trigger_message_id, agent_subject_id)` with `                          turn_origin, trigger_message_id, agent_subject_id, metadata)`. (c) In the SELECT list (line 601) replace `                $11, $12, $13, $14, $15, $16` with `                $11, $12, $13, $14, $15, $16, $17`. (d) After line 622 `    .bind(wake.map(|w| w.agent_subject_id.as_str()))` add `    .bind(origin_metadata)`. With the switch off the read is skipped and the stored value is {}, the column default.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, after line 374 (`      MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED: ${MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED:-false}`) add `      # EP-12 S1: the top-level origin on run projections. Only the literal true turns it on.` and `      MODEL_GATEWAY_RUN_ORIGIN_FIELD: ${MODEL_GATEWAY_RUN_ORIGIN_FIELD:-false}`. In the session-core environment, after line 1196 (`      SESSION_CORE_RUN_LEDGER_READ: ${SESSION_CORE_RUN_LEDGER_READ:-false}`) add `      # EP-12 S1: a child run inherits its parent's origin token. Only the literal true turns it on.` and `      SESSION_RUN_ORIGIN_INHERIT: ${SESSION_RUN_ORIGIN_INHERIT:-false}`. Both default off.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF file: keep CRLF): under the `## 2026-11-04 - Wave 3 owner decisions taken at their recommended options` entry, newest first, add: `Run origin is derived from the verified caller and inherited by child runs; never a request field (EP-12 D1, S1). A child run takes its parent's token behind SESSION_RUN_ORIGIN_INHERIT; the top-level origin projection is behind MODEL_GATEWAY_RUN_ORIGIN_FIELD. Both implemented dark.`",
+    "No regeneration for S1: no .proto or buf change, no migration, no zdr-refusals or zdr-posture-matrix row, no prompt or tool definition change, so no buf, golden, prompt-tool manifest or scenario regeneration is needed.",
+    "Guard commands: `cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib run_origin_stamp` and `cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib run_detail_value`. The DB test api_parent_child_run_is_stamped_api is #[ignore] and runs only in the session-core DB harness against a scratch database whose name contains test, for example `bash \"apps/Model Plane/scripts/tests/session-core-db-tests.sh\" run_origin_stamp=1`."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Subagents start through StartManagedRun (execution-core agent.rs:6261) and insert_managed_run_started (terminalization.rs:595) writes no metadata, so start_run_inner's inheritance never reaches a subagent until the lead_todo terminalization edit lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Depth proof with both switches true: GET /v1/runs/:id of a subagent of a scheduled run shows origin schedule and parent_run_id; repeat with an api parent once EP-12 S4 stamps api."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit or DB test reaches start_run_inner or insert_managed_run_started with the switch on; the DB test covers inherited_origin only, so the managed child stamp needs its own test (api parent with switch on gives api; switch off gives {})."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The inherit parser is loop_fold::switch_from, which accepts TRUE in any case, while the design text says literal true; the unit test pins TRUE as enabling, so change parser and test together if the owner wants exact case."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Checked with no escalation: an inherited schedule origin cannot bind a scheduled run (persist_scheduled_run_bindings needs source scheduled_run and the exact field set), an api child is owned by its key principal so no person inherits api, and a ZDR managed start never names a parent, so the terminalization edit writes {} for it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "A child of an unstamped parent (absent stamp reads as chat) is written with an explicit chat stamp when the switch is on; it reads the same but adds a key, so accept it or skip the write when the parent stamp is absent."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A stored origin outside the closed set projects origin null while metadata still shows the raw value, so the SPA must render null as unknown, never as chat."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Design deviation: origin_at_birth takes the inherited origin (Option) instead of (user, parent, inherit), load_parent_origin is folded into inherited_origin, and the grpc.rs test run_origin_is_stamped_at_birth_for_people_only moved into run_origin_stamp tests; update EP-12 S1 text if the names are accepted."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S9",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_6d36d0c6-82a-7",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/thread_export.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/rust/services/session-core/src/thread_export.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/main.rs"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-20/EP-12-S9.patch (47 KB, 5 files). Nothing was compiled or run. New file thread_export.proto defines ThreadExportService.ExportThread, plus enum ExportProfile (UNSPECIFIED is refused, FULL, REDACTED) and the messages ExportThreadRequest(1-2), ExportThreadResponse(1-6), ExportedMessage(1-7) and ExportedRun(1-7). Every field has a comment. It is added to the mp-contracts build.rs list.\n\nsession-core thread_export.rs:\n- Off-switch path: identity, then the session:read gate, then the switch. While SESSION_THREAD_EXPORT_ENABLED is off (strict loop_fold::switch_from, default off), the RPC answers unavailable thread_export_disabled. This follows MessageSearch and ThreadFork, not the 'unimplemented' the design guessed.\n- Caller checks: a ZDR or waived caller gets Refusal::feature_not_supported(\"conversation_export\") with failed_precondition. A service principal gets permission_denied.\n- One REPEATABLE READ, READ ONLY transaction does the decision and the read: the thread row first. A different org or another owner gets not_found. A Space thread is refused, then any run with retention_class <> 'persistent'.\n- The refusal is failed_precondition thread_not_exportable, with x-mp-error-code=thread_not_exportable and the new trailer x-mp-error-reason=non_persistent_run|space_thread.\n- The read covers the active-branch messages, using the same revision fold SQL as ListConversation (deleted turns and human posts excluded), and the run summaries.\n- Caps: 2,000 messages, 2,000 runs and 8 MiB of text. Past a cap the export stops at the first turn that does not fit and sets truncated=true.\n- Profiles: both profiles keep only text artifacts (id/kind/title/content/version) and never an attachment body. REDACTED keeps only the attachments in metadata, renamed attachment-N across the whole export. It strips the URL query and fragment and drops snippet/passage on web citations, and keeps only the label of a connector citation.\n\nThe service is registered in grpc.rs beside ThreadForkServiceServer (import line, one pool clone, one add_service block); main.rs gets mod thread_export. grpc.rs and main.rs were measured as LF in this checkout and kept LF. No migration is needed, so no number was taken. The conversation_export ZDR key already exists in zdr_refusal.rs.\n\nTests in thread_export::tests:\n- Pure: redacted_profile_drops_tool_payloads, caps_mark_truncated, full_profile_keeps_tool_steps_but_never_an_attachment_body, redacted_attachment_names_are_numbered_across_the_export, a_turn_without_metadata_exports_empty_json_fields, an_unset_profile_is_refused, a_refused_thread_names_its_reason_on_the_trailers, zero_retention_and_waived_callers_are_refused_with_the_export_key, an_origin_outside_the_vocabulary_reads_as_empty, the_switch_is_off_unless_it_reads_true.\n- DB (#[ignore]): thread_with_zdr_run_is_not_exportable, thread_with_waived_run_is_not_exportable, space_thread_is_not_exportable, other_owner_is_not_found, export_lists_active_branch_only, run_summary_carries_origin, export_is_refused_while_the_switch_is_off.",
+   "deviations": [
+    "ExportedMessage gains field 7 metadata_json (the design listed 1-6): without it the full and redacted profiles could not differ on tool arguments/results or connector payloads, so redaction would have nothing to drop.",
+    "Switch off answers `unavailable` thread_export_disabled (the session-core pattern used by MessageSearch, ThreadFork and ThreadGoal) rather than `unimplemented`.",
+    "ExportThreadRequest carries no org_id (design tags 1-2 kept): the org comes from the verified caller and a thread in another org reads as not_found.",
+    "EXPORT_PROFILE_UNSPECIFIED is refused as invalid_argument instead of defaulting to a profile."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment block, directly after the line `      SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}`, add two lines: `      # EP-12 S9: the owner's ExportThread (ThreadExportService). Only the literal true.` and `      SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}`",
+    "shared-edit apps/Model Plane/api/contracts/zdr-posture-matrix.json: no row added. The refusal is keyed on the caller's bearer, which existing rows already cover. The design names e_zdr_caller_export_refused and e_waived_run_thread_export_refused; add them only if they differ from existing rows on resolver inputs. Otherwise record the refusal in docs/ZDR.md and the feature table (conversation_export).",
+    "Guard: regenerate proto bindings for the new thread_export.proto (Go buf generate, if the Go side builds from model_plane/v1), then run `buf lint` and `buf breaking --against baseline.binpb` in apps/Model Plane/proto.",
+    "Guard: session-core has no lib target (no src/lib.rs), so the slice's `cargo test -p session-core --lib thread_export` will fail to select. Use `cargo test -q -p session-core --bin session-core thread_export`. DB tests need `-- --ignored` with DATABASE_URL.",
+    "Guard: run `cargo fmt` on session-core/src/thread_export.rs if `cargo fmt --check` complains. Lines were hand-wrapped to 100 columns, but the tool was not run."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ExportedRun.model is read from runs.metadata.model, which no writer stamps today, and input_tokens/output_tokens are always 0 because session-core holds no usage; S10's run summary table will show empty model and zero tokens unless usage is joined from cost-core or the run row learns them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "model-gateway S10 must map the new x-mp-error-reason trailer (thread_export.rs ERROR_REASON_TRAILER) into the typed envelope details {reason} and map Refusal::from_status for conversation_export; nothing reads that trailer yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The FULL profile passes every other metadata key through unchanged and strips binary bodies only from the top-level `attachments` key, so a base64 body nested under another key (revision_preservation shows nested attachments) would reach a full export."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 8 MiB cap is applied after up to 2,001 rows are loaded into memory, so one export can hold far more than 8 MiB in session-core before truncating; a SQL-side byte bound is depth work."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "F3 live proof: with SESSION_THREAD_EXPORT_ENABLED=true on a rebuilt session-core, export a normal thread (FULL and REDACTED), and confirm a thread with a waived turn returns failed_precondition thread_not_exportable reason non_persistent_run."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn for EP-9-C3, EP-11-S2, EP-11-S7, EP-4-S8, EP-12-S1, EP-12-S9 (EP-4-S7.patch is 0 bytes), then git reset -q",
+    "outcome": "All six applied. One conflict in mp-contracts/build.rs: EP-11-S2 added skill_versions.proto and EP-12-S9 added thread_export.proto. Resolved by keeping both lines. No .rej files. The working tree keeps the changes and nothing is staged.",
+    "clean": true
+   },
+   {
+    "command": "buf generate (Go: .plan-work/buf.gen.local2.yaml; Python: buf.gen.py-remote.yaml) + bash scripts/tests/go-gen-drift.sh",
+    "outcome": "Copied only the files from this batch. Go: sessions.pb.go was updated, and skill_versions(_grpc).pb.go and thread_export(_grpc).pb.go are new. Python: sessions_pb2.py was updated, and skill_versions_pb2.py and thread_export_pb2.py are new. I did not copy the space_*_pb2.py files: they were already missing before this batch. go-gen-drift: 54 generated Go files match.",
+    "clean": true
+   },
+   {
+    "command": "buf lint (JSON, paths normalised to /) + scripts/gates/buf-lint-ratchet.py --baseline apps/Model Plane/proto/buf-lint-baseline.json",
+    "outcome": "Ratchet OK: 1013 findings, none new. Output is in .plan-work/buf-lint-w320.json.",
+    "clean": true
+   },
+   {
+    "command": "buf breaking apps/Model Plane/proto --against baseline.binpb",
+    "outcome": "rc=0",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "Generation step, 5 passed. agent-action-admission.json gained 26 lines (skills.versions.list, learning.learn_from_thread). It was copied byte-identically to MP api/contracts, capability-core testdata, and the execution-core and model-gateway fixtures. The sha256 is now b292c5bed2e51950fa40d965727c69cf48b29547463956d0a0ae7aefe339901b, and the zdr-contract-sync pin was updated to match.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "Generation step, 9 passed. No manifest change (neither new action is model-executable).",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Clean, run again after the fixes. Remaining warnings from this batch: retention_sweeper.rs:380 WorkspaceErasure::Erased is never constructed (EP-9-C3, intended until a real sandbox eraser exists). The warnings at http_routes.rs:20630/20633 and terminalization.rs start_managed_run_inner were already there before this batch.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Clean. Only warnings that were already there (website_list_tests.rs, browser.rs).",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (capability-core via go.work; also go/gen and pkg/zdrrefusal)",
+    "outcome": "Clean.",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "rc=0, no errors. The expected baseline schedule-contract.test.ts error did not appear either.",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "slice": "EP-11-S2 + EP-12-S9",
+    "what": "Resolved the 3-way conflict by keeping both proto entries (skill_versions.proto, thread_export.proto). LF kept."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/mcp_apps.rs",
+    "slice": "EP-4-S8",
+    "what": "Removed the redundant `use base64::Engine as _;` in the test module (an unused-import warning; it already comes in through use super::*). Ran rustfmt on this new file."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/session-core/src/{thread_export.rs,run_origin_stamp.rs,skill_versions.rs}",
+    "slice": "EP-12-S9, EP-12-S1, EP-11-S2",
+    "what": "Ran rustfmt on these new files, as the builders asked. I did not reformat existing files: retention_sweeper.rs (rustfmt diffs went from 27 at HEAD to 46 now) and http_routes.rs are left for the lead, under the rule never to reformat a whole file."
+   },
+   {
+    "file": "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "slice": "EP-11-S7",
+    "what": "My first edit turned the whole file into CRLF. The HEAD blob is LF; the working copy had been CRLF but stat-clean. Converted back to LF so the diff is only +12 lines."
+   }
+  ],
+  "still_broken": [
+   "EP-4-S7: the patch is empty (0 bytes). The slice is blocked on WS14-S5 and the builder asks for it to be re-queued.",
+   "EP-11-S7 shared-edit for apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (register the /learn slash command, gated by learnCommandAvailable, plus the composer test learn_hidden_on_temporary_chat): NOT applied. This is UI feature work, not a shared line. The composer has no memory-controls source for learningAllowed, and it needs a run path with the typed refusal plus a new test. That needs a design decision from the owning slice. /learn still works through the BFF route and the new action dispatcher, but nothing in the UI reaches it yet."
+  ],
+  "notes": "I merged and compiled the batch: all touched code compiles, and only the EP-4-S7 and /learn composer items above are left open.\n\nMerge: I applied six patches in order. One conflict, in build.rs, kept both slices' lines. I then ran git reset -q. 50 tracked files are modified and the new files are untracked. Nothing is staged and nothing is committed.\n\nShared edits I applied (line endings checked against both the HEAD blob and the working copy):\n- model-gateway/src/http_routes.rs: added the /v1/skills/:id/versions route and list_skill_versions_proxy (EP-11-S2). Query was already imported.\n- verevonv3/src/shared/actions/model-access.ts: added 'learning.learn_from_thread' (agent_cannot_self_govern, context_write) and 'skills.versions.list' (no_owner_executor, read).\n- action-registry.test.ts: added both comment lines and raised the count from 304 to 306.\n- Model Plane/deploy/docker-compose.yml, every switch defaulting to false:\n  - model-gateway: MODEL_GATEWAY_RUN_ORIGIN_FIELD, MCP_APPS_ENABLED.\n  - session-core: SESSION_RUN_ORIGIN_INHERIT, SESSION_THREAD_EXPORT_ENABLED, SKILL_VERSIONS_API.\n  - capability-core: LEARN_COMMAND_ENABLED, SKILL_VERSIONS_API.\n- mp-contracts/src/zdr_refusal.rs: added FEATURES entries learn_command and skill_authoring.\n- zdr-refusals.json and its .sha256 (422af9d1...): copied byte-identically to go/pkg/zdrrefusal, the SPA src/shared/api/contracts, and the Quarry fixtures/zdr-refusals. Also replaced the old 5fdefa... pin in scripts/tests/zdr-contract-sync.test.sh; otherwise the sync test would fail.\n- capability-core/cmd/main.go: wired the /learn learner and handler. The comment I added says the route answers 503 without a learner, which matches the handler's own doc.\n- docs/ZDR.md: added the /learn (EP-11 S7) feature-table row after the Legal holds row.\n- verevonv3 BFF actions/dispatchers.rs and handlers.rs: added dispatch_learning_learn_from_thread, which calls learning::learn_from_thread with LearnBody { thread_id: input.threadId, note: input.note }. Written as LF to match the index; the working copy had been CRLF and stat-clean.\n- session-core/src/terminalization.rs: EP-12-S1 inherited-origin block. insert_managed_run_started now writes the metadata column and binds it as $17.\n\nSkipped:\n- ledger.md entries (EP-9-C3, EP-11-S2, EP-12-S1): the lead books these.\n- .env.example notes (SKILL_VERSIONS_API, SESSION_RETENTION_SWEEP_DAILY_CAP): the owner adds these.\n- The DashboardComposer /learn command: listed in still_broken.\n- zdr-posture-matrix: EP-12-S9 says no row is needed and the matrix is unchanged, so I skipped step 4b.\n- EP-4-S8's S12 docs: the builder deferred them.\n\nSSE events and payloads are unchanged, so there is no SSE golden step.\n\nNot run, as instructed: none of the slices' own tests. I ran only the vitest and cargo generation steps. All of these are for the lead to run:\n- session-core retention_sweep, memory_erasure, thread_export and run_origin_stamp (use --bin session-core: session-core has no lib target).\n- The ignored DB tests.\n- model-gateway mcp_apps, mcp_app_resource_route_tests, mcp_http, api_key_route_fence_tests, zdr_feature_table and learn.\n- The verevonv3 gateway tests.\n- capability-core go test.\n- The vitest files.\n\nWatch for a model-gateway route or fence test that lists every route: the new /v1/skills/:id/versions route may need an entry there.",
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/skill_versions.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/skill_versions_grpc.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/thread_export.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/thread_export_grpc.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/skill_versions_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/thread_export_pb2.py",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+   "apps/Model Plane/api/contracts/agent-action-admission.json",
+   "apps/Model Plane/api/contracts/agent-action-admission.json.sha256",
+   "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+   "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json",
+   "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json(+.sha256)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json(+.sha256)",
+   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json(+.sha256)",
+   "scripts/tests/zdr-contract-sync.test.sh (agent-action-admission and zdr-refusals pins)"
+  ],
+  "shared_edits_applied": [
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: /v1/skills/:id/versions route + list_skill_versions_proxy (EP-11-S2)",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: skills.versions.list and learning.learn_from_thread entries",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts: count 304 -> 306 with two comment lines",
+   "apps/Model Plane/deploy/docker-compose.yml: MODEL_GATEWAY_RUN_ORIGIN_FIELD, MCP_APPS_ENABLED (model-gateway); SESSION_RUN_ORIGIN_INHERIT, SESSION_THREAD_EXPORT_ENABLED, SKILL_VERSIONS_API (session-core); LEARN_COMMAND_ENABLED, SKILL_VERSIONS_API (capability-core); all default false",
+   "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: FEATURES learn_command, skill_authoring",
+   "zdr-refusals.json + .sha256 copied to the three vendored locations; zdr-contract-sync pin updated",
+   "apps/Model Plane/go/services/capability-core/cmd/main.go: /learn learner + NewLearnCommandHandler wiring",
+   "apps/Model Plane/docs/ZDR.md: /learn (EP-11 S7) feature-table row",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs + handlers.rs: learning.learn_from_thread dispatch",
+   "apps/Model Plane/rust/services/session-core/src/terminalization.rs: EP-12-S1 inherited origin into runs.metadata on insert_managed_run_started"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries (EP-9-C3, EP-11-S2, EP-12-S1): the lead books these",
+   "session-core .env.example SESSION_RETENTION_SWEEP_DAILY_CAP and .env.example SKILL_VERSIONS_API: owner only",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx /learn slash command + test: needs UI design (no memory-controls source in the composer); see still_broken",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json: EP-12-S9 says no row (keyed on bearers already covered)",
+   "EP-4-S8 S12 docs rows (ZDR.md, capability-ownership-matrix): the builder deferred them to S12"
+  ]
+ }
+}

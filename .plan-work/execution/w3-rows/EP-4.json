@@ -1,0 +1,709 @@
+[
+ {
+  "id": "EP-4-S1",
+  "title": "Bridge-less static widget in the opaque-origin sandbox",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-3-S1",
+   "WS26-S3"
+  ],
+  "files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/inline-widget.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/inline-widget.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/inline-widget.css",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.inline-widget.test.tsx"
+  ],
+  "new_files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/inline-widget.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/inline-widget.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/inline-widget.css",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.inline-widget.test.tsx"
+  ],
+  "lead_shared_files": [],
+  "proto_change": false,
+  "migration": false,
+  "flag": "VITE_CHAT_INLINE_WIDGETS",
+  "test_commands": [
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/features/chat/lib/inline-widget.test.ts src/shared/lib/sandbox-html.test.ts src/features/chat/components/InlineWidget.test.tsx src/features/chat/components/ChatMessages.inline-widget.test.tsx",
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm lint"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D1",
+   "D2"
+  ],
+  "decision_defaults_applied": {
+   "D1": "A dedicated ```widget fence (HTML or SVG body) in the assistant answer; not every html fence, not an artifact kind",
+   "D2": "Live only in chat assistant answers via an InlineWidgetSurface context defaulting to inert; room, people's posts, user messages, exports keep the code block"
+  },
+  "risk": [
+   "ChatMessages.tsx is a hot file (EP-14 S1-S3 restructure it): rebase, LF kept",
+   "srcdoc frames cost memory in long threads: lazy load, at most 8 live per view"
+  ],
+  "importance": "opus",
+  "importance_reason": "Script execution in the transcript is a security boundary: the sandbox attribute set and the inert-by-default surface rule (ChatMarkdown is shared with the Space room and people's posts) must be exactly right.",
+  "effort_days_low": 3,
+  "effort_days_high": 4,
+  "summary": "A closed ```widget fence in a chat assistant answer renders inline in a srcdoc iframe with sandbox=allow-scripts only (never allow-same-origin), PREVIEW_CSP first, then host theme tokens (--vv-*). New pure inline-widget.ts (fence detection, 100,000-char cap, sanitised theme CSS), additive sandboxWidgetDocument in sandbox-html.ts (sandboxHtmlDocument byte-identical), InlineWidget.tsx with an InlineWidgetSurface context defaulting to inert so the Space room, people's posts and user messages keep the code block, and a third branch in MarkdownCodeBlock. Switch VITE_CHAT_INLINE_WIDGETS (literal 'true', default off; off = code block as today).",
+  "plan_external_notes": "Live proof on a second FE dev server: widget at 1280/375 px light/dark, origin null, cookie and /api fetch blocked, same text in a Space room shows code. No server change.",
+  "order": 20401,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S2",
+  "title": "Widget prompt notice and the inline_widgets client feature",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S1"
+  ],
+  "files": [
+   "apps/Model Plane/rust/services/model-gateway/src/format_guidance.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts"
+  ],
+  "new_files": [],
+  "lead_shared_files": [
+   "apps/Model Plane/deploy/docker-compose.yml"
+  ],
+  "proto_change": false,
+  "migration": false,
+  "flag": "MODEL_GATEWAY_WIDGET_GUIDANCE",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib format_guidance",
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/shared/api/chat-client.test.ts"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D1"
+  ],
+  "decision_defaults_applied": {
+   "D1": "A dedicated ```widget fence (HTML or SVG body) in the assistant answer; not every html fence, not an artifact kind"
+  },
+  "risk": [
+   "sse.rs and chat-client.ts are hot files: one line each, CRLF kept in sse.rs"
+  ],
+  "importance": "sonnet",
+  "importance_reason": "A prompt notice in an existing pure module plus one feature string; no authority or store.",
+  "effort_days_low": 2,
+  "effort_days_high": 2,
+  "summary": "format_guidance.rs gains widget_notice and message_for_turn_with(user_text, widgets_offered); message_for_turn keeps today's behaviour. sse.rs:3209 passes widgets_offered = MODEL_GATEWAY_WIDGET_GUIDANCE (OnceLock, trim()==\"true\") && features contains inline_widgets. chat-client.ts sends inline_widgets only when VITE_CHAT_INLINE_WIDGETS === 'true'. Notice: one fence, self-contained HTML/SVG/inline JS, no network/external scripts/forms, <=100,000 chars, --vv-* variables, explain in prose too.",
+  "plan_external_notes": "Compose line ${MODEL_GATEWAY_WIDGET_GUIDANCE:-false} added by the lead. Verify at slice start whether zdr_direct_stream assembles format_guidance.",
+  "order": 20402,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S3",
+  "title": "Narrow postMessage bridge: size, staged follow-up, safe link",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S1",
+   "WS26-S3"
+  ],
+  "files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.bridge.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+  ],
+  "new_files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.bridge.test.tsx"
+  ],
+  "lead_shared_files": [],
+  "proto_change": false,
+  "migration": false,
+  "flag": "VITE_CHAT_WIDGET_BRIDGE",
+  "test_commands": [
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/features/chat/lib/widget-bridge.test.ts src/shared/lib/sandbox-html.test.ts src/features/chat/components/InlineWidget.bridge.test.tsx src/shared/actions/action-registry.test.ts",
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm lint"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D3",
+   "D4"
+  ],
+  "decision_defaults_applied": {
+   "D3": "Widget and app follow-ups are staged chips the person clicks (onSelectFollowUp), never auto-sent; 1 staged per widget, 5 per answer per minute, <=500 chars",
+   "D4": "Envelope {v:1,type,id?,payload}; source must be the frame's contentWindow and origin 'null'; types ready/size/followup/open_link; payload <=8 KiB; height 80-1200 px"
+  },
+  "risk": [
+   "action-registry.ts count assertions collide with other slices: rebase",
+   "a widget can still mislead by its own text; the chip names the widget as source"
+  ],
+  "importance": "opus",
+  "importance_reason": "Defines the only channel out of the sandbox; source/origin checks, rate limits and the no-auto-send rule are security decisions.",
+  "effort_days_low": 3,
+  "effort_days_high": 4,
+  "summary": "New pure widget-bridge.ts: envelope parser {v:1,type,id?,payload}, accepts only event.source === frame.contentWindow and origin 'null', types ready/size/followup/open_link, payload <=8 KiB, height clamp 80-1200 px, token buckets (1 staged chip per widget, 5 per answer per minute, 20 size msgs/s), BRIDGE_SHIM (window.verevon.resize/suggest/openLink) injected by sandboxWidgetDocument when the bridge is on. InlineWidget.tsx adds one message listener per frame (removed on cleanup); followup stages a chip that calls the existing onSelectFollowUp handler; open_link goes through isSafeLinkHref and the transcript's external-link confirmation. Action contracts chat.stage_widget_followup and chat.open_widget_link added first. Switch VITE_CHAT_WIDGET_BRIDGE (default off; off = no shim, no listener).",
+  "plan_external_notes": "Verify at slice start that the chat page passes onSelectFollowUp into the message render context. Live proof: a widget looping suggest() shows one chip; clicking sends one visible user turn; javascript: link refused.",
+  "order": 20403,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S4",
+  "title": "MCP elicitation transport in the gateway (held call, answer service, schema mapping)",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "WS05-S4"
+  ],
+  "files": [
+   "apps/Model Plane/proto/model_plane/v1/mcp_elicitation.proto",
+   "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+   "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+   "apps/Model Plane/rust/crates/mp-contracts/src/mcp_elicitation.rs",
+   "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_elicitation.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/grpc.rs"
+  ],
+  "new_files": [
+   "apps/Model Plane/proto/model_plane/v1/mcp_elicitation.proto",
+   "apps/Model Plane/rust/crates/mp-contracts/src/mcp_elicitation.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_elicitation.rs"
+  ],
+  "lead_shared_files": [
+   "apps/Model Plane/deploy/docker-compose.yml",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  ],
+  "proto_change": true,
+  "migration": false,
+  "flag": "MCP_ELICITATION_ENABLED",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-contracts --lib mcp_elicitation",
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib mcp_",
+   "cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against baseline.binpb"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D5",
+   "D6",
+   "D8",
+   "D15",
+   "D16"
+  ],
+  "decision_defaults_applied": {
+   "D5": "MCP session stays per call, extended only while an elicitation is pending, up to MCP_ELICITATION_HOLD_SECONDS (default 600, clamp 60-1800)",
+   "D6": "Elicitation protocol revision and capability advertised only when allow_elicitation is true; otherwise initialize is byte-identical",
+   "D8": "Flat schema mapped to QuestionItem (string->text, enum->single, boolean->single, number->text validated), <=4 fields; nested/arrays/sensitive names declined",
+   "D15": "sampling/createMessage never advertised; answered with method-not-found",
+   "D16": "An answer that reaches a replica without the held call fails closed as mcp_elicitation_expired"
+  },
+  "risk": [
+   "exec-core's 8 s ProxyMcpTool timeout bounds the time to the first elicitation frame",
+   "held streams tie up connections: caps 8 per org, 64 per process",
+   "gateway.proto, runtime_registries.rs, grpc.rs, mcp_*.rs are CRLF; MCP elicitation revision string must be verified against the spec"
+  ],
+  "importance": "opus",
+  "importance_reason": "New wire contract, a streaming reader and held third-party sessions; sensitive-field refusal and the byte-identical-when-off initialize are authority and privacy decisions.",
+  "effort_days_low": 7,
+  "effort_days_high": 9,
+  "summary": "New proto file mcp_elicitation.proto (McpElicitationPending, service McpElicitationService with AnswerMcpElicitation, request/response; own service so ModelGateway impls and doubles do not change), added to mp-contracts build.rs. gateway.proto: ProxyMcpToolRequest.allow_elicitation = 8, ProxyMcpToolResponse.elicitation = 4 (commented, additive). New mp-contracts mcp_elicitation.rs: schema->QuestionItem mapping and answers->content, sensitive-name matcher, <=4 fields. mcp_jsonrpc.rs: build_initialize_request_with(id, elicitation) (old fn delegates with false), server-request parser, elicitation result and method-not-found builders (sampling refused). mcp_http.rs: connect_with, call_tool_interactive reading SSE frames with the cross-frame byte cap, respond(); call_tool unchanged. New MG mcp_elicitation.rs: in-memory ElicitationRegistry (el_<ulid>, caps, reaper sends cancel at MCP_ELICITATION_HOLD_SECONDS default 600 clamp 60-1800, <=3 elicitations per call, logs ids/lengths only). runtime_registries.rs handle_proxy_mcp_tool uses the interactive path only when allow_elicitation && switch. grpc.rs registers the service with the existing interceptor; only the held call's user may answer.",
+  "plan_external_notes": "Compose lines for MCP_ELICITATION_ENABLED and MCP_ELICITATION_HOLD_SECONDS added by the lead; golden e_zdr_run_mcp_elicitation_not_advertised added to the posture matrix by the lead. Live proof needs a fixture Streamable HTTP MCP server that elicits inside tools/call.",
+  "order": 20404,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S5",
+  "title": "Question origin contract: run_questions origin columns, proto fields, store",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "WS14-S3"
+  ],
+  "files": [
+   "apps/Model Plane/rust/services/session-core/migrations/0105_run_question_origin.sql",
+   "apps/Model Plane/rust/services/session-core/migrations/revert/0105_run_question_origin.down.sql",
+   "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+   "apps/Model Plane/rust/crates/mp-contracts/src/user_question.rs",
+   "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+   "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs"
+  ],
+  "new_files": [
+   "apps/Model Plane/rust/services/session-core/migrations/0105_run_question_origin.sql",
+   "apps/Model Plane/rust/services/session-core/migrations/revert/0105_run_question_origin.down.sql"
+  ],
+  "lead_shared_files": [],
+  "proto_change": true,
+  "migration": true,
+  "flag": "",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib run_question",
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-contracts --lib user_question",
+   "cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against baseline.binpb"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D9"
+  ],
+  "decision_defaults_applied": {
+   "D9": "Run owner only; depth-0, non-ZDR, non-waived, parkable, non-Space runs only"
+  },
+  "risk": [
+   "orchestration.proto and orchestration_grpc.rs are shared with EP-1/EP-10 (different messages)",
+   "orchestration.proto and user_question.rs are LF; orchestration_store.rs and orchestration_grpc.rs are CRLF"
+  ],
+  "importance": "opus",
+  "importance_reason": "Who may claim a question was asked by a third-party server is an authority boundary (only the execution service may set a non-model origin).",
+  "effort_days_low": 3,
+  "effort_days_high": 3,
+  "summary": "session-core migration 0105_run_question_origin (+ revert): origin TEXT NOT NULL DEFAULT 'model' CHECK IN ('model','mcp_elicitation'), origin_label TEXT NOT NULL DEFAULT '' (<=80), constraint label empty iff origin model. orchestration.proto: CreateRunQuestionRequest.origin = 8, origin_label = 9; RunQuestion.origin = 15, origin_label = 16 (commented). mp-contracts user_question.rs: ORIGIN_MODEL, ORIGIN_MCP_ELICITATION, MAX_ORIGIN_LABEL, validate_origin. orchestration_store.rs writes/reads both; orchestration_grpc.rs create_run_question validates and accepts a non-model origin only from the execution-core service principal; list returns origin. No switch: unset reads as model and nothing sends an origin until S7.",
+  "plan_external_notes": "Verify at slice start how create_run_question tells a service caller from a delegated user bearer. Migration needs the DB harness for its up/down test.",
+  "order": 20405,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S6",
+  "title": "Origin on the user_question event and the question card",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S5",
+   "WS14-S4"
+  ],
+  "files": [
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "apps/Model Plane/api/contracts/sse-event-payloads.json",
+   "scripts/tests/zdr-contract-sync.test.sh",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.tsx",
+   "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/QuestionCard.test.tsx"
+  ],
+  "new_files": [],
+  "lead_shared_files": [],
+  "proto_change": false,
+  "migration": false,
+  "flag": "",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib user_question run_question_value",
+   "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+   "bash scripts/tests/zdr-contract-sync.test.sh",
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/shared/api/chat-client.test.ts src/shared/chat-nodes/QuestionCard.test.tsx"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D9"
+  ],
+  "decision_defaults_applied": {
+   "D9": "Run owner only; depth-0, non-ZDR, non-waived, parkable, non-Space runs only"
+  },
+  "risk": [
+   "SSE golden recipe (payload json, SPA copy, gen-chat-event-types --check, pinned digest) is shared with other slices: rebase"
+  ],
+  "importance": "sonnet",
+  "importance_reason": "Display plumbing over S5's contract; keys are omitted for model origin so old output stays byte-identical.",
+  "effort_days_low": 2,
+  "effort_days_high": 3,
+  "summary": "run_question_value (http_routes.rs) adds origin and origin_label only for a non-model origin; ChatEvent::UserQuestion gains optional origin/origin_label serialised only when Some; sse.rs:13501-13506 passes them. SSE golden regenerated with the D2-956 recipe. chat-client.ts reads origin only for mcp_elicitation with a label <=80 chars. QuestionCard shows 'Spørsmål fra <server>' and 'Svaret sendes til <server>' for that origin; model questions unchanged.",
+  "plan_external_notes": "Copy of sse-event-payloads.json into the SPA contracts folder per the existing recipe; verify the SPA copy path at slice start.",
+  "order": 20406,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S7",
+  "title": "Elicitation in the governed loop: resume question, pause, answer the held call",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S4",
+   "EP-4-S5",
+   "WS14-S5"
+  ],
+  "files": [
+   "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+  ],
+  "new_files": [],
+  "lead_shared_files": [
+   "apps/Model Plane/deploy/docker-compose.yml",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  ],
+  "proto_change": false,
+  "migration": false,
+  "flag": "MCP_DO_ELICITATION",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib elicitation",
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib mcp_gateway"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D7",
+   "D8",
+   "D9",
+   "D16"
+  ],
+  "decision_defaults_applied": {
+   "D7": "Elicitation is a WS14 resume question; the run pauses; the held call is answered on resume",
+   "D8": "Flat schema mapped to QuestionItem (string->text, enum->single, boolean->single, number->text validated), <=4 fields; nested/arrays/sensitive names declined",
+   "D9": "Run owner only; depth-0, non-ZDR, non-waived, parkable, non-Space runs only",
+   "D16": "An answer that reaches a replica without the held call fails closed as mcp_elicitation_expired"
+  },
+  "risk": [
+   "agent.rs and runtime_loop/mod.rs are hot (EP-1, EP-9): rebase, CRLF kept",
+   "depends on WS14-S5's executor input pause, which is not built yet; use the type it lands"
+  ],
+  "importance": "opus",
+  "importance_reason": "Pauses a governed run on a third-party server's request and sends the owner's answer out; ZDR, owner-only and question-cap rules are authority and privacy decisions.",
+  "effort_days_low": 5,
+  "effort_days_high": 7,
+  "summary": "mcp_gateway.rs sets ProxyMcpToolRequest.allow_elicitation from GovernedMcp and gains an McpElicitationService client and answer_elicitation. execute_mcp (runtime_loop/mod.rs:2315): on a pending form create a question (delivery resume, origin mcp_elicitation, origin_label server label, items from the form, expires = hold left, idempotency {run}:{step}:elicit:<n>) and return the WS14-S5 input-pause outcome. resume.rs: consume the answer, map it back, AnswerMcpElicitation accept; skip -> decline; expiry/cancel -> cancel; lost held call -> tool error mcp_elicitation_expired. agent.rs admission: allow only when MCP_DO_ELICITATION (literal true, default off) && depth 0 && not ZDR/waived && parkable && no space_id; counts against MAX_QUESTIONS_PER_RUN.",
+  "plan_external_notes": "Needs gateway MCP_ELICITATION_ENABLED and MCP_DO_TOOLS != off for proof; compose line and golden e_waived_run_mcp_elicitation_not_advertised added by the lead. Live proof with the fixture server: answer, skip and timeout paths.",
+  "order": 20407,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S8",
+  "title": "MCP Apps resource read: ui:// discovery and resources/read behind a viewer-checked route",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S4",
+   "WS05-S4"
+  ],
+  "files": [
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_apps.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs"
+  ],
+  "new_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_apps.rs"
+  ],
+  "lead_shared_files": [
+   "apps/Model Plane/deploy/docker-compose.yml",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  ],
+  "proto_change": false,
+  "migration": false,
+  "flag": "MCP_APPS_ENABLED",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib mcp_apps",
+   "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D10",
+   "D11",
+   "D12"
+  ],
+  "decision_defaults_applied": {
+   "D10": "SPA asks the gateway by tool name; gateway re-discovers the ui:// uri and reads it with the viewer's authority; nothing stored (60 s memory cache)",
+   "D11": "ui:// uri is not part of the tool digest in v1; TOOL_DIGEST_VERSION unchanged",
+   "D12": "PREVIEW_CSP unchanged for apps; declared network domains reported, not honoured"
+  },
+  "risk": [
+   "MCP Apps extension _meta keys may move: isolated in mcp_apps.rs, verify at slice start",
+   "http_routes.rs is the largest hot file: additive block at the end of the router"
+  ],
+  "importance": "opus",
+  "importance_reason": "Serves third-party HTML to the browser; the per-user server visibility, allowlist and declared-uri checks are authority rules.",
+  "effort_days_low": 4,
+  "effort_days_high": 5,
+  "summary": "New MG mcp_apps.rs: ui_resource_for(tool_json) reads the tool's _meta ui resource uri (ui:// only); read_app_resource repeats handle_proxy_mcp_tool's checks (usable by this user, enabled, allowlisted, HTTPS), confirms by fresh discovery that the tool still declares the uri, resources/read, text/html only, <=512 KiB, UTF-8, 60 s in-memory cache keyed (org, server, uri), declared network domains reported as needs_network. mcp_http.rs adds list_tools_raw and read_resource (McpToolDef and the digest untouched). http_routes.rs: GET /v1/mcp-apps/resource?server_id=&tool= -> {data:{uri, html, needs_network}}, typed errors, 404 while MCP_APPS_ENABLED is off, ZDR tokens refused with feature_not_supported mcp_execution. BFF mcp.rs pass-through /api/v1/mcp-apps/resource.",
+  "plan_external_notes": "Security acknowledgement of D11 (ui uri outside the digest) before the S12 flip. Compose line and golden e_zdr_token_mcp_app_resource_refused added by the lead.",
+  "order": 20408,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S9",
+  "title": "MCP App host in the frame: JSON-RPC over postMessage",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S3",
+   "EP-4-S8"
+  ],
+  "files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.mcp-app.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+  ],
+  "new_files": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/McpAppFrame.test.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.mcp-app.test.tsx"
+  ],
+  "lead_shared_files": [],
+  "proto_change": false,
+  "migration": false,
+  "flag": "VITE_MCP_APPS",
+  "test_commands": [
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/features/chat/lib/mcp-app-bridge.test.ts src/features/chat/components/McpAppFrame.test.tsx src/features/chat/components/ChatMessages.mcp-app.test.tsx src/shared/api/chat-client.test.ts src/shared/actions/action-registry.test.ts",
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm lint"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D3",
+   "D12",
+   "D13"
+  ],
+  "decision_defaults_applied": {
+   "D3": "Widget and app follow-ups are staged chips the person clicks (onSelectFollowUp), never auto-sent; 1 staged per widget, 5 per answer per minute, <=500 chars",
+   "D12": "PREVIEW_CSP unchanged for apps; declared network domains reported, not honoured",
+   "D13": "App-initiated tools/call: read class only, same server, run owner, via ExecuteStep with the viewer's delegated bearer, 10/min per frame; else app_call_requires_chat"
+  },
+  "risk": [
+   "verify at slice start that Do-run MCP calls reach ChatToolCall with the namespaced name and output on reload",
+   "ChatMessages.tsx, chat-client.ts, action-registry.ts are hot"
+  ],
+  "importance": "opus",
+  "importance_reason": "Hosts third-party app code next to the transcript; the method allowlist and the refusal of tools/call until S10 keep the app without authority.",
+  "effort_days_low": 4,
+  "effort_days_high": 5,
+  "summary": "New pure mcp-app-bridge.ts on top of widget-bridge.ts checks: answers ui/initialize with host info and theme, sends tool-input and tool-result notifications once, handles ui/size, ui/open-link (safe link), ui/message (staged chip), answers tools/call with an app_call_requires_chat JSON-RPC error until S10, every other method method-not-found (method names in one table, verified against the extension at slice start). New McpAppFrame.tsx fetches the resource via chat-client getMcpAppResource, labels 'App fra <server>', shows the network notice, uses sandboxWidgetDocument with the shim, never caches. ChatMessages.tsx draws at most 2 apps per answer under settled mcp__ tool calls, chat surface only. Action contracts chat.open_mcp_app and chat.stage_mcp_app_message. Switch VITE_MCP_APPS (default off; needs S1 and S3 switches).",
+  "plan_external_notes": "Live proof on a second FE dev server with the fixture app: table render at 1280/375 px, staged message, origin null.",
+  "order": 20409,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S10",
+  "title": "App-initiated tools/call: viewer-bound, same server, read class only, through ExecuteStep",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S8",
+   "EP-4-S9",
+   "WS05-S6.code"
+  ],
+  "files": [
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mcp.rs",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/mcp-app-bridge.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+   "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+  ],
+  "new_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_app_calls.rs"
+  ],
+  "lead_shared_files": [
+   "apps/Model Plane/deploy/docker-compose.yml",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  ],
+  "proto_change": false,
+  "migration": false,
+  "flag": "MCP_APP_TOOL_CALLS",
+  "test_commands": [
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib mcp_app_calls",
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib execute_step",
+   "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets",
+   "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/features/chat/lib/mcp-app-bridge.test.ts src/shared/api/chat-client.test.ts src/shared/actions/action-registry.test.ts"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "",
+  "decisions": [
+   "D13"
+  ],
+  "decision_defaults_applied": {
+   "D13": "App-initiated tools/call: read class only, same server, run owner, via ExecuteStep with the viewer's delegated bearer, 10/min per frame; else app_call_requires_chat"
+  },
+  "risk": [
+   "a second entry into tool execution beside the run loop: must stay read class, same server, run owner, or it becomes an approval bypass",
+   "EC grpc.rs/runtime_loop/mod.rs touched only if ExecuteStep does not already dispatch mcp__ through execute_mcp with the signed class"
+  ],
+  "importance": "opus",
+  "importance_reason": "Opens a user-driven path into governed tool execution; viewer-bound attribution and the read-class limit are the core authority decisions of F-t3-045.",
+  "effort_days_low": 6,
+  "effort_days_high": 8,
+  "summary": "New MG mcp_app_calls.rs: switch MCP_APP_TOOL_CALLS (literal true, default off), refuses ZDR (mcp_execution), viewer must own the run that drew the app, tool on the app's own server and allowlisted, registry class none/read only (else app_call_requires_chat), 10 calls per frame per minute keyed by a SPA frame nonce, calls execution-core ExecuteStep{tool mcp__..., permission_mode ask, run_id, user_id} with the viewer's delegated bearer as tools.rs does for code_interpreter, output scrubbed and capped 64 KiB, audit line without arguments. http_routes.rs POST /v1/mcp-apps/tool-call additive block, typed envelope errors. BFF pass-through. FE bridge forwards tools/call via chat-client callMcpAppTool when VITE_MCP_APP_TOOL_CALLS === 'true'; action contract chat.mcp_app_tool_call (risk medium). Execution-core arm added only if ExecuteStep lacks mcp__ dispatch through the signed gate.",
+  "plan_external_notes": "Enable only after WS05-S6 enforce is live and OD-5 is accepted. Verify at slice start which gateway client reads capability_tools classes. Compose lines and golden e_zdr_token_mcp_app_tool_call_refused added by the lead.",
+  "order": 20410,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S11",
+  "title": "ADR stub: dedicated user-content origin deferred",
+  "tag": "BUILD",
+  "status": "todo",
+  "remaining": "",
+  "depends_on": [],
+  "files": [
+   "docs/architecture/adr-user-content-origin.md"
+  ],
+  "new_files": [
+   "docs/architecture/adr-user-content-origin.md"
+  ],
+  "lead_shared_files": [],
+  "proto_change": false,
+  "migration": false,
+  "flag": "",
+  "test_commands": [],
+  "needs_live_stack": false,
+  "needs_external": "",
+  "decisions": [
+   "D14"
+  ],
+  "decision_defaults_applied": {
+   "D14": "No dedicated user-content origin in W3; ADR stub defers it"
+  },
+  "risk": [
+   "none"
+  ],
+  "importance": "sonnet",
+  "importance_reason": "Documentation only; records a deferral the plan and DEC-40 already recommend.",
+  "effort_days_low": 0,
+  "effort_days_high": 1,
+  "summary": "New docs/architecture/adr-user-content-origin.md, status Deferred: context (opaque-origin srcdoc is the only untrusted-markup renderer), decision (no new origin, no app network, no app storage, no viewer-bound connectors in W3), consequences (apps needing network do not work; S8 notice), reopen triggers (EP-12 share model, a customer app needing network, a security review of a sandbox domain), owners (Frontend, Control, Application).",
+  "plan_external_notes": "",
+  "order": 20411,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ },
+ {
+  "id": "EP-4-S12",
+  "title": "Flip switches, ledger, ZDR rows, ownership rows, live proof",
+  "tag": "FINISH",
+  "status": "blocked-external",
+  "remaining": "",
+  "depends_on": [
+   "EP-4-S1",
+   "EP-4-S2",
+   "EP-4-S3",
+   "EP-4-S4",
+   "EP-4-S5",
+   "EP-4-S6",
+   "EP-4-S7",
+   "EP-4-S8",
+   "EP-4-S9",
+   "EP-4-S10",
+   "EP-4-S11"
+  ],
+  "files": [
+   "apps/Model Plane/deploy/docker-compose.yml",
+   "apps/Model Plane/docs/decisions/ledger.md",
+   "apps/Model Plane/docs/ZDR.md",
+   "apps/Model Plane/docs/capability-ownership-matrix.md",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+   "docs/plans/model-plane-depth-register.md"
+  ],
+  "new_files": [],
+  "lead_shared_files": [
+   "apps/Model Plane/deploy/docker-compose.yml",
+   "apps/Model Plane/docs/decisions/ledger.md",
+   "apps/Model Plane/docs/ZDR.md",
+   "apps/Model Plane/docs/capability-ownership-matrix.md",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+   "docs/plans/model-plane-depth-register.md"
+  ],
+  "proto_change": false,
+  "migration": false,
+  "flag": "",
+  "test_commands": [
+   "bash scripts/tests/zdr-contract-sync.test.sh",
+   "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test zdr_posture_matrix --test zdr_refusal_inventory"
+  ],
+  "needs_live_stack": true,
+  "needs_external": "Owner rulings OD-1..OD-7 (staged follow-ups, resume elicitation owner-only, sensitive-field list, ui uri outside digest security nod, read-class app calls, no user-content origin, privacy notice for elicitation answers); WS14-S5 and WS05-S6 live; fixture MCP server on the proof stack; owner's model key for live runs",
+  "decisions": [
+   "D3",
+   "D7",
+   "D8",
+   "D9",
+   "D11",
+   "D13",
+   "D14"
+  ],
+  "decision_defaults_applied": {
+   "D3": "Widget and app follow-ups are staged chips the person clicks (onSelectFollowUp), never auto-sent; 1 staged per widget, 5 per answer per minute, <=500 chars",
+   "D7": "Elicitation is a WS14 resume question; the run pauses; the held call is answered on resume",
+   "D8": "Flat schema mapped to QuestionItem (string->text, enum->single, boolean->single, number->text validated), <=4 fields; nested/arrays/sensitive names declined",
+   "D9": "Run owner only; depth-0, non-ZDR, non-waived, parkable, non-Space runs only",
+   "D11": "ui:// uri is not part of the tool digest in v1; TOOL_DIGEST_VERSION unchanged",
+   "D13": "App-initiated tools/call: read class only, same server, run owner, via ExecuteStep with the viewer's delegated bearer, 10/min per frame; else app_call_requires_chat",
+   "D14": "No dedicated user-content origin in W3; ADR stub defers it"
+  },
+  "risk": [
+   "flip order matters: widgets -> bridge -> elicitation -> apps -> app calls"
+  ],
+  "importance": "opus",
+  "importance_reason": "Turns on third-party content, elicitation egress and app-initiated calls on a real org; needs the owner and live evidence.",
+  "effort_days_low": 2,
+  "effort_days_high": 3,
+  "summary": "Compose lines (all ${...:-false}) for MODEL_GATEWAY_WIDGET_GUIDANCE, MCP_ELICITATION_ENABLED, MCP_ELICITATION_HOLD_SECONDS, MCP_APPS_ENABLED, MCP_APP_TOOL_CALLS (gateway) and MCP_DO_ELICITATION, MCP_APP_TOOL_CALLS (execution-core); VITE_ switches documented for the owner (.env.example is the owner's); six ledger entries; ZDR.md rows; ownership matrix rows; four e_ golden cases; depth register D3 rows. Live flows F1-F4 from the design's proof plan.",
+  "plan_external_notes": "Flip order: VITE_CHAT_INLINE_WIDGETS + MODEL_GATEWAY_WIDGET_GUIDANCE -> VITE_CHAT_WIDGET_BRIDGE -> MCP_ELICITATION_ENABLED + MCP_DO_ELICITATION (after WS14-S5 live) -> MCP_APPS_ENABLED + VITE_MCP_APPS (after OD-4) -> MCP_APP_TOOL_CALLS (after WS05-S6 enforce live).",
+  "order": 20412,
+  "train": "W3",
+  "lane": null,
+  "batch": null
+ }
+]

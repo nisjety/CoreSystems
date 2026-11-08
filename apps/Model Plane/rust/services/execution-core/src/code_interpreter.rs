@@ -251,18 +251,19 @@ fn enforcement_report_requested_in(raw: Option<&str>) -> bool {
 
 /// The enforcement report for one run (EP-9 E1). The network tier is the one the
 /// policy the run was launched with allows, never one a request asked for. Only a
-/// wrapped process with no network counts as fully enforced: `--unshare-net` is
-/// the boundary bwrap applies itself, and it is the only one this tool runs with.
-fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy) -> SandboxReport {
+/// wrapped process with no network counts as fully enforced, and only when the command
+/// that was spawned unshares the network namespace (`isolated`): a boundary the argv
+/// does not carry is partial, whatever the policy says.
+fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy, isolated: bool) -> SandboxReport {
     let network = match network {
         MpNetworkPolicy::Disabled => NetworkTier::Off,
         MpNetworkPolicy::AllowDomains(_) => NetworkTier::Allowlist,
         MpNetworkPolicy::AllowAll => NetworkTier::All,
     };
-    let enforcement = match (sandboxed, network) {
-        (false, _) => Enforcement::Unenforced,
-        (true, NetworkTier::Off) => Enforcement::Full,
-        (true, _) => Enforcement::Partial,
+    let enforcement = match (sandboxed, isolated, network) {
+        (false, _, _) => Enforcement::Unenforced,
+        (true, true, NetworkTier::Off) => Enforcement::Full,
+        (true, _, _) => Enforcement::Partial,
     };
     SandboxReport {
         sandboxed,
@@ -272,17 +273,17 @@ fn enforcement_report(sandboxed: bool, network: &MpNetworkPolicy) -> SandboxRepo
 }
 
 /// The report for a run that went out through its own live proxy (EP-9 E3). The
-/// namespace was unshared and the proxy admitted only the tier's hosts, so the
-/// boundary is one the sandbox applied itself: `full`, named by the tier the
-/// call ran at rather than by the policy's host list.
-fn proxied_enforcement_report(sandboxed: bool, tier: NetworkTier) -> SandboxReport {
+/// namespace is unshared, so the proxy is the one way out and the boundary is one the
+/// sandbox applied itself: `full`, named by the tier the call ran at rather than by the
+/// policy's host list. Without the unshared namespace it is partial.
+fn proxied_enforcement_report(sandboxed: bool, tier: NetworkTier, isolated: bool) -> SandboxReport {
     SandboxReport {
         sandboxed,
         network: tier,
-        enforcement: if sandboxed {
-            Enforcement::Full
-        } else {
-            Enforcement::Unenforced
+        enforcement: match (sandboxed, isolated) {
+            (false, _) => Enforcement::Unenforced,
+            (true, true) => Enforcement::Full,
+            (true, false) => Enforcement::Partial,
         },
     }
 }
@@ -906,9 +907,13 @@ async fn run_in_root(
     // Attached only while the switch is on, so the result is byte-identical without it.
     let sandbox = enforcement_report_requested().then(|| {
         if egress_counts.is_some() {
-            proxied_enforcement_report(outcome.sandboxed, egress.tier)
+            proxied_enforcement_report(outcome.sandboxed, egress.tier, outcome.network_isolated)
         } else {
-            enforcement_report(outcome.sandboxed, &policy.network())
+            enforcement_report(
+                outcome.sandboxed,
+                &policy.network(),
+                outcome.network_isolated,
+            )
         }
     });
 
@@ -1248,7 +1253,7 @@ mod tests {
                 limits: "enforced",
                 limit_hit: None,
             },
-            sandbox: Some(enforcement_report(true, &MpNetworkPolicy::Disabled)),
+            sandbox: Some(enforcement_report(true, &MpNetworkPolicy::Disabled, true)),
             egress: None,
         };
         let json = serde_json::to_string(&result).expect("serializes");
@@ -1277,7 +1282,11 @@ mod tests {
                 limits: "enforced",
                 limit_hit: None,
             },
-            sandbox: Some(proxied_enforcement_report(true, NetworkTier::Registries)),
+            sandbox: Some(proxied_enforcement_report(
+                true,
+                NetworkTier::Registries,
+                true,
+            )),
             egress: Some(EgressCounts {
                 allowed_hosts: 2,
                 denied_hosts: 1,
@@ -1291,8 +1300,22 @@ mod tests {
             "json: {json}"
         );
         assert_eq!(
-            proxied_enforcement_report(false, NetworkTier::Registries).enforcement,
+            proxied_enforcement_report(false, NetworkTier::Registries, true).enforcement,
             Enforcement::Unenforced
+        );
+    }
+
+    /// A proxied call whose command did not unshare the namespace has a proxy the
+    /// sandbox does not confine: the report must not call that boundary full.
+    #[test]
+    fn a_proxied_call_without_the_unshared_namespace_is_partial() {
+        assert_eq!(
+            proxied_enforcement_report(true, NetworkTier::Allowlist, false),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::Allowlist,
+                enforcement: Enforcement::Partial,
+            }
         );
     }
 
@@ -1399,7 +1422,7 @@ except OSError:
     #[test]
     fn a_wrapped_run_with_no_network_is_fully_enforced() {
         assert_eq!(
-            enforcement_report(true, &MpNetworkPolicy::Disabled),
+            enforcement_report(true, &MpNetworkPolicy::Disabled, true),
             SandboxReport {
                 sandboxed: true,
                 network: NetworkTier::Off,
@@ -1408,8 +1431,22 @@ except OSError:
         );
     }
 
+    /// The regression the flag is for: a command whose argv lost `--unshare-net` must
+    /// not report full, even though its policy still says no network.
+    #[test]
+    fn a_wrapped_run_whose_command_does_not_unshare_the_network_is_partial() {
+        assert_eq!(
+            enforcement_report(true, &MpNetworkPolicy::Disabled, false),
+            SandboxReport {
+                sandboxed: true,
+                network: NetworkTier::Off,
+                enforcement: Enforcement::Partial,
+            }
+        );
+    }
+
     /// A run that bwrap did not wrap must never read as enforced, whatever its
-    /// policy says.
+    /// policy says and whatever its argv would have carried.
     #[test]
     fn an_unwrapped_run_is_never_reported_as_enforced() {
         for network in [
@@ -1417,10 +1454,12 @@ except OSError:
             MpNetworkPolicy::AllowAll,
             MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
         ] {
-            assert_eq!(
-                enforcement_report(false, &network).enforcement,
-                Enforcement::Unenforced
-            );
+            for isolated in [true, false] {
+                assert_eq!(
+                    enforcement_report(false, &network, isolated).enforcement,
+                    Enforcement::Unenforced
+                );
+            }
         }
     }
 
@@ -1432,7 +1471,8 @@ except OSError:
         assert_eq!(
             enforcement_report(
                 true,
-                &MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()])
+                &MpNetworkPolicy::AllowDomains(vec!["pypi.org".to_owned()]),
+                true
             ),
             SandboxReport {
                 sandboxed: true,
@@ -1441,7 +1481,7 @@ except OSError:
             }
         );
         assert_eq!(
-            enforcement_report(true, &MpNetworkPolicy::AllowAll),
+            enforcement_report(true, &MpNetworkPolicy::AllowAll, true),
             SandboxReport {
                 sandboxed: true,
                 network: NetworkTier::All,

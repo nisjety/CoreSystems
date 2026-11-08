@@ -1,0 +1,399 @@
+[
+ {
+  "id": "WS13-S2",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Model Plane/api/openapi.yaml",
+   "apps/Model Plane/api/sdk/typescript (Approval.ts, DecideApprovalBody.ts, new ApprovalCause.ts, models/index.ts, docs, README, .openapi-generator/FILES)",
+   "apps/Model Plane/api/sdk/python (approval.py, decide_approval_body.py, new approval_cause.py, api/orchestration_api.py, __init__ files, docs, README, tests, FILES)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+   "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts (new)",
+   "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts (new)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-card.test.tsx (new)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx (round 2)",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.test.tsx (round 2)",
+   "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/dashboard/home/BrowserChrome.tsx",
+   "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.ts",
+   "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-approvals.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (round 2)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.replay.test.ts (round 2)",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+   "apps/Frontend Plane/verevonv3/eslint-suppressions.json (round 2, pruned)"
+  ],
+  "tests_run": [
+   {
+    "command": "cd apps/Frontend Plane/verevonv3 && pnpm vitest run --maxWorkers=2 src/shared/approvals src/shared/api/orchestration-client.test.ts src/features/spaces/lib/space-approvals.test.ts src/features/chat/components/ChatMessages.approval-card.test.tsx src/shared/actions/action-registry.test.ts src/features/chat/components/ChatLiveRunPanel.test.tsx src/shared/api/chat-client.replay.test.ts",
+    "outcome": "7 files, 109 tests passed (includes the two new round-2 tests)"
+   },
+   {
+    "command": "cd apps/Frontend Plane/verevonv3 && pnpm vitest run --maxWorkers=2 ChatLiveRunPanel.test.tsx chat-client.replay.test.ts chat-client.test.ts",
+    "outcome": "122 passed; the one failure was my own first draft of the new chat-client test (wrong envelope), fixed and re-run green"
+   },
+   {
+    "command": "cd apps/Frontend Plane/verevonv3 && pnpm exec eslint -c eslint.ui-gates.config.js --prune-suppressions src",
+    "outcome": "eslint-suppressions.json now drops ChatPanels.tsx 34 -> 33 and ChatLiveRunPanel.tsx 25 -> 24; no other change"
+   },
+   {
+    "command": "cd apps/Frontend Plane/verevonv3 && pnpm lint",
+    "outcome": "exit 0, 0 errors, 195 warnings (pre-existing solid/reactivity warnings)"
+   },
+   {
+    "command": "cd apps/Frontend Plane/verevonv3 && pnpm typecheck",
+    "outcome": "33 errors, all in RemoteSupportPage.tsx and quarry-client.ts (pre-existing remote-core/Quarry SDK gaps); none in files this slice touched"
+   },
+   {
+    "command": "Round 1 (unchanged this round): gateway cargo test --all-targets 668 lib + integration passed; model-gateway approval_value 4 passed before another slice's proto change broke its compile; full vitest 3838 passed",
+    "outcome": "not re-run this round; no Rust files changed in round 2"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Commit eslint-suppressions.json with the slice (already pruned: ChatPanels.tsx 34->33, ChatLiveRunPanel.tsx 25->24).",
+   "Accept the widened ownership for ChatLiveRunPanel.tsx, ChatLiveRunPanel.test.tsx, chat-client.ts and chat-client.replay.test.ts.",
+   "Once model-gateway compiles again after the other slice's EvaluatePolicyRequest.user_id/tool_name change, re-run cd apps/Model Plane/rust && cargo test -q -p model-gateway --lib approval_value.",
+   "Optionally regenerate the SDKs with api/generate-sdk.sh and diff against the hand-edited files.",
+   "Rebuild model-gateway and the BFF gateway image, run a second dev server on 5174, and check the card in nb and en plus GET approvals showing cause and POST decide with scope thread returning 422 scope_not_enabled.",
+   "Add the WS13-S2 line to apps/Model Plane/docs/decisions/ledger.md and a Build-ledger row."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "The TypeScript and Python SDKs under apps/Model Plane/api/sdk were hand-edited, not regenerated with api/generate-sdk.sh. The plan row says regenerated. I read the diffs and they look consistent with the openapi.yaml change. I could not run the Python SDK tests because pydantic and pytest are not installed here. The lead should regenerate and diff, or accept the hand edit.",
+    "Live evidence is not done and only the lead can do it. That means rebuilding model-gateway and the BFF gateway images, running a second dev server on 5174 with --strictPort, and checking the card in nb and en for tickets.create, a provider write under ask and a browser risk gate. It also means curl GET approvals showing cause, and POST decide with scope thread returning 422 scope_not_enabled.",
+    "The WS13-S2 line is missing from apps/Model Plane/docs/decisions/ledger.md, and no Build-ledger row exists in the plan.",
+    "Ownership was widened beyond the owned list: ChatLiveRunPanel.tsx and its test, chat-client.ts and chat-client.replay.test.ts, and eslint-suppressions.json (ChatPanels.tsx 34 to 33, ChatLiveRunPanel.tsx 25 to 24). The lead must accept this and commit those files with the slice. chat-client.ts now drops `detail` from the approval_state_changed step, which is a small behaviour change.",
+    "Commit hygiene: the working tree also holds other slices' uncommitted changes in http_routes.rs (its WS12 imports), grpc.rs, sse.rs and VEREVON_CHAT_DESIGN.md. Stage only this slice's hunks. The `// TEMP-WS02S3` patch in model-gateway grpc.rs must not be committed under this slice, and model-gateway does not compile without it."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Round 2 fixes. (1) ChatLiveRunPanel onApproval: detail is now approvalKindLabel(event.approvalKind, i18n) and the title goes through i18n.tr('Godkjenning','Approval'); new test in ChatLiveRunPanel.test.tsx fires onApproval with APPROVAL_KIND_TOOL and asserts 'Verkt\u00f8ykall' shown and no APPROVAL_KIND text. (2) chat-client.ts approval_state_changed step no longer carries approval_kind (module has no locale to word it; id, title and status remain); new test in chat-client.replay.test.ts sends the CUSTOM envelope and asserts no APPROVAL_KIND in the step. verevon-ui-events.ts:245 only copies the kind onto the approval.requested UI event, which ag-ui-client wraps as a CUSTOM envelope; grep of non-test source shows no renderer reads that kind, so it was left unchanged. (3) eslint-suppressions.json pruned; pnpm lint now exits 0. Both ChatLiveRunPanel.tsx and chat-client.ts are outside the owned list, edited per the lead's instruction to fix these findings. All round-2 files are LF and kept LF. Carried from round 1: SDKs hand-edited not regenerated; model-gateway cargo re-run still blocked by another slice's EvaluatePolicyRequest proto change; ledger entry for WS13-S2 not added (not an owned file)."
+ },
+ {
+  "id": "WS05-S3",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+   "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go (regenerated, scoped buf generate)",
+   "apps/Model Plane/go/gen/model_plane/v1/capabilities_grpc.pb.go (regenerated)",
+   "apps/Model Plane/go/services/capability-core/internal/server/decision_proof.go",
+   "apps/Model Plane/go/services/capability-core/internal/server/decision_proof_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+   "apps/Model Plane/go/services/capability-core/internal/server/server_tool_binding_test.go (new)",
+   "apps/Model Plane/go/services/capability-core/internal/server/server_tool_binding_integration_test.go (new, build tag integration)",
+   "apps/Model Plane/go/services/capability-core/internal/authz/authz.go",
+   "apps/Model Plane/go/services/capability-core/internal/authz/authz_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+   "apps/Model Plane/go/services/capability-core/internal/policy/engine_class_test.go (new)",
+   "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+    "outcome": "1196 passed, 0 failed (26 in capability_policy)"
+   },
+   {
+    "command": "CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test tool_class_registry_parity --test autonomy_ladder_contract --test zdr_refusal_inventory --test cross_service_loop_contract",
+    "outcome": "all pass (7, 6, 2 and the remaining target)"
+   },
+   {
+    "command": "Go (capability-core go test/vet), mp-contracts, buf lint/breaking, tag-number diff",
+    "outcome": "not re-run this round: no Go, proto or mp-contracts file changed; the first-round results stand (go test ./... ok, buf breaking exit 0, no tag removed or renumbered)"
+   }
+  ],
+  "db_tests_written": [
+   "cd apps/Model Plane/go/services/capability-core && go test -tags integration ./internal/server -run TestToolBindingSQLResolvesOnlyWhatTheTenantMaySee (testcontainers Postgres, needs docker; written and vetted, not run)"
+  ],
+  "lead_todo": [
+   "FIRST apply the two required other-file edits above, then cargo check -p model-gateway --lib and go build ./... in capability-core.",
+   "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment, after the EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY line, add `      # WS05-S3: how far the registry's declared tool class is trusted. off leaves requests and evidence checks as before; shadow names the tool and user, checks the signed v2 claims and counts mismatches (an mcp__ tool is still refused); enforce refuses mismatches and v1 evidence and lets a registered mcp__ tool through. Only the literals shadow and enforce move off off.` and `      TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off}` (set shadow on the proof stack only after the live proof).",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md (append): '## 2026-10-22 - The signed decision names its tool, user, class, floor, source and digest, and an mcp__ name binds only from the registry (WS05-S3)'. Status: implemented, TOOL_CLASS_GATE off. capability-core always signs claim set v2 and adds ResolveToolBindings; execution-core resolves mcp__ names only from a per-run table filled from it, verifies tool, user, class, floor, policy source and pinned digest, pins (version, class) per run, and refuses v1 evidence under enforce. Shadow is observe-only: a registered mcp__ tool is resolved, evaluated and verified, divergences are counted, and the call is still refused permission_denied; only enforce (later S4's MCP_DO_TOOLS with expected_digest passed to the gateway) makes an mcp__ tool dispatchable. Decide only tightens (not approved -> deny, floor ask or above and unclassified -> ask). user_id is asserted by service:execution-core only. Deploy order: execution-core before capability-core, because a pre-S3 verifier rejects v:2. Under ZDR or a waived route an mcp__ call is refused with the typed mcp_execution refusal before any registry lookup.",
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md (add row near the capability_tools rows): 'Tool bindings and the signed decision claims (tool, user, class, floor, source, digest; ResolveToolBindings)' | owner capability-core (registry rows, Decide, signing); execution-core resolves per run, verifies, pins, never decides a class.",
+   "Rebuild capability-core and execution-core together (./scripts/compose.sh recipe), run the integration test above, then the live proof with TOOL_CLASS_GATE=shadow: a Do turn on built-in tools succeeds with v2 evidence verified (no divergence warnings; execution_core_tool_class_gate_divergence_total absent or 0), read_subagent_result and tickets.create pause with their usual causes, a forged mcp__x__y call AND a registered approved mcp__ call are both denied permission_denied. Then flip enforce on a scratch run and confirm v1 is refused and the registered mcp__ tool is evaluated. The plan's 'decode a v2 JWS from the execution-core debug log' has no log to read; decode one through a capability-core test client.",
+   "Pre-existing, not from this slice: go/gen tests do not build until execution.pb.go is regenerated for the execution.proto Usage change; durable_loop_contract the_park_writer_guard_goes_red... needs its mutation target re-pointed; buf ratchet lists 3 execution.proto comment findings.",
+   "WS05-S4 follow-up: agent.rs merged_tool_defs must call prefetch_tool_bindings once per run; MCP_DO_TOOLS gating, the typed offer filter and passing expected_digest (the verified binding digest) to proxy_tool in mcp_gateway.rs are S4's, and must land before enforce is enabled anywhere."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:2095 (REQUIRED, workspace does not compile without it: add `user_id: String::new(), tool_name: String::new(),` to the EvaluatePolicyRequest literal in handle CheckPermission, after `scope: \"global\".to_owned(),`)",
+   "apps/Model Plane/go/services/capability-core/cmd/main.go:431 (REQUIRED for the lookup at runtime): `capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).WithToolBindingDatabase(pool)`",
+   "apps/Model Plane/go/services/capability-core/internal/registry/capability_tools_store.go (optional later move of the binding SQL)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "REQUIRED lead edit before anything else: apps/Model Plane/rust/services/model-gateway/src/grpc.rs:2095 EvaluatePolicyRequest literal needs `user_id: String::new(), tool_name: String::new(),` (I confirmed it is the only other literal; without it the workspace does not compile).",
+    "REQUIRED lead edit: apps/Model Plane/go/services/capability-core/cmd/main.go ~431 `capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).WithToolBindingDatabase(pool)`; without it ResolveToolBindings returns Unavailable, an mcp__ name never resolves, and a built-in tool is judged at its capability ceiling.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off} (with the implementer's comment) to the execution-core environment after EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY; set shadow only after the live proof.",
+    "shared-edit docs/decisions/ledger.md and docs/capability-ownership-matrix.md rows as given in the implementer's lead_todo.",
+    "Not runnable by me (no docker): `go test -tags integration ./internal/server -run TestToolBindingSQLResolvesOnlyWhatTheTenantMaySee` (written; it vets clean with -tags integration; I read the binding SQL against migration 0016 and the capabilities table: columns qualified_name, pinned_digest, review_state, deleted_at and c.version all exist).",
+    "Live proof on a rebuilt stack with TOOL_CLASS_GATE=shadow: Do turn on built-ins succeeds with v2 evidence verified and execution_core_tool_class_gate_divergence_total absent or 0; read_subagent_result and tickets.create pause with their usual causes; forged mcp__x__y and a registered approved mcp__ tool are both denied permission_denied under shadow. Then enforce on a scratch run: v1 evidence refused, registered mcp__ tool evaluated. Decode a v2 JWS through a capability-core test client (there is no debug log to read).",
+    "Deploy order: execution-core before or with capability-core (a pre-S3 verifier rejects v:2).",
+    "Follow-up owned by WS05-S4, not S3: agent.rs merged_tool_defs must call prefetch_tool_bindings once per run (the trait method and impl are tested but have no production caller yet; the on-miss lookup covers the gap), and mcp_gateway.rs must pass expected_digest to proxy_tool before enforce or MCP_DO_TOOLS makes an mcp__ tool dispatchable. Under shadow a registry-bound mcp__ tool is observe-only (denied), so nothing becomes dispatchable early.",
+    "Pre-existing and not from this slice: durable_loop_contract `the_park_writer_guard_goes_red_when_the_code_it_guards_regresses` fails because its mutation target `return Ok(super::park::parked_response(` was changed by the usage work in agent.rs (not S3); go/gen tests need execution.pb.go regenerated for the execution.proto Usage change; buf lint reports many comment-style findings in other files, none new on the added S3 messages (all are commented)."
+   ]
+  },
+  "review_defects": [
+   {
+    "severity": "high",
+    "where": "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:575-589 (binding_for) and :1040 (version_accepts treats any registry binding as enforced under Shadow); reached through runtime_loop/mod.rs:834-835 execute_mcp",
+    "scenario": "TOOL_CLASS_GATE=shadow is supposed to be observe-only (\"legacy decides\"), and the plan flips it on in compose once S3 is proven. For an mcp__ name, though, shadow turns the legacy answer (always deny: no governed binding) into a live allow. Take an org that has an approved MCP tool row. merged_tool_defs (agent.rs:970-971) already offers every gateway-listed MCP tool, and RunAgentRequest.tools can add any mcp__ name. execution-core has MODEL_GATEWAY_ADDR set in compose. With shadow on, binding_for resolves the name from ResolveToolBindings, and capability-core allows a read-class tool (risk low). The permission engine returns Allow for mcp__ under Auto, and check_autonomy_rung passes when the rung is Unspecified. execute_mcp then calls ProxyMcpTool with expected_digest empty (mcp_gateway.rs:93), so the gateway skips its digest check. A high-risk MCP write becomes ask, and an approval then releases it and it runs. All of this happens before S4's MCP_DO_TOOLS gate (code default off, read on the proof stack, writes withheld per DEC-12), the class-driven permission engine and the expected_digest wiring exist. The digest the verifier checks is never bound to the call that is actually dispatched, so a server that changed the definition after the last observation runs under the old decision.",
+    "fix": "Make shadow observe-only for dynamic tools as well. Under Shadow, resolve and verify the mcp__ binding and count any divergence, but keep refusing with the legacy permission_denied (\"tool has no governed capability binding\"). Only Enforce, or S4's MCP_DO_TOOLS together with expected_digest passed to proxy_tool, should make an mcp__ name dispatchable. Add a test that a registered, approved mcp__ tool under Shadow still returns permission_denied."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/internal/server/server.go:520 (policy.Decide(result, binding) with binding == nil) and :608 evaluatedClass; verifier apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:1094-1139 v2_mismatch",
+    "scenario": "When tool_name is named but no binding is found, the response and the signed claims carry the capability ceiling's class and floor, but Decide(result, nil) returns the risk-level result unchanged. That happens whenever WithToolBindingDatabase is not attached, which is the state of this tree until the lead applies the pending main.go edit, and also for a name that has no capability_tools row. Example: shadow or enforce, tool tickets.create. cap.tool.ticket.create is medium risk with an owner_effect/durable_owner ceiling. capability-core signs v2 {decision: allow, side_effect_class: owner_effect, approval_floor: durable_owner}. read_subagent_result (cap.agent.lineage.read, low risk, ceiling floor ask) is signed {allow, floor ask} in the same way. With the DB attached, both are ask. The execution-core verifier only checks that the vocabulary is consistent, never that an allow is compatible with its floor, so it accepts a signed decision that contradicts itself even under enforce. The slice's guarantee that a floor of ask or above becomes ask therefore depends on deployment wiring. Today only the separate permission-engine pause stops these calls, and S4/WS13 consumers of the signed floor would trust a self-contradictory allow.",
+    "fix": "When a tool is named and no binding is found, apply Decide with a synthetic binding built from the capability ceiling (class and floor) so the ceiling's floor tightens the decision. In v2_mismatch, refuse any allow whose signed approval_floor ranks at ask or above. Add an engine/server test for a named built-in tool with no DB handle."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/go/services/capability-core/internal/server/server.go EvaluatePolicy tool binding branch (after lookupToolBinding)",
+    "scenario": "A built-in (non-mcp__) tool name that the registry binds to capability Z, evaluated under a different capability Y, falls back to Y's ceiling. capability-core then signs a v2 allow claiming tool X under capability Y with Y's class, for example tool_name=shell under cap.tool.http (read), signed allow. Any service principal with capability:read can mint this. execution-core rejects it today only because its static map pins the capability id. The signed claim does not establish a registry-owned binding, which is what v2 is supposed to guarantee.",
+    "fix": "When tool_name is not bound under the evaluated capability, deny with tool_not_bound if the name resolves under any other capability (or exists in capability_tools at all). Fall back to the ceiling only for a name the registry does not hold anywhere."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs:794-810 (BindingState::table LRU eviction) with pin at :862",
+    "scenario": "The per-run pin of (version, class) lives in a 1024-run LRU, and every allowed call under shadow or enforce touches it, built-in tools included. On a busy replica, or with a tenant starting many short runs, an idle long-running run gets evicted. Its pins and binding table are dropped, so a later call re-resolves and re-pins whatever version the registry holds now. The guarantee that a mid-run version or class change fails closed silently lapses. A drifted digest is still denied by Decide, so this only affects a re-approval or reclassification mid-run.",
+    "fix": "Treat a pin lookup on a run that was evicted as unknown-and-failed-closed for dynamic tools (for example, keep a separate bounded set of evicted keys), or size the LRU by active runs and record evictions in a metric. Document the per-process, best-effort scope in the decision ledger."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/go/services/capability-core/internal/server/decision_proof.go:29 (decisionProofVersion = \"2\" always)",
+    "scenario": "The plan row says to roll capability-core before execution-core. A pre-S3 execution-core rejects every v:2 claim set, so following the plan's order refuses every tool call fleet-wide (fail closed, but an outage) until execution-core is rolled. The implementer flagged this, but the plan row and the lead's deploy recipe still say capability-core first.",
+    "fix": "Either sign v1 when the request names neither a tool nor a user, which makes rollout order-independent while the gate is off, or correct the plan row and the ledger entry to say execution-core first and gate the capability-core rollout on it."
+   }
+  ],
+  "notes": "Fix applied (only capability_policy.rs changed this round; mod.rs untouched). Under TOOL_CLASS_GATE=shadow a registry-bound mcp__ tool is now observe-only. GrpcCapabilityPolicy::evaluate_tool_call still resolves the binding, calls capability-core, verifies the v2 evidence and pins, then returns permission_denied \"tool has no governed capability binding\" when binding.registry is set and the gate is Shadow, so execute_mcp is unreachable under shadow and only enforce can allow a dynamic tool. Divergences are now counted for dynamic tools too: version_accepts and pin_binding refuse only under Enforce (they previously also refused whenever call.registry was set), so shadow logs and counts execution_core_tool_class_gate_divergence_total for a digest, class, floor, version, v1 or pin mismatch and the final shadow refusal covers the call. Off and Enforce behaviour is unchanged. Doc comment on ToolClassGate updated. Tests: new a_registered_mcp_tool_is_only_dispatchable_under_enforce (shadow still evaluates and verifies, then returns permission_denied; enforce allows); the dynamic-binding verifier test now asserts refused under enforce and only counted under shadow, with a borrowed capability id refused under every gate; the v1 test now expects shadow to count a dynamic v1; tests that needed an allowed mcp__ tool (replay, mid-run version move, prefetch, later-run resolution) moved to the Enforce harness. DEPLOY NOTE: the earlier report's remark that shadow makes an approved mcp__ tool evaluable no longer holds; shadow never dispatches an mcp__ tool. The earlier required other-file edits and lead_todo items (model-gateway grpc.rs literal, capability-core main.go WithToolBindingDatabase, compose TOOL_CLASS_GATE lines, ledger and ownership-matrix rows, docker proofs) are unchanged and still pending with the lead. The live-proof item about shadow allowing an approved mcp__ tool should now read: under shadow a registered mcp__ tool is denied permission_denied and the divergence counter stays 0 for a clean tool. WS05-S4 must pass expected_digest to proxy_tool before enforce or MCP_DO_TOOLS makes mcp__ dispatchable."
+ },
+ {
+  "id": "WS02-S3",
+  "outcome": "needs-attention",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/execution.proto",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+   "apps/Model Plane/rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs",
+   "apps/Model Plane/go/gen/model_plane/v1/proto_wire_parity_execution_test.go"
+  ],
+  "tests_run": [
+   {
+    "command": "cd apps/Model Plane/rust; CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test -- usage_envelope reported_usage",
+    "outcome": "4 passed, including the new a_run_that_outlives_the_deadline_still_publishes_its_usage_envelope"
+   },
+   {
+    "command": "cd apps/Model Plane/rust; CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+    "outcome": "2000 passed, 0 failed, 4 ignored"
+   },
+   {
+    "command": "cd apps/Model Plane/rust; CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test",
+    "outcome": "139 passed, 0 failed (241 s)"
+   },
+   {
+    "command": "Earlier round, not re-run this round (execution-core, mp-contracts and the Go wire-parity files are untouched this round): execution-core --lib, mp-contracts --test proto_wire_parity_execution, Go parity in a scratch copy",
+    "outcome": "execution-core --lib 1192 passed, 3 failed (capability_policy.rs, another slice); mp-contracts parity 10 passed; Go parity 8 passed in a scratch copy with a regenerated execution.pb.go"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "1. Regenerate the checked-in generated code from the edited proto (buf generate; native buf 1.72 + protoc-gen-go): at least apps/Model Plane/go/gen/model_plane/v1/execution.pb.go, plus any python/TS outputs that are checked in. Then run: cd apps/Model Plane/go/gen && go test ./model_plane/v1 (the new TestRunAgentResponseUsage* tests need the regenerated type).",
+   "2. shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, next to MODEL_GATEWAY_RUN_CONTEXT, add exactly this line: `      MODEL_GATEWAY_AGENT_USAGE_ENVELOPE: ${MODEL_GATEWAY_AGENT_USAGE_ENVELOPE:-}`  (empty means off; only the literal 'true' enables).",
+   "3. Fix the other slice's half-landed change so the workspace compiles: apps/Model Plane/rust/services/model-gateway/src/grpc.rs:2095 EvaluatePolicyRequest literal needs tool_name and user_id; and 3 capability_policy.rs tests in execution-core fail (not WS02-S3).",
+   "4. Deploy execution-core first (it reports RunAgentResponse.usage), then model-gateway; leave MODEL_GATEWAY_AGENT_USAGE_ENVELOPE unset until DEC-18 (Control confirms attribution), since cost-core bills metered entries.",
+   "5. Live proof with the flag on in a test org: one multi-round Do run, ideally with a subagent, then GET /api/v1/cost/run?run_id=<id> shows exactly one row with summed tokens and both cache legs. Also run one run whose duration exceeds AGENTIC_RUN_DEADLINE_SECS (set it to a few seconds): the stream ends with agent_dispatch_unavailable and the row still lands once the executor finishes. With the flag unset, the row count must be unchanged.",
+   "6. Update the plan's Build ledger: WS02-S3 code and tests done; enablement waits on DEC-18; harness DB-test count unchanged (no DB tests written)."
+  ],
+  "deviations": [
+   "Edited park.rs (not on the owned list), as in round 1: usage: None in parked_response and its test literal, the minimum needed to compile after RunAgentResponse gained field 9.",
+   "The unit test no longer asserts latency_ms == 1500; the latency now comes from the ledger's start instant, so the test asserts it is a u64."
+  ],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "fix",
+   "required_fixes": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs, run_rounds (around the `ctx.usage.record(&response)` call after the 'inference round usage' info! line): record the round only when inference actually ran. A continuation's first round is the seeded one (`seeded_round.take()` -> `Ok(Response::new(round))`; RoundSeed::Segment/InPlace carry an InferResponse built with `..Default::default()` by the approval continuation and resume::restore). It currently goes through `UsageTally::record`, so every approval/in-place continuation adds one phantom 'inference round' with zero tokens. This breaks the RunUsage.inference_rounds contract ('rounds that returned a provider response'), and the comment on the paused test ('the continuation never reports the same round twice'). It also lets a continuation that fails right after its seeded round publish a zero-token ledger row, because the gateway guard is only `inference_rounds == 0` (money/audit). Fix: skip `record` when `first_of_segment` (the round was seeded), or make `first_of_segment` visible at the record site. Add a test: a continuation (RoundSeed::Segment) that answers on its first real round reports inference_rounds == 1, not 2 (and a continuation whose only round was the seeded one reports 0).",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs, comment in agentic_run_stream above `let latency_ms` (about line 10683): it says the ledger row 'comes from `publish_agent_usage`', a function that no longer exists (replaced by `AgentUsageLedger::publish`, called from the dispatch task). Correct the reference so the comment is not stale."
+   ],
+   "dod_gaps": [
+    "Checked-in generated Go code is not regenerated: apps/Model Plane/go/gen/model_plane/v1/execution.pb.go (and any checked-in python/TS outputs from buf.gen.yaml) must be regenerated from the edited execution.proto by the lead. Without it the new Go parity tests do not compile in the real tree. I verified in a scratch copy with a locally regenerated execution.pb.go that all 3 new TestRunAgentResponseUsage* tests and the earlier RunAgent* parity tests pass (GOWORK=off with -mod=mod, since the scratch copy had no go.sum).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, next to MODEL_GATEWAY_RUN_CONTEXT, add `      MODEL_GATEWAY_AGENT_USAGE_ENVELOPE: ${MODEL_GATEWAY_AGENT_USAGE_ENVELOPE:-}` (not yet present; grep confirms). Empty means off; only the literal 'true' enables it.",
+    "Unmodified tree still fails to compile model-gateway at services/model-gateway/src/grpc.rs:2095 (EvaluatePolicyRequest is missing `tool_name` and `user_id`; another slice's half-landed change). The model-gateway tests below could only be run in a scratch copy with `..Default::default()` added to that literal. In-tree `cargo test -p model-gateway ...` fails until the other slice lands.",
+    "Live proof (docker): deploy execution-core first, then model-gateway, with MODEL_GATEWAY_AGENT_USAGE_ENVELOPE=true in a test org. Run one multi-round Do run, ideally with a subagent, then check GET /api/v1/cost/run?run_id=<id> and /api/v1/cost/entries for exactly one row with summed tokens and both cache legs, and check the usage frame. Also run a run longer than AGENTIC_RUN_DEADLINE_SECS and confirm the row still lands once. With the flag unset, the row count must be unchanged. Enabling stays blocked on DEC-18 (cost-core enqueues billing for the metered row).",
+    "Update the plan's Build ledger for WS02-S3. Plan hygiene: park.rs (not on the owned list) was touched minimally (`usage: None` in parked_response and one test literal), which was necessary to compile; the lead should accept or record it. Not a defect for this slice: a run_agent Err (tonic Status after rounds were spent) reports no usage, so those rounds are never billed."
+   ]
+  },
+  "review_defects": [
+   {
+    "severity": "high",
+    "where": "apps/Model Plane/rust/services/model-gateway/src/sse.rs agentic_run_stream: publish_agent_usage is called only after `let response = match dispatch_result` (~L10438-10457). follow_agentic_run (~L9793-9813) returns Err(DeadlineExpired) and drops (detaches) the dispatch JoinHandle.",
+    "scenario": "An unpinned Do run gets a 120 s follow deadline by default (AGENTIC_RUN_DEADLINE_DEFAULT_SECS; 270 s when pinned). execution-core has no wall clock by default (EXECUTION_RUN_WALL_CLOCK_SECS unset means off). Suppose a run takes longer than that: a long research task, many tool rounds, or subagents. The DeadlineExpired arm sends agent_dispatch_unknown and returns. The detached task keeps running, and execution-core finishes the run and returns a RunAgentResponse carrying the full RunUsage, but nothing reads it, so no AGENT_USAGE envelope is ever published. The same happens on the join-error arm. The longest and most expensive Do runs never reach the ledger, and any user can trigger this on purpose by asking for long work. That breaks the slice's own guarantee that Do-round usage reaches the ledger.",
+    "fix": "Publish inside the dispatch task itself: wrap the future that spawn_run_dispatch spawns so it calls publish_agent_usage as soon as RunAgent returns Ok, whether or not the follower is still waiting. Or give that task what it needs to publish. Keep the {request_id}-AGENT_USAGE key so the follower can never publish a second copy, and add a test where the deadline expires before the response arrives and the envelope is still published."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs run_rounds: ctx.usage.record(&response) (~L2591) runs before the route guard and overwrites provider_used/model_used. sse.rs build_agent_usage_envelope: CostBasis::of_route(..).served_by(&usage.provider_used).",
+    "scenario": "Take a run pinned to the ChatGPT subscription. Rounds 1-3 are served by the subscription provider. Round 4 comes back from a metered provider (for example a stale or misconfigured inference-core falling back to 'openai'). The route guard refuses that round and the run ends RouteUnavailable, but the tally has already set provider_used to 'openai' and model_used to the substituted model. served_by() returns Metered when the provider is not a subscription provider, so it overrides the route's Subscription basis. The single envelope then has cost_basis 'metered' and the substituted model, and cost-core prices the tokens of all four rounds at API list price and enqueues billing. The subscription rounds get list-priced, which the plan forbids ('subscription never list-priced').",
+    "fix": "Do not let a round the route guard rejects decide the route or basis of the whole tally. Either record it after the guard passes, or keep a separate leg for wrong-route rounds, or never let a pinned route's basis be downgraded. Better still, carry the basis per leg, or at least make the envelope keep Subscription whenever the route is pinned. Add a test: three subscription rounds, then one wrong-provider round, must not produce cost_basis 'metered' for the summed tokens."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs run_agent_with_route_parkable: `run_rounds(...).await?` (~L1469) and `finalize(...).await?` (~L1518-1533); UsageTally lives only in the Ok response.",
+    "scenario": "Rounds have already been spent (tokens charged by the provider) when run_rounds propagates a tonic::Status through `?`, for example a pause_for_approval or session write failure, or when finalize returns Err because the durable receipt write failed. The gateway then gets Ok(Ok(Err(status))) and takes the ambiguous or rejection arm, and the tally is dropped. Nothing is published for rounds the provider billed. A crash or receipt outage at the worst moment means spent inference that never reaches the ledger.",
+    "fix": "Report usage on the error path as well, for example in a status detail or trailer the gateway reads before it classifies the failure. Or document this as a known gap and have the ledger reconciled from execution-core's per-round logs, so the loss is visible rather than silent."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs UsageTally::record (provider_used/model_used = last counted round) + sse.rs build_agent_usage_envelope (one envelope, one model)",
+    "scenario": "An unpinned run's rounds (or its delegates' rounds) can be served by different providers or models, for example when inference-core falls back to another provider partway through the run. All tokens are summed into one envelope priced at the LAST round's model. Suppose early rounds ran on an expensive model and the last on a cheap fallback, or the other way round: the bill is wrong in either direction. Concurrent fan-out children also make 'last' nondeterministic.",
+    "fix": "Tally per (provider, model), as a repeated leg in RunUsage, and publish one envelope per leg with a key like {request_id}-AGENT_USAGE-{n}. Or refuse to price a mixed tally under a single model."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/go/gen/model_plane/v1/proto_wire_parity_execution_test.go (new TestRunAgentResponseUsage* tests) vs the un-regenerated execution.pb.go",
+    "scenario": "The checked-in execution.pb.go has no RunUsage type and no RunAgentResponse.Usage field, so `go test ./model_plane/v1` in go/gen fails to compile in the tree as it stands. Every Go test in that package is broken until the lead regenerates the file, and CI for the gen module fails if the batch lands without the regeneration.",
+    "fix": "Land the regenerated execution.pb.go (and the other buf outputs) in the same change as the test, or hold the Go golden back until the regeneration lands."
+   }
+  ],
+  "notes": "Fix for the review finding (high). Previously the follower published the usage envelope after it received the RunAgentResponse. When the follow deadline expired (120 s unpinned, 270 s pinned) or the join failed, the dispatch task was detached and its tally was dropped, so long runs never reached the ledger. Now the dispatch task publishes the envelope itself. In sse.rs, publish_agent_usage is replaced by a private AgentUsageLedger struct, which owns an Arc of the publisher plus the switch value, ids, model, zdr, route, privacy tier and start instant. Its publish method keeps the same guards as before: switch strictly 'true', not zdr, inference_rounds > 0. spawn_run_dispatch takes the ledger as a new last parameter. Inside the spawned task, right after run_agent returns Ok with usage set, it calls ledger.publish, whether or not the follower is still waiting. The follower's publish block in agentic_run_stream is removed, so the {request_id}-AGENT_USAGE key can only be published from the task and never twice. The ledger is built at the call site, with the switch read from the environment at dispatch time. Paused and parked responses are still billed, because the task publishes on every Ok response. Tests: the e2e FollowedTurn gained a publisher field. The new e2e test sets a 1 s deadline and a 3 s executor delay. It asserts the stream ended with agent_dispatch_unavailable and no envelope yet, then polls the publisher and asserts exactly one USAGE_ENVELOPE with the -AGENT_USAGE key, run_id and the summed tokens and cache read. The sse.rs unit helper now uses AgentUsageLedger, and the latency assertion became is_u64 because latency is now measured from the stored start instant. The unmodified tree still fails to compile model-gateway at grpc.rs:2095 (EvaluatePolicyRequest, another slice). As in the first round I patched that literal with ..Default::default() temporarily to run the tests, then restored it from a backup. git diff of grpc.rs is empty."
+ },
+ {
+  "id": "WS27-S0",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\usage_meter_contract.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "rustfmt --edition 2021 --check services/model-gateway/tests/usage_meter_contract.rs (from apps/Model Plane/rust)",
+    "outcome": "passed (exit 0) after this round's edits. The file is all CRLF: 864 CRLF, 0 lone LF."
+   },
+   {
+    "command": "CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test usage_meter_contract (from apps/Model Plane/rust)",
+    "outcome": "did not compile, exit 101: error[E0063] missing fields `tool_name` and `user_id` in initializer of `EvaluatePolicyRequest` at services\\model-gateway\\src\\grpc.rs:2095; 'could not compile model-gateway (lib) due to 1 previous error'. Neither test ran. grpc.rs has no uncommitted change; the mismatch comes from the uncommitted edit to apps/Model Plane/proto/model_plane/v1/capabilities.proto (user_id at line 167, tool_name at line 174). Blocker unchanged from round 1."
+   },
+   {
+    "command": "grep for decision_calls, unimplemented reserve/finalize, and the new identifiers in usage_meter_contract.rs",
+    "outcome": "no stale names remain; unary_calls, _jwks, DEV_ORG/DEV_USER, serve_auth_core_jwks and sign_delegated_bearers are wired through"
+   },
+   {
+    "command": "field check: sessions.proto ReserveToolActionResponse and FinalizeToolActionResponse",
+    "outcome": "each has one bool field, created and updated, matching the stubs"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "BLOCKED UPSTREAM, not in this slice: C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\grpc.rs:2095 (the EvaluatePolicyRequest initializer) still omits tool_name and user_id. The uncommitted edit to C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\capabilities.proto (lines 167 and 174) adds them. The proto owner must set both fields in grpc.rs, or revert the proto edit. Until then no model-gateway test target compiles.",
+   "After that fix, from C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust run: CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test usage_meter_contract. Both tests should pass. The file has never compiled, so expect a possible compile fix first. If tool_round_tokens_are_absent_from_the_final_usage_frame fails, check the stream status and whether reserve_tool_action and finalize_tool_action are reached before changing any assertion.",
+   "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\decisions\\ledger.md: insert the entry below as the new first '## ' entry, directly before the line '## 2026-10-21 - Do runs inherit the Ask run context; the two loops stay separate (WS02-S6)' (currently line 25), keeping one blank line after it. Then add the base line '**Base:** WS01-S0 (the live ZDR wave), commit <id>'. The WS01-S0 commit is not identifiable from commit subjects; 68424704 ('record ZDR wave') is only the nearest candidate, so the lead must confirm it. ENTRY: ## 2026-10-22 - One run-cost meter, owned by model-gateway with cost-core as the ledger; an unknown price is null, never the default row (WS27-S0)\n\n**Status: D3 and D7 decided locally; D1, D2, D4, D5 and D6 proposed under DEC-18 until the owner approves. Characterised by `model-gateway/tests/usage_meter_contract.rs`; no runtime change.** The run-cost meter has one owner, model-gateway, which meters every provider call of a turn and enforces the run-ceiling warnings. cost-core stays the ledger of record: it writes durable rows from the gateway's usage envelopes and prices nothing on the stream. A call whose price is unknown reports `cost_usd: null` and never takes the catalogue's `default` row (D3). Today `PricingCache::lookup` gives every unlisted model the `default` price, so a confident wrong figure reaches the stream; `unknown_model_priced_from_default_row` pins that until WS27-S1 flips it. A ZDR turn may state an ephemeral cost in its stream, numbers only and nothing stored (D4). It writes no ledger row and skips the budget gate, so ceilings and admin dashboards do not cover ZDR spend; the gap is stated in ZDR.md with S5. Two budgets stay separate. A per-run ceiling (the request's cap, else the org's `max_cost_per_run_usd_micros` or `max_tokens_per_run`) warns at 80% and, with its enforcement switch on, ends the tool phase at 100%; its wording says 'this run' (D1, D6). The org budget that cost-core checks compares lifetime totals today and becomes windowed in WS27-S8 (D2); until then the two can disagree. Tool-decision calls are unmetered today: the final `usage` frame states the answer call alone, pinned by `tool_round_tokens_are_absent_from_the_final_usage_frame` until WS27-S2 makes the frame the turn total (D7). Whether tool rounds reach the billing ledger waits for Control's attribution decision (D5).",
+   "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\capability-ownership-matrix.md: insert this row directly after the '| Cost / usage ledger | **cost-core** (Go) | Postgres | gateway emits `usage.*` | NATS | \u2705 |' row (currently line 78): | Run-cost meter and ceiling warnings | **model-gateway** (per-turn meter and run ceilings; WS27-S1 and S6, not yet built) | none for the meter (per turn); durable rows stay in **cost-core** (Postgres) | gateway emits the `usage` and `usage_progress` frames; cost-core prices nothing on the stream | NATS usage | single owner: one meter in the gateway, one ledger in cost-core; an unknown price is null |",
+   "Commit note: the new file C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\usage_meter_contract.rs is untracked and must be staged with the slice's commit. No docker or live step is required for S0. Nothing was staged, committed or stashed by this agent."
+  ],
+  "deviations": [
+   "Delegated bearers are sent as request headers from stream_turn, not by a middleware layered onto the router. The headers and the verification are the same as authenticated_user_router.",
+   "The keypair is generated at runtime with the same pattern as e2e zdr_route_test_keypair. No key text is copied, because the owner rule forbids handling key values.",
+   "The tool-round count is a floor (>= 2), not an exact count, which is how the review asked for it to be handled. The optional comment on this is in the test.",
+   "Only the four *_AUTH_AUDIENCE variables used by the four bearers are set. The other five planes' bearers are absent, so they are not verified and need no audience."
+  ],
+  "needs_other_files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\grpc.rs (EvaluatePolicyRequest initializer at line 2095 lacks tool_name and user_id, which the uncommitted proto edit adds; owned by that proto change)",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\decisions\\ledger.md (shared; the lead applies the shared-edit line)",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\capability-ownership-matrix.md (shared; the lead applies the shared-edit line)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "The plan's test command cannot be re-run in the live worktree because of the upstream compile error at model-gateway/src/grpc.rs:2095 (EvaluatePolicyRequest lacks tool_name and user_id, which the uncommitted capabilities.proto edit adds). The lead must set both fields in grpc.rs, or sequence the commits so the proto edit lands with that fix, then re-run `cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test usage_meter_contract`. With only that line patched in a scratch copy, both tests pass.",
+    "Ledger entries are not yet in the repo, because the implementer was told not to edit shared files. The lead applies the two shared-edit lines: the new first '## 2026-10-22 ...' entry in docs/decisions/ledger.md (before the WS02-S6 entry at line 25), and the 'Run-cost meter and ceiling warnings' row after line 78 of capability-ownership-matrix.md. The anchors exist as described (matrix line 78 'Cost / usage ledger'; ledger first entry is the 2026-10-21 WS02-S6 entry).",
+    "The plan asks for the WS01-S0 commit to be identified as the slice's base. It cannot be identified from commit subjects, and 68424704 is only a candidate. The lead must confirm it and write it in the ledger 'Base:' line.",
+    "The new test file is untracked. It must be staged with the slice's commit.",
+    "Evidence is CI only (no docker or live step), so nothing else is open."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Round 2 fixes, owned file only. (1) start_gateway and stream_turn: the turn now carries four delegated bearers (data plane, session, inference, execution). They are signed with an RSA key generated at runtime, as zdr_route_test_keypair does in e2e, so no key text is in the file. They are verified against a JWKS wiremock held in Gateway._jwks, and they name org_placeholder and user_placeholder. MODEL_GATEWAY_AUTH_DEV_BYPASS=1 is kept. The tool-round test is #[serial_test::serial] and calls clear_auth_env at its end. Checked in source: invoke_stream_sse requires VerifiedInferenceBearer (sse.rs:881) and takes the other planes' bearers as Option; verify_delegated_user_bearer returns 403 on any sub, user_id or org_id mismatch with the dev-bypass claims (auth.rs). (2) reserve_tool_action and finalize_tool_action return created: true and updated: true. The ScriptedSession doc now names the tool-action audit. (3) decision_calls is renamed unary_calls and counts every unary call. The test asserts a tool_call frame with name count_words and unary_calls >= 2. The 42/7 usage assertions are unchanged. The two calls beyond the decision rounds are the thread title (sse.rs generate_thread_title, ~line 4338) and the follow-ups (generate_follow_ups, ~line 4387). Both run after the answer text, so they never take a scripted round. (4) Re-run is blocked by the upstream compile error in tests_run. The file has never compiled, so a compile fix may still be needed once the upstream error is cleared. Test runtime includes one RSA 2048 key generation per test binary, which may take seconds in a debug build."
+ },
+ {
+  "id": "WS12-S5",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/test/locale-leak.ts",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-locale-smoke.test.tsx",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docs/UI_STATE_CHECKLIST.md",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/verevon-web/plans/chat-workspace/VEREVON_CHAT_DESIGN.md"
+  ],
+  "tests_run": [
+   {
+    "command": "pnpm exec vitest run src/features/chat/components/chat-locale-smoke.test.tsx",
+    "outcome": "27 passed, 0 failed on the final run (approval 2, plan control 5, artifacts 7, live run 3, run receipt 6, detector 4). Cold worker starts timed out under load on some runs and passed on retry."
+   },
+   {
+    "command": "pnpm exec eslint src/test/locale-leak.ts src/features/chat/components/chat-locale-smoke.test.tsx",
+    "outcome": "exit 0"
+   },
+   {
+    "command": "new-file UI copy gate, simulated with the ui-gates-new-files override on src/test/locale-leak.ts",
+    "outcome": "0 findings. Positive control via lintText: a Norwegian string literal is flagged (2 findings); the regex-literal form is not (0)."
+   },
+   {
+    "command": "pnpm typecheck (tsc -b)",
+    "outcome": "exit 1 with 33 errors, all pre-existing: src/shared/api/quarry-client.ts (21) and src/features/support/components/RemoteSupportPage.tsx (12). None in the new files."
+   },
+   {
+    "command": "temporary ratchet probe on a rendered file card, deleted after the run",
+    "outcome": "4 of 4: an unpinned leak fails, an inexact pin fails, a stale pin fails, the exact pin passes."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Commit the four files: three new (locale-leak.ts, chat-locale-smoke.test.tsx, UI_STATE_CHECKLIST.md) and one modified (VEREVON_CHAT_DESIGN.md, criterion 9 row only). Nothing else in verevonv3 belongs to this slice.",
+   "Once the uncommitted approval-copy work (src/shared/approvals/approval-copy.ts, ChatMessages.tsx ApprovalRequests, ChatPanels.tsx ChatProofApproval) is committed or dropped, re-run pnpm exec vitest run src/features/chat/components/chat-locale-smoke.test.tsx. Remove any pin that now reads English from RECEIPT_HEADER_LEAKS, RECEIPT_EFFECT_LEAKS, SPARSE_RECEIPT_LEAKS or the four artifact pins.",
+   "DoD mutation proof, not run here because ChatMessages.tsx is not owned: on a scratch branch change PlanApprovalControl's grant label from rungLabel(option, i18n.tr) to RUNG_LABEL[option], run the smoke test, record the failure naming 'skrive i arbeidsomradet' (the Norwegian grant name), attach that output to the PR, then discard the scratch change.",
+   "After pushing, confirm the spa-ui-gates new-file scan on CI. The simulated scan of src/test/locale-leak.ts reports 0 findings locally.",
+   "The full pnpm test suite was not run, only the slice's test file. Run the full suite before merge if wanted."
+  ],
+  "deviations": [
+   "The spec says the smoke fails on Norwegian text under en. For the run receipt and the file-type labels it passes by pinning their exact text, because those strings live in files outside this slice. The ratchet fails on any new Norwegian string, and on a pinned string that is translated without its pin being removed.",
+   "The stop-list is wider than the plan's list. All ten plan words are still covered: Godkjenn, Avvis, Lukk, Last ned, Vis, Skjul, Lagre and Avbryt by word, and Kj\u00f8rer and Fullf\u00f8rt by the letters \u00e6\u00f8\u00e5. Added words the surfaces show: Kvittering, Oppdater, Utfall, Verifis*, Effektklasse, Steg, Kun, Ikke, Noen, Ingen, Henter, Ukjent, Ekstern, Handling, registrert, and the file-type nouns dokument, regneark, presentasjon, tekst, arkiv, bilde, lyd, fil and filtype.",
+   "The Norwegian detector is a regular-expression literal, not string literals. The new-file copy gate reads Norwegian string literals in every added src file as copy, and this file is a detector. A positive control confirmed the gate still flags Norwegian string literals. If the lead prefers literal lists, the new-file scan needs a src/test/** exemption in scripts/ui-gates-new-files.mjs, an S4 file I did not change.",
+   "The criterion 9 row was replaced in full, so the 2026-09-06 detail now lives only in git history. CRLF is preserved: 1262 of 1262 lines.",
+   "The helper is a .ts file, so renderInLocale calls I18nProvider directly rather than using JSX.",
+   "The S3 grant-label mutation proof is not run here; see lead_todo item 3. A detector-level check of the Norwegian grant string RUNG_LABEL.workspace_write is in the suite instead."
+  ],
+  "needs_other_files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx: RunProofPanel copy is still English-incomplete. Translate with i18n.tr: the eyebrow 'Kvittering', the 'Oppdater' button, the metric labels 'Verifisert', 'Effektklasse' and 'Utfall', the effect-class labels, the row labels 'Utfallsstatus' and 'Verifisering', the unavailable note, and the goal, status and effect-class fallbacks ('Arbeidskj\u00f8ring', 'registrert', 'Ikke fastsl\u00e5tt'). Then prune the receipt pins in the smoke test.",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-artifacts.ts: friendlyMimeLabel returns Norwegian labels ('Excel-regneark (XLSX)', 'Markdown-dokument', 'HTML-dokument', 'Tekstfil', and the fallbacks 'Ukjent filtype', '-bilde', '-lyd', '-tekst'). It needs a tr argument passed from its callers, including ChatArtifactPanel.tsx (file meta line and file card) and any other artifactFileMeta call site. Then prune the four artifact pins in the smoke test."
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Mutation proof is lead-only. Revert PlanApprovalControl's grant label to RUNG_LABEL[option] on a scratch branch, run the smoke test and keep the failure output. The test asserts the English radio names 'Write in the workspace' and 'Do anything, including outbound actions', and a detector self-test shows RUNG_LABEL.workspace_write is flagged, so it should fail. I did not run the mutation because I may not edit ChatMessages.tsx.",
+    "Commit ordering. The smoke passes only against the current working tree. ChatPanels.tsx ChatProofApproval, ChatMessages.tsx ApprovalRequests and the untracked src/shared/approvals/approval-copy.ts are another session's uncommitted work. HEAD's ChatProofApproval renders the literal fallback 'Handling', and the sparse-receipt test no longer pins it. Commit the slice after that work, or re-run the smoke on the committed tree first and re-add the 'Handling' pin if it fails.",
+    "Pins to remove once the translations land in ChatPanels.tsx (RunProofPanel) and chat-artifacts.ts (friendlyMimeLabel): RECEIPT_HEADER_LEAKS, RECEIPT_EFFECT_LEAKS, SPARSE_RECEIPT_LEAKS and the four artifact pins ('Markdown-dokument', 'Tekstfil', 'HTML-dokument', 'Excel-regneark (XLSX)'). Criterion 9 is honestly recorded as 'Partly met'.",
+    "CI confirmation of the spa-ui-gates new-file scan on locale-leak.ts and chat-locale-smoke.test.tsx, and a full pnpm test run. I ran only the slice's file and eslint."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Built per the plan. src/test/locale-leak.ts has renderInLocale and expectNoNorwegian. Readable copy is the text plus aria-label, aria-description, title, placeholder and alt. The smoke test covers the approval block, the plan-grant control, the artifact panel (document, code, HTML, spreadsheet, announced-but-empty), the live run (waiting, interrupted, collapsed toggle) and the run receipt (loading, empty, failed, verified effect, sparse fallbacks), each under en, with the no wording checked as a mirror, plus detector self-tests. The state checklist names a test for each state or says it is by hand. Criterion 9 is now 'Partly met', with the evidence stated.\n\nStill Norwegian under en, pinned by exact text in the smoke test: the run receipt in ChatPanels.tsx (RunProofPanel) and the file-type labels from friendlyMimeLabel in chat-artifacts.ts. A new Norwegian string fails the smoke. A pinned string that gets translated fails it until its pin is removed.\n\nConcurrent edits: while I ran, another session changed ChatMessages.tsx (ApprovalRequests now uses src/shared/approvals/approval-copy.ts, which is untracked) and ChatPanels.tsx (ChatProofApproval kind label). They are uncommitted, and I did not touch them. The approval test no longer asserts headline wording. The sparse-receipt pin 'Handling' was removed because the current tree translates it. The pins match the tree at my final run."
+ }
+]

@@ -19,6 +19,11 @@ import {
   type ExchangeVersionState,
 } from '@/features/chat/lib/chat-versions'
 import {
+  rewindPlan,
+  type HiddenTurn,
+  type RewindPlan,
+} from '@/features/chat/lib/chat-versions-server'
+import {
   CHAT_ACTIVE_THREAD_CHANGED_EVENT,
   clearActiveChatThreadId,
   readActiveChatThreadId,
@@ -73,6 +78,7 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import {
   cancelRun,
+  continueRun,
   decideApproval,
   answerQuestion as answerRunQuestion,
   listApprovals,
@@ -84,6 +90,7 @@ import {
   type ApprovalEdit,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
+import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
@@ -101,12 +108,15 @@ import {
   rejectPlan,
   listModels,
   queueInvocationInput,
+  rewindChatThread,
   resumeStream,
   saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
+  undoChatRewind,
   VEREVON_BALANCE_MODE_ID,
   type AutonomyRung,
+  type ChatBranchMove,
   type ChatConnectedEvent,
   type ChatErrorEvent,
   type ChatFeedbackRating,
@@ -140,6 +150,9 @@ import {
 } from '@/shared/api/thread-goal-client'
 import {
   findArtifactById,
+  foldSavedRevision,
+  newestTurnCarrying,
+  type SavedRevision,
 } from './chat-artifacts'
 import {
   collectArtifactItems,
@@ -1799,6 +1812,7 @@ export function useChatController() {
       turn.content = answer.content
       turn.streaming = false
       turn.status = undefined
+      turn.settledAt ??= new Date().toISOString()
       turn.stopReason = undefined
       if ((answer.artifacts?.length ?? 0) > 0) turn.artifacts = answer.artifacts
       if ((answer.citations?.length ?? 0) > 0) turn.citations = answer.citations
@@ -1885,7 +1899,10 @@ export function useChatController() {
     if (outcome.kind === 'aborted' || state.threadId !== threadId) return
     const updateTurn = (update: (turn: ChatTurn) => void) => setState((s) => {
       const turn = s.turns.find((candidate) => candidate.id === assistantId)
-      if (turn) update(turn)
+      if (turn) {
+        update(turn)
+        turn.settledAt ??= new Date().toISOString()
+      }
     })
     if (outcome.kind === 'failed') {
       setState((s) => { s.error = outcome.message })
@@ -2099,7 +2116,10 @@ export function useChatController() {
       if (!isActiveThread()) return
       setState((s) => {
         const t = s.turns.find((t) => t.id === assistantId)
-        if (t) t.streaming = false
+        if (t) {
+          t.streaming = false
+          t.settledAt ??= new Date().toISOString()
+        }
       })
       setState((s) => {
         const t = s.turns.find((t) => t.id === assistantId)
@@ -3232,6 +3252,29 @@ export function useChatController() {
   }
 
   /**
+   * The chat side of the live panel's Give back (EP-1). The panel has handed the browser back, so the
+   * takeover approval the run waits on is decided with the person's note and the run continues under
+   * chat.run.continue. A refused or ambiguous continue is shown, and is not sent again by this path.
+   */
+  const giveBackBrowserRun = async (runId: string, note: string): Promise<void> => {
+    if (isForeignOriginThread(state.threadId)) return
+    const outcome: BrowserGiveBackOutcome = await runBrowserGiveBack(runId, note, {
+      listApprovals,
+      decideApproval: (approvalId, decision, reason) => decideApproval(approvalId, decision, reason),
+      continueRun: (continuedRunId, approvalId, claimToken, onEvent) =>
+        continueRun(continuedRunId, approvalId, claimToken, onEvent),
+      newClaimToken: () => createId('claim'),
+    }).catch((): BrowserGiveBackOutcome => ({ kind: 'decision_failed' }))
+    if (outcome.kind === 'decision_failed') {
+      showFeedbackNotice(i18n.tr('Nettleseren kunne ikke gis tilbake. Prøv igjen.', 'The browser could not be handed back. Try again.'))
+    } else if (outcome.kind === 'continue_refused') {
+      showFeedbackNotice(outcome.effect.approvalSpent === 'no'
+        ? i18n.tr('Kjøringen kunne ikke fortsette etter at nettleseren ble gitt tilbake.', 'The run could not continue after the browser was handed back.')
+        : i18n.tr('Kjøringen følges videre i panelet.', 'The run is followed in the panel.'))
+    }
+  }
+
+  /**
    * A mid-run message the run ended before receiving.
    *
    * Held rather than dropped: the 404 that produces this arrives BEFORE the SPA
@@ -3621,7 +3664,10 @@ export function useChatController() {
     const stopStreaming = (status?: ChatTurn['status']) => {
       setState((s) => {
         const turn = s.turns.find((t) => t.id === assistantId)
-        if (turn) turn.streaming = false
+        if (turn) {
+          turn.streaming = false
+          turn.settledAt ??= new Date().toISOString()
+        }
       })
       setState((s) => {
         const turn = s.turns.find((t) => t.id === assistantId)
@@ -4236,12 +4282,18 @@ export function useChatController() {
     }
     setState((s) => {
       for (const turn of s.turns) {
-        if (turn.streaming) turn.streaming = false
+        if (turn.streaming) {
+          turn.streaming = false
+          turn.settledAt ??= new Date().toISOString()
+        }
       }
     })
     setState((s) => {
       for (const turn of s.turns) {
-        if (turn.status === 'waiting') turn.status = 'stopped'
+        if (turn.status === 'waiting') {
+          turn.status = 'stopped'
+          turn.settledAt ??= new Date().toISOString()
+        }
       }
     })
     markOpenSteps('stopped', 'Stopped by the user.')
@@ -4673,6 +4725,7 @@ export function useChatController() {
       }
       turn.streaming = false
       turn.status = 'error'
+      turn.settledAt ??= new Date().toISOString()
       if (shown.action) turn.failureAction = shown.action
       if (shown.retryAt) turn.retryAt = shown.retryAt
     })
@@ -5297,6 +5350,122 @@ export function useChatController() {
     setState((s) => { s.turns = result.turns })
   }
 
+  /**
+   * The last rewind on a thread, kept until the person undoes it or the thread moves on. Its server ids are what
+   * the undo must name; `removed` is what the rewind took off the transcript, which the undo puts back.
+   */
+  type RewindUndoState = {
+    threadId: string
+    rewoundTo: string
+    hidden: HiddenTurn[]
+    returnToMessageId: string
+    expectedLeafMessageId: string
+    removed: ChatTurn[]
+  }
+  const [rewindUndoState, setRewindUndoState] = createSignal<RewindUndoState | null>(null)
+
+  /** The rewind an assistant answer offers, with the turns it would hide: a server-versioned thread, idle, not the leaf. */
+  const rewindPlanFor = (turnId: string): RewindPlan | null => {
+    if (isStreaming() || !usesServerVersions(state.threadId)) return null
+    if (state.turns.find((turn) => turn.id === turnId)?.role !== 'assistant') return null
+    return rewindPlan(state.turns, turnId)
+  }
+
+  /** The turns an undo would bring back, while the rewind that hid them is still the newest thing in the thread. */
+  const rewindOfferFor = (turnId: string): HiddenTurn[] | null => {
+    const pending = rewindUndoState()
+    if (!pending || pending.rewoundTo !== turnId || pending.threadId !== state.threadId) return null
+    return state.turns[state.turns.length - 1]?.id === turnId ? pending.hidden : null
+  }
+
+  /** A refused branch move: a thread that moved on is reloaded, and any other refusal is said once. */
+  const reportBranchMoveFailure = (error: unknown, threadId: string) => {
+    const code = error instanceof ApiError ? error.code : null
+    if (code === 'active_leaf_stale') {
+      showFeedbackNotice(i18n.tr(
+        'Samtalen har gått videre. Last den inn på nytt og prøv igjen.',
+        'The conversation has moved on. Reload it and try again.',
+      ))
+      void loadThread(threadId)
+      return
+    }
+    showFeedbackNotice(code === 'history_branch_refused'
+      ? i18n.tr(
+        'Vent til svaret er ferdig, så kan samtalen flyttes.',
+        'Wait for the answer to finish, then the conversation can move.',
+      )
+      : i18n.tr('Samtalen kunne ikke flyttes. Prøv igjen.', 'The conversation could not be moved. Try again.'))
+  }
+
+  /**
+   * Rewinds a server-versioned thread to an answer the person chose (WS17 S9). The turns after it leave the
+   * transcript, and the server keeps them on their own branch, so the undo can put them back.
+   */
+  const rewindTo = async (turnId: string) => {
+    const threadId = state.threadId
+    if (isStreaming() || !threadId || !usesServerVersions(threadId)) return
+    const turns = snapshot(state.turns)
+    if (turns.find((turn) => turn.id === turnId)?.role !== 'assistant') return
+    const plan = rewindPlan(turns, turnId)
+    if (!plan) return
+    const index = turns.findIndex((turn) => turn.id === turnId)
+    const turn = turns[index]
+    const leafTurn = turns.find((item) => item.id === plan.expectedLeafMessageId)
+    const target = turn ? serverIdOf(turn) : undefined
+    const leaf = leafTurn ? serverIdOf(leafTurn) : undefined
+    if (!target || !leaf) {
+      showFeedbackNotice(i18n.tr(
+        'Denne meldingen er ikke lagret ennå, så samtalen kan ikke gå tilbake hit. Last den inn på nytt og prøv igjen.',
+        'This message is not saved yet, so the conversation cannot rewind here. Reload it and try again.',
+      ))
+      return
+    }
+    let move: ChatBranchMove
+    try {
+      move = await rewindChatThread(threadId, target, leaf)
+    } catch (error) {
+      reportBranchMoveFailure(error, threadId)
+      return
+    }
+    if (state.threadId !== threadId) return
+    const kept = turns.slice(0, index + 1)
+    setRewindUndoState({
+      threadId,
+      rewoundTo: turnId,
+      hidden: plan.hidden,
+      returnToMessageId: leaf,
+      expectedLeafMessageId: move.activeLeafMessageId,
+      removed: turns.slice(index + 1),
+    })
+    setState((s) => { s.turns = kept })
+    const shown = kept.map((item) => serverIdOf(item))
+    if (shown.length !== move.activePath.length || shown.some((id, position) => id !== move.activePath[position])) {
+      void loadThread(threadId)
+    }
+  }
+
+  /** Undoes the rewind on screen: the leaf returns to the turn it left, and the turns it hid come back (WS17 S9). */
+  const undoRewind = async () => {
+    const pending = rewindUndoState()
+    if (!pending || pending.threadId !== state.threadId) return
+    let move: ChatBranchMove
+    try {
+      move = await undoChatRewind(pending.threadId, pending.returnToMessageId, pending.expectedLeafMessageId)
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'active_leaf_stale') setRewindUndoState(null)
+      reportBranchMoveFailure(error, pending.threadId)
+      return
+    }
+    setRewindUndoState(null)
+    if (state.threadId !== pending.threadId) return
+    const restored = [...snapshot(state.turns), ...pending.removed]
+    setState((s) => { s.turns = restored })
+    const shown = restored.map((item) => serverIdOf(item))
+    if (shown.length !== move.activePath.length || shown.some((id, position) => id !== move.activePath[position])) {
+      void loadThread(pending.threadId)
+    }
+  }
+
   const updateTaskStep = (id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
     setState((s) => {
       s.taskSteps = s.taskSteps.map((step) => (
@@ -5334,6 +5503,19 @@ export function useChatController() {
     })
   }
 
+  /**
+   * Folds a revision the person saved or restored in the Output panel (EP-3 S4) into the newest turn that carries its
+   * artifact, so the panel and the message chips show it as the newest version. The fold stays in memory: the revision
+   * store is the record, and the panel reads it back when it opens.
+   */
+  const foldSavedArtifactRevision = (revision: SavedRevision) => {
+    setState((s) => {
+      const turn = s.turns[newestTurnCarrying(s.turns, revision.artifactId)]
+      if (!turn?.artifacts) return
+      turn.artifacts = foldSavedRevision(turn.artifacts, revision)
+    })
+  }
+
   return {
     hasMessages,
     isStreaming,
@@ -5342,6 +5524,7 @@ export function useChatController() {
     latestGrounding,
     artifactItems,
     artifacts,
+    foldSavedArtifactRevision,
     latestScreen,
     liveRunId,
     runPanelCollapsed,
@@ -5356,6 +5539,7 @@ export function useChatController() {
     handleApprovalDecision,
     handleEditedApprovalDecision,
     refreshApprovalsForRun,
+    giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
     copyTurn,
@@ -5370,6 +5554,10 @@ export function useChatController() {
     branchAt,
     finalExchangeVersion,
     selectExchangeVersion,
+    rewindPlanFor,
+    rewindOfferFor,
+    rewindTo,
+    undoRewind,
     startNewChat,
     state,
     activeTab,
@@ -5386,6 +5574,7 @@ export function useChatController() {
     planMode,
     approveTurnPlan,
     pendingQuestion,
+    parkedTurnId,
     questionPending,
     questionError,
     answerPendingQuestion,

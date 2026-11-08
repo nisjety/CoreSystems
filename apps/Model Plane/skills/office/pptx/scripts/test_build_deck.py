@@ -18,6 +18,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -136,6 +137,154 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaises(build_deck.Refusal) as caught:
             build_deck.check_manifest(manifest, self.base)
         self.assertEqual(caught.exception.finding["id"], "unsupported_version")
+
+    def test_an_empty_slide_is_error(self):
+        plans = self.plans([{"id": "s1", "layout": "title_only"}])
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "error")
+        self.assertIn("empty_slide", finding_ids(plans[0]["findings"]))
+
+    def test_a_slide_with_text_but_no_title_is_warn(self):
+        plans = self.plans([{"id": "s1", "layout": "title_bullets", "bullets": ["Short"]}])
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "warn")
+        self.assertIn("title_missing", finding_ids(plans[0]["findings"]))
+
+    def test_bullets_are_capped_across_both_columns(self):
+        slide = {
+            "id": "s1",
+            "layout": "two_column",
+            "title": "Mix",
+            "left": ["a", "b", "c", "d"],
+            "right": ["e", "f", "g"],
+        }
+        plans = self.plans([slide])
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "warn")
+        self.assertIn("bullets_over_cap", finding_ids(plans[0]["findings"]))
+
+    def test_notes_over_the_cap_are_warn_and_kept_whole(self):
+        notes = "n" * (build_deck.MAX_NOTES_CHARS + 1)
+        plans = self.plans([{"id": "s1", "layout": "title_only", "title": "Notes", "notes": notes}])
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "warn")
+        self.assertIn("notes_too_long", finding_ids(plans[0]["findings"]))
+        self.assertEqual(plans[0]["notes"], notes)
+
+    def test_more_than_four_pictures_are_error_and_none_is_placed(self):
+        images = ["p%d.png" % number for number in range(build_deck.MAX_IMAGES + 1)]
+        plans = self.plans([{"id": "s1", "layout": "image", "title": "Many", "image": images}])
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "error")
+        self.assertIn("too_many_images", finding_ids(plans[0]["findings"]))
+        self.assertEqual(plans[0]["images"], [])
+
+    def test_a_picture_that_is_not_there_is_error(self):
+        plans = self.plans([{"id": "s1", "layout": "image", "title": "Photo", "image": "gone.png"}])
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "error")
+        self.assertIn("image_missing", finding_ids(plans[0]["findings"]))
+
+    def test_windows_and_backslash_picture_paths_are_refused(self):
+        for path in ("C:\\photos\\a.png", "\\\\server\\share\\a.png", "/etc/a.png", "..\\a.png"):
+            plans = self.plans([{"id": "s1", "layout": "image", "title": "Photo", "image": path}])
+            self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "error", path)
+            self.assertEqual(plans[0]["images"], [], path)
+
+    def test_a_picture_reached_through_a_symbolic_link_is_refused(self):
+        real = os.path.join(self.base, "real")
+        os.mkdir(real)
+        with open(os.path.join(real, "a.png"), "wb") as handle:
+            handle.write(PIXEL_PNG)
+        try:
+            os.symlink(real, os.path.join(self.base, "linked"), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this platform cannot create a symbolic link")
+        plans = self.plans(
+            [{"id": "s1", "layout": "image", "title": "Photo", "image": "linked/a.png"}]
+        )
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "error")
+        self.assertIn("image_path_symlink", finding_ids(plans[0]["findings"]))
+
+    def test_a_link_on_the_way_to_a_picture_is_refused_on_any_platform(self):
+        # The same walk as the test above, with the link answered by a stub, so the
+        # refusal is checked where the platform cannot make a symbolic link.
+        real_islink = os.path.islink
+        linked = os.path.join(self.base, "linked")
+
+        def stub_islink(path):
+            return path == linked or real_islink(path)
+
+        with mock.patch("os.path.islink", side_effect=stub_islink):
+            plans = self.plans(
+                [{"id": "s1", "layout": "image", "title": "Photo", "image": "linked/a.png"}]
+            )
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "error")
+        self.assertIn("image_path_symlink", finding_ids(plans[0]["findings"]))
+        self.assertEqual(plans[0]["images"], [])
+
+    def test_a_manifest_over_the_character_cap_is_refused(self):
+        path = os.path.join(self.base, "manifest.json")
+        manifest = {
+            "version": 1,
+            "title": "Big",
+            "locale": "en-GB",
+            "slides": [],
+            "pad": "x" * build_deck.MAX_MANIFEST_CHARS,
+        }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        with self.assertRaises(build_deck.Refusal) as caught:
+            build_deck.load_manifest(path)
+        self.assertEqual(caught.exception.finding["id"], "manifest_too_large")
+
+    def test_a_deck_over_forty_slides_is_refused(self):
+        slides = [
+            {"id": "s%d" % number, "layout": "title_only", "title": "Slide %d" % number}
+            for number in range(build_deck.MAX_SLIDES + 1)
+        ]
+        with self.assertRaises(build_deck.Refusal) as caught:
+            self.plans(slides)
+        self.assertEqual(caught.exception.finding["id"], "too_many_slides")
+
+    def test_a_theme_named_in_the_manifest_is_refused(self):
+        manifest = {
+            "version": 1,
+            "title": "Test",
+            "locale": "en-GB",
+            "theme": "dark",
+            "slides": [{"id": "s1", "layout": "title_only", "title": "Slide"}],
+        }
+        with self.assertRaises(build_deck.Refusal) as caught:
+            build_deck.check_manifest(manifest, self.base)
+        self.assertEqual(caught.exception.finding["id"], "theme_unsupported")
+
+    def test_a_repeated_slide_id_refuses_the_deck(self):
+        slides = [
+            {"id": "s1", "layout": "title_only", "title": "A"},
+            {"id": "s1", "layout": "title_only", "title": "B"},
+        ]
+        with self.assertRaises(build_deck.Refusal) as caught:
+            self.plans(slides)
+        self.assertEqual(caught.exception.finding["id"], "manifest_invalid")
+
+    def test_a_list_field_that_is_not_a_list_refuses_the_deck(self):
+        with self.assertRaises(build_deck.Refusal) as caught:
+            self.plans([{"id": "s1", "layout": "title_bullets", "title": "A", "bullets": "one"}])
+        self.assertEqual(caught.exception.finding["id"], "manifest_invalid")
+
+    def test_content_the_layout_does_not_place_is_warn(self):
+        plans = self.plans(
+            [{"id": "s1", "layout": "title_only", "title": "Only", "bullets": ["x"]}]
+        )
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "warn")
+        self.assertIn("content_not_placed", finding_ids(plans[0]["findings"]))
+
+    def test_an_unknown_field_is_warn_and_ignored(self):
+        plans = self.plans(
+            [{"id": "s1", "layout": "title_bullets", "title": "Typo", "bulets": ["x"]}]
+        )
+        self.assertEqual(build_deck.slide_state(plans[0]["findings"]), "warn")
+        self.assertIn("unknown_field", finding_ids(plans[0]["findings"]))
+
+    def test_the_text_estimate_counts_wrapped_lines(self):
+        width, height = 5_000_000, 1_000_000
+        self.assertTrue(build_deck.fits(["A short line"], 18, width, height))
+        self.assertFalse(build_deck.fits(["word " * 400], 18, width, height))
 
     def cited_plans(self, slides, sources=None, claims=None, locale="nb-NO"):
         manifest = {"version": 1, "title": "Rapport", "locale": locale, "slides": slides}
@@ -307,6 +456,70 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0])["deck"]["slides"], 5)
+
+    def write_manifest(self, manifest):
+        path = os.path.join(self.base, "manifest.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+        return path
+
+    def test_an_unknown_layout_still_builds_and_is_flagged(self):
+        manifest = {
+            "version": 1,
+            "title": "Unknown layout",
+            "locale": "en-GB",
+            "slides": [
+                {"id": "s1", "layout": "quote", "title": "Quote", "bullets": ["A line"]},
+                {"id": "s2", "layout": "title_only", "title": "Second"},
+            ],
+        }
+        out = os.path.join(self.base, "deck.pptx")
+        status, report = build_deck.run(self.write_manifest(manifest), out, base_dir=self.base)
+        self.assertEqual(status, 0)
+        self.assertEqual([slide["state"] for slide in report["slides"]], ["error", "ok"])
+        self.assertIn("unknown_layout", finding_ids(report["slides"][0]["findings"]))
+
+        from pptx import Presentation
+
+        self.assertEqual(len(Presentation(out).slides), 2)
+
+    def test_a_crowded_column_is_flagged_as_may_overflow(self):
+        manifest = {
+            "version": 1,
+            "title": "Crowded",
+            "locale": "en-GB",
+            "slides": [
+                {"id": "s1", "layout": "two_column", "title": "Many words", "left": ["x" * 90] * 6}
+            ],
+        }
+        out = os.path.join(self.base, "deck.pptx")
+        status, report = build_deck.run(self.write_manifest(manifest), out, base_dir=self.base)
+        self.assertEqual(status, 0)
+        self.assertEqual(report["slides"][0]["state"], "warn")
+        self.assertIn("text_may_overflow", finding_ids(report["slides"][0]["findings"]))
+
+    def test_every_placeholder_of_the_layouts_sits_on_the_widescreen_canvas(self):
+        prs, _, _ = build_deck.new_presentation(None)
+        shapes = list(prs.slide_master.shapes)
+        for layout in prs.slide_layouts:
+            shapes.extend(layout.shapes)
+        measured = [s for s in shapes if None not in (s.left, s.top, s.width, s.height)]
+        self.assertTrue(measured)
+        for shape in measured:
+            self.assertLessEqual(shape.left + shape.width, SLIDE_W, shape.name)
+            self.assertLessEqual(shape.top + shape.height, SLIDE_H, shape.name)
+        # Stretched across the slide, not left in the 4:3 template's left three quarters.
+        widest = max(shape.left + shape.width for shape in prs.slide_master.placeholders)
+        self.assertGreater(widest, SLIDE_W * 0.9)
+
+    def test_a_shape_past_the_slide_edge_is_flagged(self):
+        prs, size, _ = build_deck.new_presentation(None)
+        blank = next(layout for layout in prs.slide_layouts if layout.name == "Blank")
+        slide = prs.slides.add_slide(blank)
+        slide.shapes.add_textbox(SLIDE_W - 100_000, 0, 1_000_000, 500_000)
+        findings = []
+        build_deck.fit_check(slide, findings, size)
+        self.assertIn("shape_outside_slide", finding_ids(findings))
 
     def themed_bundle(self, theme, master=None):
         """A template bundle laid out as the /skills mount gives it; returns the theme path."""

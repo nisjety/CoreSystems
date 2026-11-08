@@ -1,0 +1,68 @@
+{
+  "_comment": "Shaped after the full inbound JSON example in Postmark's Parse an email documentation (https://postmarkapp.com/developer/user-guide/inbound/parse-an-email). Header names and value shapes are the documented ones; addresses, ids and the DKIM signature bytes are placeholders. This is NOT a captured real payload.",
+  "From": "owner@example.com",
+  "MessageStream": "inbound",
+  "FromName": "Task Owner",
+  "FromFull": {
+    "Email": "owner@example.com",
+    "Name": "Task Owner",
+    "MailboxHash": ""
+  },
+  "To": "abc123def456@tasks.verevon.ai",
+  "ToFull": [
+    {
+      "Email": "abc123def456@tasks.verevon.ai",
+      "Name": "",
+      "MailboxHash": ""
+    }
+  ],
+  "Cc": "",
+  "CcFull": [],
+  "Bcc": "",
+  "BccFull": [],
+  "OriginalRecipient": "abc123def456@tasks.verevon.ai",
+  "ReplyTo": "owner@example.com",
+  "Subject": "Fwd: please draft a reply",
+  "MessageID": "22c74902-a0c1-4511-804f-341342852c90",
+  "Date": "Thu, 5 Apr 2012 16:59:01 +0200",
+  "MailboxHash": "",
+  "TextBody": "Please draft a reply to the message below.",
+  "HtmlBody": "<html><body><p>Please draft a reply to the message below.</p></body></html>",
+  "StrippedTextReply": "",
+  "Tag": "",
+  "Headers": [
+    {
+      "Name": "X-Spam-Checker-Version",
+      "Value": "SpamAssassin 3.3.1 (2010-03-16) onrs-ord-pm-inbound1.wildbit.com"
+    },
+    {
+      "Name": "X-Spam-Status",
+      "Value": "No"
+    },
+    {
+      "Name": "X-Spam-Score",
+      "Value": "-0.1"
+    },
+    {
+      "Name": "X-Spam-Tests",
+      "Value": "DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,SPF_PASS"
+    },
+    {
+      "Name": "Received-SPF",
+      "Value": "Pass (sender SPF authorized) identity=mailfrom; client-ip=203.0.113.10; helo=mail.example.com; envelope-from=owner@example.com; receiver=abc123def456@tasks.verevon.ai"
+    },
+    {
+      "Name": "DKIM-Signature",
+      "Value": "v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.com; s=selector1; h=mime-version:reply-to:message-id:subject:from:to:cc:content-type; bh=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=; b=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+    },
+    {
+      "Name": "MIME-Version",
+      "Value": "1.0"
+    },
+    {
+      "Name": "Message-ID",
+      "Value": "<placeholder-message-id@mail.example.com>"
+    }
+  ],
+  "Attachments": []
+}

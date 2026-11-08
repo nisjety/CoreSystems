@@ -1,0 +1,214 @@
+{
+ "batchId": "W2-12",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS20-S6",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go",
+    "apps/Model Plane/rust/services/execution-core/src/scheduled_agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/state.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/activities/activities.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/step_loop.go",
+    "apps/Model Plane/go/services/orchestrator-core/cmd/workflows/interactive_run_test.go",
+    "apps/Model Plane/scripts/tests/scheduled-step-config-contract-test.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib scheduled_agent (run from apps/Model Plane/rust)",
+     "outcome": "ok, 15 passed (includes new scheduled_agent_refuses_zdr_and_waived, wall_clock_is_the_lane_ceiling_or_the_contract_time_left, loop_scope_takes_the_contracts_round_cap)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+     "outcome": "ok, 1328 passed, 0 failed (was 1325 before this round); no compiler warnings in the log"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/orchestrator-core && GOFLAGS= go vet ./cmd/... && GOFLAGS= go test -count=1 ./...",
+     "outcome": "ok, every package passes"
+    },
+    {
+     "command": "GOFLAGS= go test -count=1 ./cmd/workflows/ -run ScheduledRun -v",
+     "outcome": "ok, 6 passed including new TestScheduledRun_AgentLaneIncompleteStepReportsFailed (Completed false, summary outcome failed)"
+    },
+    {
+     "command": "gofmt -l on LF content of step_loop.go and interactive_run_test.go; rustfmt --check on LF copy of scheduled_agent.rs",
+     "outcome": "clean"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/lib.rs: after `pub(crate) mod scheduled_inference_auth;` add `pub(crate) mod scheduled_agent;`. Then delete the two lines `// WS20 S6. The file lives at the crate root; lib.rs should declare it there (shared edit).` and `#[path = \"../scheduled_agent.rs\"]` from apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs, change `super::scheduled_agent::` to `crate::scheduled_agent::` in runtime_loop/agent.rs (LoopScope in the run_agent_with_offered and run_agent_with_route_parkable signatures, plus the withhold/egress call sites), change `runtime_loop::scheduled_agent::` to `crate::scheduled_agent::` in grpc.rs, and re-run cargo test -p execution-core --lib scheduled_agent.",
+    "needs_other_files (blocks the lane, carried from round 1): apps/Model Plane/rust/services/session-core/src/run_service_grpc.rs get_scheduled_step_context (around lines 626-631): fill ScheduledStepContext.contract_json, contract_digest and contract_expires_at from runs.metadata. Store the body as exact text under a key such as contract_json in the StartScheduledRun metadata (apps/Model Plane/rust/services/session-core/src/grpc.rs around lines 1949-1954, currently a nested JSON value that jsonb re-serialises and breaks the digest), and add that key to the exact list (around line 1964). Without this, execution-core never sees a contract.",
+    "needs_other_files (ZDR clause, new this round): apps/Model Plane/proto/model_plane/v1/runs.proto ScheduledStepContext (WS20-S5 owned): add the run's zdr and waiver fields at new tags, and session-core get_scheduled_step_context must serve them. Then in execution-core grpc.rs execute_scheduled_agent_step build the caller's zdr and zdr_waiver from run.zdr and run.zdr_waiver (currently the constants false and None) so refuses_retention sees the real retention. Until this lands the refusal path is unreachable in practice.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: pass EXECUTION_SCHEDULED_AGENT_ENABLED through, default empty (off), on both execution-core and orchestrator-core, e.g. `EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}` next to the existing scheduled-step passthrough near lines 1135-1136. Both must agree.",
+    "shared-edit apps/Model Plane/api/contracts/zdr-posture-matrix.json (+ .sha256): add row `scheduled_do_run` refused for every ZDR and waived cell, then run bash scripts/tests/zdr-contract-sync.test.sh. Not in this slice's owned files.",
+    "Lead proof (not run here, needs live stack): rebuild execution-core, orchestrator-core and session-core; set EXECUTION_SCHEDULED_AGENT_ENABLED=true on both; run scheduled-step-proof.sh after the session-core fix; capture a fire whose goal needs a web read and a write, then check the transcript (answer once, with the withheld block), the scheduled_step_receipts row, Temporal history (no content), cost_entries for the run, and the absence of an approvals row.",
+    "Lead decision on the failed-step terminalization: a non-completed agent-lane step now yields summary outcome failed but still goes through CompleteRunActivity (pre-existing flow in interactive_run.go). Decide whether a failed agent-lane step should instead call FailRunActivity."
+   ],
+   "deviations": [
+    "The scoped option is an Option<LoopScope> parameter on run_agent_with_offered and run_agent_with_route_parkable (None at every other call site, including test call sites), rather than a field on RunAgentRequest, which would have needed a proto change.",
+    "finalize gained an append_answer bool parameter, passed as scheduled.is_none().",
+    "LoopContext gained a max_tokens field copied into delegated children, so the inference request reads ctx.max_tokens.",
+    "The refusal checks the lane's own AuthenticatedUser (zdr false, no waiver) until the lead's ScheduledStepContext fields exist; it is wired and unit-tested but inert in practice.",
+    "In the summary, failed takes precedence over needs_review when the last step did not complete.",
+    "scheduled_agent.rs remains CRLF in the working copy, matching the file's current line endings, and agent.rs, grpc.rs, step_loop.go and interactive_run_test.go were kept CRLF."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/go/services/orchestrator-core/cmd/activities/activities.go: `scheduledStepHeartbeatEvery` is time.Minute, the same value as the HeartbeatTimeout that step_loop.go sets for the agent-lane activity (executeScheduledAgentStep). The first heartbeat therefore arrives at the instant the 60 s heartbeat timeout expires, so any agent-lane step running longer than about a minute is timed out by Temporal while execution-core may still be running it, and MaxAttempts 1 turns that into a failed run. Fix: set the ticker well below the timeout (e.g. 20 s) and keep HeartbeatTimeout at 60 s as the row specifies.",
+     "ZDR clause not implemented (dependency-blocked, the slice owner cannot close it inside its ownership set): apps/Model Plane/rust/services/execution-core/src/grpc.rs execute_scheduled_agent_step builds the caller with the constants zdr: false, org_zdr: None, zdr_waiver: None, so refuses_retention can never fire, and scheduled_agent.rs run_request hard-codes `zdr: false` into the RunAgentRequest sent to inference and tools. The row requires run_scheduled_agent to refuse zdr||waived before work, using the run's real retention. The fix needs ScheduledStepContext in apps/Model Plane/proto/model_plane/v1/runs.proto (WS20-S5 scope) to carry the run's zdr and waiver at new tags, session-core get_scheduled_step_context to serve them, and grpc.rs to build the caller and run_request from them. This must land before the lane can be reached or the flag enabled."
+    ],
+    "dod_gaps": [
+     "Lead, live proof (needs docker, not run here): rebuild execution-core, orchestrator-core and session-core; set EXECUTION_SCHEDULED_AGENT_ENABLED=true on both; run scheduled-step-proof.sh; capture a fire whose goal needs a web read and a write, then check the transcript (one answer with the withheld block), the scheduled_step_receipts row, Temporal history with no content, cost_entries for the run, and no approvals row.",
+     "Lead, S5 dependency: session-core get_scheduled_step_context must serve contract_json, contract_digest and contract_expires_at from runs.metadata (the body kept as exact text), and runs.proto ScheduledStepContext must carry zdr and waiver. Until then the agent lane is unreachable end to end, and the ZDR refusal cannot fire.",
+     "Lead, shared edits named by the implementer: apps/Model Plane/deploy/docker-compose.yml passthrough for EXECUTION_SCHEDULED_AGENT_ENABLED on execution-core and orchestrator-core, default empty; apps/Model Plane/rust/services/execution-core/src/lib.rs declares pub(crate) mod scheduled_agent; apps/Model Plane/api/contracts/zdr-posture-matrix.json (+ .sha256) row scheduled_do_run refused for every ZDR and waived cell, then bash scripts/tests/zdr-contract-sync.test.sh.",
+     "scheduled-step-config-contract-test.sh cannot run on this host because ripgrep (rg) is not installed; it fails at its first check (line 22) before reaching the new assertions. The two new assertions were checked with grep and pass (SWITCH_ENV constant present; os.Getenv line present). Run it where rg is installed.",
+     "cargo test --all-targets was not run (the plan says Windows uses --lib plus named test files, and no EC/tests file exists for this slice)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The ZDR/waiver refusal is inert until ScheduledStepContext carries the run's retention and waiver (runs.proto and session-core, WS20-S5 scope); the caller it checks is built with constants."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core get_scheduled_step_context still returns no contract, so the agent lane is unreachable end to end (carried from round 1)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Pre-existing S1 legacy path: ExecuteScheduledStepActivity passes resp.Output into StepResult.Output, which flows into Temporal history; the plan forbids content in Temporal history."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The contract's max_tokens_per_round is now enforced per round, but the round count and token budget are not bounded by a run-level token cap; a long tool loop can still spend up to 8 rounds at 4096 tokens each."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A non-completed agent-lane step still calls CompleteRunActivity after the failed summary; the run is terminalized as completed by the orchestrator's activity flow unless session-core maps the failed receipt, which needs checking live."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No driver-level test proves a gated effect is withheld and never paused (the plan's EC/tests/scheduled_agent_contract.rs); the new LoopScope effects (max tokens, no result_query, no append) are covered only by compile and existing suites, not by a scoped test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No Go replay test for the scheduled-agent-lane GetVersion gate and the AgentLane marker recorded at start."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The K3-23 egress limit refuses every web_fetch URL with a query string in the scheduled lane; the owner may prefer the after-flagged wording or a contract hosts allowlist, which needs a contract v1 field first."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "tool_calls is still always 0 because RunAgentResponse exposes no tool-call count."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The scheduled egress guard covers only web_fetch URLs with a query string, but web_search sends the model-chosen query to a third-party provider and is contract-approved read class, so injected web content could move owner data out through a search query; owner decision needed before enabling."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No driver-level test exists (EC/tests/scheduled_agent_contract.rs is absent); the 15 scheduled_agent tests cover only pure helpers, so the agent.rs withhold branches, the egress refusal, the purpose-lock, the no-approval-row guarantee and execute_scheduled_agent_step are untested beyond compilation."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "On the wall-clock timeout the lane returns unknown_outcome with zero counts and writes no transcript, so withheld effects collected before the deadline are lost to the owner even though the row requires them visible."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "scheduledAgentOutcomeSummary's failed branch is unreachable: a status of failed becomes a non-retryable activity error and goes to handleFailure/FailRunActivity, so the lead's failed-terminalization question is answered by the code already, and TestScheduledRun_AgentLaneIncompleteStepReportsFailed mocks a Completed:false step with no error that the real activity cannot return."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No Go replay test covers the scheduled-agent-lane GetVersion gate or the AgentLane marker recorded at start, which the row lists as required."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two switches must agree: the orchestrator sets AgentLane from its own EXECUTION_SCHEDULED_AGENT_ENABLED and execution-core reads its own. Orchestrator on with execution-core off sends a contract step to the legacy lane while the workflow treats it as an agent step; the compose passthrough is missing and the config script only checks source names."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs declares the module through a #[path] workaround because lib.rs does not yet list scheduled_agent; the lead must apply the shared lib.rs edit and remove the workaround."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "apps/Model Plane/scripts/tests/dev-runtime-preflight.sh is in the owned file list and the row asks for an update at lines 105-118, but it is unchanged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-round output cap is enforced, but there is no run-level token budget, so up to 8 rounds at 2048-4096 tokens each can run per fire, and tool_calls is always reported as 0."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The egress refusal is always on for any web_fetch URL containing '?', which is stricter than the K3-23 wording (after content is flagged or a contract hosts allowlist); the owner should confirm this choice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Pre-existing legacy single-inference lane (untouched by this slice) returns resp.Output into StepResult.Output, which lands in Temporal history, against the plan's no-content-in-history rule."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The refusal path runs after the claim rather than before it as the row specifies; it still records a failed receipt and does no work, so the impact is ordering only."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Model Plane/scripts/tests/scheduled-step-config-contract-test.sh now has the same 'scheduled-step config contract' echo line twice (lines 127 and 129)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go and cmd/workflows/interactive_run_test.go are changed but are not on the owned list; the pb.go is the generated companion of the owned proto and is needed for the build, so the ownership list should be amended rather than the edit reverted."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Go lane reimplements the switch rule (TrimSpace plus EqualFold) rather than sharing mp_contracts::loop_fold::switch_from; the two agree today."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "org_zdr is hard-coded to None in the lane's caller, so an org-level ZDR setting is never considered; this folds into the ZDR required fix."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "zdr",
+    "audit"
+   ],
+   "notes": "Round 2 fixes applied. (1) agent.rs finalize takes an append_answer bool that the scheduled lane passes as false, so the transcript written through RecordScheduledRunResult is the only assistant message the thread gets. (2) A new Option<LoopScope> parameter threads through run_agent_with_offered and run_agent_with_route_parkable (None for every other caller, including tests). It sets LoopContext.max_tokens from contract.max_tokens_per_round (the inference request uses ctx.max_tokens instead of MAX_TOKENS), and it skips result_query (result_store is None when scoped). (3) scheduled_agent::wall_clock(contract, now) returns min(240 s, time left on the contract), zero if the expiry does not parse; grpc.rs uses it for the timeout. (4) scheduled_agent::refuses_retention(zdr, waived) returns REFUSAL_RETENTION (scheduled_zdr_refused); grpc.rs calls it first, before admit, and finishes the step as failed. The caller it checks is the lane's own AuthenticatedUser, which has zdr false and no waiver until ScheduledStepContext carries the run's retention and waiver, so the refusal is inert until the lead's fields land. (5) scheduledAgentOutcomeSummary reports failed when the last step is not Completed, takes precedence over needs_review, and has a Go test with Completed false. Status stays partial for the items in lead_todo: session-core contract serving, the lib.rs module move, the ZDR/waiver fields, the flag in compose, and the zdr-posture row. No docker, DB harness, or live proof was run."
+  }
+ ]
+}

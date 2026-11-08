@@ -1,0 +1,45 @@
+.gitattributes
+.github/workflows/contract-goldens.yml
+apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md
+apps/Application Plane/convex-core/convex/schema.ts
+apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md
+apps/Control Plane/auth-core/src/auth/membership-audit-outbox.postgres.spec.ts
+apps/Control Plane/auth-core/src/auth/organization-events.plugin.ts
+apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md
+apps/Frontend Plane/verevonv3/scripts/verify-sse-frames.mjs
+apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx
+apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx
+apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.test.ts
+apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx
+apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/ooxml.ts
+apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.test.ts
+apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.ts
+apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json
+apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256
+apps/Frontend Plane/verevonv3/src/shared/chat-nodes/index.ts
+apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_INTEGRATION.md
+apps/MODEL_ENTITLEMENTS_ADR_2026-10-15.md
+apps/Model Plane/api/contracts/browser-domain-canonical.json
+apps/Model Plane/api/contracts/sse-event-payloads.json
+apps/Model Plane/api/contracts/sse-event-payloads.json.sha256
+apps/Model Plane/docs/DEV_AUTHORITY_HANDOFF_MATRIX.md
+apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md
+apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md
+apps/Model Plane/docs/runbooks/audit-delivery-replay.md
+apps/Model Plane/go/services/orchestrator-core/README.md
+apps/Model Plane/rust/services/execution-core/src/integration_tools.rs
+apps/Model Plane/rust/services/execution-core/tests/fixtures/office/
+apps/Model Plane/rust/services/inference-core/src/provider/effort.rs
+apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs
+apps/Model Plane/rust/services/inference-core/src/provider/intent.rs
+apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+apps/Model Plane/rust/services/session-core/src/store.rs
+apps/Model Plane/scripts/rebuild-service.sh
+apps/Model Plane/scripts/tests/audit-delivery-proof-test.sh
+apps/Model Plane/scripts/tests/audit-delivery-proof.sh
+apps/Model Plane/scripts/tests/rebuild-service-test.sh
+apps/Model Plane/scripts/verify-office-render.sh
+docs/plans/model-plane-chat-build-plan-2026-10-14.md
+scripts/tests/ownership-docs-contract.test.mjs
+scripts/tests/zdr-contract-sync.test.sh

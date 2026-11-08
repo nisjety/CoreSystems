@@ -1,0 +1,2451 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.test.tsx
+index cd461fb99..200202382 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.test.tsx	
+@@ -2,7 +2,7 @@
+ 
+ import { cleanup, render } from '@solidjs/testing-library'
+ import { afterEach, describe, expect, it } from 'vitest'
+-import { ArtifactProvenance } from './ArtifactProvenance'
++import { ArtifactProvenance, researchPassFacts } from './ArtifactProvenance'
+ 
+ afterEach(cleanup)
+ 
+@@ -53,3 +53,42 @@ describe('ArtifactProvenance', () => {
+     }
+   })
+ })
++
++describe('ArtifactProvenance second pass (EP-2-S6)', () => {
++  const twoPass = () => stamp({
++    passes: 2,
++    claims_by_status: { supported: 3, single_source: 1, conflict: 1, unsupported: 2 },
++    sources: [
++      { number: 1, url: 'https://example.no/a', title: 'Fôrpriser', pass: 1 },
++      { number: 2, url: 'https://example.no/b', title: 'Gap', pass: 2 },
++    ],
++  })
++
++  it('shows the passes and the claim counts by status', () => {
++    const { container } = render(() => <ArtifactProvenance provenance={twoPass()} />)
++    expect(container.querySelector('.verevon-chat-artifact-provenance__passes')?.textContent).toContain('To runder')
++    const claims = container.querySelector('.verevon-chat-artifact-provenance__claims')?.textContent ?? ''
++    expect(claims).toContain('3 støttet')
++    expect(claims).toContain('1 fra én kilde')
++    expect(claims).toContain('1 motstridende')
++    expect(claims).toContain('2 ikke verifisert')
++  })
++
++  it('shows no pass or claim line on a stamp without them', () => {
++    const { container } = render(() => <ArtifactProvenance provenance={stamp()} />)
++    expect(container.querySelector('.verevon-chat-artifact-provenance__passes')).toBeNull()
++    expect(container.querySelector('.verevon-chat-artifact-provenance__claims')).toBeNull()
++  })
++
++  it('reads the second pass numbers and drops a partial tally', () => {
++    expect(researchPassFacts(twoPass())).toEqual({
++      passes: 2,
++      claims: { supported: 3, single_source: 1, conflict: 1, unsupported: 2 },
++      secondPassNumbers: [2],
++    })
++    expect(researchPassFacts(stamp())).toBeUndefined()
++    expect(researchPassFacts(null)).toBeUndefined()
++    const partial = researchPassFacts(stamp({ passes: 1, claims_by_status: { supported: 1 } }))
++    expect(partial).toEqual({ passes: 1, claims: undefined, secondPassNumbers: [] })
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.tsx
+index 81eab6cae..12f23b646 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.tsx	
+@@ -4,6 +4,55 @@ import { useI18n } from '@/shared/i18n'
+ import { formatMoment } from '@/shared/i18n/format'
+ import { isSafeLinkHref } from '../lib/safe-href'
+ 
++/** Claim counts by status, in the stored ledger's tokens (EP-2-S6). */
++export type ClaimCounts = { supported: number; single_source: number; conflict: number; unsupported: number }
++
++/** What a gap-driven second pass added to a stamp (EP-2-S6). */
++export type ResearchPassFacts = {
++  /** Research passes that ran: 2 when a gap search ran, 1 when it was skipped. */
++  passes: number
++  /** Ledger claims per status; absent when no ledger could be produced. */
++  claims?: ClaimCounts
++  /** The `[n]` the second pass's reads earned, for grouping the Sources tab by pass. */
++  secondPassNumbers: number[]
++}
++
++const CLAIM_STATUSES = ['supported', 'single_source', 'conflict', 'unsupported'] as const
++
++/**
++ * The second-pass facts on a provenance stamp (EP-2-S6), read from the wire shape on their own so a stamp
++ * without them (the switch off, an older turn) yields nothing and renders as before. Counts must all be
++ * non-negative integers or none is shown: a half-read tally would understate what was unsupported.
++ */
++export function researchPassFacts(value: unknown): ResearchPassFacts | undefined {
++  if (!value || typeof value !== 'object') return undefined
++  const record = value as Record<string, unknown>
++  const passes = record.passes
++  if (typeof passes !== 'number' || !Number.isInteger(passes) || passes < 1) return undefined
++  const rawCounts = record.claims_by_status
++  let claims: ClaimCounts | undefined
++  if (rawCounts && typeof rawCounts === 'object') {
++    const counts = rawCounts as Record<string, unknown>
++    const valid = CLAIM_STATUSES.every((status) => {
++      const count = counts[status]
++      return typeof count === 'number' && Number.isInteger(count) && count >= 0
++    })
++    if (valid) {
++      claims = {
++        supported: counts.supported as number,
++        single_source: counts.single_source as number,
++        conflict: counts.conflict as number,
++        unsupported: counts.unsupported as number,
++      }
++    }
++  }
++  const secondPassNumbers = (Array.isArray(record.sources) ? record.sources : []).flatMap((entry) => {
++    const source = entry && typeof entry === 'object' ? (entry as Record<string, unknown>) : undefined
++    return source?.pass === 2 && typeof source.number === 'number' ? [source.number] : []
++  })
++  return { passes, claims, secondPassNumbers }
++}
++
+ /**
+  * The provenance stamp under a research report's artifact card (EP-2-S4): what the report was built from, the
+  * coverage it reached and the model that wrote it. Takes the stamp as it arrived, live or from a stored turn, and
+@@ -13,6 +62,7 @@ import { isSafeLinkHref } from '../lib/safe-href'
+ export function ArtifactProvenance(props: { provenance: unknown }) {
+   const i18n = useI18n()
+   const stamp = createMemo(() => parseResearchProvenance(props.provenance))
++  const passFacts = createMemo(() => researchPassFacts(props.provenance))
+   const when = (iso: string) => formatMoment(iso, i18n.locale())
+   return (
+     <Show when={stamp()}>
+@@ -29,6 +79,25 @@ export function ArtifactProvenance(props: { provenance: unknown }) {
+               {i18n.tr('Tiden gikk ut før alle kildene var lest.', 'Time ran out before every source was read.')}
+             </p>
+           </Show>
++          <Show when={passFacts()}>
++            {(facts) => (
++              <p class="verevon-chat-artifact-provenance__passes">
++                {facts().passes > 1
++                  ? i18n.tr('To runder: hull i kildene ble søkt opp på nytt.', 'Two passes: gaps in the sources were searched again.')
++                  : i18n.tr('Én runde.', 'One pass.')}
++              </p>
++            )}
++          </Show>
++          <Show when={passFacts()?.claims}>
++            {(claims) => (
++              <p class="verevon-chat-artifact-provenance__claims">
++                {i18n.tr(
++                  `Påstander: ${claims().supported} støttet · ${claims().single_source} fra én kilde · ${claims().conflict} motstridende · ${claims().unsupported} ikke verifisert`,
++                  `Claims: ${claims().supported} supported · ${claims().single_source} single-source · ${claims().conflict} conflicting · ${claims().unsupported} not verified`,
++                )}
++              </p>
++            )}
++          </Show>
+           <details class="verevon-chat-artifact-provenance__details">
+             <summary>{i18n.tr('Spørsmål, delspørsmål og kilder', 'Question, sub-queries and sources')}</summary>
+             <p>{value().question}</p>
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx
+index 24a28423d..31e81f972 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx	
+@@ -1425,6 +1425,41 @@ describe('SourcesPanel cited passages (EP-2-S4)', () => {
+   })
+ })
+ 
++describe('SourcesPanel research passes (EP-2-S6)', () => {
++  const numbered = () => [
++    read({ id: 'dr-1', number: 1, url: 'https://one.no/a' }),
++    read({ id: 'dr-2', number: 2, url: 'https://two.no/a' }),
++    read({ id: 'dr-3', number: 3, url: 'https://three.no/a' }),
++    unread(),
++  ]
++
++  it('groups the read sources by the pass that read them, keeping the leads apart', () => {
++    const { container, unmount } = render(() => <SourcesPanel sources={numbered()} secondPassNumbers={[3]} />)
++    const passes = Array.from(container.querySelectorAll('.verevon-chat-source-pass'))
++    expect(passes.map((section) => section.getAttribute('data-pass'))).toEqual(['1', '2'])
++    expect(passes[0].querySelectorAll('.verevon-chat-source-card')).toHaveLength(2)
++    expect(passes[1].querySelectorAll('.verevon-chat-source-card')).toHaveLength(1)
++    expect(passes[1].textContent).toContain('Andre runde')
++    expect(passes[1].textContent).toContain('three.no')
++    // The running index carries on across the passes, and the unread lead stays in its own group.
++    expect(passes[1].querySelector('.verevon-chat-source-card__meta span')?.textContent).toBe('3')
++    expect(container.querySelectorAll('.verevon-chat-source-group--unread .verevon-chat-source-card')).toHaveLength(1)
++    unmount()
++  })
++
++  it('renders the flat list as before without a second pass', () => {
++    for (const secondPassNumbers of [undefined, [], [9]]) {
++      const { container, unmount } = render(() => (
++        <SourcesPanel sources={numbered()} secondPassNumbers={secondPassNumbers} />
++      ))
++      expect(container.querySelector('.verevon-chat-source-pass')).toBeNull()
++      expect(container.textContent).not.toContain('Første runde')
++      expect(container.querySelectorAll('.verevon-chat-source-card')).toHaveLength(4)
++      unmount()
++    }
++  })
++})
++
+ describe('ChatTabs Kilder badge', () => {
+   it('counts the sources that were read, not the leads that were only found', () => {
+     const { container, unmount } = render(() => (
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx
+index 1550089bf..e1b961ca6 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx	
+@@ -365,7 +365,15 @@ export function EmptyPanel(props: { icon: JSX.Element; title: string; subtitle:
+  * for a web-search or knowledge turn — the headings and the tally disappear and
+  * this renders exactly the flat list it always did.
+  */
+-export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null; sources: EvidenceSource[] }) {
++export function SourcesPanel(props: {
++  grounding?: ChatKnowledgeGrounding | null
++  sources: EvidenceSource[]
++  /**
++   * The `[n]` a gap-driven second research pass read (EP-2-S6), from the report's provenance stamp. When any
++   * read source carries one of them the read list is grouped by pass; otherwise it renders as before.
++   */
++  secondPassNumbers?: readonly number[]
++}) {
+   const i18n = useI18n()
+   // Connected-app items (WS23 S6) are the person's own mail, files and events, not web or knowledge
+   // evidence: they sit under their own heading, grouped by account, and stay out of the read tally.
+@@ -403,6 +411,39 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
+     (entry) => evidenceSourceGroupKey(entry.source),
+     (entry) => evidenceSourceGroupLabel(entry.source),
+   ))
++  // Pass grouping (EP-2-S6) sits inside the read section, above the domain grouping: a pass is the
++  // coarser fact (what the first search found versus what the gap search added), and each pass keeps
++  // its own domain groups and the running index computed above.
++  const secondPass = createMemo(() => new Set(props.secondPassNumbers ?? []))
++  const inSecondPass = (source: EvidenceSource) =>
++    source.kind === 'web' && source.number !== undefined && secondPass().has(source.number)
++  const passSplit = createMemo(() => readEntries().some((entry) => inSecondPass(entry.source)))
++  const readPassGroups = createMemo(() => [1, 2].map((pass) => ({
++    pass,
++    groups: groupBySourceGroupId<SourceEntry>(
++      readEntries().filter((entry) => inSecondPass(entry.source) === (pass === 2)),
++      (entry) => evidenceSourceGroupKey(entry.source),
++      (entry) => evidenceSourceGroupLabel(entry.source),
++    ),
++  })).filter((section) => section.groups.length > 0))
++  const renderReadGroups = (groups: () => ReturnType<typeof readGroups>) => (
++    <For each={groups()}>
++      {(group) => (
++        <section class="verevon-chat-source-domain-group">
++          <Show when={groups().length > 1}>
++            <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
++          </Show>
++          <For each={group.items}>
++            {(entry) => (
++              entry.source.kind === 'knowledge'
++                ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
++                : <WebSourceCard source={entry.source} index={entry.index} />
++            )}
++          </For>
++        </section>
++      )}
++    </For>
++  )
+   return (
+     <Show
+       when={props.sources.length > 0 || props.grounding}
+@@ -451,22 +492,20 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
+           <Show when={hasUnread() && groups().read.length > 0}>
+             <h2 class="verevon-chat-source-group__heading">{i18n.tr('Lest og brukt', 'Read and used')}</h2>
+           </Show>
+-          <For each={readGroups()}>
+-            {(group) => (
+-              <section class="verevon-chat-source-domain-group">
+-                <Show when={readGroups().length > 1}>
+-                  <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+-                </Show>
+-                <For each={group.items}>
+-                  {(entry) => (
+-                    entry.source.kind === 'knowledge'
+-                      ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+-                      : <WebSourceCard source={entry.source} index={entry.index} />
+-                  )}
+-                </For>
+-              </section>
+-            )}
+-          </For>
++          <Show when={passSplit()} fallback={renderReadGroups(readGroups)}>
++            <For each={readPassGroups()}>
++              {(section) => (
++                <section class="verevon-chat-source-pass" data-pass={section.pass}>
++                  <h2 class="verevon-chat-source-group__heading">
++                    {section.pass === 1
++                      ? i18n.tr('Første runde', 'First pass')
++                      : i18n.tr('Andre runde: hull i kildene', 'Second pass: gaps in the sources')}
++                  </h2>
++                  {renderReadGroups(() => section.groups)}
++                </section>
++              )}
++            </For>
++          </Show>
+           <Show when={hasUnread()}>
+             <section class="verevon-chat-source-group verevon-chat-source-group--unread">
+               <h2 class="verevon-chat-source-group__heading">{i18n.tr('Ikke lest', 'Not read')}</h2>
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs b/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs
+index e0887295d..b1c56a70f 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs	
+@@ -12,6 +12,8 @@
+ //! plan      one cheap non-streaming inference → up to 9 distinct sub-queries
+ //! search    every sub-query CONCURRENTLY via web_search, deduped by URL
+ //! read      the most promising pages CONCURRENTLY via fetch_url, capped
++//! ledger    (DEEP_RESEARCH_SECOND_PASS) one plan-tier claim check, then up
++//!           to 4 gap queries searched and read inside the budget left
+ //! synth     one inference over the read passages → report with inline [n]
+ //! emit      citation per source + the report as a `document` artifact
+ //! ```
+@@ -1544,6 +1546,10 @@ pub fn bounded_extract(text: &str, cap: usize) -> String {
+ /// gains a stated reason, so it degrades to "found, not read" instead of being
+ /// silently citable with no text behind it.
+ ///
++/// Sources numbered by an earlier call keep their numbers and their share of the budget: a second
++/// research pass numbers its pages after the first pass's, so a `[n]` already streamed never moves
++/// (EP-2-S6). On a first call nothing is numbered yet and the walk starts at 1 with an empty budget.
++///
+ /// Returns the number of sources dropped by the corpus budget.
+ pub fn number_and_bound(
+     sources: &mut [ResearchSource],
+@@ -1552,9 +1558,16 @@ pub fn number_and_bound(
+ ) -> usize {
+     let mut used = 0usize;
+     let mut next_number = 1usize;
++    for source in sources.iter().filter(|source| source.is_read()) {
++        used = used.saturating_add(source.extract.as_deref().map_or(0, |text| text.chars().count()));
++        next_number = next_number.max(source.number.unwrap_or_default().saturating_add(1));
++    }
+     let mut dropped = 0usize;
+ 
+     for &index in order {
++        if sources[index].number.is_some() {
++            continue;
++        }
+         let Some(extract) = sources[index].extract.clone() else {
+             continue;
+         };
+@@ -2047,6 +2060,21 @@ pub struct ResearchProvenance {
+     /// RFC 3339, UTC, to the second.
+     pub generated_at: String,
+     pub pipeline: &'static str,
++    /// Research passes that ran (EP-2-S6). Only with the second pass on; `None` writes no key.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub passes: Option<u8>,
++    /// sha256 of the canonical `research_ledger` JSON (EP-2-S6), so the stamp names the ledger the
++    /// report was written against. `None` writes no key.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub ledger_digest: Option<String>,
++    /// Ledger claims per status (EP-2-S6), for the report footer. `None` writes no key.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub claims_by_status: Option<std::collections::BTreeMap<&'static str, usize>>,
++    /// The closed `research_ledger` v1 itself (EP-2-S6, D2). It rides the stamp so it is stored
++    /// exactly where the stamp is: never on a ZDR or waived turn (D12), erased with the message,
++    /// never indexed or fed to memory. `None` writes no key.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub research_ledger: Option<ResearchLedger>,
+ }
+ 
+ /// One source a report was built from, by the `[n]` the report cites it as.
+@@ -2055,6 +2083,10 @@ pub struct ProvenanceSource {
+     pub number: u32,
+     pub url: String,
+     pub title: String,
++    /// The research pass that read it (EP-2-S6), so the Sources tab can group by pass. Only on a
++    /// stamp from a run with the second pass on; `None` writes no key.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub pass: Option<u8>,
+ }
+ 
+ /// The coverage a report reached, the same counts its coverage line states.
+@@ -2090,6 +2122,7 @@ impl ResearchProvenance {
+                         number: u32::try_from(source.number?).ok()?,
+                         url: source.url.clone(),
+                         title: source.title.clone(),
++                        pass: None,
+                     })
+                 })
+                 .collect(),
+@@ -2102,7 +2135,28 @@ impl ResearchProvenance {
+             },
+             generated_at: generated_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+             pipeline: PROVENANCE_PIPELINE,
++            passes: None,
++            ledger_digest: None,
++            claims_by_status: None,
++            research_ledger: None,
++        }
++    }
++
++    /// The stamp with the second pass's facts (EP-2-S6): how many passes ran, which pass read each
++    /// source (`second_pass_numbers` are the `[n]` the gap reads earned), and the ledger with its
++    /// digest and counts when there is one.
++    #[must_use]
++    pub fn with_second_pass(mut self, pass: &SecondPass, second_pass_numbers: &BTreeSet<u32>) -> Self {
++        self.passes = Some(pass.passes());
++        for source in &mut self.sources {
++            source.pass = Some(if second_pass_numbers.contains(&source.number) { 2 } else { 1 });
+         }
++        if let Some(ledger) = &pass.ledger {
++            self.ledger_digest = Some(ledger.digest());
++            self.claims_by_status = Some(ledger.claims_by_status());
++            self.research_ledger = Some(ledger.clone());
++        }
++        self
+     }
+ 
+     /// A filled stamp for shape tests (the payload golden's full artifact sample).
+@@ -2116,13 +2170,42 @@ impl ResearchProvenance {
+                 number: 1,
+                 url: "https://example.test/a".to_owned(),
+                 title: "A".to_owned(),
++                pass: None,
+             }],
+             model: "model".to_owned(),
+             coverage: ProvenanceCoverage { found: 2, read: 1, unread: 1, deadline_hit: false },
+             generated_at: "2026-11-04T00:00:00Z".to_owned(),
+             pipeline: PROVENANCE_PIPELINE,
++            passes: None,
++            ledger_digest: None,
++            claims_by_status: None,
++            research_ledger: None,
+         }
+     }
++
++    /// [`Self::sample`] as a two-pass run with a one-claim ledger, for the persistence tests.
++    #[cfg(test)]
++    #[must_use]
++    pub fn sample_with_ledger() -> Self {
++        let pass = SecondPass {
++            ledger: Some(ResearchLedger {
++                version: LEDGER_VERSION,
++                claims: vec![LedgerClaim {
++                    id: "c1".to_owned(),
++                    text: "claim".to_owned(),
++                    status: ClaimStatus::SingleSource,
++                    sources: vec![1],
++                }],
++                gaps: vec!["gap query".to_owned()],
++                pass_count: 2,
++            }),
++            gap_queries: vec!["gap query".to_owned()],
++            pages_read: 0,
++            skipped: None,
++            cut_short: false,
++        };
++        Self::sample().with_second_pass(&pass, &BTreeSet::new())
++    }
+ }
+ 
+ /// Attach a provenance stamp to a report's artifact frame. Any other event is left as it is.
+@@ -2335,6 +2418,669 @@ pub fn no_evidence_context_message(question: &str, coverage: &Coverage, detail:
+     )
+ }
+ 
++// ---------------------------------------------------------------------------
++// Phase 3b — claim ledger and gap-driven second pass (EP-2-S6, pure parts)
++// ---------------------------------------------------------------------------
++
++/// Environment switch for the claim ledger and the gap-driven second pass. Off, the pipeline is
++/// the one-pass pipeline above: no ledger inference, no gap search, and every frame, prompt and
++/// receipt is the one sent before.
++pub const SECOND_PASS_ENV: &str = "DEEP_RESEARCH_SECOND_PASS";
++
++/// Whether the second pass is switched on in this process.
++#[must_use]
++pub fn second_pass_enabled() -> bool {
++    parse_second_pass(std::env::var(SECOND_PASS_ENV).ok().as_deref())
++}
++
++/// Only the literal `true` enables; `1`, `on` and anything else stay off.
++#[must_use]
++pub fn parse_second_pass(raw: Option<&str>) -> bool {
++    raw.map(str::trim) == Some("true")
++}
++
++/// The ledger schema version this gateway writes and accepts (D2). A ledger that names another
++/// version is not read, because its statuses may not mean what ours do.
++pub const LEDGER_VERSION: u32 = 1;
++/// Most claims one ledger holds (D2). Past this the ledger is a second report, not an index of
++/// the first one's claims.
++pub const MAX_LEDGER_CLAIMS: usize = 24;
++/// Longest claim text kept (D2), cut on a char boundary.
++pub const MAX_CLAIM_CHARS: usize = 300;
++/// Most gap queries one second pass searches (D2). Each is one more Quarry search.
++pub const MAX_GAP_QUERIES: usize = 4;
++/// Characters of each read page the ledger inference sees. The ledger only has to say which
++/// numbered page states a claim, so it reads the head of each page rather than the whole corpus
++/// the report is written from: a plan-tier call over 80k characters would cost what the report
++/// does.
++const LEDGER_EXTRACT_CHARS: usize = 2_000;
++/// Hard ceiling on one ledger inference. Longer than [`PLAN_TIMEOUT`]: the answer is up to 24
++/// claims of JSON from the same reasoning tier, not a handful of search phrases.
++const LEDGER_TIMEOUT: Duration = Duration::from_secs(30);
++/// Output budget for one ledger: 24 claims of up to 300 characters plus the reasoning tokens the
++/// plan tier bills against the same ceiling (see [`PLAN_MAX_TOKENS`]).
++const LEDGER_MAX_TOKENS: i32 = 6_144;
++/// One gap search round: the queries run concurrently, so the round costs one Quarry edge
++/// timeout, as the first search phase does in [`DEFAULT_WALL_CLOCK_SECS`].
++const GAP_SEARCH_ROOM: Duration = Duration::from_secs(30);
++/// One gap read batch: a concurrent batch costs its slowest page, one plain-fetch timeout.
++const GAP_READ_ROOM: Duration = Duration::from_secs(30);
++/// How long before the delegated bearer expires the second pass stops counting on it (D11). The
++/// synthesis call carries the same bearer, so a pass that ends at `exp` leaves a report that
++/// cannot authenticate.
++const BEARER_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
++
++/// Step ids for the second pass. Stable strings like the first pass's.
++const STEP_GAPS: &str = "deep-research-gaps";
++const STEP_PASS2: &str = "deep-research-pass2";
++/// Step titles for the second pass's two rows.
++const GAPS_TITLE: &str = "Sjekker påstander";
++const PASS2_TITLE: &str = "Andre runde";
++
++/// How well the read pages support one claim (D2). The wire tokens are the stored schema.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ClaimStatus {
++    /// Two or more read pages state it and none contradicts it.
++    Supported,
++    /// Exactly one read page states it.
++    SingleSource,
++    /// Read pages disagree about it.
++    Conflict,
++    /// The question needs it and no read page states it.
++    Unsupported,
++}
++
++impl ClaimStatus {
++    /// The stored token, which is also the receipt's count key.
++    #[must_use]
++    pub fn code(self) -> &'static str {
++        match self {
++            Self::Supported => "supported",
++            Self::SingleSource => "single_source",
++            Self::Conflict => "conflict",
++            Self::Unsupported => "unsupported",
++        }
++    }
++
++    /// The status for a token, or `None` for anything outside the closed set: an unknown status
++    /// rejects its claim rather than being guessed into one of ours.
++    fn from_code(code: &str) -> Option<Self> {
++        match code.trim() {
++            "supported" => Some(Self::Supported),
++            "single_source" => Some(Self::SingleSource),
++            "conflict" => Some(Self::Conflict),
++            "unsupported" => Some(Self::Unsupported),
++            _ => None,
++        }
++    }
++}
++
++/// One claim the ledger tracks (D2).
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++pub struct LedgerClaim {
++    /// Server-assigned `c1..`: a model-chosen id is never stored.
++    pub id: String,
++    pub text: String,
++    pub status: ClaimStatus,
++    /// The `[n]` numbers of read pages the claim rests on; only numbers the report can cite.
++    pub sources: Vec<u32>,
++}
++
++/// The closed `research_ledger` v1 (D2): which claims the read pages support, and which gaps a
++/// second pass searched for. Model-labelled, so it only routes claims to the hedged section of the
++/// report; it never removes evidence. Rides the report's provenance stamp and so is stored only
++/// where the stamp is (never on a ZDR or waived turn, D12) and erased with the message.
++#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
++pub struct ResearchLedger {
++    pub version: u32,
++    pub claims: Vec<LedgerClaim>,
++    /// Gap queries, already re-clamped.
++    pub gaps: Vec<String>,
++    /// Research passes whose pages the ledger was labelled over.
++    pub pass_count: u8,
++}
++
++impl ResearchLedger {
++    /// Claims per status, for the receipt and the report footer. Every status is listed, a zero
++    /// included, so a reader can tell "none unsupported" from "not counted".
++    #[must_use]
++    pub fn claims_by_status(&self) -> std::collections::BTreeMap<&'static str, usize> {
++        let mut counts: std::collections::BTreeMap<&'static str, usize> = [
++            ClaimStatus::Supported,
++            ClaimStatus::SingleSource,
++            ClaimStatus::Conflict,
++            ClaimStatus::Unsupported,
++        ]
++        .into_iter()
++        .map(|status| (status.code(), 0))
++        .collect();
++        for claim in &self.claims {
++            *counts.entry(claim.status.code()).or_insert(0) += 1;
++        }
++        counts
++    }
++
++    /// True when some claim is less than supported: the trigger for a gap search besides a short
++    /// read phase.
++    #[must_use]
++    pub fn has_weak_claims(&self) -> bool {
++        self.claims
++            .iter()
++            .any(|claim| claim.status != ClaimStatus::Supported)
++    }
++
++    /// sha256 (hex) of the ledger's JSON. The struct fixes the key order, so the same ledger always
++    /// has the same digest, and the stamp can name the ledger it was built with.
++    #[must_use]
++    pub fn digest(&self) -> String {
++        use sha2::Digest as _;
++        let canonical = serde_json::to_string(self).unwrap_or_default();
++        sha2::Sha256::digest(canonical.as_bytes())
++            .iter()
++            .fold(String::with_capacity(64), |mut hex, byte| {
++                let _ = write!(hex, "{byte:02x}");
++                hex
++            })
++    }
++}
++
++/// Parse the ledger inference's answer against the closed v1 schema.
++///
++/// `None` when the answer is not a JSON object naming version 1: the pass then runs without a
++/// ledger rather than on a guessed one. Inside a readable ledger the server, not the model, has the
++/// last word: ids are reassigned, text is whitespace-collapsed and cut to [`MAX_CLAIM_CHARS`], a
++/// claim with an unknown status or no text is dropped, a source number the report cannot cite is
++/// dropped, and a status the remaining sources cannot carry is lowered (`supported` on one page is
++/// `single_source`; any claim on no readable page is `unsupported`). Claims cap at
++/// [`MAX_LEDGER_CLAIMS`], gaps are re-clamped by [`gap_queries`] against `plan`.
++#[must_use]
++pub fn parse_research_ledger(
++    raw: &str,
++    readable: &BTreeSet<u32>,
++    plan: &[String],
++) -> Option<ResearchLedger> {
++    let value: Value = serde_json::from_str(&strip_code_fence(raw)).ok()?;
++    let object = value.as_object()?;
++    if object.get("version").and_then(Value::as_u64) != Some(u64::from(LEDGER_VERSION)) {
++        return None;
++    }
++    let mut claims: Vec<LedgerClaim> = Vec::new();
++    for entry in object
++        .get("claims")
++        .and_then(Value::as_array)
++        .map(Vec::as_slice)
++        .unwrap_or_default()
++    {
++        if claims.len() >= MAX_LEDGER_CLAIMS {
++            break;
++        }
++        let Some(status) = entry
++            .get("status")
++            .and_then(Value::as_str)
++            .and_then(ClaimStatus::from_code)
++        else {
++            continue;
++        };
++        let collapsed = entry
++            .get("text")
++            .and_then(Value::as_str)
++            .unwrap_or_default()
++            .split_whitespace()
++            .collect::<Vec<_>>()
++            .join(" ");
++        if collapsed.is_empty() {
++            continue;
++        }
++        let mut sources: Vec<u32> = entry
++            .get("sources")
++            .and_then(Value::as_array)
++            .map(Vec::as_slice)
++            .unwrap_or_default()
++            .iter()
++            .filter_map(Value::as_u64)
++            .filter_map(|number| u32::try_from(number).ok())
++            .filter(|number| readable.contains(number))
++            .collect();
++        sources.sort_unstable();
++        sources.dedup();
++        let status = match (status, sources.len()) {
++            (_, 0) => ClaimStatus::Unsupported,
++            (ClaimStatus::Supported, 1) => ClaimStatus::SingleSource,
++            (status, _) => status,
++        };
++        claims.push(LedgerClaim {
++            id: format!("c{}", claims.len() + 1),
++            text: collapsed.chars().take(MAX_CLAIM_CHARS).collect(),
++            status,
++            sources,
++        });
++    }
++    let gaps: Vec<String> = object
++        .get("gaps")
++        .and_then(Value::as_array)
++        .map(Vec::as_slice)
++        .unwrap_or_default()
++        .iter()
++        .filter_map(Value::as_str)
++        .map(str::to_owned)
++        .collect();
++    Some(ResearchLedger {
++        version: LEDGER_VERSION,
++        claims,
++        gaps: gap_queries(&gaps, plan),
++        pass_count: 1,
++    })
++}
++
++/// Re-clamp the ledger's gap queries the way a plan is clamped: normalized, plausible, distinct
++/// from each other and from every sub-query already searched (case-insensitively), at most
++/// [`MAX_GAP_QUERIES`]. A gap that repeats a planned query would pay a search for results the
++/// first pass already holds.
++#[must_use]
++pub fn gap_queries(raw: &[String], plan: &[String]) -> Vec<String> {
++    let mut seen: BTreeSet<String> = plan
++        .iter()
++        .map(|query| normalize_sub_query(query).to_lowercase())
++        .collect();
++    let mut gaps: Vec<String> = Vec::new();
++    for candidate in raw {
++        if gaps.len() >= MAX_GAP_QUERIES {
++            break;
++        }
++        let normalized = normalize_sub_query(candidate);
++        if normalized.is_empty() || !is_plausible_query(&normalized) {
++            continue;
++        }
++        if seen.insert(normalized.to_lowercase()) {
++            gaps.push(normalized);
++        }
++    }
++    gaps
++}
++
++/// The ledger instruction: the numbered pages, each cut to [`LEDGER_EXTRACT_CHARS`], and the
++/// closed answer shape. The page text was screened when it was fetched, as it was for synthesis.
++#[must_use]
++pub fn ledger_prompt(question: &str, sources: &[ResearchSource]) -> String {
++    let mut prompt = String::with_capacity(4_096);
++    let _ = write!(
++        prompt,
++        "You are auditing the evidence for a research question. Below are numbered extracts of \
++         the pages that were read. List the factual claims a report answering the question would \
++         make ({MAX_LEDGER_CLAIMS} at most), each with the numbers of the extracts that state it \
++         and one status:\n\
++         - \"supported\": two or more extracts state it and none contradicts it\n\
++         - \"single_source\": exactly one extract states it\n\
++         - \"conflict\": extracts disagree about it (list every extract involved)\n\
++         - \"unsupported\": the question needs it but no extract states it\n\
++         Then list at most {MAX_GAP_QUERIES} short web-search queries that would settle the most \
++         important unsupported, single-source or conflicting claims. A query is a search phrase, \
++         not a sentence, and never a URL.\n\n\
++         Answer with ONLY this JSON object, no prose and no code fence:\n\
++         {{\"version\":{LEDGER_VERSION},\"claims\":[{{\"id\":\"c1\",\"text\":\"...\",\
++         \"status\":\"supported\",\"sources\":[1,2]}}],\"gaps\":[\"...\"]}}\n\n"
++    );
++    let _ = writeln!(prompt, "QUESTION: {}\n", question.trim());
++    prompt.push_str("EXTRACTS:\n\n");
++    let mut numbered: Vec<&ResearchSource> = sources.iter().filter(|s| s.is_read()).collect();
++    numbered.sort_by_key(|source| source.number.unwrap_or(usize::MAX));
++    for source in numbered {
++        let _ = writeln!(
++            prompt,
++            "[{}] {} — {}",
++            source.number.unwrap_or_default(),
++            source.title,
++            source.url
++        );
++        let _ = writeln!(
++            prompt,
++            "{}\n",
++            bounded_extract(
++                source.extract.as_deref().unwrap_or_default(),
++                LEDGER_EXTRACT_CHARS
++            )
++        );
++    }
++    prompt
++}
++
++/// The citation numbers the report can cite, which are the only numbers a ledger may name.
++#[must_use]
++pub fn readable_numbers(sources: &[ResearchSource]) -> BTreeSet<u32> {
++    sources
++        .iter()
++        .filter(|source| source.is_read())
++        .filter_map(|source| u32::try_from(source.number?).ok())
++        .collect()
++}
++
++/// Why a second pass did not search, as a stated fact for the coverage line and the receipt.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum SecondPassSkip {
++    /// The wall clock leaves no room for a ledger, a search round, a read batch and synthesis.
++    Deadline,
++    /// The delegated bearer expires before that work and synthesis could finish (D11).
++    BearerWindow,
++    /// The ledger inference failed or answered outside the schema.
++    LedgerUnavailable,
++    /// The read target was met and every claim is supported: nothing to look for.
++    NotNeeded,
++    /// The ledger named no usable gap query.
++    NoGaps,
++    /// The first pass spent the page target or the fetch-attempt ceiling.
++    BudgetSpent,
++}
++
++impl SecondPassSkip {
++    /// Stable token for the receipt and the bound log.
++    #[must_use]
++    pub fn code(self) -> &'static str {
++        match self {
++            Self::Deadline => "deadline",
++            Self::BearerWindow => "bearer-window",
++            Self::LedgerUnavailable => "ledger-unavailable",
++            Self::NotNeeded => "not-needed",
++            Self::NoGaps => "no-gaps",
++            Self::BudgetSpent => "budget-spent",
++        }
++    }
++
++    /// The same fact for the Work tab's step row, in the product's language.
++    fn detail(self) -> &'static str {
++        match self {
++            Self::Deadline => "Hoppet over: for lite tid igjen til en ny runde og rapporten.",
++            Self::BearerWindow => "Hoppet over: tilgangen utløper før en ny runde og rapporten.",
++            Self::LedgerUnavailable => "Påstandssjekken ga ikke noe brukbart svar.",
++            Self::NotNeeded => "Ingen ny runde trengs: alle påstander er støttet.",
++            Self::NoGaps => "Ingen hull å søke etter.",
++            Self::BudgetSpent => "Ingen ny runde: side- eller hentebudsjettet er brukt opp.",
++        }
++    }
++
++    /// The same fact as a clause for the coverage line.
++    fn reason(self) -> &'static str {
++        match self {
++            Self::Deadline => "the research time budget had no room left for it",
++            Self::BearerWindow => {
++                "the request's credential would have expired before it and the report could finish"
++            }
++            Self::LedgerUnavailable => "the claim check could not be produced",
++            Self::NotNeeded => "the first pass met its read target and every claim was supported",
++            Self::NoGaps => "the claim check named no gap worth searching",
++            Self::BudgetSpent => "the first pass had spent the page or fetch-attempt budget",
++        }
++    }
++}
++
++/// What the second pass did, for the synthesis prompt, the receipt and the stamp.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SecondPass {
++    /// The ledger the report is written against: re-labelled over both passes when there was time,
++    /// otherwise the first pass's. `None` when no ledger could be produced.
++    pub ledger: Option<ResearchLedger>,
++    /// The gap queries searched; empty when the pass was skipped.
++    pub gap_queries: Vec<String>,
++    /// Pages the second pass read and the report can cite.
++    pub pages_read: usize,
++    /// Why no gap search ran; `None` when it did.
++    pub skipped: Option<SecondPassSkip>,
++    /// Whether the pass's own time bound cut the gap reads short.
++    pub cut_short: bool,
++}
++
++impl SecondPass {
++    /// Research passes that ran: 2 when a gap search ran, else 1.
++    #[must_use]
++    pub fn passes(&self) -> u8 {
++        if self.skipped.is_none() {
++            2
++        } else {
++            1
++        }
++    }
++
++    /// A pass that did nothing but say why: no ledger, no search.
++    #[must_use]
++    pub fn skipped(reason: SecondPassSkip, ledger: Option<ResearchLedger>) -> Self {
++        Self {
++            ledger,
++            gap_queries: Vec::new(),
++            pages_read: 0,
++            skipped: Some(reason),
++            cut_short: false,
++        }
++    }
++}
++
++/// The end of the window the second pass may work in, or why it may not start (D11).
++///
++/// The run must still finish synthesis before both the wall clock and the earliest delegated
++/// bearer `exp` (less [`BEARER_EXPIRY_MARGIN`]), so the pass ends [`SYNTHESIS_TIMEOUT`] before the
++/// earlier of the two, and starts only if a ledger inference, one search round and one read batch
++/// fit before that end. Mirrors execution-core's `RunDeadline`, which bounds a run by the same two
++/// clocks. A bearer whose expiry cannot be read bounds nothing here: the wall clock still does.
++///
++/// # Errors
++///
++/// The [`SecondPassSkip`] naming whichever clock left no room.
++pub fn second_pass_window(
++    now: Instant,
++    deadline: Instant,
++    bearer_expiry: Option<Instant>,
++) -> Result<Instant, SecondPassSkip> {
++    let bearer_limit =
++        bearer_expiry.map(|expiry| expiry.checked_sub(BEARER_EXPIRY_MARGIN).unwrap_or(now));
++    let (limit, skip) = match bearer_limit {
++        Some(limit) if limit < deadline => (limit, SecondPassSkip::BearerWindow),
++        _ => (deadline, SecondPassSkip::Deadline),
++    };
++    let work = LEDGER_TIMEOUT + GAP_SEARCH_ROOM + GAP_READ_ROOM;
++    match limit.checked_sub(SYNTHESIS_TIMEOUT) {
++        Some(end) if end >= now + work => Ok(end),
++        _ => Err(skip),
++    }
++}
++
++/// Whether a re-labelling ledger inference still fits before `pass_end`, the window end
++/// [`second_pass_window`] returned (which already leaves synthesis its own time).
++#[must_use]
++pub fn relabel_fits(now: Instant, pass_end: Instant) -> bool {
++    now + LEDGER_TIMEOUT <= pass_end
++}
++
++/// The `exp` claim of a JWT bearer, in Unix seconds. `None` for an opaque or unreadable bearer.
++/// The bearer was verified where the turn was admitted; this reads its expiry, nothing more.
++#[must_use]
++pub fn bearer_expiry_unix(bearer: &str) -> Option<i64> {
++    use base64::Engine as _;
++    let payload = bearer.trim().split('.').nth(1)?;
++    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
++        .decode(payload.trim_end_matches('='))
++        .ok()?;
++    serde_json::from_slice::<Value>(&bytes)
++        .ok()?
++        .get("exp")?
++        .as_i64()
++}
++
++/// The earliest expiry among `bearers`, as an `Instant` measured from `now` / `now_unix`.
++#[must_use]
++pub fn earliest_bearer_expiry(bearers: &[&str], now: Instant, now_unix: i64) -> Option<Instant> {
++    bearers
++        .iter()
++        .filter_map(|bearer| bearer_expiry_unix(bearer))
++        .min()
++        .map(|exp| {
++            now + Duration::from_secs(u64::try_from(exp.saturating_sub(now_unix)).unwrap_or(0))
++        })
++}
++
++/// Whether the ledger and the first pass call for a gap search: the read phase fell short, or a
++/// claim is less than supported. Ledger-free runs never search gaps, because without a ledger
++/// there is no gap list to search.
++#[must_use]
++pub fn second_pass_needed(coverage: &Coverage, ledger: &ResearchLedger) -> bool {
++    let short = coverage.read < coverage.page_target && shortfall_reason(coverage).is_some();
++    short || ledger.has_weak_claims()
++}
++
++/// The page target and fetch attempts the second pass may still spend: what the first pass left
++/// of the run's own budgets, never more. The two passes together therefore stay inside
++/// [`max_pages`] and [`read_attempt_budget`].
++#[must_use]
++pub fn second_pass_budget(
++    first: ReadProgress,
++    page_target: usize,
++    attempt_budget: usize,
++) -> (usize, usize) {
++    (
++        page_target.saturating_sub(first.succeeded),
++        attempt_budget.saturating_sub(first.attempted),
++    )
++}
++
++/// The coverage facts after a second pass: the first pass's, with the gap queries counted as
++/// planned sub-queries, the new sources as found, and the read and unread counts taken from the
++/// finished source set.
++#[allow(clippy::too_many_arguments)] // one fact each, from two phases
++#[must_use]
++pub fn merge_second_pass_coverage(
++    first: &Coverage,
++    sources: &[ResearchSource],
++    gap_count: usize,
++    gap_with_results: usize,
++    gap_search_failures: usize,
++    gap_gate: GateReport,
++    gap_halt: Option<ReadHalt>,
++    gap_dropped_for_budget: usize,
++) -> Coverage {
++    let read = sources.iter().filter(|source| source.is_read()).count();
++    Coverage {
++        planned: first.planned.saturating_add(gap_count),
++        with_results: first.with_results.saturating_add(gap_with_results),
++        search_failures: first.search_failures.saturating_add(gap_search_failures),
++        found: sources.len(),
++        filtered: first.filtered.saturating_add(gap_gate.filtered),
++        relevance_fallback: first.relevance_fallback,
++        read,
++        unread: sources.len().saturating_sub(read),
++        page_target: first.page_target,
++        halt: gap_halt.or(first.halt),
++        deadline_hit: first.deadline_hit,
++        corpus_exhausted: first.corpus_exhausted || gap_dropped_for_budget > 0,
++    }
++}
++
++/// The second pass as one sentence for the coverage line, so the report says whether a gap
++/// search ran and, when it did not, why.
++#[must_use]
++pub fn second_pass_statement(pass: &SecondPass) -> String {
++    match pass.skipped {
++        Some(skip) => format!(
++            "No gap-driven second research pass ran, because {}.",
++            skip.reason()
++        ),
++        None => {
++            let mut statement = format!(
++                "A gap-driven second research pass searched {} gap quer{} and read {} more \
++                 page(s)",
++                pass.gap_queries.len(),
++                if pass.gap_queries.len() == 1 { "y" } else { "ies" },
++                pass.pages_read
++            );
++            if pass.cut_short {
++                statement.push_str(", stopping early to leave time for the report");
++            }
++            statement.push('.');
++            statement
++        }
++    }
++}
++
++/// The synthesis prompt with the second pass's facts and the claim ledger (EP-2-S6).
++///
++/// `None` is exactly [`synthesis_prompt`]. With a pass, the coverage line gains the pass sentence
++/// and the prompt gains the ledger and the rule that sends an unsupported claim to `## Kunne ikke
++/// verifiseres`. The ledger routes claims; it never licenses dropping a numbered source.
++#[must_use]
++pub fn synthesis_prompt_with_ledger(
++    question: &str,
++    sources: &[ResearchSource],
++    coverage: &Coverage,
++    pass: Option<&SecondPass>,
++) -> String {
++    let mut prompt = synthesis_prompt(question, sources, coverage);
++    let Some(pass) = pass else {
++        return prompt;
++    };
++    let _ = writeln!(prompt, "\nSECOND PASS: {}", second_pass_statement(pass));
++    if let Some(ledger) = &pass.ledger {
++        if !ledger.claims.is_empty() {
++            prompt.push_str(
++                "\nCLAIM LEDGER (a separate check of which numbered sources state each claim):\n",
++            );
++            for claim in &ledger.claims {
++                let numbers = claim
++                    .sources
++                    .iter()
++                    .map(|number| format!("[{number}]"))
++                    .collect::<Vec<_>>()
++                    .join("");
++                let _ = writeln!(
++                    prompt,
++                    "- {} ({}){}{}",
++                    claim.text,
++                    claim.status.code(),
++                    if numbers.is_empty() { "" } else { " " },
++                    numbers
++                );
++            }
++        }
++        prompt.push_str(
++            "\nLedger rules:\n\
++             - A claim marked unsupported goes under `## Kunne ikke verifiseres`, never under \
++             `## Funn`, and is stated as not verified.\n\
++             - A single_source claim says it rests on one source.\n\
++             - A conflict claim states each side with its own [n].\n\
++             - The ledger only decides where a claim goes. Never drop a numbered source or its \
++             evidence because of it.\n",
++        );
++    }
++    prompt
++}
++
++/// [`research_receipt`] with the second pass's counts (EP-2-S6): `passes`, the `gap_queries`
++/// searched and `claims_by_status`. `None` is exactly [`research_receipt`].
++#[must_use]
++pub fn research_receipt_with_second_pass(
++    plan: &[String],
++    coverage: &Coverage,
++    report_chars: usize,
++    sources: &[ResearchSource],
++    pass: Option<&SecondPass>,
++) -> Value {
++    let mut receipt = research_receipt(plan, coverage, report_chars, sources);
++    let Some(pass) = pass else {
++        return receipt;
++    };
++    if let Some(object) = receipt.as_object_mut() {
++        object.insert("passes".to_owned(), serde_json::json!(pass.passes()));
++        object.insert("gap_queries".to_owned(), serde_json::json!(pass.gap_queries));
++        object.insert(
++            "second_pass_skipped".to_owned(),
++            serde_json::json!(pass.skipped.map(SecondPassSkip::code)),
++        );
++        object.insert(
++            "claims_by_status".to_owned(),
++            pass.ledger.as_ref().map_or(Value::Null, |ledger| {
++                serde_json::json!(ledger.claims_by_status())
++            }),
++        );
++    }
++    receipt
++}
++
+ // ---------------------------------------------------------------------------
+ // Pipeline
+ // ---------------------------------------------------------------------------
+@@ -2938,6 +3684,48 @@ pub async fn run_deep_research(
+         )
+         .await;
+ 
++    // ---- Phase 3b: claim ledger and gap-driven second pass (EP-2-S6) ----
++    // Before the citations, so a page the gap reads earn is numbered after the first pass's and
++    // every `[n]` streams once. Off, or with nothing read, every later phase sees the first pass
++    // exactly as before.
++    let mut second_pass: Option<SecondPass> = None;
++    let mut second_pass_numbers: BTreeSet<u32> = BTreeSet::new();
++    let coverage = if second_pass_enabled() && coverage.read > 0 {
++        let context = PassContext {
++            state,
++            request_id,
++            run_id,
++            org_id,
++            user_id,
++            thread_id,
++            inference_bearer,
++            session_bearer,
++            zdr,
++            min_privacy_tier,
++            question,
++            cancel,
++            deadline,
++        };
++        let budget = PassBudget {
++            first: progress,
++            page_target,
++            attempt_budget,
++            corpus_cap,
++        };
++        let Some(run) =
++            run_second_pass(&context, &mut events, &plan, &mut sources, budget, &coverage).await?
++        else {
++            return Ok(cancelled_outcome(events, base_messages));
++        };
++        tool_successes = tool_successes.saturating_add(run.tool_successes);
++        tool_failures = tool_failures.saturating_add(run.tool_failures);
++        second_pass_numbers = run.second_pass_numbers;
++        second_pass = Some(run.pass);
++        run.coverage
++    } else {
++        coverage
++    };
++
+     // ---- Phase 4: citations ---------------------------------------------
+     // Emitted before synthesis so the Kilder tab fills while the report is
+     // still being written, rather than everything landing at once at the end.
+@@ -3001,7 +3789,7 @@ pub async fn run_deep_research(
+             "active",
+         )
+         .await;
+-    let prompt = synthesis_prompt(question, &sources, &coverage);
++    let prompt = synthesis_prompt_with_ledger(question, &sources, &coverage, second_pass.as_ref());
+     let synthesized = guarded(
+         cancel,
+         deadline,
+@@ -3046,17 +3834,23 @@ pub async fn run_deep_research(
+                 text,
+                 version,
+             );
+-            if passages {
++            // A second-pass run stamps its report even with passages off: the stamp is where the
++            // ledger rides, and so where it is stored or, on a ZDR or waived turn, stripped (D12).
++            if passages || second_pass.is_some() {
++                let stamp = ResearchProvenance::build(
++                    question,
++                    &plan,
++                    &sources,
++                    resolved_model.as_deref().unwrap_or(model),
++                    &coverage,
++                    chrono::Utc::now(),
++                );
+                 stamp_provenance(
+                     &mut artifact,
+-                    ResearchProvenance::build(
+-                        question,
+-                        &plan,
+-                        &sources,
+-                        resolved_model.as_deref().unwrap_or(model),
+-                        &coverage,
+-                        chrono::Utc::now(),
+-                    ),
++                    match &second_pass {
++                        Some(pass) => stamp.with_second_pass(pass, &second_pass_numbers),
++                        None => stamp,
++                    },
+                 );
+             }
+             events.push(artifact).await;
+@@ -3096,122 +3890,544 @@ pub async fn run_deep_research(
+             });
+         }
+     }
+-
+-    let receipt = research_receipt(&plan, &coverage, report_chars, &sources);
+-    events
+-        .push(ChatEvent::ToolResult {
+-            id: pipeline_call_id,
+-            // A run that gathered evidence but could not compose the report is
+-            // NOT "ok" in the tool timeline. Reporting it as ok would put a green
+-            // check on the one step that failed, which is the same class of lie
+-            // as citing a page nobody read.
+-            status: if report.is_some() {
+-                "ok".to_owned()
+-            } else {
+-                "error".to_owned()
+-            },
+-            output: receipt.to_string(),
+-            error: synthesis_failure.map(str::to_owned),
+-        })
+-        .await;
+-
+-    tracing::debug!(
+-        %request_id,
+-        planned = coverage.planned,
+-        with_results = coverage.with_results,
+-        found = coverage.found,
+-        read = coverage.read,
+-        // Logged beside `read` for the same reason the coverage statement carries
+-        // it: 4 reads is most of an 8-page run and a quarter of a 16-page one.
+-        page_target = coverage.page_target,
+-        unread = coverage.unread,
+-        deadline_hit = coverage.deadline_hit,
+-        report_chars,
+-        "deep research complete"
++
++    let receipt = research_receipt_with_second_pass(
++        &plan,
++        &coverage,
++        report_chars,
++        &sources,
++        second_pass.as_ref(),
++    );
++    events
++        .push(ChatEvent::ToolResult {
++            id: pipeline_call_id,
++            // A run that gathered evidence but could not compose the report is
++            // NOT "ok" in the tool timeline. Reporting it as ok would put a green
++            // check on the one step that failed, which is the same class of lie
++            // as citing a page nobody read.
++            status: if report.is_some() {
++                "ok".to_owned()
++            } else {
++                "error".to_owned()
++            },
++            output: receipt.to_string(),
++            error: synthesis_failure.map(str::to_owned),
++        })
++        .await;
++
++    tracing::debug!(
++        %request_id,
++        planned = coverage.planned,
++        with_results = coverage.with_results,
++        found = coverage.found,
++        read = coverage.read,
++        // Logged beside `read` for the same reason the coverage statement carries
++        // it: 4 reads is most of an 8-page run and a quarter of a 16-page one.
++        page_target = coverage.page_target,
++        unread = coverage.unread,
++        deadline_hit = coverage.deadline_hit,
++        report_chars,
++        "deep research complete"
++    );
++
++    Ok(DeepResearchOutcome {
++        messages,
++        events: events.into_buffer(),
++        resolved_model,
++        any_tool_succeeded: tool_successes > 0,
++        tool_successes,
++        tool_failures,
++        web_citations,
++        cancelled: false,
++        report,
++        coverage,
++    })
++}
++
++/// Build the outcome for a cancelled run: the conversation untouched, so the
++/// caller emits a terminal `stopped` rather than answering from half-gathered
++/// evidence the user has already declined to wait for.
++fn cancelled_outcome(
++    events: ResearchEvents<'_>,
++    base_messages: Vec<ChatMessage>,
++) -> DeepResearchOutcome {
++    DeepResearchOutcome {
++        messages: base_messages,
++        events: events.into_buffer(),
++        resolved_model: None,
++        any_tool_succeeded: false,
++        tool_successes: 0,
++        tool_failures: 0,
++        web_citations: 0,
++        cancelled: true,
++        report: None,
++        coverage: Coverage::default(),
++    }
++}
++
++/// Build the outcome for a run that gathered no readable evidence.
++#[allow(clippy::too_many_arguments)] // one call shape, used from two failure points
++async fn finish_without_evidence(
++    mut events: ResearchEvents<'_>,
++    mut messages: Vec<ChatMessage>,
++    question: &str,
++    coverage: &Coverage,
++    pipeline_call_id: &str,
++    plan: &[String],
++    sources: &[ResearchSource],
++    detail: &str,
++    tool_successes: u32,
++    tool_failures: u32,
++) -> DeepResearchOutcome {
++    events
++        .step(
++            STEP_SYNTHESIZE,
++            "Skriver rapport",
++            "Ingen lesbare kilder – ingen rapport skrevet.",
++            "error",
++        )
++        .await;
++    events
++        .push(ChatEvent::ToolResult {
++            id: pipeline_call_id.to_owned(),
++            status: "error".to_owned(),
++            output: research_receipt(plan, coverage, 0, sources).to_string(),
++            error: Some(detail.to_owned()),
++        })
++        .await;
++    messages.push(ChatMessage {
++        compaction_summary: String::new(),
++        role: "user".to_owned(),
++        content: no_evidence_context_message(question, coverage, detail),
++        name: String::new(),
++    });
++    DeepResearchOutcome {
++        messages,
++        events: events.into_buffer(),
++        resolved_model: None,
++        any_tool_succeeded: false,
++        tool_successes,
++        tool_failures,
++        web_citations: 0,
++        cancelled: false,
++        report: None,
++        coverage: *coverage,
++    }
++}
++
++/// The turn context the second pass's network phases need, bundled so the pass is one call.
++struct PassContext<'a> {
++    state: &'a AppState,
++    request_id: &'a str,
++    run_id: &'a str,
++    org_id: &'a str,
++    user_id: &'a str,
++    thread_id: &'a str,
++    inference_bearer: &'a str,
++    session_bearer: &'a str,
++    zdr: bool,
++    min_privacy_tier: i32,
++    question: &'a str,
++    cancel: &'a AtomicBool,
++    /// The run's wall clock, which the pass's own window ends before.
++    deadline: Instant,
++}
++
++/// The first pass's read budgets, which the second pass may only spend the rest of.
++#[derive(Clone, Copy)]
++struct PassBudget {
++    first: ReadProgress,
++    page_target: usize,
++    attempt_budget: usize,
++    corpus_cap: usize,
++}
++
++/// What [`run_second_pass`] hands back to the pipeline.
++struct SecondPassRun {
++    pass: SecondPass,
++    /// Coverage over both passes; the first pass's when no gap search ran.
++    coverage: Coverage,
++    /// The `[n]` the gap reads earned.
++    second_pass_numbers: BTreeSet<u32>,
++    tool_successes: u32,
++    tool_failures: u32,
++}
++
++/// The claim ledger and, when it and the clocks allow, one gap-driven search and read (EP-2-S6).
++///
++/// Every step is bounded by [`second_pass_window`], which ends early enough for synthesis to run
++/// inside both the wall clock and the bearer window (D11); a step the window cuts short stops the
++/// pass, never the run. Searches and reads go through the same audited tool paths as the first
++/// pass, so the same screening and audit apply.
++///
++/// Returns `Ok(None)` when the user pressed Stop.
++///
++/// # Errors
++///
++/// Only an audit-persistence failure, exactly as the first pass's phases.
++#[allow(clippy::too_many_lines)] // one bounded phase, in order; splitting it scatters the budget
++async fn run_second_pass(
++    context: &PassContext<'_>,
++    events: &mut ResearchEvents<'_>,
++    plan: &[String],
++    sources: &mut Vec<ResearchSource>,
++    budget: PassBudget,
++    first: &Coverage,
++) -> Result<Option<SecondPassRun>, &'static str> {
++    let unchanged = |pass: SecondPass| SecondPassRun {
++        pass,
++        coverage: *first,
++        second_pass_numbers: BTreeSet::new(),
++        tool_successes: 0,
++        tool_failures: 0,
++    };
++    events
++        .step(
++            STEP_GAPS,
++            GAPS_TITLE,
++            "Kontrollerer hvilke påstander kildene støtter.",
++            "active",
++        )
++        .await;
++    let now = Instant::now();
++    let bearer_expiry = earliest_bearer_expiry(
++        &[context.inference_bearer, context.session_bearer],
++        now,
++        chrono::Utc::now().timestamp(),
++    );
++    let window = match second_pass_window(now, context.deadline, bearer_expiry) {
++        Ok(end) => end,
++        Err(skip) => {
++            log_bound(context.request_id, "second_pass", 1, 0, 0, skip.code());
++            events.step(STEP_GAPS, GAPS_TITLE, skip.detail(), "done").await;
++            return Ok(Some(unchanged(SecondPass::skipped(skip, None))));
++        }
++    };
++
++    let prompt = ledger_prompt(context.question, sources);
++    let raw = match guarded(context.cancel, window, ledger_inference(context, &prompt)).await {
++        Ok(raw) => raw,
++        Err(StopReason::Cancelled) => return Ok(None),
++        Err(StopReason::Deadline) => String::new(),
++    };
++    let Some(ledger) = parse_research_ledger(&raw, &readable_numbers(sources), plan) else {
++        let skip = SecondPassSkip::LedgerUnavailable;
++        log_bound(context.request_id, "second_pass", 1, 0, 0, skip.code());
++        events.step(STEP_GAPS, GAPS_TITLE, skip.detail(), "error").await;
++        return Ok(Some(unchanged(SecondPass::skipped(skip, None))));
++    };
++    let counts = ledger.claims_by_status();
++    let count = |status: ClaimStatus| counts.get(status.code()).copied().unwrap_or_default();
++    events
++        .step(
++            STEP_GAPS,
++            GAPS_TITLE,
++            &format!(
++                "{} påstander: {} støttet, {} fra én kilde, {} motstridende, {} uten støtte.",
++                ledger.claims.len(),
++                count(ClaimStatus::Supported),
++                count(ClaimStatus::SingleSource),
++                count(ClaimStatus::Conflict),
++                count(ClaimStatus::Unsupported),
++            ),
++            "done",
++        )
++        .await;
++
++    let (target, attempts) =
++        second_pass_budget(budget.first, budget.page_target, budget.attempt_budget);
++    let skip = if !second_pass_needed(first, &ledger) {
++        Some(SecondPassSkip::NotNeeded)
++    } else if ledger.gaps.is_empty() {
++        Some(SecondPassSkip::NoGaps)
++    } else if target == 0 || attempts == 0 {
++        Some(SecondPassSkip::BudgetSpent)
++    } else {
++        None
++    };
++    if let Some(skip) = skip {
++        log_bound(context.request_id, "second_pass", 1, ledger.gaps.len(), 0, skip.code());
++        events.step(STEP_PASS2, PASS2_TITLE, skip.detail(), "done").await;
++        return Ok(Some(unchanged(SecondPass::skipped(skip, Some(ledger)))));
++    }
++
++    // ---- gap search ----
++    let gaps = ledger.gaps.clone();
++    events
++        .step(
++            STEP_PASS2,
++            PASS2_TITLE,
++            &format!("Søker etter {} hull: {}", gaps.len(), gaps.join(" · ")),
++            "active",
++        )
++        .await;
++    let mut tool_successes: u32 = 0;
++    let mut tool_failures: u32 = 0;
++    let mut cut_short = false;
++    let searched = guarded(
++        context.cancel,
++        window,
++        search_sub_queries(
++            context.state,
++            context.request_id,
++            context.run_id,
++            context.org_id,
++            context.user_id,
++            context.thread_id,
++            context.session_bearer,
++            context.zdr,
++            &gaps,
++        ),
++    )
++    .await;
++    let (mut hits, gap_ok, gap_failures) = match searched {
++        Ok(result) => {
++            let (hits, ok, failed, _) = result?;
++            (hits, ok, failed)
++        }
++        Err(StopReason::Cancelled) => return Ok(None),
++        Err(StopReason::Deadline) => {
++            cut_short = true;
++            (Vec::new(), 0, gaps.len())
++        }
++    };
++    tool_successes = tool_successes.saturating_add(u32::try_from(gap_ok).unwrap_or(u32::MAX));
++    tool_failures = tool_failures.saturating_add(u32::try_from(gap_failures).unwrap_or(u32::MAX));
++    // Gap queries index after the plan's, so a page both passes surfaced is not mistaken for one
++    // two plan sub-queries corroborated.
++    for hit in &mut hits {
++        hit.sub_query = hit.sub_query.saturating_add(plan.len());
++    }
++    let known: BTreeSet<String> = sources
++        .iter()
++        .map(|source| normalize_url_key(&source.url))
++        .collect();
++    let mut fresh: Vec<ResearchSource> = dedupe_hits(&hits)
++        .into_iter()
++        .filter(|source| !known.contains(&normalize_url_key(&source.url)))
++        .collect();
++    let gap_gate = apply_relevance_gate(context.question, &mut fresh);
++    let base = sources.len();
++    let order: Vec<usize> = read_order(&fresh)
++        .into_iter()
++        .map(|index| index.saturating_add(base))
++        .collect();
++    sources.extend(fresh);
++
++    // ---- gap reads, inside what the first pass left of the budgets ----
++    let mut progress = ReadProgress {
++        corpus_chars: budget.first.corpus_chars,
++        ..ReadProgress::default()
++    };
++    let mut halt: Option<ReadHalt> = None;
++    while !cut_short {
++        let batch = match plan_read_batch(&order, progress, target, attempts, budget.corpus_cap) {
++            Ok(batch) => batch,
++            Err(reason) => {
++                halt = Some(reason);
++                break;
++            }
++        };
++        progress.batches = progress.batches.saturating_add(1);
++        events
++            .step(
++                STEP_PASS2,
++                PASS2_TITLE,
++                &format!(
++                    "Henter {} sider parallelt ({} av {} lest).",
++                    batch.len(),
++                    progress.succeeded,
++                    target
++                ),
++                "active",
++            )
++            .await;
++        let read = guarded(
++            context.cancel,
++            window,
++            read_pages(
++                context.state,
++                context.request_id,
++                context.run_id,
++                context.org_id,
++                context.user_id,
++                context.thread_id,
++                context.session_bearer,
++                context.zdr,
++                sources,
++                &batch,
++            ),
++        )
++        .await;
++        match read {
++            Ok(result) => {
++                let (extracts, ok, failed) = result?;
++                tool_successes =
++                    tool_successes.saturating_add(u32::try_from(ok).unwrap_or(u32::MAX));
++                tool_failures =
++                    tool_failures.saturating_add(u32::try_from(failed).unwrap_or(u32::MAX));
++                progress.attempted = progress.attempted.saturating_add(batch.len());
++                progress.succeeded = progress.succeeded.saturating_add(ok);
++                for (index, outcome) in extracts {
++                    match outcome {
++                        Ok(text) => {
++                            progress.corpus_chars =
++                                progress.corpus_chars.saturating_add(text.chars().count());
++                            sources[index].mark_read(text);
++                        }
++                        Err(reason) => {
++                            sources[index].mark_unread(UnreadStatus::FetchFailed, reason);
++                        }
++                    }
++                }
++            }
++            Err(StopReason::Cancelled) => return Ok(None),
++            Err(StopReason::Deadline) => {
++                cut_short = true;
++                progress.attempted = progress.attempted.saturating_add(batch.len());
++                for &index in &batch {
++                    if sources[index].extract.is_none() {
++                        sources[index].mark_unread(
++                            UnreadStatus::Deadline,
++                            "the second research pass stopped before this page was read, to leave \
++                             time for the report",
++                        );
++                    }
++                }
++            }
++        }
++    }
++    let dropped = number_and_bound(sources, &order, budget.corpus_cap);
++    let second_pass_numbers: BTreeSet<u32> = readable_numbers(&sources[base..]);
++    log_bound(
++        context.request_id,
++        "second_pass_pages",
++        target,
++        order.len(),
++        second_pass_numbers.len(),
++        &format!(
++            "halt={} attempts={}/{} gaps={} cut_short={cut_short}",
++            halt.map_or("deadline", ReadHalt::code),
++            progress.attempted,
++            attempts,
++            gaps.len()
++        ),
+     );
+ 
+-    Ok(DeepResearchOutcome {
+-        messages,
+-        events: events.into_buffer(),
+-        resolved_model,
+-        any_tool_succeeded: tool_successes > 0,
+-        tool_successes,
+-        tool_failures,
+-        web_citations,
+-        cancelled: false,
+-        report,
+-        coverage,
+-    })
+-}
+-
+-/// Build the outcome for a cancelled run: the conversation untouched, so the
+-/// caller emits a terminal `stopped` rather than answering from half-gathered
+-/// evidence the user has already declined to wait for.
+-fn cancelled_outcome(
+-    events: ResearchEvents<'_>,
+-    base_messages: Vec<ChatMessage>,
+-) -> DeepResearchOutcome {
+-    DeepResearchOutcome {
+-        messages: base_messages,
+-        events: events.into_buffer(),
+-        resolved_model: None,
+-        any_tool_succeeded: false,
+-        tool_successes: 0,
+-        tool_failures: 0,
+-        web_citations: 0,
+-        cancelled: true,
+-        report: None,
+-        coverage: Coverage::default(),
++    // Re-label over both passes when there is still time, so a claim a gap page now supports is
++    // not reported as unsupported. Otherwise the first ledger stands, labelled over pass 1 only,
++    // which its `pass_count` of 1 says.
++    let mut ledger = ledger;
++    if !second_pass_numbers.is_empty() && relabel_fits(Instant::now(), window) {
++        let prompt = ledger_prompt(context.question, sources);
++        let raw = match guarded(context.cancel, window, ledger_inference(context, &prompt)).await {
++            Ok(raw) => raw,
++            Err(StopReason::Cancelled) => return Ok(None),
++            Err(StopReason::Deadline) => String::new(),
++        };
++        let searched: Vec<String> = plan.iter().chain(gaps.iter()).cloned().collect();
++        if let Some(mut relabelled) =
++            parse_research_ledger(&raw, &readable_numbers(sources), &searched)
++        {
++            // The gaps the ledger records are the ones searched, not new ones nobody searched.
++            relabelled.gaps.clone_from(&gaps);
++            relabelled.pass_count = 2;
++            ledger = relabelled;
++        }
+     }
+-}
+ 
+-/// Build the outcome for a run that gathered no readable evidence.
+-#[allow(clippy::too_many_arguments)] // one call shape, used from two failure points
+-async fn finish_without_evidence(
+-    mut events: ResearchEvents<'_>,
+-    mut messages: Vec<ChatMessage>,
+-    question: &str,
+-    coverage: &Coverage,
+-    pipeline_call_id: &str,
+-    plan: &[String],
+-    sources: &[ResearchSource],
+-    detail: &str,
+-    tool_successes: u32,
+-    tool_failures: u32,
+-) -> DeepResearchOutcome {
++    let coverage = merge_second_pass_coverage(
++        first,
++        sources,
++        gaps.len(),
++        gap_ok,
++        gap_failures,
++        gap_gate,
++        halt,
++        dropped,
++    );
+     events
+         .step(
+-            STEP_SYNTHESIZE,
+-            "Skriver rapport",
+-            "Ingen lesbare kilder – ingen rapport skrevet.",
+-            "error",
++            STEP_PASS2,
++            PASS2_TITLE,
++            &format!(
++                "Leste {} nye sider fra {} hullsøk{}.",
++                second_pass_numbers.len(),
++                gaps.len(),
++                if cut_short {
++                    " (stoppet tidlig for å gi rapporten tid)"
++                } else {
++                    ""
++                }
++            ),
++            "done",
+         )
+         .await;
+-    events
+-        .push(ChatEvent::ToolResult {
+-            id: pipeline_call_id.to_owned(),
+-            status: "error".to_owned(),
+-            output: research_receipt(plan, coverage, 0, sources).to_string(),
+-            error: Some(detail.to_owned()),
+-        })
+-        .await;
+-    messages.push(ChatMessage {
+-        compaction_summary: String::new(),
+-        role: "user".to_owned(),
+-        content: no_evidence_context_message(question, coverage, detail),
+-        name: String::new(),
+-    });
+-    DeepResearchOutcome {
+-        messages,
+-        events: events.into_buffer(),
+-        resolved_model: None,
+-        any_tool_succeeded: false,
++    Ok(Some(SecondPassRun {
++        pass: SecondPass {
++            ledger: Some(ledger),
++            gap_queries: gaps,
++            pages_read: second_pass_numbers.len(),
++            skipped: None,
++            cut_short,
++        },
++        coverage,
++        second_pass_numbers,
+         tool_successes,
+         tool_failures,
+-        web_citations: 0,
+-        cancelled: false,
+-        report: None,
+-        coverage: *coverage,
++    }))
++}
++
++/// One bounded ledger inference on the plan tier. Returns the raw content, or an empty string for
++/// every failure mode, each logged; an empty answer means "no ledger", which skips the gap search
++/// rather than failing the run.
++async fn ledger_inference(context: &PassContext<'_>, prompt: &str) -> String {
++    let configured =
++        std::env::var("DEEP_RESEARCH_PLAN_MODEL").unwrap_or_else(|_| PLAN_MODEL.to_owned());
++    let (request_model, role_fallback_model) = role_routing::side_task_model(
++        role_routing::role_routing_enabled(),
++        &configured,
++        &configured,
++    );
++    let mut client = context.state.inference_client.clone();
++    let response = tokio::time::timeout(
++        LEDGER_TIMEOUT,
++        client.infer(authorized(
++            InferRequest {
++                request_id: format!("{}-research-ledger", context.request_id),
++                // The plan tier and its purpose: labelling claims is the same class of cheap side
++                // task as planning, and it never reaches the user as prose.
++                purpose: InferPurpose::ResearchPlan as i32,
++                org_id: context.org_id.to_owned(),
++                model: request_model,
++                role_fallback_model,
++                messages: vec![ChatMessage {
++                    compaction_summary: String::new(),
++                    role: "user".to_owned(),
++                    content: prompt.to_owned(),
++                    name: String::new(),
++                }],
++                temperature: 0.0,
++                max_tokens: LEDGER_MAX_TOKENS,
++                zdr: context.zdr,
++                // The ledger reads page text, so it inherits the turn's floor like synthesis does.
++                min_privacy_tier: context.min_privacy_tier,
++                ..Default::default()
++            },
++            context.inference_bearer,
++        )),
++    )
++    .await;
++    match response {
++        Ok(Ok(resp)) => resp.into_inner().content,
++        Ok(Err(error)) => {
++            tracing::debug!(%error, request_id = %context.request_id, "deep research ledger inference failed");
++            String::new()
++        }
++        Err(_elapsed) => {
++            tracing::debug!(request_id = %context.request_id, "deep research ledger inference timed out");
++            String::new()
++        }
+     }
+ }
+ 
+@@ -5510,4 +6726,483 @@ mod tests {
+         stamp_provenance(&mut step, ResearchProvenance::sample());
+         assert_eq!(step, before);
+     }
++
++    /// EP-2-S6: the claim ledger, the gap queries and the second pass's budgets and clocks.
++    mod second_pass {
++        use super::*;
++
++        fn readable(numbers: &[u32]) -> BTreeSet<u32> {
++            numbers.iter().copied().collect()
++        }
++
++        fn ledger_with(claims: Vec<(ClaimStatus, Vec<u32>)>) -> ResearchLedger {
++            ResearchLedger {
++                version: LEDGER_VERSION,
++                claims: claims
++                    .into_iter()
++                    .enumerate()
++                    .map(|(index, (status, sources))| LedgerClaim {
++                        id: format!("c{}", index + 1),
++                        text: format!("claim {index}"),
++                        status,
++                        sources,
++                    })
++                    .collect(),
++                gaps: vec!["gap one".to_owned()],
++                pass_count: 1,
++            }
++        }
++
++        fn ran(ledger: Option<ResearchLedger>) -> SecondPass {
++            SecondPass {
++                ledger,
++                gap_queries: vec!["gap one".to_owned(), "gap two".to_owned()],
++                pages_read: 3,
++                skipped: None,
++                cut_short: false,
++            }
++        }
++
++        #[test]
++        fn the_switch_reads_only_the_literal_true() {
++            assert!(parse_second_pass(Some("true")));
++            assert!(parse_second_pass(Some(" true ")));
++            for raw in [None, Some(""), Some("1"), Some("on"), Some("TRUE"), Some("yes")] {
++                assert!(!parse_second_pass(raw), "{raw:?}");
++            }
++        }
++
++        #[test]
++        fn the_ledger_parser_reads_the_closed_v1_shape_and_reassigns_ids() {
++            let raw = r#"```json
++            {"version":1,"claims":[
++              {"id":"x9","text":"  Prisen er   120 kr ","status":"supported","sources":[1,2]},
++              {"id":"x9","text":"Leveringstid","status":"conflict","sources":[2,3]}
++            ],"gaps":["leveringstid butikk"],"extra":"ignored"}
++            ```"#;
++            let ledger = parse_research_ledger(raw, &readable(&[1, 2, 3]), &[]).expect("a ledger");
++            assert_eq!(ledger.version, 1);
++            assert_eq!(ledger.pass_count, 1);
++            assert_eq!(ledger.claims[0].id, "c1");
++            assert_eq!(ledger.claims[1].id, "c2", "model ids are never kept");
++            assert_eq!(ledger.claims[0].text, "Prisen er 120 kr");
++            assert_eq!(ledger.claims[0].status, ClaimStatus::Supported);
++            assert_eq!(ledger.claims[1].status, ClaimStatus::Conflict);
++            assert_eq!(ledger.gaps, vec!["leveringstid butikk"]);
++        }
++
++        #[test]
++        fn a_ledger_outside_the_schema_is_not_read() {
++            let numbers = readable(&[1]);
++            for raw in [
++                "",
++                "not json",
++                "[]",
++                r#"{"claims":[]}"#,
++                r#"{"version":2,"claims":[]}"#,
++                r#"{"version":"1","claims":[]}"#,
++            ] {
++                assert_eq!(parse_research_ledger(raw, &numbers, &[]), None, "{raw}");
++            }
++        }
++
++        #[test]
++        fn an_unknown_status_rejects_its_claim_and_an_empty_text_is_dropped() {
++            let raw = r#"{"version":1,"claims":[
++              {"text":"a","status":"probably","sources":[1]},
++              {"text":"   ","status":"supported","sources":[1]},
++              {"text":"b","status":"single_source","sources":[1]}
++            ],"gaps":[]}"#;
++            let ledger = parse_research_ledger(raw, &readable(&[1]), &[]).expect("a ledger");
++            assert_eq!(ledger.claims.len(), 1);
++            assert_eq!(ledger.claims[0].text, "b");
++            assert_eq!(ledger.claims[0].id, "c1");
++        }
++
++        #[test]
++        fn an_over_long_claim_is_cut_on_a_char_boundary() {
++            let text = "ø".repeat(MAX_CLAIM_CHARS + 50);
++            let raw = serde_json::json!({
++                "version": 1,
++                "claims": [{"text": text, "status": "supported", "sources": [1, 2]}],
++                "gaps": [],
++            })
++            .to_string();
++            let ledger = parse_research_ledger(&raw, &readable(&[1, 2]), &[]).expect("a ledger");
++            assert_eq!(ledger.claims[0].text.chars().count(), MAX_CLAIM_CHARS);
++        }
++
++        #[test]
++        fn the_claim_count_is_capped() {
++            let claims: Vec<Value> = (0..MAX_LEDGER_CLAIMS + 6)
++                .map(|n| serde_json::json!({"text": format!("claim {n}"), "status": "supported", "sources": [1, 2]}))
++                .collect();
++            let raw = serde_json::json!({"version": 1, "claims": claims, "gaps": []}).to_string();
++            let ledger = parse_research_ledger(&raw, &readable(&[1, 2]), &[]).expect("a ledger");
++            assert_eq!(ledger.claims.len(), MAX_LEDGER_CLAIMS);
++        }
++
++        #[test]
++        fn a_status_is_lowered_to_what_its_citable_sources_can_carry() {
++            let raw = r#"{"version":1,"claims":[
++              {"text":"two named, one citable","status":"supported","sources":[1,7]},
++              {"text":"no citable source","status":"supported","sources":[9]},
++              {"text":"conflict with nothing citable","status":"conflict","sources":[]},
++              {"text":"duplicates collapse","status":"supported","sources":[2,2,1]}
++            ],"gaps":[]}"#;
++            let ledger = parse_research_ledger(raw, &readable(&[1, 2]), &[]).expect("a ledger");
++            let statuses: Vec<ClaimStatus> = ledger.claims.iter().map(|claim| claim.status).collect();
++            assert_eq!(
++                statuses,
++                vec![
++                    ClaimStatus::SingleSource,
++                    ClaimStatus::Unsupported,
++                    ClaimStatus::Unsupported,
++                    ClaimStatus::Supported,
++                ]
++            );
++            assert_eq!(ledger.claims[0].sources, vec![1], "an uncitable number is dropped");
++            assert_eq!(ledger.claims[3].sources, vec![1, 2]);
++        }
++
++        #[test]
++        fn gap_queries_are_re_clamped_like_a_plan() {
++            let plan = vec!["Strømpris Norge 2026".to_owned()];
++            let raw: Vec<String> = [
++                "1. strømpris norge 2026",
++                "\"nettleie endring\"",
++                "NETTLEIE ENDRING",
++                "{}",
++                "",
++                &"x".repeat(MAX_SUB_QUERY_CHARS + 40),
++                "a",
++                "b",
++                "c",
++            ]
++            .iter()
++            .map(|value| (*value).to_owned())
++            .collect();
++            let gaps = gap_queries(&raw, &plan);
++            assert_eq!(gaps.len(), MAX_GAP_QUERIES);
++            assert_eq!(gaps[0], "nettleie endring", "a planned query and a duplicate are dropped");
++            assert_eq!(gaps[1].chars().count(), MAX_SUB_QUERY_CHARS);
++            assert_eq!(&gaps[2..], ["a", "b"]);
++        }
++
++        #[test]
++        fn the_ledger_prompt_numbers_only_read_pages_and_bounds_each() {
++            let mut sources = vec![
++                read_source("https://one.no", &"y".repeat(LEDGER_EXTRACT_CHARS * 2)),
++                source("https://lead.no", vec![0], 1),
++            ];
++            let order = read_order(&sources);
++            number_and_bound(&mut sources, &order, 100_000);
++            let prompt = ledger_prompt("hva koster det", &sources);
++            assert!(prompt.contains("[1] "));
++            assert!(!prompt.contains("https://lead.no"), "an unread lead is not evidence");
++            assert!(prompt.contains(&format!("[truncated at {LEDGER_EXTRACT_CHARS} characters")));
++            assert!(prompt.contains("\"version\":1"));
++        }
++
++        #[test]
++        fn a_second_numbering_continues_after_the_first_and_keeps_its_budget() {
++            let mut sources = vec![
++                read_source("https://one.no", &"a".repeat(600)),
++                read_source("https://two.no", &"b".repeat(600)),
++            ];
++            let order = read_order(&sources);
++            number_and_bound(&mut sources, &order, 1_900);
++            sources.push(read_source("https://three.no", &"c".repeat(600)));
++            sources.push(read_source("https://four.no", &"d".repeat(600)));
++            let dropped = number_and_bound(&mut sources, &[2, 3], 1_900);
++            assert_eq!(sources[0].number, Some(1), "a streamed [n] never moves");
++            assert_eq!(sources[1].number, Some(2));
++            assert_eq!(sources[2].number, Some(3), "the gap page numbers after the first pass");
++            assert_eq!(sources[3].number, None, "the corpus budget is the run's, not the pass's");
++            assert_eq!(dropped, 1);
++            assert_eq!(sources[3].unread_status, Some(UnreadStatus::CorpusFull));
++        }
++
++        /// Drive both passes' read loops the way the pipeline does, with a fixed success pattern.
++        fn drive(
++            order_len: usize,
++            target: usize,
++            succeeds: impl Fn(usize) -> bool,
++            start: ReadProgress,
++            attempts: usize,
++        ) -> ReadProgress {
++            let order: Vec<usize> = (0..order_len).collect();
++            let mut progress = start;
++            while let Ok(batch) = plan_read_batch(&order, progress, target, attempts, usize::MAX) {
++                progress.attempted += batch.len();
++                progress.succeeded += batch.iter().filter(|&&index| succeeds(index)).count();
++            }
++            progress
++        }
++
++        #[test]
++        fn the_two_passes_never_exceed_the_runs_page_or_attempt_budget() {
++            for page_target in 1..=MAX_PAGES_CEILING {
++                let attempt_budget = read_attempt_budget(page_target);
++                for first_candidates in [0, 1, 3, 10, 40] {
++                    for modulus in 1..=4 {
++                        let first = drive(
++                            first_candidates,
++                            page_target,
++                            |index| index % modulus == 0,
++                            ReadProgress::default(),
++                            attempt_budget,
++                        );
++                        let (target, attempts) = second_pass_budget(first, page_target, attempt_budget);
++                        let second = drive(
++                            40,
++                            target,
++                            |index| index % (modulus + 1) == 0,
++                            ReadProgress::default(),
++                            attempts,
++                        );
++                        assert!(
++                            first.succeeded + second.succeeded <= page_target,
++                            "pages: {page_target} first {first:?} second {second:?}"
++                        );
++                        assert!(
++                            first.attempted + second.attempted <= attempt_budget,
++                            "attempts: {attempt_budget} first {first:?} second {second:?}"
++                        );
++                    }
++                }
++            }
++        }
++
++        #[test]
++        fn a_spent_first_pass_leaves_the_second_nothing() {
++            let first = ReadProgress { attempted: 48, succeeded: 16, batches: 3, corpus_chars: 0 };
++            assert_eq!(second_pass_budget(first, 16, 48), (0, 0));
++            let short = ReadProgress { attempted: 20, succeeded: 5, batches: 3, corpus_chars: 0 };
++            assert_eq!(second_pass_budget(short, 16, 48), (11, 28));
++        }
++
++        #[test]
++        fn the_guard_skips_the_pass_when_the_wall_clock_is_near() {
++            let now = Instant::now();
++            let near = now + SYNTHESIS_TIMEOUT + Duration::from_secs(10);
++            assert_eq!(second_pass_window(now, near, None), Err(SecondPassSkip::Deadline));
++            let far = now + Duration::from_secs(600);
++            assert_eq!(second_pass_window(now, far, None), Ok(far - SYNTHESIS_TIMEOUT));
++        }
++
++        #[test]
++        fn the_guard_skips_the_pass_when_the_bearer_expires_first() {
++            let now = Instant::now();
++            let far = now + Duration::from_secs(600);
++            let soon = now + SYNTHESIS_TIMEOUT + Duration::from_secs(60);
++            assert_eq!(
++                second_pass_window(now, far, Some(soon)),
++                Err(SecondPassSkip::BearerWindow)
++            );
++            let expired = now;
++            assert_eq!(
++                second_pass_window(now, far, Some(expired)),
++                Err(SecondPassSkip::BearerWindow)
++            );
++            let later = now + Duration::from_secs(500);
++            assert_eq!(
++                second_pass_window(now, far, Some(later)),
++                Ok(later - BEARER_EXPIRY_MARGIN - SYNTHESIS_TIMEOUT),
++                "the bearer margin and synthesis both come off the earlier clock"
++            );
++        }
++
++        #[test]
++        fn a_relabel_needs_a_ledger_timeout_inside_the_window() {
++            let now = Instant::now();
++            assert!(relabel_fits(now, now + LEDGER_TIMEOUT));
++            assert!(!relabel_fits(now, now + LEDGER_TIMEOUT - Duration::from_secs(1)));
++        }
++
++        #[test]
++        fn the_bearer_expiry_is_read_from_a_jwt_and_never_from_an_opaque_token() {
++            use base64::Engine as _;
++            let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
++                .encode(br#"{"sub":"u","exp":1700000300}"#);
++            let token = format!("eyJhbGciOiJub25lIn0.{payload}.sig");
++            assert_eq!(bearer_expiry_unix(&token), Some(1_700_000_300));
++            assert_eq!(bearer_expiry_unix("opaque-token"), None);
++            assert_eq!(bearer_expiry_unix(""), None);
++
++            let now = Instant::now();
++            let earliest = earliest_bearer_expiry(&[token.as_str(), "opaque"], now, 1_700_000_000);
++            assert_eq!(earliest, Some(now + Duration::from_secs(300)));
++            let past = earliest_bearer_expiry(&[token.as_str()], now, 1_800_000_000);
++            assert_eq!(past, Some(now), "an expired bearer is now, never earlier");
++            assert_eq!(earliest_bearer_expiry(&["opaque"], now, 0), None);
++        }
++
++        #[test]
++        fn a_gap_search_is_needed_for_a_short_read_or_a_weak_claim() {
++            let met = Coverage {
++                read: 16,
++                page_target: 16,
++                halt: Some(ReadHalt::TargetMet),
++                ..Coverage::default()
++            };
++            let strong = ledger_with(vec![(ClaimStatus::Supported, vec![1, 2])]);
++            assert!(!second_pass_needed(&met, &strong));
++            for weak in [ClaimStatus::SingleSource, ClaimStatus::Conflict, ClaimStatus::Unsupported] {
++                assert!(second_pass_needed(&met, &ledger_with(vec![(weak, vec![1])])), "{weak:?}");
++            }
++            let short = Coverage {
++                read: 4,
++                page_target: 16,
++                halt: Some(ReadHalt::AttemptsExhausted),
++                ..Coverage::default()
++            };
++            assert!(second_pass_needed(&short, &strong));
++        }
++
++        #[test]
++        fn the_coverage_statement_names_a_skipped_pass_and_its_reason() {
++            let skipped = SecondPass::skipped(SecondPassSkip::BearerWindow, None);
++            let statement = second_pass_statement(&skipped);
++            assert!(statement.starts_with("No gap-driven second research pass ran"));
++            assert!(statement.contains("credential"));
++            let prompt = synthesis_prompt_with_ledger("q", &[], &Coverage::default(), Some(&skipped));
++            assert!(prompt.contains(&statement), "the report is told why");
++
++            let mut cut = ran(None);
++            cut.cut_short = true;
++            let statement = second_pass_statement(&cut);
++            assert!(statement.contains("searched 2 gap queries and read 3 more page(s)"));
++            assert!(statement.contains("stopping early"));
++        }
++
++        #[test]
++        fn the_synthesis_prompt_routes_unsupported_claims_to_the_unverified_section() {
++            let sources = quoted_sources();
++            let coverage = coverage_of(&sources, 1, 1, 0, GateReport::default(), target_met(2));
++            assert_eq!(
++                synthesis_prompt_with_ledger("q", &sources, &coverage, None),
++                synthesis_prompt("q", &sources, &coverage),
++                "switch off: the prompt sent before"
++            );
++            let pass = ran(Some(ledger_with(vec![
++                (ClaimStatus::Unsupported, vec![]),
++                (ClaimStatus::Conflict, vec![1, 2]),
++            ])));
++            let prompt = synthesis_prompt_with_ledger("q", &sources, &coverage, Some(&pass));
++            assert!(prompt.contains("CLAIM LEDGER"));
++            assert!(prompt.contains("- claim 0 (unsupported)\n"));
++            assert!(prompt.contains("- claim 1 (conflict) [1][2]"));
++            assert!(prompt.contains(
++                "A claim marked unsupported goes under `## Kunne ikke verifiseres`, never under \
++                 `## Funn`"
++            ));
++            assert!(prompt.contains("`## Kunne ikke verifiseres` — REQUIRED"), "the section stays mandatory");
++        }
++
++        #[test]
++        fn the_receipt_gains_passes_gaps_and_claim_counts_only_with_a_pass() {
++            let sources = quoted_sources();
++            let coverage = coverage_of(&sources, 1, 1, 0, GateReport::default(), target_met(2));
++            let plan = vec!["sub".to_owned()];
++            assert_eq!(
++                research_receipt_with_second_pass(&plan, &coverage, 10, &sources, None),
++                research_receipt(&plan, &coverage, 10, &sources)
++            );
++            let pass = ran(Some(ledger_with(vec![
++                (ClaimStatus::Supported, vec![1, 2]),
++                (ClaimStatus::Unsupported, vec![]),
++            ])));
++            let receipt = research_receipt_with_second_pass(&plan, &coverage, 10, &sources, Some(&pass));
++            assert_eq!(receipt["passes"], 2);
++            assert_eq!(receipt["gap_queries"], serde_json::json!(["gap one", "gap two"]));
++            assert_eq!(receipt["second_pass_skipped"], Value::Null);
++            assert_eq!(
++                receipt["claims_by_status"],
++                serde_json::json!({"conflict": 0, "single_source": 0, "supported": 1, "unsupported": 1})
++            );
++            let skipped = SecondPass::skipped(SecondPassSkip::NoGaps, None);
++            let receipt = research_receipt_with_second_pass(&plan, &coverage, 10, &sources, Some(&skipped));
++            assert_eq!(receipt["passes"], 1);
++            assert_eq!(receipt["second_pass_skipped"], "no-gaps");
++            assert_eq!(receipt["claims_by_status"], Value::Null);
++        }
++
++        #[test]
++        fn merged_coverage_counts_the_gap_queries_and_the_new_pages() {
++            let mut sources = quoted_sources();
++            let first = coverage_of(
++                &sources,
++                2,
++                2,
++                0,
++                GateReport { filtered: 1, fallback_used: false },
++                ReadOutcome {
++                    target: 4,
++                    halt: ReadHalt::AttemptsExhausted,
++                    deadline_hit: false,
++                    corpus_exhausted: false,
++                },
++            );
++            sources.push(read_source("https://gap.no", "gap page text that was read"));
++            number_and_bound(&mut sources, &[3], 10_000);
++            let merged = merge_second_pass_coverage(
++                &first,
++                &sources,
++                2,
++                1,
++                1,
++                GateReport { filtered: 2, fallback_used: false },
++                Some(ReadHalt::CandidatesExhausted),
++                0,
++            );
++            assert_eq!(merged.planned, 4);
++            assert_eq!(merged.with_results, 3);
++            assert_eq!(merged.search_failures, 1);
++            assert_eq!(merged.found, 4);
++            assert_eq!(merged.filtered, 3);
++            assert_eq!(merged.read, 3);
++            assert_eq!(merged.unread, 1);
++            assert_eq!(merged.page_target, 4);
++            assert_eq!(merged.halt, Some(ReadHalt::CandidatesExhausted));
++            assert!(!merged.corpus_exhausted);
++        }
++
++        #[test]
++        fn the_stamp_carries_passes_digest_counts_and_the_ledger_only_with_a_pass() {
++            let plain = ResearchProvenance::sample();
++            let value = serde_json::to_value(&plain).expect("serializable");
++            for key in ["passes", "ledger_digest", "claims_by_status", "research_ledger"] {
++                assert!(value.get(key).is_none(), "switch off: no {key} key");
++            }
++            assert!(value["sources"][0].get("pass").is_none());
++
++            let pass = ran(Some(ledger_with(vec![(ClaimStatus::SingleSource, vec![1])])));
++            let stamp = ResearchProvenance::sample().with_second_pass(&pass, &readable(&[1]));
++            assert_eq!(stamp.passes, Some(2));
++            assert_eq!(stamp.sources[0].pass, Some(2));
++            let digest = stamp.ledger_digest.clone().expect("a digest");
++            assert_eq!(digest.len(), 64);
++            assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
++            assert_eq!(digest, pass.ledger.as_ref().expect("a ledger").digest(), "stable");
++            let value = serde_json::to_value(&stamp).expect("serializable");
++            assert_eq!(value["research_ledger"]["version"], 1);
++            assert_eq!(value["research_ledger"]["claims"][0]["status"], "single_source");
++            assert_eq!(value["claims_by_status"]["single_source"], 1);
++
++            let first_only = ResearchProvenance::sample()
++                .with_second_pass(&SecondPass::skipped(SecondPassSkip::Deadline, None), &BTreeSet::new());
++            assert_eq!(first_only.passes, Some(1));
++            assert_eq!(first_only.sources[0].pass, Some(1));
++            assert_eq!(first_only.research_ledger, None);
++            assert_eq!(first_only.ledger_digest, None);
++        }
++
++        #[test]
++        fn a_different_ledger_has_a_different_digest() {
++            let one = ledger_with(vec![(ClaimStatus::Supported, vec![1, 2])]);
++            let two = ledger_with(vec![(ClaimStatus::Conflict, vec![1, 2])]);
++            assert_ne!(one.digest(), two.digest());
++        }
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs
+index 47110147f..b577707ae 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs	
+@@ -3470,4 +3470,57 @@ mod tests {
+         assert!(artifact.iter().any(|key| key == "content"), "the artifact itself stays");
+         assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
+     }
++
++    /// The keys of the stored `research_ledger` on the first artifact's stamp, or nothing.
++    fn stored_ledger_keys(metadata: &Option<prost_types::Struct>) -> Vec<String> {
++        use prost_types::value::Kind;
++        let Some(Kind::ListValue(artifacts)) = metadata
++            .as_ref()
++            .and_then(|metadata| metadata.fields.get("artifacts"))
++            .and_then(|value| value.kind.as_ref())
++        else {
++            return Vec::new();
++        };
++        let Some(Kind::StructValue(artifact)) = artifacts.values.first().and_then(|value| value.kind.as_ref()) else {
++            return Vec::new();
++        };
++        let Some(Kind::StructValue(stamp)) = artifact.fields.get("provenance").and_then(|value| value.kind.as_ref())
++        else {
++            return Vec::new();
++        };
++        match stamp.fields.get("research_ledger").and_then(|value| value.kind.as_ref()) {
++            Some(Kind::StructValue(ledger)) => ledger.fields.keys().cloned().collect(),
++            _ => Vec::new(),
++        }
++    }
++
++    fn ledger_evidence(zdr_or_waived: bool) -> Option<prost_types::Struct> {
++        let mut report = stamped_report();
++        report.provenance = Some(Box::new(crate::deep_research::ResearchProvenance::sample_with_ledger()));
++        crate::session_flow::turn_evidence_metadata(
++            None,
++            &[],
++            &crate::session_flow::persistable_artifacts(vec![report], zdr_or_waived),
++            crate::session_flow::TurnQuality::default(),
++        )
++    }
++
++    /// EP-2-S6 (D2): a persistent turn stores the closed ledger beside the report it was built
++    /// for, and only its v1 keys.
++    #[test]
++    fn a_persistent_turn_stores_the_research_ledger_on_the_report_stamp() {
++        let mut keys = stored_ledger_keys(&ledger_evidence(false));
++        keys.sort_unstable();
++        assert_eq!(keys, vec!["claims", "gaps", "pass_count", "version"]);
++    }
++
++    /// EP-2-S6 (D12): a ZDR or waived turn streamed the ledger and stores none of it.
++    #[test]
++    fn a_zdr_or_waived_turn_stores_no_research_ledger() {
++        let stored = ledger_evidence(true);
++        assert!(stored_ledger_keys(&stored).is_empty());
++        let artifact = first_entry_keys(&stored, "artifacts");
++        assert!(artifact.iter().any(|key| key == "content"), "the report itself stays");
++        assert!(!artifact.iter().any(|key| key == "provenance"), "{artifact:?}");
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index d9d94fda4..112ff9c2b 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -164,7 +164,9 @@ pub struct AttachmentPreview {
+ 
+ /// Environment switch for cited passages and the research provenance stamp (EP-2-S4). Off, no
+ /// citation or artifact frame carries `quote`, `locator` or `provenance`, and nothing new is
+-/// persisted with the message.
++/// persisted with the message. The one exception is a deep-research report from a run with
++/// `deep_research::SECOND_PASS_ENV` on (EP-2-S6): its stamp carries the claim ledger, so it is
++/// stamped whichever way this switch is set.
+ pub const CITATION_PASSAGES_ENV: &str = "MODEL_GATEWAY_CITATION_PASSAGES";
+ 
+ /// Whether cited passages are switched on in this process.
+@@ -4291,4 +4293,29 @@ mod citation_passage_tests {
+         };
+         assert!(plain.payload("r").get("provenance").is_none());
+     }
++
++    /// EP-2-S6: the claim ledger streams on the report's stamp and leaves with it (D12).
++    #[test]
++    fn research_ledger_streams_on_the_stamp_and_is_stripped_with_it() {
++        let event = ChatEvent::Artifact {
++            id: "research-r".to_owned(),
++            kind: "document".to_owned(),
++            title: "Dyp research".to_owned(),
++            content: "# Rapport".to_owned(),
++            version: 1,
++            provenance: Some(Box::new(crate::deep_research::ResearchProvenance::sample_with_ledger())),
++        };
++        let payload = event.payload("r");
++        assert_eq!(payload["provenance"]["passes"], 2);
++        assert_eq!(payload["provenance"]["research_ledger"]["version"], 1);
++        assert_eq!(payload["provenance"]["research_ledger"]["claims"][0]["status"], "single_source");
++        assert_eq!(payload["provenance"]["claims_by_status"]["single_source"], 1);
++        assert!(payload["provenance"]["ledger_digest"].is_string());
++
++        let recorded = RecordedArtifact::from_event(&event).expect("a text artifact");
++        let stored = serde_json::to_value(&recorded).expect("serializable");
++        assert_eq!(stored["provenance"]["research_ledger"]["pass_count"], 2);
++        let stripped = serde_json::to_value(recorded.without_provenance()).expect("serializable");
++        assert!(stripped.get("provenance").is_none(), "no ledger without its stamp");
++    }
+ }

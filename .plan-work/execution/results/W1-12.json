@@ -1,0 +1,157 @@
+{
+ "batchId": "W1-12",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS10-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/model_entitlement.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/tests/model_entitlement_catalogue.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/model-entitlement-refusals.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/model-entitlement-refusals.json.sha256",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/README.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/model-entitlement-contract-sync.test.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/model-entitlement-contract-schema.mjs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/model-entitlement-contract-schema.test.mjs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/contract-goldens.yml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/model-entitlement-refusals.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/model-entitlement-refusals.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/model-entitlement-refusals.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/model-entitlement-refusals.json.sha256",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.model-entitlement.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --all-targets",
+     "outcome": "all pass (176 lib tests incl. 8 new model_entitlement unit tests; 8 in tests/model_entitlement_catalogue.rs; the other targets pass)"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib normalize",
+     "outcome": "24 passed (includes the 2 new deployment_allowlist_refusal tests)"
+    },
+    {
+     "command": "bash scripts/tests/model-entitlement-contract-sync.test.sh",
+     "outcome": "5 passed, 0 failed"
+    },
+    {
+     "command": "bash scripts/tests/model-entitlement-contract-sync.test.sh --self-test",
+     "outcome": "self-test ok (tampered golden, drifted vendored copy, disagreeing pin, content-carrying golden all fail)"
+    },
+    {
+     "command": "node --test scripts/tests/model-entitlement-contract-schema.test.mjs",
+     "outcome": "16 passed"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/model-entitlement-refusals.test.ts src/features/chat/components/chat-normalizers (apps/Frontend Plane/verevonv3)",
+     "outcome": "7 files, 106 tests passed"
+    },
+    {
+     "command": "pnpm typecheck (grep for touched files) and eslint on the 4 touched SPA files",
+     "outcome": "no findings in touched files"
+    },
+    {
+     "command": "cargo clippy -q -p mp-contracts --all-targets",
+     "outcome": "no findings in model_entitlement.rs or its test (pre-existing warnings elsewhere)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the evidence flow: bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build model-gateway with ALLOWED_MODELS=a, curl /v1/invoke and /v1/invoke/stream with model b, capture the 403 body and the SSE error frame, then restore env (use recreate-with-live-env.sh per the worktree deploy memory).",
+    "Commit the new files together: the golden, its .sha256 and the SPA vendored copy must land in one commit (the sync script fails if they differ).",
+    "Optionally run python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check (HEAD already fails it per the plan; the error frame itself is unchanged)."
+   ],
+   "deviations": [
+    "Vendored a byte-identical copy of the golden and its .sha256 into apps/Frontend Plane/verevonv3/src/shared/api/contracts/ (not named in the slice's file list) because the repo's README convention is that a consumer never reads a golden from outside its own tree, as zdr-refusals does; the sync script's VENDORED table checks both copies. Delete the two files and the VENDORED rows if the owner wants a cross-tree read instead.",
+    "The SSE error frame (ChatEvent::Error in sse_events.rs, not owned) carries only code, message and retryable, so the frame has no action or details; the plan text said the SSE frame carries the typed body. The SPA maps by code, so the visible behaviour is unaffected.",
+    "The sync script is a new standalone script (own pin, vendored-copy check, strict loader, --self-test) rather than rows in zdr-contract-sync.test.sh, which the plan says stays untouched; contract-goldens.yml got path filters and three steps for it."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof (lead, docker): rebuild model-gateway with ALLOWED_MODELS=a, call /v1/invoke and /v1/invoke/stream with model b, capture the typed 403 and the SSE error frame with code model_not_entitled, restore the env (recreate-with-live-env.sh), and confirm the SPA shows the Norwegian text.",
+     "Commit the golden, its .sha256 and the SPA vendored copy together, because the sync script fails if they differ."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Row evidence not done (lead-run): rebuild model-gateway, run with ALLOWED_MODELS=a and model b on /v1/invoke and /v1/invoke/stream, capture the typed 403 and the SSE error frame with code model_not_entitled, restore env, and confirm the SPA shows the Norwegian text."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Clients that matched the old untyped 400 for an ALLOWED_MODELS refusal (grep of http.ts and the BFF gateway was not done; http.ts is not owned) will now see 403 with a nested error object; check before the model-gateway image ships."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ChatEvent::Error in model-gateway/src/sse_events.rs has no action or details fields, so the SSE frame cannot carry the reason or model id; add them (and update the sse-event-payloads golden) if the composer should show the refined per-reason sentence."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No gateway caller yet for Refusal::grpc_status: gRPC invoke (grpc.rs:683), unary http grpc_status_to_http (http_routes.rs) and sse.rs:8146-8176 must map the new trailers before FailedPrecondition in S4; infer-statuses.json gains the two new kinds in S3."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the sse.rs stream path end to end for the nested refusal (only the normalize unit tests and the Refusal::from_body round trip cover it); add one in the model-gateway stream tests with ALLOWED_MODELS set."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "model_entitlement_matrix.rs (S3) should evaluate the permit, route and availability rows; S1 only checks the refusal and refusing-availability rows."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "model-entitlement-matrix.json is vendored into org-core and the contract-goldens.yml path filter now names it, but the matrix itself has no digest pin in any sync script."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Any client that matched the old untyped 400 with a flat {error: string} for an ALLOWED_MODELS refusal now gets 403 with a nested error object. Grep http.ts and the BFF gateway before the model-gateway image ships; my grep of the repo for the old message text found nothing."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "ChatEvent::Error in sse_events.rs has no action or details fields, so the SSE frame cannot carry the reason or model id. Add them and update the sse-event-payloads golden if the composer should show the per-reason sentence."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives invoke_stream_sse end to end with ALLOWED_MODELS set. The nested-refusal branch in sse.rs is covered only by the normalize unit tests and the Refusal::from_body round trip."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Refusal::grpc_status has no caller yet. S4 must map the new trailers in the gRPC invoke handler, in grpc_status_to_http and in sse.rs before the FailedPrecondition arm. S3 must add the two new kinds to infer-statuses.json."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "model_entitlement_matrix.rs (S3) should evaluate the permit, route and availability rows. S1 checks only the refusal row and the refusing availability rows."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "model-entitlement-matrix.json now appears in the contract-goldens.yml path filter, but no sync script pins its digest."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "zdr"
+   ],
+   "notes": "Built to the row, all switches untouched (the slice adds none). The model-gateway deployment allowlist refusal (ALLOWED_MODELS) is now a typed 403 body {\"error\":{code:\"model_not_entitled\",message,retryable:false,action:\"choose_another_model\",details:{model,reason:\"deployment_allowlist\"}}} from the pure fn deployment_allowlist_refusal in normalize.rs (the unary path returns it unchanged; the stream path in sse.rs reads the nested shape via Refusal::from_body and emits an error frame with code model_not_entitled, message and retryable; the flat {\"error\": \"...\"} shape is unchanged). mp-contracts model_entitlement.rs holds code::{MODEL_NOT_ENTITLED, ENTITLEMENT_UNAVAILABLE}, Reason (5, the matrix vocabulary), Action, Refusal builders (not_entitled, unavailable), json_body, grpc_status (PERMISSION_DENIED / UNAVAILABLE, never FAILED_PRECONDITION; trailers x-mp-provider-error and x-mp-entitlement-reason), from_body/from_status, catalogue_json/catalogue_text, and wire_model_id (the caller-supplied model id is echoed only if it is <=128 bytes of model-id characters, so refusal bodies stay content-free). The golden model-entitlement-refusals.json (+.sha256, pin d8b48550...a647a) is generated (MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts --test model_entitlement_catalogue). tests/model_entitlement_catalogue.rs also evaluates the matrix's refusal row (r_refusal_is_content_free) and the refusing availability rows against the real builders. SPA: model-entitlement-refusals.ts (Norwegian first, English = golden verbatim) wired into streamFailurePresentation: model_not_entitled -> no retry, text says choose another model; model_entitlement_unavailable -> retry. No proto change, no migration, no Cargo.toml change needed (serde_json/tonic already there). The gRPC invoke handler is not wired (the gate is not on that path today; S4 adds admission there), so the gRPC builder is tested but has no caller yet."
+  }
+ ]
+}

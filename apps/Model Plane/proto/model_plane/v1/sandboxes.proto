@@ -684,6 +684,13 @@ message ReadProcessOutputRequest {
 
   // The signed model.thread.read decision addressed to this service.
   string space_read_decision_token = 6;
+
+  // The run the caller names as the process's owner (the owner read path of the
+  // computer panel's terminal). Optional: empty reads a process of any run in the
+  // Space, as this read always has. When set, a process another run started is
+  // NotFound, the same answer as a process in another Space, so a caller learns
+  // nothing about ids outside its own run.
+  string run_id = 7;
 }
 
 // One page of output.

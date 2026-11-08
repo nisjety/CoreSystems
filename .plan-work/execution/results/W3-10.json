@@ -1,0 +1,748 @@
+{
+ "batchId": "W3-10",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-8-S10",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/src/space_memory.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs"
+   ],
+   "notes": "The agent scope is built dark behind SESSION_AGENT_MEMORY_ENABLED. It only turns on when that variable is the literal \"true\" and SESSION_SPACE_MEMORY_ENABLED is also on. Nothing was compiled or run. All edited files kept their CRLF line endings.\n\nThe design assumed the agent subject would need a new proto field. It does not: runs.agent_subject_id (migration 0075_space_mentions_and_wake_origin) is set only by a Control-signed wake that passed check_wake_facts. So there is no new proto field and no new migration; the slice reuses 0103_agent_memory_scope_key, which already allows scope 'agent' and source_label 'agent_memory'.\n\nWhat was built:\n- space_memory.rs:\n  - Switch reader agent_enabled() and topic check is_agent_self_topic (\"AGENT_SELF\").\n  - agent_scope_id builds '<space>:<agent>' and refuses a Space id that contains ':'.\n  - agent_stamp_for is a pure decision table with a new Skip::NotAgentTurn.\n  - index_agent_memory writes a scope='agent' row stamped with the audience and source_label 'agent_memory'. The agent is the thread's single live wake run; zero or two live wake runs write nothing. The owner's memory gate runs under the row lock, and nothing is mirrored to Letta.\n  - recall_agent_memory reads by run_id and thread_id. It requires the wake's own Space and agent, a non-waived thread, owner memory not off, and an audience hash equal to the thread's current one (D5). It returns rows with topic MEMORY (the episodic bucket) and the text quoted with Debug escaping, labelled agent_memory.\n  - erase_agent_memory is written but not reachable yet (see lead_todo).\n  - upsert_space_row now takes a Placement (scope and scope_id) and is shared by both scopes.\n- memory_grpc.rs IndexMemory: with the switch on, an AGENT_SELF save in a Space thread goes through the agent branch. It refuses a ZDR or waived credential and any origin other than model_tool. With the switch off, AGENT_SELF stays a thread note as before.\n- grpc.rs get_context_assembly_inner: appends the agent's notes only when the switch is on, the retention is Durable and a run_id is present.\n- dreaming.rs search_agent_memory: the unowned branch now excludes 'space' and 'agent' rows (see the P1 finding).\n\nTests (written, not run):\n- Unit: agent_switch_needs_both_switches_and_the_literal_true, agent_scope_id_names_one_binding, agent_stamp_table, agent_self_topic_is_a_thread_note_with_the_switch_off, agent_memory_cannot_raise_authority, every_agent_path_is_behind_the_switch, search_never_returns_room_or_agent_rows_outside_their_reader. skip_labels_are_closed_tokens was updated for the new Skip variant.\n- DB (ignored, harness): agent_memory_recalled_only_when_agent_addressed, agent_memory_never_crosses_spaces, revoked_binding_erases_agent_memory.\n\nStatus is partial because erasure on binding revocation is not wired: it needs a memory.proto RPC whose number neither integration report reserves. The BFF file named in the row (domains/spaces.rs) is now domains/spaces/mod.rs; I did not edit it, because revoke_space_agent has no session-core call to make until that RPC exists. Space deletion already erases agent rows by the '<space_id>:' prefix (EP-8 S7 code in grpc.rs).",
+   "deviations": [
+    "Assumed D12 = (a): agent memory is per (Space, agent) binding, recalled as quoted text in the episodic bucket with label agent_memory, never as instructions or tool grants; memory across Spaces is refused.",
+    "Assumed D3 = (b): `scope` stays the kind and `scope_id` names the instance ('<space_id>:<agent_subject_id>'), reusing migration 0103_agent_memory_scope_key (round A's 0075 renumbered per round B). No new migration.",
+    "No new proto field: the verified agent subject is read from runs.agent_subject_id, which only a Control-signed wake sets, instead of a new append-context field.",
+    "No BFF change: the owned path domains/spaces.rs is now domains/spaces/mod.rs, and revoke_space_agent cannot erase until a session-core RPC exists.",
+    "erase_agent_memory carries #[allow(dead_code)] until the revocation RPC calls it.",
+    "Agent memory needs SESSION_SPACE_MEMORY_ENABLED as well as its own switch, because agent rows are Space content and share S7's erasure.",
+    "Agent recall also applies the D5 audience-hash rule; the design did not say so explicitly, and this is the narrower choice.",
+    "dreaming.rs search_agent_memory now excludes scope 'space' as well as 'agent' from its unowned branch. This touches S6/S7 behaviour, but only rows that exist when a switch is on."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment, right after line `SESSION_SPACE_MEMORY_ENABLED: ${SESSION_SPACE_MEMORY_ENABLED:-false}` (~1129), add `      SESSION_AGENT_MEMORY_ENABLED: ${SESSION_AGENT_MEMORY_ENABLED:-false}`",
+    "owner (not lead): .env.example may want a commented `SESSION_AGENT_MEMORY_ENABLED=false` beside SESSION_SPACE_MEMORY_ENABLED",
+    "shared-edit apps/Model Plane/docs/ZDR.md: after the 'Space memory (agent_memory scope=space, EP-8 S6)' row (~line 92), add the row: `| **Agent memory (agent_memory scope='agent', EP-8 S10)** | No agent note written or recalled on a ZDR or waived turn | Built dark behind SESSION_AGENT_MEMORY_ENABLED (off; also needs SESSION_SPACE_MEMORY_ENABLED). Written only by the woken agent's save_memory (topic AGENT_SELF, origin model_tool) on its own verified wake run; recalled only on runs addressed to that agent in that Space; never mirrored to Letta; erased by Space deletion; erasure on binding revocation pending its RPC. |`",
+    "proto number needed (not reserved in round A or B): memory.proto MemoryService, append after the last RPC: `rpc EraseAgentMemory(EraseAgentMemoryRequest) returns (EraseAgentMemoryResponse);` with the messages `EraseAgentMemoryRequest { string org_id = 1; string space_id = 2; string agent_subject_id = 3; }` and `EraseAgentMemoryResponse { uint64 erased = 1; }`, each commented. Authority (which Control decision the BFF presents) needs ruling. The session-core handler then wraps space_memory::erase_agent_memory and drops its allow(dead_code); BFF domains/spaces/mod.rs apply_space_agent_state(state='revoked') calls it after Convex confirms.",
+    "guard: compile session-core (`cargo test -q -p session-core --lib space_memory`, plus memory_grpc and grpc unit tests); run the three new DB tests through the session-core DB harness; cargo fmt may reflow two long lines in space_memory.rs (agent_enabled_from tests, agent_facts_from_row destructure) and the memory_grpc condition.",
+    "ledger (lead): record 'Agent memory is per (Space, agent) binding, quoted below instructions, keyed on runs.agent_subject_id from the verified wake (EP-8 D12 = a, with EP-6 OD-5 / DEC-14 pending)'."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/proto/model_plane/v1/memory.proto (EraseAgentMemory RPC, unreserved number)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs (revocation call, after the RPC exists)",
+    "apps/Model Plane/docs/ZDR.md (agent memory row)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D12 assumed = (a) per (Space, agent) binding, quoted, no authority; the owner must confirm together with EP-6 OD-5 / DEC-14 before SESSION_AGENT_MEMORY_ENABLED goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D3 assumed = (b) `scope` kind plus `scope_id` instance (migration 0103); it still needs the Space session's acknowledgement before either Space or agent memory switches on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Binding revocation does not erase agent rows yet (no RPC/proto number), so a revoked agent's notes stay stored until Space deletion; if the same agent subject is re-bound and woken, it would recall them again."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before this slice, search_agent_memory's unowned branch (`session_id IS NULL AND scope <> 'user'`) returned every Space's 'space' rows (S6/S7) to any non-contained thread in the org; it is now `NOT IN ('user','space','agent')`. A harness run of the S7 tests should confirm nothing relied on the old behaviour."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "IndexMemoryRequest has no run_id, so the AGENT_SELF writer infers the agent as the thread's single live wake run; a member's model_tool save made during that run would be attributed to the agent. A run_id field (unreserved number) would remove the inference."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The three DB tests (agent_memory_recalled_only_when_agent_addressed, agent_memory_never_crosses_spaces, revoked_binding_erases_agent_memory) have not run on Postgres, and the seeded wake run relies on runs_wake_pair_chk accepting the UPDATE of agent_subject_id plus trigger_message_id."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "EP-6 phase 3 must live-prove an addressed agent turn shows its quoted note in the episodic segment and an unaddressed room turn does not, before the switch flips."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The SearchMemory RPC does not return agent rows even on the agent's own run (recall into context only); decide whether the agent's search_memory tool should see its own notes."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-14-S2",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/http/handlers.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/user-core/internal/http/appearance_density_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/navbar.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/theme/appearance.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/navbar-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/transcript-density.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/transcript-density.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/DensityMenu.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/DensityMenu.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-density.css",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx"
+   ],
+   "notes": "EP-14-S2 is built code-first with every switch off. user-core validates an additive transcriptDensity (omitempty, closed set detailed/standard/compact/minimal, 422 typed envelope with details.allowed). The gateway carries a known level through in the theme save and the onboarding brand writer, and only a known level. The SPA resolves the level (stored, else compactMode=true means compact, else standard), caches it under verevon.chat.density.v1 behind try/catch, and writes it through the existing generic BFF settings route with a read-modify-write (the updateTonePreset pattern). The menu is mounted in ChatPage behind VITE_CHAT_TRANSCRIPT_DENSITY (strict 'true'). The fold gate is settledFoldEnabled AND the density foldSettled rule. With the switch off the rules are unrestricted and the DOM gets no new attribute, so the switch-off path is unchanged. Nothing was run: no test, build, lint, typecheck, cargo, go, pnpm, node or docker command. Guard checks to run after the lead_todo edits: go test ./internal/http/... -run TestAppearance (user-core); cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets with the filters navbar_theme_save_keeps_transcript_density and onboarding_appearance_keeps_transcript_density; pnpm exec vitest run on transcript-density.test.ts, DensityMenu.test.tsx and action-registry.test.ts; pnpm lint; node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit. No proto, no migration, no ZDR matrix row (a preference, not content, and no refusal). ChatMessages.tsx is not touched.",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: in the MODEL_ACCESS record, insert after the line `  'chat.set_agent_mode': exempt('agent_cannot_self_govern', 'context_write'),` the line `  'chat.set_transcript_density': exempt('ui_state_only', 'external_write'),`. MODEL_ACCESS is typed Readonly<Record<ActionId, ...>>, so typecheck fails and isModelExecutableAction has no row without it.",
+    "Regenerate apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json after the model-access row lands: from apps/Frontend Plane/verevonv3 run `pnpm_config_verify_deps_before_run=false VEREVON_UPDATE_GOLDEN=1 pnpm exec vitest run src/shared/actions/admission-contract.test.ts` (the write is at admission-contract.test.ts:106), then rerun that file without the variable.",
+    "Re-vendor the four Model Plane copies of agent-action-admission.json from the regenerated golden, since model-access.ts says the other planes vendor it: apps/Model Plane/api/contracts/agent-action-admission.json, apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json, apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json, apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json. Not edited here.",
+    "Owner only: add `VITE_CHAT_TRANSCRIPT_DENSITY=false` to apps/Frontend Plane/verevonv3/.env.example next to the other chat switches. Not edited here (owner rule).",
+    "Add apps/Frontend Plane/verevonv3/src/features/chat/components/chat-density.css to the EP-14-S2 new_files record; it is a new stylesheet beyond the batch's four new files.",
+    "Run the size ratchet after the batch: `python scripts/gates/size-ratchet.py --check`. ChatPage.tsx grows by about 11 lines and action-registry.ts by about 19 lines.",
+    "Control Plane acknowledgement (D5): the user-core owner acknowledges the additive transcriptDensity field in AppearanceSettings (apps/Control Plane/user-core/internal/http/handlers.go). No file is edited for this."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (shared-edit, see lead_todo)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (generated, see lead_todo)",
+    "apps/Model Plane vendored agent-action-admission.json copies (4 files, see lead_todo)",
+    "apps/Frontend Plane/verevonv3/.env.example (owner only)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx (optional: a header slot would move DensityMenu into ChatHeader; not owned, not edited)"
+   ],
+   "deviations": [
+    "Assumed D5 = recommendation: four levels (detailed, standard, compact, minimal) stored as additive transcriptDensity in user-core appearance settings, cached under verevon.chat.density.v1, with the compactMode fallback applied in the SPA resolveDensity. The server only stores and validates; it never derives a level.",
+    "Fold gate: compact and minimal fold settled turns only when VITE_CHAT_SETTLED_FOLD is also on (the S1 switch stays the master for folding). The design text reads as if the density switch alone turns folding on.",
+    "Rule set narrowed to foldSettled and showProcess. minimal hides the tool chips and reasoning trace by a CSS rule on data-transcript-process. collapseReasoning, stepsAsCount, toolRowStyle and showLifecycleNotices are not applied in S2: detailed and standard render alike, and minimal keeps lifecycle notices in view because the notice type has no error marker (settled-fold.ts FOLDED_KINDS comment).",
+    "Density read and write go through the existing BFF generic route /api/v1/settings/appearance, as a read-modify-write in navbar-client.ts (the updateTonePreset pattern). No new BFF route was added, and appearance_payload is unchanged because the chat does not read the navbar payload. The design section 4 asked for the exposure.",
+    "DensityMenu is mounted as a row under ChatHeader in ChatPage.tsx, not inside the header, because ChatPanels.tsx is not owned by this slice. ChatMessages.tsx is not touched: the process trail is hidden by CSS on the workspace section's data attribute.",
+    "New stylesheet components/chat-density.css, not in the batch's new_files list.",
+    "The chat.set_transcript_density contract is registered and the UI calls the client directly, as navbar.save_theme does. No gateway action dispatcher was added.",
+    "The Go PUT answers an unknown level with 422 and the typed envelope code transcript_density_invalid, details.allowed as the named array (the design says 422)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "D5 was built at its recommendation without owner sign-off (four levels, additive user-core transcriptDensity, cache key verevon.chat.density.v1, compactMode fallback); the owner must accept it, and user-core must acknowledge the field, before the switch is turned on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The design's S2 proof is not run (wave mode): rebuild user-core and the BFF, set minimal in one browser and reload in a second, change the theme in the navbar and confirm the level survives, and take screenshots per level on a long Do thread."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The three new Vitest files are written but unrun; transcript-density.test.ts relies on Solid 2 effects flushing through flush() and a setTimeout settle, so a failure there is first a harness question, not a logic one."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the ChatPage fold gate (settledFoldEnabled && rules.foldSettled) or the data-transcript-process attribute; they are checked by reading the code only."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "compact and minimal fold only when VITE_CHAT_SETTLED_FOLD is also on, so enabling the density switch alone does not turn folding on; confirm this is the intended order when S1's default flips."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Only foldSettled and the minimal process hide are applied; detailed and standard render identically, and reasoning and step lists open closed at every level, so collapseReasoning, stepsAsCount and toolRowStyle belong with the S3 narration work through a ChatMessages seam."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "minimal keeps lifecycle notices visible because the notice type carries no error marker, so hiding them could hide an error; a later slice can add the marker and then hide non-error notices."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The density save is a read-modify-write of the whole appearance object over the generic settings route, so a theme save that lands between its GET and PUT can be overwritten by the density PUT (one round trip wide)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The design's three-writer reset risk does not occur today: user-core merges patches with the JSONB || operator and omits an empty transcriptDensity, so the carry-through is a guard against a future replace-style write, not a fix for a live reset."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The Go PUT cannot clear a stored level (omitempty drops the empty value and the merge keeps it); no UI offers a clear action, so this only limits a future reset control."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "DensityMenu sits in a row under ChatHeader rather than inside it; move it into the header through a slot when ChatPanels.tsx is next open."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "appearance_payload in the navbar BFF does not expose transcriptDensity, which the design asked for; add it only when a shell consumer needs the level."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S10",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "notes": "I wrote the code and the tests but ran nothing, as ordered. All four files keep their CRLF line endings, which I checked.\n\n**Proto (`execution.proto`)**\n- `RunContext` gets `repeated AgentRoleSpec agent_roles = 8`, the number reserved in rounds A and B.\n- New message `AgentRoleSpec` has fields 1-7: `agent_ref`, `version`, `digest`, `name`, `instructions`, `tool_capability_ids`, `autonomy_cap`.\n- The change is additive, and every new field has a comment.\n\n**execution-core (`runtime_loop/agent.rs`)**\n- Switch `EXECUTION_CORE_SUBAGENT_ROLES`, read with the strict parser. While it is off, the catalogue and any `role` key are ignored, as before.\n- `run_subagent_roles` gives an empty catalogue to ZDR, waived, scheduled and continuation runs, so naming a role there is a tool error. It drops the whole catalogue if it breaks any bound: more than 8 entries, duplicate refs, a bad ref, version 0, instructions over 4096 bytes, or an autonomy cap outside the vocabulary.\n- `offer_subagent_roles` adds an optional `role` enum and a role list to the `subagent.task` description. A run that offers it is marked not derivable, so it is not parkable, following the precedent for other added tools.\n- `run_subagent` resolves the role before any budget is spent. An unknown role is a tool error and never falls back to the parent's full tool set.\n- The child gets `role_tools`: the parent's tools whose `trusted_capability_id` is in the role's allowlist (an intersection), with the purpose-lock allowlist rebuilt from that set. It is seeded with `role_prompt` (the instructions, then the goal); the recorded goal is still the goal alone.\n- Lineage: `register_delegated_child_run` now takes an `agent_id`, which is `agent_ref@version` when a role was used. The research fan-out passes `None` and is unchanged.\n- The child's `LoopContext` has `subagent_roles: None`, so it stays one level deep.\n- Tests in `mod subagent_role_tests`:\n  - `subagent_role_narrows_tools_never_widens`\n  - `subagent_unknown_role_is_tool_error`\n  - `subagent_role_records_version_on_child`\n  - switch parsing, switch off, and ZDR/waived/scheduled/continuation\n  - bounds, and offer byte-identical without roles\n\n**model-gateway**\n- `http_routes.rs`: `InvokeRequest.agent_roles: Option<serde_json::Value>`. I kept it as raw JSON so a body is parsed exactly as before while the switch is off.\n- `sse.rs`:\n  - New switch `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE`, strict parser, default off.\n  - `compose_agent_roles` returns nothing when the switch is off, on a ZDR or waived turn, or for a malformed body. It drops each invalid entry, keeps the first of any duplicate, cuts instructions to 4 KB on a character boundary, and keeps at most 8 roles.\n  - `agentic_run_stream` takes a new last parameter, `agent_roles`. The continuation launch and the two test launches pass `Vec::new()`.\n  - The roles are put into `RunContext` after `run_context::prepare`, so they travel with the run and are never recorded.\n  - Tests in `mod agent_role_catalogue_tests`.\n\n**Not changed**\n- `zdr-posture-matrix.json`: per the hard rule, there is no row for a feature refusal. A ZDR or waived turn never builds the catalogue, and the ZDR handling lives in `zdr_features.rs`, the shared edit below.\n\n**Source of the catalogue**\n- Published definitions do not exist yet (EP-6 S7 and the BFF injection in S9 are not built). The gateway therefore takes a catalogue the BFF resolves, the same trust model as `agent_system_prompt`; the BFF half is in `needs_other_files`.",
+   "deviations": [
+    "Assumed OD-5 = (a): the agent's tool allowlist and autonomy cap live in the Convex definition and are applied tighten-only. The child's tools are the parent's tools intersected with the role's capability ids; capability-core gets no agent table.",
+    "Assumed OD-4 = (b): roles are immutable published versions, identified by agent_ref, version and digest, and the lineage records agent_ref@version.",
+    "Added a second switch, MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE (default off), on the gateway side, in addition to the design's EXECUTION_CORE_SUBAGENT_ROLES. Without it, a role key in a forged body could reach the run context.",
+    "The design says the gateway composes the catalogue from published definitions, but the gateway cannot read Convex and S7/S9 are not built. The gateway instead takes a catalogue the BFF resolves in InvokeRequest.agent_roles, then bounds and validates it itself.",
+    "No zdr-posture-matrix.json row (the design proposed golden e_zdr_token_subagent_roles_not_offered). Matrix rows are keyed on resolver inputs only; ZDR is covered by an Inert row in zdr_features.rs (shared edit) and by the refusal in compose_agent_roles.",
+    "The catalogue reaches a run only when MODEL_GATEWAY_RUN_CONTEXT composes a RunContext, because it rides inside it.",
+    "The child is named by StartManagedRunRequest.agent_id = agent_ref@version (session-core allows up to 256 bytes, trimmed, no control characters). The lineage-edge SubagentRole stays Generic."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/run_context.rs: in fn compose, the literal `RunContext { authored_instructions, history, memory_block, status: Some(status), user_profile: ..., }` (around line 796) needs a new line after the user_profile line: `        // Never composed here: the Do launch adds the role catalogue after `prepare` (EP-6 S10).` then `        agent_roles: Vec::new(),`. Without it the build breaks.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs: in fn make_request's InvokeRequest literal, after `            ui_locale: None,` (line 616) add `            agent_roles: None,`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs: (1) in FIELD_TREATMENTS, after `    (\"ui_locale\", Treatment::Honored),` add `    (\"agent_roles\", Treatment::Inert(\"no tool loop runs on a ZDR turn, so no subagent takes a role; the catalogue is never built\")),` (2) in invoke_field_names' destructure, after `        ui_locale: _,` add `        agent_roles: _,` (3) in the returned vec, after `        \"ui_locale\",` add `        \"agent_roles\",`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs: in cases(), after `        (\"ui_locale\", with(\"ui_locale\", json!(\"no\")), None),` add `        (\"agent_roles\", with(\"agent_roles\", json!([{\"agent_ref\": \"a\", \"version\": 1}])), None),`.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment, next to `MODEL_GATEWAY_USER_PROFILE_PREFIX: ${MODEL_GATEWAY_USER_PROFILE_PREFIX:-false}` add `      MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE: ${MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE:-false}`. In the execution-core environment (near EXECUTION_CORE_AUTH_AUDIENCE) add `      EXECUTION_CORE_SUBAGENT_ROLES: ${EXECUTION_CORE_SUBAGENT_ROLES:-false}`.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): \"Agent definitions stay in Convex and are versioned there; capability-core keeps policy only; an agent's tool allowlist and cap apply tighten-only (EP-6, OD-4, OD-5, DEC-14), proposed until the owner rules\".",
+    "Regenerate the proto bindings (mp-contracts) for the new RunContext.agent_roles field and the AgentRoleSpec message, and run buf lint against the ratchet. The prompt-tool manifest needs no regeneration: the subagent.task definition is unchanged while the switch is off.",
+    "Owner: add MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE and EXECUTION_CORE_SUBAGENT_ROLES (both default false) to .env.example."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs (BFF, the S9 owner): strip any client-sent `agent_roles` from the invoke body, and while the BFF switch is on, add the Space's bound agents at their pinned or published versions as [{agent_ref, version, digest, name, instructions, tool_capability_ids, autonomy_cap}]. This needs S7's Convex versions.",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs or mp-contracts/src/run_context.rs validate(): optionally refuse a ZDR RunAgentRequest whose RunContext carries agent_roles at the boundary (closed token run_context_zdr_agent_roles). agent.rs already ignores it, so this is defense in depth."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-5 assumed = (a): the agent allowlist and cap are applied tighten-only from the Convex definition, with no capability-core agent table. The owner must rule before either role switch is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-4 assumed = (b): immutable published versions identified by agent_ref, version and digest. The child's lineage agent_id is agent_ref@version; the owner must rule before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the BFF strips client-sent `agent_roles`, turning MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE on lets a forged body inject role instructions into a child's prompt. Tools can still only narrow, but the BFF strip must land before switch-on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No catalogue source exists yet (EP-6 S7 Convex versions, S9 BFF injection), so the feature cannot be shown working end to end. A live run is needed: a role-named subagent.task whose child is offered only the intersected tools, and whose child run carries agent_id agent_ref@version."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A run that offers the role parameter is marked not derivable and so cannot park. An approval continuation gets no catalogue, so a role named after resume is a tool error. A park resume also never offers roles, because it rebuilds the base tool set alone."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The catalogue rides only in a composed RunContext, so it needs MODEL_GATEWAY_RUN_CONTEXT on as well. A run with run context off carries no roles even with both role switches on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "role_tools keeps parent tools by trusted_capability_id. Several tools share one capability id (for example save_memory and plan.* both map to cap.memory.index), so allowing that capability admits all of them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "run_subagent applies the role to any subagent.* label it handles, not only subagent.task. The lineage-edge SubagentRole stays Generic, and the role identity is carried only in the child run's agent_id."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S4",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/mcp_elicitation.proto",
+    "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/mcp_elicitation.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_http.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/mcp_elicitation.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs"
+   ],
+   "notes": "The code is written and nothing has been compiled or run. The owner's order was code first, so the guard compiles the batch.\n\n**Contract (proto)**\n- New file `mcp_elicitation.proto`. It holds `McpElicitationPending`, a new service `McpElicitationService` with `AnswerMcpElicitation`, and that RPC's request and response. It imports `orchestration.proto` for `QuestionItem` and `QuestionAnswerItem`. Every message and field is commented. The file is LF.\n- `gateway.proto` (kept CRLF) imports the new file and gains `ProxyMcpToolRequest.allow_elicitation = 8` and `ProxyMcpToolResponse.elicitation = 4`, both additive.\n- `mp-contracts/build.rs` lists the new file.\n\n**Revision string checked against the spec**\nI checked the revision string against modelcontextprotocol.io/specification/2025-06-18/client/elicitation. The revision is \"2025-06-18\" and the client capability is `{\"elicitation\":{}}`. Field types, the string formats (email, uri, date, date-time), `enum`/`enumNames` and the accept/decline/cancel actions all match the spec.\n\n**`mp-contracts` mapping (`src/mcp_elicitation.rs`)**\n- `items_from_schema` maps the form onto question items:\n  - string becomes text; a string `enum` of 2 to 6 values becomes a single choice with ids o0..o5; boolean becomes a Ja/Nei single choice; number and integer become text.\n  - It declines: more than 4 fields, nested objects or arrays, unknown formats, and names or titles that look sensitive.\n  - Item ids are the property name when it is a valid id, otherwise `field_<i>`.\n- `content_from_answers` turns answers back into content. It checks numbers (and integers), min/max, formats and lengths.\n- `is_sensitive_field` matches fragments such as password/token/apikey/personnummer anywhere, and pin/card/kort only as whole words, so names like `shipping` are not caught.\n\n**Gateway JSON-RPC (`mcp_jsonrpc.rs`)**\n- `ELICITATION_PROTOCOL_VERSION` and `build_initialize_request_with(id, elicitation)`. The old builder delegates with `false`, and a test pins its exact JSON.\n- `ServerRequest` and `parse_server_request` read `elicitation/create`, `ping`, and any other method as unsupported, including sampling.\n- Builders for the elicitation result, an empty result (for `ping`) and method-not-found (-32601).\n\n**Gateway transport (`mcp_http.rs`)**\n- The session now stores its `protocol_version`. It is today's value unless elicitation was advertised and the server agreed.\n- `connect_with(url, token, elicitation)`; plain `connect` delegates with `false`.\n- `McpMessageStream` reads the response incrementally (SSE frames or plain JSON). The 1 MiB cap is counted across all frames, using `MCP_MAX_RESPONSE_BYTES`, which is now `pub(crate)`.\n- `call_tool_interactive(tool, args, stream_timeout)` sets a per-request timeout to replace the client's 10 s total timeout. `read_on` answers `ping`, sends method-not-found for sampling and other requests, and stops at a form.\n- `respond` posts the client's answer. `call_tool` is unchanged.\n\n**Gateway registry (new `mcp_elicitation.rs`)**\n- `MCP_ELICITATION_ENABLED` uses the strict parser. `MCP_ELICITATION_HOLD_SECONDS` defaults to 600, clamped to 60-1800.\n- `ElicitationRegistry` is an in-memory DashMap keyed `el_<ulid>`, with a process-wide `global()` instance. Caps are 8 held calls per org and 64 per process, checked under a lock.\n- A call may ask at most 3 forms; a 4th cancels it.\n- A form that does not map is answered `decline` and the stream is read on.\n- The reaper runs every 15 s and sends `cancel` when a call expires.\n- `answer()` only works for the org and user the call was held for; anyone else gets `mcp_elicitation_expired`. An invalid answer leaves the call held so it can be answered again.\n- The transport is behind a `HeldTransport` trait so tests can script it. Logs carry ids, counts and lengths only.\n\n**Wiring**\n- `runtime_registries.rs` (CRLF kept): `handle_proxy_mcp_tool` takes the interactive path only when the switch is on, `allow_elicitation` is set and `user_id` is non-empty. All other paths are unchanged apart from `elicitation: None` in the response literals.\n  - The origin label is the server name, or its id if it has none, cut to `MAX_ORIGIN_LABEL`.\n  - `settled_parts` is shared with `grpc.rs`.\n- `grpc.rs` (CRLF): `McpElicitationService` is implemented on `GatewayService` and added beside `ModelGatewayServer` with a clone of the same verifier. The gate is the same as ProxyMcpTool: `RpcAccess::Tool`, the ZDR contract and service principal only. Org comes from the verified identity. With the switch off it always answers expired.\n\n**Tests written**\n- `mp-contracts`: the 6 named tests plus positional ids, enum size, integer, formats and missing answer.\n- `mcp_jsonrpc`: the 4 named tests plus the result shape.\n- `mcp_http`: the 3 named tests plus sampling.\n- `mcp_elicitation`: the named tests plus invalid answer, unknown action, sensitive decline, non-form mode and switch parsing.\n- `runtime_registries`: `switch_off_ignores_allow_elicitation` and a label test.\n\n**Dependency on another slice:** `MAX_ORIGIN_LABEL` comes from EP-4-S5's uncommitted edit to `user_question.rs` in this same batch.",
+   "deviations": [
+    "The test 'third_elicitation_cancels_the_call' is named 'a_fourth_elicitation_cancels_the_call'. The slice allows up to 3 forms per call, so the 4th form is what cancels the call.",
+    "No zdr-posture-matrix row was added for e_zdr_run_mcp_elicitation_not_advertised. Matrix rows are keyed on resolver inputs only, so the golden is the byte-exact unit test initialize_without_elicitation_is_unchanged in mcp_jsonrpc.rs instead.",
+    "handle_proxy_mcp_tool also needs a non-empty user_id before it advertises elicitation, because a call without a user has no one who may answer.",
+    "A string field with a format other than email, uri, date or date-time is declined (unsupported_format) instead of being shown as plain text."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs: in fn proxy_request, inside the pb::ProxyMcpToolRequest literal, add the line `        allow_elicitation: false,` right after `        expected_digest: expected_digest.to_owned(),` (keep the file's CRLF). Without it execution-core does not compile against the new proto field. EP-4-S7 later sets it from GovernedMcp.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block, right after the `HOOKS_DURABLE: ${HOOKS_DURABLE:-false}` line, add: `      # EP-4 S4: MCP elicitation (a server's form held in the gateway while the owner answers). Only the literal true.`, then `      MCP_ELICITATION_ENABLED: ${MCP_ELICITATION_ENABLED:-false}`, then `      # Hold window of an unanswered form, seconds (default 600, clamped 60-1800).`, then `      MCP_ELICITATION_HOLD_SECONDS: ${MCP_ELICITATION_HOLD_SECONDS:-600}`.",
+    "Regenerate proto bindings for gateway.proto and the new mcp_elicitation.proto (Go under go/gen/model_plane/v1, Python _gen, verevon TS gen), then run `buf lint` and `buf breaking --against baseline.binpb` in apps/Model Plane/proto. Rust is generated by mp-contracts/build.rs, which now lists the new file.",
+    "Compile and test: `cargo test -q -p mp-contracts --lib mcp_elicitation`, `cargo test -q -p model-gateway --lib mcp_`, `cargo test -q -p model-gateway --lib switch_off_ignores_allow_elicitation`, plus a cargo build of execution-core after the shared edit above.",
+    "Owner: add MCP_ELICITATION_ENABLED=false and MCP_ELICITATION_HOLD_SECONDS=600 to .env.example."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs (one struct-literal field, see lead_todo)",
+    "apps/Model Plane/deploy/docker-compose.yml (env lines, see lead_todo)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "execution-core's 8 s ProxyMcpTool channel timeout also covers AnswerMcpElicitation, so a server that works more than 8 s after receiving the answer completes inside the gateway but its result never reaches the run; S7 must give the answer call a longer deadline or accept that loss."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Prove against a Streamable HTTP fixture server that elicits {project: enum[3], notify: boolean} inside tools/call: ProxyMcpTool{allow_elicitation:true} returns elicitation, AnswerMcpElicitation{accept} returns the tool result, and an unanswered call gets cancel within hold+15 s."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Held calls live in one replica's memory (D16): with more than one model-gateway replica, an answer routed to the wrong replica fails as mcp_elicitation_expired; it fails closed, but sticky routing is WS04's job before multi-replica switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The elicitation revision is pinned to 2025-06-18 (checked against the spec page). Servers on 2025-11-25 negotiate down; any reply other than 2025-06-18 makes the session fall back to 2024-11-05, so such a server never elicits."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Optional schema properties (not in `required`) must still be answered, because user_question items have no optional flag; a form with optional fields therefore demands every answer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Calls that have expired still count toward the 8-per-org and 64-per-process caps until the 15 s reaper tick removes them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The interactive HTTP path (connect_with plus call_tool_interactive against a real socket, and the respond 202 handling) has no wiremock test, because safe_mcp_http_client needs HTTPS or an env-allowlisted internal host; only the stream parser and the registry are unit-tested."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Interactive::Elicit carries a large McpMessageStream by value, which may trip clippy::large_enum_variant; box the stream if the guard's clippy run flags it."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S5",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/session-core/migrations/0105_run_question_origin.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0105_run_question_origin.down.sql",
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/user_question.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs"
+   ],
+   "notes": "I wrote the code and tests; nothing was compiled or run. Migration 0105 is the next free session-core number after round B's renumbering (0100-0104 are taken). It adds `origin`, defaulting to 'model' and limited to 'model' or 'mcp_elicitation', and `origin_label`, at most 80 characters. A CHECK makes the label empty exactly when the origin is 'model'. The revert file runs in a transaction and can be run twice.\n\nProto (additive, every field commented): `CreateRunQuestionRequest` gets `origin=8` and `origin_label=9`; `RunQuestion` gets `origin=15` and `origin_label=16`.\n\nmp-contracts adds `ORIGIN_MODEL`, `ORIGIN_MCP_ELICITATION`, `MAX_ORIGIN_LABEL=80` and `validate_origin`. It treats an empty origin as model, refuses a label on a model question, and requires a one-line label of 1-80 characters for a server question.\n\nThe store has `RunQuestionRow.origin`/`origin_label` and `NewRunQuestion.origin`/`origin_label`, plus both columns in `RUN_QUESTION_COLUMNS` and in the INSERT.\n\nIn the gRPC layer, a new pure function `question_origin` runs right after `authorize_org` and before any store lookup, so the existing gate-order source test still holds. It validates the origin (bad values get InvalidArgument `invalid_question: ...`). Only a caller with `is_service()` and principal `service:execution-core` may set a non-model origin; anyone else gets PermissionDenied `question_origin_not_allowed`. `run_question_from_row` returns the origin and label, so the create response and the list carry them.\n\nThere is no switch: nothing sends an origin until S7, unset reads as model, and behaviour is unchanged.\n\nTests:\n- mp-contracts: three `validate_origin` tests.\n- session-core gRPC (no database): `run_question_user_principal_cannot_set_a_server_origin`, `run_question_origin_is_checked_and_only_execution_core_may_name_a_server`, `run_question_list_returns_origin`.\n- session-core store, DB tests (`#[ignore]`, need a scratch Postgres): `run_question_origin_defaults_to_model` (includes an insert that does not name the columns), `run_question_mcp_origin_needs_a_label`, `run_question_model_origin_refuses_a_label`, `run_question_label_over_80_is_refused`, `run_question_list_returns_origin`.\n- session-core store, static migration check: `run_question_migration_0105_adds_the_origin_and_its_revert_drops_it`.\n\nLine endings kept: the proto, user_question.rs and the migrations are LF; the store and gRPC files are CRLF (checked by counting).",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: in execute_ask_user, the `pb::CreateRunQuestionRequest { ... }` literal (after `idempotency_key: format!(\"{run_id}:{step_id}\"),`) add `origin: String::new(),` and `origin_label: String::new(),` (it has no `..Default::default()`, so it will not compile without them).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs: in fn scripted_question, the `RunQuestion { ... }` literal, after `answered_message_id: String::new(),` add `origin: String::new(),` and `origin_label: String::new(),`.",
+    "Regenerate the proto bindings for orchestration.proto (Go go/gen/model_plane/v1/orchestration.pb.go and any TS/Python generated copies); then run `buf lint` and `buf breaking --against baseline.binpb`.",
+    "The slice's test command `cargo test -p session-core --lib run_question` will not work: session-core has no src/lib.rs. Use `cargo test -q -p session-core --bin session-core run_question`, and run the store DB tests with `DATABASE_URL=<scratch> ... -- --ignored --test-threads=1`.",
+    "Migration number: 0105 was not reserved in round A or round B. It is the next free number after round B's renumbered 0100-0104; please record it in 00-integration-round-b.md."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "S7 will be refused unless execution-core changes credentials and gets a grant: it calls CreateRunQuestion with the run owner's delegated bearer (execute_ask_user), but the new gate needs a service:execution-core credential, and authorize_owner_row only lets a service through if it holds orchestration:write, which no principal has today. S7 must create elicitation questions under the execution-core service credential and add orchestration:write for it in plane-service-principals."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The origin is not part of the idempotency check: a retry with an existing key returns the stored row even if it names a different origin. This is safe because S7's keys are `{run_id}:{step_id}:elicit:<n>`, which no model question uses."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The QuestionAsked/QuestionAnswered orchestration events and the gateway's run_question_value do not carry the origin yet; that belongs to S6, and until then a server question would render as the model's on the event path."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "After 0105 is applied, check with psql (keys only) that existing run_questions rows read origin='model' and origin_label=''; the mcp_elicitation row is proven in S7."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The store tests that need a database are #[ignore]; they run only against a scratch Postgres with --ignored --test-threads=1."
+    }
+   ],
+   "deviations": [
+    "The test command in the slice's queue row (`--lib`) does not apply to session-core, which is a binary crate; the tests are written to run under `--bin session-core run_question`.",
+    "validate_origin also refuses a newline or tab in the label (a one-line card heading), on top of the design's length limit."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-4-S11",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/docs/architecture/adr-user-content-origin.md"
+   ],
+   "notes": "Created the ADR stub docs/architecture/adr-user-content-origin.md (Status Deferred, 2026-11-03, 51 lines, CRLF to match the sibling ADRs in this worktree; core.autocrlf=true with LF blobs). It defers a dedicated user-content origin (D14, OD-6) and carries the context, decision, consequences, reopen triggers and owners from the S11 row. The context narrows the design's claim that the opaque-origin srcdoc frame is the only untrusted-markup renderer to artifact markup (viewer-registry.ts) and names the Inbox email, dashboard web view and PDF frames as existing exceptions this ADR does not change. No test, build, lint, typecheck, cargo, go, pnpm or docker command was run; git was read-only. S11 has no flag, contract, proto, migration, golden, ZDR row or ledger row, and no index or gate references the ADR family, so no shared file changes are needed.",
+   "lead_todo": [],
+   "needs_other_files": [],
+   "deviations": [
+    "The S11 row and the EP-4 design context say the opaque-origin srcdoc frame is the only untrusted-markup renderer; the ADR scopes that claim to artifact markup (viewer-registry.ts, ArtifactHtmlPreview, ChatAttachmentCanvas HTML) because the Inbox email frame (same-origin, scripts off), the dashboard web view (allow-scripts plus allow-same-origin, currently unused) and the unsandboxed PDF frames also draw untrusted content."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "DashboardSearchPanel.tsx:259 calls window.open with a search result URL and no scheme check (search-client.ts only derives hostnames), so a javascript: result would run script in the app origin unless the search backend guarantees http(s); verify the backend and add a client-side http(s) check."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "WebPageViewer in DashboardSearchResults.tsx:147-185 has no caller but frames search-result URLs with allow-scripts plus allow-same-origin and no scheme or same-origin check, so wiring it as it stands would run a result on the app origin."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Inbox email frame in EmailBody.tsx:126-129 is same-origin with untrusted HTML and no test pins its sandbox string, so adding allow-scripts there would run email script with the app's authority."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The PDF frames in ChatArtifactPanel.tsx:499, ChatAttachmentCanvas.tsx:173 and ArtifactOfficePreview.tsx:58 have no sandbox, and looksLikePdfContent (chat-artifacts.ts:185-190) accepts any http(s) URL ending in .pdf, so a same-origin .pdf URL would load unsandboxed on the app origin."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "OD-6 (no dedicated user-content origin in W3) is an owner ruling; the ADR records the agent default as Deferred and stays open until the owner accepts or overrides it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "EP-12's share ADR (S13) should be checked against reopen trigger 1 of docs/architecture/adr-user-content-origin.md before it is accepted, since public links or cross-org sharing would reopen this deferral."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S2",
+   "status": "done",
+   "files_changed": [
+    "apps/Control Plane/auth-core/src/auth/api-key-exchange.ts",
+    "apps/Control Plane/auth-core/src/auth/api-key-exchange.controller.ts",
+    "apps/Control Plane/auth-core/src/auth/api-key-exchange.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/api-key-exchange.controller.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/convex-token.service.ts",
+    "apps/Control Plane/auth-core/src/auth/convex-token.service.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principal.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principal.spec.ts",
+    "apps/Control Plane/auth-core/src/app.module.ts"
+   ],
+   "notes": "I wrote the code and tests for the slice but did not run anything, per the code-first order. Before this attempt none of the owned files had partial edits. All edited files use LF line endings, and that is kept.\n\nBetter Auth 1.6.23 `verifyApiKey`: I read the plugin source in the live checkout's node_modules without changing it. The signature is `auth.api.verifyApiKey({ body: { key, configId?, permissions? } })` and it returns `{ valid, error: { code } | null, key: Omit<ApiKey,'key'> | null }`. The error codes are KEY_DISABLED, KEY_EXPIRED, RATE_LIMITED, USAGE_EXCEEDED, INVALID_API_KEY and KEY_NOT_FOUND. The controller calls it without `configId`, so the policy can name `org_key_refused` itself. With `configId: 'user-keys'` the plugin would report an org key as INVALID_API_KEY.\n\n- **Policy (`api-key-exchange.ts`):** a pure module. The audience-to-scope table is closed: model-gateway, session-core and inference-core get `agent:runs`; quarry and browser-broker get `browser:agent`. A scope `resource:action` counts as granted only when the plugin's permission map lists the action under the resource. The org binding is `key.metadata.org_id`, and the key's ZDR flag counts only when `metadata.zdr` is exactly `true`.\n  - Refusal reasons: key_invalid, key_disabled, key_expired, key_rate_limited, org_key_refused, org_mismatch, owner_not_member, scope_not_granted, audience_not_allowed.\n- **Route (`api-key-exchange.controller.ts`):** `POST /api/:audience/api-key-exchange`. It is on only when both `API_KEY_ENABLED` and `API_KEY_AGENT_EXCHANGE_ENABLED` are the literal `true`. Otherwise it answers 404 with the same body as an unknown audience.\n  - Order of checks:\n    1. The body must not carry `zdr`; a caller-selected posture is refused with 400.\n    2. The calling service must be authorized (new `authorizePlaneServiceApiKeyExchange`, registry field `apiKeyExchange`).\n    3. The key is checked with `verifyApiKey`.\n    4. The owner's membership is read with `resolveCanonicalTokenContext`.\n    5. The policy decides.\n    6. `zdr` is the org posture from `resolveInteractiveRetentionPosture`, OR the key flag.\n  - It then mints with a fresh `jti` and writes the durable audit `api_key_token_exchanged`. If that audit fails, it answers 503 and returns no token.\n  - Key-level refusals are audited as `api_key_token_denied`, but a refusal of the calling service itself is not audited.\n  - Responses: success is `{data:{token,expiresAt,audience}}`; every refusal is `{error:{code,message,details:{reason}}}`. Status codes: 401 for invalid, disabled or expired keys, 429 for rate limits, 403 for other policy refusals, 503 when something it depends on is unavailable. Nothing logs the key.\n- **Token signing (`convex-token.service.ts`):** `issuePlaneToken` and `issueModelPlaneToken` now accept `principalType: 'api_key'`. model-gateway has its own issuer and audience, and it is not a plane audience, so both paths need it. Both share one validator that matches `is_well_formed_api_key` in model-gateway's `auth.rs`.\n  - Claim shape: `sub` is `apikey:<keyId>`, plus `key_id`, `acting_user_id` and a required `jti`. There is no `user_id`, `service_id`, `email` or `step_up`.\n  - The signer caps the lifetime at 120 s (`API_KEY_TOKEN_MAX_TTL_SECONDS`). Without the organization-policy authority on the posture, the token fails closed to `zdr:true`.\n  - `keyId` and `actingUserId` are refused on other principal types; a service token may still carry `actingUserId`, as before.\n  - With the switches off, existing callers get byte-identical tokens.\n- **Registry (`plane-service-principal.ts`):** a new optional `apiKeyExchange: string[]`, checked against the closed audience list. It is separate from `audiences`, so opting in grants no `/internal-token`.\n\n**Tests written:**\n- Policy table covering every refusal reason, scope subsets, zdr raise-only and literal parsing of the key flag.\n- Controller cases:\n  - Switch off and unknown audience give the same 404.\n  - A caller without `apiKeyExchange` gets 403 before the key is read.\n  - A malformed body or a body carrying `zdr` gets 400.\n  - The exact claims and audit event on success.\n  - Each `verifyApiKey` refusal code maps to its reason.\n  - Org posture unavailable and audit failure each give 503 and no token.\n  - The key appears in no log, audit payload or refusal.\n- Signer: api_key shape, the TTL cap and every rejected shape.\n- Registry: authorization and validation of the new field.\n\nI did not add the `web_policy` and `key_hosts` claims from the INNH-10 token table (they matter for the browser-broker audience). They are recorded below.",
+   "lead_todo": [
+    "shared-edit apps/Control Plane/scripts/plane-principal-registry.jq: (1) in known_row_keys add \"apiKeyExchange\" to the list (alphabetical: put it first, before \"allowAnyOrg\"); (2) in check_maps, after the tokenExchange block, add `| (if ($row | has(\"apiKeyExchange\")) then $row.apiKeyExchange as $l | if ($l | non_empty_strings | not) then fail($name; \"\\\"apiKeyExchange\\\" must be a non-empty array of non-empty strings\") elif ([$l[] | IN(\"model-gateway\", \"session-core\", \"inference-core\", \"quarry\", \"browser-broker\")] | all | not) then fail($name; \"\\\"apiKeyExchange\\\" audiences must be model-gateway, session-core, inference-core, quarry or browser-broker\") else . end else . end)`; (3) in the reduce, after `+ optional($row; \"tokenExchange\")` add `+ optional($row; \"apiKeyExchange\")`. Without this the assembler refuses any policy row carrying the field.",
+    "shared-edit apps/Control Plane/config/plane-service-principals.json (only after the jq edit lands): on the \"verevon-gateway\" row add `\"apiKeyExchange\": [\"model-gateway\", \"session-core\", \"inference-core\"]`. It stays inert while API_KEY_AGENT_EXCHANGE_ENABLED is off. Then re-run scripts/tests/principal-registry-parity.test.sh and plane-service-principals-policy.contract.spec.ts (its toMatchObject assertions on that row tolerate the extra key).",
+    "shared-edit apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md: in the auth-core token-issuance section add the line: `POST /api/:audience/api-key-exchange` (EP-12 S2 / INNH-10 CP-1): the only path that mints an `api_key` principal token (sub apikey:<key_id>, acting_user_id attribution only, TTL <= 120 s, jti); callers opted in per audience by registry `apiKeyExchange`; switch API_KEY_AGENT_EXCHANGE_ENABLED (on top of API_KEY_ENABLED), default off; durable audit api_key_token_exchanged / api_key_token_denied, fail-closed.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): add \"One API-key exchange route for every plane audience: auth-core POST /api/:audience/api-key-exchange mints api_key tokens (closed audience/scope table, user-keys only, TTL <= 120 s, zdr = org OR key flag) - EP-12 D3, INNH-10 CP-1/CP-4\".",
+    "Formatting: run `pnpm exec prettier --write src/auth/api-key-exchange.ts src/auth/api-key-exchange.controller.ts src/auth/api-key-exchange.spec.ts src/auth/api-key-exchange.controller.spec.ts src/auth/convex-token.service.spec.ts src/auth/plane-service-principal.spec.ts` in apps/Control Plane/auth-core. Several test-table rows exceed 80 columns, and prettier is enforced through eslint.",
+    "Guard: `cd \"apps/Control Plane/auth-core\" && pnpm exec jest src/auth/api-key-exchange src/auth/convex-token.service src/auth/plane-service-principal`, then diff the failing set against HEAD (15 pre-existing failures across 3 suites); also run tsc on the project.",
+    "Owner (not lead): add API_KEY_AGENT_EXCHANGE_ENABLED=false to auth-core's .env.example, and pass `API_KEY_AGENT_EXCHANGE_ENABLED: ${API_KEY_AGENT_EXCHANGE_ENABLED:-false}` to the auth-core service in apps/Control Plane/docker-compose.yml if that compose file enumerates auth-core env (not an owned file)."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/scripts/plane-principal-registry.jq",
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "deviations": [
+    "model-gateway is not a PlaneAudience (it has its own issuer and audience via issueModelPlaneToken), so api_key support went into both issuePlaneToken and issueModelPlaneToken, sharing one validator (apiKeyIdentityClaims) and one TTL helper, instead of issuePlaneToken alone.",
+    "The org posture comes from resolveInteractiveRetentionPosture(orgId) rather than resolveTenantServiceRetentionPosture: the latter requires a principal whose registry row has retention 'tenant' and wraps the same resolver.",
+    "verifyApiKey is called without configId, and the policy refuses non-user-keys with org_key_refused. This consumes the org key's plugin rate-limit counter on a refused exchange.",
+    "Denial reasons beyond the design's list: key_invalid and key_rate_limited (mapped from the plugin's codes). Caller-level refusals use reasons caller_not_authorized, malformed_request, retention_not_selectable, audience_not_found, and *_unavailable for 503s.",
+    "The 120 s cap lives only in the signer (API_KEY_TOKEN_MAX_TTL_SECONDS in convex-token.service.ts); the controller passes no override.",
+    "The web_policy and key_hosts claims from the INNH-10 section 3 token table are not minted (not in EP-12 S2's row)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Exchanged api_key tokens carry neither the web_policy nor the key_hosts claim that INNH-10 section 3 requires for the browser-broker audience, so the browser half (quarry/browser-broker audiences) must not be opted in via apiKeyExchange until CP-2's host ceiling and those claims exist."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Owner membership is the existence of a Better Auth member row (resolveCanonicalTokenContext); a banned or deleted user's key, or a user whose membership is pending removal, is not separately refused, and CP-3 (api_key_revoked event) is still unbuilt."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A refusal whose durable audit cannot be written still answers the refusal (it issues nothing), and refusals of an unauthenticated calling service are not audited at all, to keep the audit stream from being floodable; only grants are fail-closed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The recommended registry change adds apiKeyExchange to the existing verevon-gateway (mail-task) credential; a dedicated principal would keep the two authorities on separate credentials, as the retention-decision row does, but every registry row must also carry a non-empty audiences/scopes internal-token grant."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof F2 still needs: a user-keys key with permissions {agent:[runs]} and metadata {org_id}, the switches on, and an exchange through the gateway credential yielding a 120 s aud=model-gateway token that model-gateway's is_well_formed_api_key accepts, plus an api_key_token_exchanged audit row with no key material."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the real Better Auth api-key plugin (verifyApiKey is mocked), so the metadata/permissions shapes the plugin returns (parsed permissions object, migrated metadata) are verified only by reading plugin 1.6.23's source."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S3",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\agent-api.v1.yaml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\agent-api-v1.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\generate-sdk.sh",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\src\\zdr_refusal.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\agent_api_contract.rs"
+   ],
+   "notes": "Built EP-12-S3 code first. Nothing was compiled or tested. (1) api/contracts/agent-api-v1.json is the golden: six routes with method, public path, gateway path, scope, operation id, query and header parameters and body fields; response field sets; limits; refused fields mapped to features; a closed 13-code error vocabulary with HTTP status, retryable flag, details keys and shared origin; and a zdr block for agent_api. (2) api/agent-api.v1.yaml is OpenAPI 3.1.0 with info 1.0.0, server /api/agent/v1, apiKey in header x-api-key, six operations carrying x-gateway-path and x-scope, typed envelopes, and details declared as objects. (3) tests/agent_api_contract.rs checks golden against spec: paths and methods, operation ids, gateway paths, scopes, parameters, the body allow-list and its caps, response field sets, the ErrorCode enum, details objects, refused fields, the shared ZDR and entitlement codes, and the sha256 pin. It reads the YAML with a line-block reader and adds no dependency (sha2 and serde_json already exist). (4) zdr_refusal.rs appends agent_api, conversation_export, conversation_share and conversation_import to FEATURES after user_profile, keeps CRLF (1071 of 1071 lines), and adds a round-trip unit test. (5) generate-sdk.sh takes an optional spec argument. A bare call resolves to the same spec, output folder and package names as before; agent-api writes sdk/agent-api/{typescript,python} as @verevon/agent-api and verevon_agent_api. No switch, proto, migration or Cargo change. Read-only checks only: CRLF counts, a json.load of the golden (6 routes, 13 codes), a YAML indentation scan, and sha256 of the golden. The batch cannot compile until the .sha256 pin is created and the refusal golden is regenerated and copied.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/api/contracts/agent-api-v1.json.sha256: create the file with one line: 0bd0c4974e6be687e548dddfe37c8b9f8d93d72e4946f6e1f3411dae1146dabb  agent-api-v1.json (sha256 of the golden as written, LF). The parity test include_str!s this pin, so the batch does not compile until it exists. Recompute with sha256sum if the golden changes.",
+    "guard: from apps/Model Plane/rust run MP_UPDATE_GOLDEN=1 cargo test -q -p mp-contracts zdr_refusal. This regenerates apps/Model Plane/api/contracts/zdr-refusals.json with four features appended after user_profile: agent_api 'the Agent API', conversation_export 'conversation export and replay', conversation_share 'conversation sharing', conversation_import 'conversation import'.",
+    "guard: refresh apps/Model Plane/api/contracts/zdr-refusals.json.sha256 to the regenerated digest, keeping its existing '<hash> *zdr-refusals.json' form.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh line 118: in the GOLDENS row 'apps/Model Plane/api/contracts/zdr-refusals.json|<digest>' replace 5a14940f482bd0af7b546a0b620d1357c9c5a292518cd70f826fe49fe878caaf with the regenerated digest.",
+    "guard: re-vendor byte-identical copies of the regenerated golden and its .sha256 pin to apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json (and .sha256), apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json (embedded by zdrrefusal.go; and .sha256), and apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json (and .sha256). Then run bash scripts/tests/zdr-contract-sync.test.sh from the repo root.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: (a) after line 63 '  | 'user_profile'' add the union members '  | 'agent_api'', '  | 'conversation_export'', '  | 'conversation_share'', '  | 'conversation_import''. (b) after line 192 '  user_profile: { no: 'den faste profilen', en: 'the standing profile' },' add '  agent_api: { no: 'agent-API', en: 'the Agent API' },', '  conversation_export: { no: 'eksport av samtaler', en: 'conversation export and replay' },', '  conversation_share: { no: 'deling av samtaler', en: 'conversation sharing' },', '  conversation_import: { no: 'import av samtaler', en: 'conversation import' },'. Without these, zdr-refusals.test.ts (keys must equal the golden) and the Record<ZdrFeatureKey, Copy> typecheck fail. The Norwegian wording is a proposal for owner review.",
+    "guard: compile and test the batch with cd apps/Model Plane/rust && cargo test -q -p model-gateway --test agent_api_contract, then cargo test -q -p mp-contracts --lib zdr_refusal, then bash scripts/tests/zdr-contract-sync.test.sh once the items above are applied.",
+    "lead, optional: add a row for agent-api-v1.json to the table in apps/Model Plane/api/contracts/README.md (authored by EP-12-S3, pinned by its .sha256, read by model-gateway tests/agent_api_contract.rs).",
+    "lead, optional: apps/Model Plane/api/.gitignore does not cover the new sdk/agent-api output. Add sdk/agent-api/typescript/node_modules/, sdk/agent-api/typescript/dist/, sdk/agent-api/python/__pycache__/, sdk/agent-api/python/*.egg-info/, sdk/agent-api/python/dist/ and sdk/agent-api/python/build/ beside the existing sdk lines.",
+    "No proto, migration, feature switch, Cargo.toml or docker change in S3. zdr_features.rs needs no row (its table test covers InvokeRequest fields, not catalogue keys), and no zdr-posture-matrix row is added. The strict ZDR loader (scripts/tests/zdr-contract-schema.mjs) checks no feature rules."
+   ],
+   "deviations": [
+    "The four keys are appended after user_profile, the last FEATURES entry, rather than after sandbox_workspace as the design says, because user_profile now sits between them. The golden diff stays additive.",
+    "The error vocabulary goes beyond the design's list with api_key_invalid (401), model_not_entitled (403) and model_entitlement_unavailable (503), which share the entitlement golden, plus internal_error (500) and upstream_unavailable (503). S8's exchange-denial and upstream mapping need them.",
+    "zdr_feature_not_supported is pinned at HTTP 412, the gateway's existing FailedPrecondition mapping for ZDR feature refusals, not an API-typical 403.",
+    "agent_api_feature_not_supported is pinned at 422. The golden also defines the refused-field map and the page, metadata and length caps, which the design names only in part: page size 20 with a 100 maximum and no unpaged read, metadata at most 16 pairs with keys up to 64 and values up to 512 characters, and a per-key live-run cap of 2.",
+    "The public Run and Message shapes are narrower than run_detail_value and the thread message projection (no checkpoint_index, goal, owner_subject_id, agent_name, author_subject_id, post_kind or grounding). S5 and S7 must project to these shapes, which departs from the design's 'through run_detail_value' wording.",
+    "The parity test reads the YAML with a line-block reader and does not parse YAML, so no Cargo.toml change is needed."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/api/contracts/agent-api-v1.json.sha256 (new; lead creates it with the digest in lead_todo)",
+    "apps/Model Plane/api/contracts/zdr-refusals.json and its .sha256 (guard regenerates with MP_UPDATE_GOLDEN=1)",
+    "scripts/tests/zdr-contract-sync.test.sh (line 118 GOLDENS digest)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts (FEATURE_LABELS and ZdrFeatureKey for the four keys)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json and .sha256 (re-vendor)",
+    "apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json and .sha256 (re-vendor)",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/zdr-refusals.json and .sha256 (re-vendor)",
+    "apps/Model Plane/api/contracts/README.md, apps/Model Plane/api/.gitignore and apps/Model Plane/docs/ZDR.md (optional lead docs rows)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "S5 must project the Agent API run through an allow-list to the v1 Run schema instead of returning run_detail_value unchanged, because S4's stamp writes api_key_owner (the key owner's user id) into run metadata that key holders would otherwise read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "POST /v1/agent/runs has no idempotency key in v1, so a client retry after a timeout starts a second run and a second model charge; decide an Idempotency-Key header before S7 is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The per-key live-run cap of 2 that the golden pins is held in memory per replica, so N replicas admit up to 2N live runs per key until the cap is made shared or durable."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner should confirm HTTP 412 for zdr_feature_not_supported on a public API before the first SDK ships, since 412 is the gateway's internal FailedPrecondition mapping and not a typical public choice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner should confirm the defaults the design leaves open: the refused-field map (15 fields to 12 features), page size 20 with a 100 maximum and no unpaged read, metadata caps of 16 pairs with keys up to 64 and values up to 512 characters, and the narrower Run and Message shapes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The public run status words and run event names are not enumerated, so they should be pinned in the golden before S5 to keep the SSE and status vocabulary from drifting from the spec."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The parity test reads the spec with a line-block reader, and no OpenAPI 3.1 schema validation runs until the SDK generator is run in S16, so a structural spec error would surface late."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test ties the golden to the gateway router yet, so S5 must add a route-table test of method and gateway path for every /v1/agent route, and S8 the same for the ingress paths."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The four new keys refuse nothing until S5, S9, S14 and S15 add refusal sites, so each site must name its key and get a depth row so that no export, share, import or Agent API surface ships without its refusal."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Norwegian labels (agent-API, eksport av samtaler, deling av samtaler, import av samtaler) are proposals for owner review, and the SPA copy only passes its test and typecheck once the FEATURE_LABELS shared edit in lead_todo is applied."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "MP_UPDATE_GOLDEN=1 cargo test -q -p mp-contracts --lib zdr_refusal (generation step, apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "15 passed; zdr-refusals.json regenerated with agent_api, conversation_export, conversation_share, conversation_import appended (new digest 4d6cce0d0910af6c827be802409c2ceb9f805f74bff86d1886289a36b01a59e2)",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml (apps/Model Plane/proto) + copy differing files + bash apps/Model Plane/scripts/tests/go-gen-drift.sh",
+    "outcome": "updated execution.pb.go, gateway.pb.go, orchestration.pb.go; new mcp_elicitation.pb.go, mcp_elicitation_grpc.pb.go; drift check: 46 generated Go files match",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml + compare ignoring version line/Validate call",
+    "outcome": "execution_pb2.py, gateway_pb2.py, orchestration_pb2.py updated; mcp_elicitation_pb2.py added (gateway_pb2 now imports it); same protobuf 7.36.2 header",
+    "clean": true
+   },
+   {
+    "command": "buf lint --error-format json (apps/Model Plane/proto) vs .plan-work/buf-lint-w309.json; buf breaking --against baseline.binpb",
+    "outcome": "lint: 1923 findings, 0 new vs W3-09 (saved .plan-work/buf-lint-w310.json); breaking: exit 0",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run --pool=forks src/shared/actions/admission-contract.test.ts (generation)",
+    "outcome": "5 passed; golden gained the chat.set_transcript_density row (access none, ui_state_only); new digest 4f6917214397b75aa5e09194cddf6002c51abafd9514178e4d02063bc79a1dd6",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest (generation)",
+    "outcome": "2 FAILED, pre-existing at HEAD and not caused by this batch: the test's source pointer says `pub fn builtin_tool_defs()` in services/model-gateway/src/tool_loop.rs holds no ToolDefinition blocks (EP-2-S3 afc28e9dd moved the definitions into builtin_tool_defs_with). tool_loop.rs is not in this batch. No manifest was written",
+    "clean": false
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust)",
+    "outcome": "first run: 2 errors E0063 (missing agent_roles) in execution-core runtime_loop/agent.rs tests; after the fix: Finished, only pre-existing warnings (none in batch hunks)",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished; 3 pre-existing unused-import warnings (browser.rs, marketing/website_list_tests.rs)",
+    "clean": true
+   },
+   {
+    "command": "GOWORK=off go build ./... && go vet ./... (apps/Control Plane/user-core)",
+    "outcome": "clean",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... in Model Plane go modules gen, pkg/zdrrefusal, services/{capability-core,orchestrator-core,sandbox-manager,bridge-core,browser-broker,cost-core,letta-bridge}",
+    "outcome": "all clean",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (apps/Frontend Plane/verevonv3)",
+    "outcome": "exactly the 1 baseline error (src/shared/api/schedule-contract.test.ts:28)",
+    "clean": true
+   },
+   {
+    "command": "tsc on apps/Control Plane/auth-core",
+    "outcome": "not run: the worktree's auth-core has no node_modules (needs pnpm install, which I did not do)",
+    "clean": false
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "slice": "EP-6-S10",
+    "what": "Added `agent_roles: Vec::new(),` to two test pb::RunContext literals (full_run_context ~19691, run_context_text_cannot_change_the_permission_posture ~20038) after the new proto field; CRLF kept"
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "slice": "EP-6-S10",
+    "what": "The builder's one-line agent_roles Inert row is wrapped in the multi-line form the table's other long Inert rows use"
+   },
+   {
+    "file": "apps/Control Plane/scripts/plane-principal-registry.jq",
+    "slice": "EP-12-S2",
+    "what": "Put apiKeyExchange in true alphabetical order in known_row_keys (after allowAnyOrg; the builder's note said first, which is not alphabetical)"
+   }
+  ],
+  "still_broken": [
+   "apps/Model Plane/rust/crates/mp-contracts/tests/prompt_tool_manifest.rs:331 - pre-existing at HEAD, not caused by this batch: the manifest test points at `pub fn builtin_tool_defs()` in services/model-gateway/src/tool_loop.rs:6045, which now delegates to builtin_tool_defs_with (6060), so 2 manifest tests fail and MP_UPDATE_PROMPT_MANIFEST cannot regenerate. Needs the test re-pointed to builtin_tool_defs_with (left for the lead or the EP-2-S3 owner)",
+   "apps/Control Plane/auth-core: tsc, prettier and jest were not run because the worktree has no auth-core node_modules. EP-12-S2's prettier --write list and its guard jest run are still to do"
+  ],
+  "regenerated": [
+   "apps/Model Plane/api/contracts/zdr-refusals.json (MP_UPDATE_GOLDEN) + .sha256 -> 4d6cce0d...01a59e2 *zdr-refusals.json",
+   "byte-identical copies of zdr-refusals.json and its .sha256 in apps/Frontend Plane/verevonv3/src/shared/api/contracts/, apps/Model Plane/go/pkg/zdrrefusal/, apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/fixtures/zdr-refusals/",
+   "scripts/tests/zdr-contract-sync.test.sh line 118 zdr-refusals digest -> 4d6cce0d...01a59e2",
+   "apps/Model Plane/api/contracts/agent-api-v1.json.sha256 (new; recomputed as 0bd0c4974e6be687e548dddfe37c8b9f8d93d72e4946f6e1f3411dae1146dabb  agent-api-v1.json, which matches the builder's value)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (VEREVON_UPDATE_GOLDEN) copied byte-identically to apps/Model Plane/api/contracts/, go/services/capability-core/internal/api/testdata/, rust/services/execution-core/tests/fixtures/, rust/services/model-gateway/tests/fixtures/",
+   "apps/Model Plane/api/contracts/agent-action-admission.json.sha256 -> 4f691721...a1dd6 *agent-action-admission.json; zdr-contract-sync.test.sh line 209 digest updated",
+   "apps/Model Plane/go/gen/model_plane/v1: execution.pb.go, gateway.pb.go (CRLF kept), orchestration.pb.go updated; mcp_elicitation.pb.go and mcp_elicitation_grpc.pb.go new",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1: execution_pb2.py, gateway_pb2.py, orchestration_pb2.py updated; mcp_elicitation_pb2.py new (gateway_pb2 imports it)",
+   "Rust bindings: mp-contracts build.rs (built during the checks)"
+  ],
+  "shared_edits_applied": [
+   "apps/Model Plane/deploy/docker-compose.yml (LF): session-core SESSION_AGENT_MEMORY_ENABLED (EP-8-S10); model-gateway MCP_ELICITATION_ENABLED + MCP_ELICITATION_HOLD_SECONDS after HOOKS_DURABLE (EP-4-S4); model-gateway MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE after USER_PROFILE_PREFIX and execution-core EXECUTION_CORE_SUBAGENT_ROLES after its EXECUTION_CORE_AUTH_AUDIENCE (EP-6-S10). All default false (hold seconds 600), each with a one-line comment. Names checked against the code's env constants",
+   "apps/Model Plane/docs/ZDR.md (CRLF): Agent memory row after the Space memory row (EP-8-S10)",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: 'chat.set_transcript_density': exempt('ui_state_only', 'external_write') after chat.set_agent_mode (EP-14-S2)",
+   "apps/Model Plane/rust/services/model-gateway/src/run_context.rs: agent_roles: Vec::new() with its comment in compose's RunContext literal (EP-6-S10)",
+   "apps/Model Plane/rust/services/model-gateway/src/normalize.rs: agent_roles: None in make_request (EP-6-S10)",
+   "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs: agent_roles Inert row, destructure field and name list (EP-6-S10)",
+   "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs: agent_roles case (EP-6-S10)",
+   "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs: allow_elicitation: false in proxy_request (EP-4-S4)",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: origin/origin_label String::new() in execute_ask_user's CreateRunQuestionRequest, with a comment (EP-4-S5)",
+   "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs: origin/origin_label in scripted_question (EP-4-S5)",
+   "apps/Control Plane/scripts/plane-principal-registry.jq (CRLF): apiKeyExchange in known_row_keys, a check_maps validation block and optional() in the reduce (EP-12-S2)",
+   "apps/Control Plane/config/plane-service-principals.json: verevon-gateway row apiKeyExchange [model-gateway, session-core, inference-core] (EP-12-S2); JSON validated",
+   "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md (CRLF): API-key token issuance bullet in the auth-core section (EP-12-S2)",
+   "apps/Model Plane/api/contracts/agent-api-v1.json.sha256 created (EP-12-S3)",
+   "scripts/tests/zdr-contract-sync.test.sh: zdr-refusals (line 118) and agent-action-admission (line 209) digests (EP-12-S3, EP-14-S2)",
+   "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts: 4 ZdrFeatureKey union members and 4 FEATURE_LABELS rows (the Norwegian wording is the builder's proposal for owner review) (EP-12-S3)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries (EP-6-S10, EP-12-S2, EP-8-S10 D12 ledger note): booked by the lead",
+   "all .env.example additions (SESSION_AGENT_MEMORY_ENABLED, VITE_CHAT_TRANSCRIPT_DENSITY, MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE, EXECUTION_CORE_SUBAGENT_ROLES, MCP_ELICITATION_*, API_KEY_AGENT_EXCHANGE_ENABLED): owner only",
+   "apps/Control Plane/docker-compose.yml API_KEY_AGENT_EXCHANGE_ENABLED for auth-core: the builder marked it owner/conditional; not applied",
+   "EP-8-S10 memory.proto EraseAgentMemory RPC + BFF spaces/mod.rs revocation call: needs a proto number and an authority ruling (design), not a shared edit",
+   "EP-6-S10 needs_other_files: BFF domains/spaces.rs agent_roles strip/compose and the optional ZDR boundary refusal in execution-core: these need design or S7, not shared edits",
+   "EP-12-S3 optional rows: apps/Model Plane/api/contracts/README.md agent-api-v1 row, apps/Model Plane/api/.gitignore sdk/agent-api lines: left for the lead",
+   "EP-14-S2 bookkeeping: chat-density.css in the new_files record; size ratchet (python scripts/gates/size-ratchet.py --check) not run",
+   "EP-14-S2 optional ChatPanels.tsx header slot: not owned, not applied",
+   "EP-4-S5 migration number 0105 record in 00-integration-round-b.md: lead bookkeeping",
+   "Verevon TS proto gen (EP-4-S4 note): verevonv3 has no generated copies of these messages, so there was nothing to regenerate"
+  ],
+  "notes": "The whole batch now compiles. The Model Plane Rust workspace with all targets, the verevonv3 gateway, the touched Go modules and the verevonv3 tsc6 app typecheck (only its 1 baseline error) all pass. The one compile fix in a builder's file: two test RunContext literals in execution-core runtime_loop/agent.rs were missing agent_roles (EP-6-S10). No tests were run beyond the three generation steps. The lead should still run these:\n- bash scripts/tests/zdr-contract-sync.test.sh, to confirm the new pins\n- cargo test -p model-gateway --test agent_api_contract\n- the session-core DB tests\n- auth-core jest, tsc and prettier (blocked: the worktree has no auth-core node_modules)\n- the size ratchet\n\nThe prompt_tool_manifest generation step fails before writing anything, and this is pre-existing at HEAD: the test's source pointer to tool_loop.rs builtin_tool_defs is stale since EP-2-S3. No batch file changed a prompt, so nothing is lost now, but the test needs re-pointing.\n\nOne thing for the lead's review: EP-6-S10's subagent_roles_enabled_with treats \" true \" (with spaces) as on (agent.rs ~31225). The owner rule allows only the literal \"true\". Leave it if the repo's strict parser trims whitespace; otherwise it should be tightened.\n\nThe .gitattributes warnings (\"LF will be replaced by CRLF\") on the Go/Quarry .sha256 pins and the Python gen files are core.autocrlf notices. Those files were LF before and are still LF.\n\nUntracked files I did not create or touch: apps/Control Plane/audit-core/audit-verify.exe and apps/Frontend Plane/Ingestion Plane/. No commits, staging or git state changes were made."
+ }
+}

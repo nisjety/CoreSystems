@@ -1,0 +1,79 @@
+/* The chat library on the reports page (F-t3-080): saved artifact copies and uploaded text, one filtered list.
+   Colours come from the chat tokens only. */
+.chat-library {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.chat-library__header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.chat-library__header p,
+.chat-library__empty {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+}
+
+.chat-library__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-library__filters button[aria-pressed='true'] {
+  border-color: var(--verevon-text-soft);
+  color: var(--verevon-text);
+}
+
+.chat-library__list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-library__item {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+}
+
+.chat-library__row {
+  display: grid;
+  gap: 2px;
+}
+
+.chat-library__row small {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.chat-library__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-library__text {
+  max-height: 320px;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--verevon-surface-muted);
+  color: var(--verevon-text-soft);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.chat-library__more {
+  justify-self: start;
+}

@@ -1,0 +1,778 @@
+{
+ "batchId": "W3-14",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-2-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-1",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.cited-passage.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/CitedPassageViewer.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/CitedPassageViewer.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactProvenance.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "I wrote the code and tests for this slice. Nothing was compiled or run (code-first order). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-2-S4.patch (101,858 bytes).\n\nWhat it does:\n- **Switch:** MODEL_GATEWAY_CITATION_PASSAGES is read in sse_events.rs and only the literal \"true\" turns it on.\n- **Citation event:** `ChatEvent::Citation` gains `passage: Option<CitationPassage{quote ≤400 chars, locator{document_id, chunk_index}}>`. The payload writes `quote` and `locator` only when they are set.\n- **Artifact event:** `ChatEvent::Artifact` gains `provenance: Option<Box<deep_research::ResearchProvenance>>`.\n- **Stored history:** `RecordedCitation` carries the passage flattened into the same keys the stream uses. `RecordedArtifact` carries provenance and gains `into_event()`, which the staged publish now uses.\n- **Knowledge citations:** sse.rs sets them in all three emit sites: up-front plus the sink seed, the verification pass, and the ZDR stream. The passage is the first GroundingFact of the citation's document.\n- **Deep research:** `citation_events_quoting` quotes the best `select_passages` hit of a read source. Unread leads never get a quote. Each report is stamped with `ResearchProvenance::build(...)` (pipeline \"deep_research_v1\").\n- **ZDR and waived turns (D12):** the stored message drops quote, locator and provenance via `session_flow::persistable_citations` and `persistable_artifacts` (zdr_or_waived = `effective_zdr || retention_class.is_some()`). The live stream still carries them.\n- **Switch off:** every producer passes `None`, so frames and stored metadata are byte-identical to before.\n- **Matrix rows:** two new enforcement rows in zdr-posture-matrix.json, each with inputs no other row uses:\n  - zdr bearer + azure-openai with `explicit_zdr` → zdr/explicit_zdr\n  - waiver on conn-3 → waived\n- **FE (chat-client.ts):** citation and artifact frames are parsed into validated `quote`/`locator`/`provenance`, plus a new `fetchCitedChunk` (BFF `POST /api/v1/knowledge/retrieve/chunks`, picks `chunk_index` client-side; an empty answer, 403 or 404 reads as \"denied\").\n- **FE components:** `CitedPassageViewer` is a side sheet: knowledge shows the quote plus \"Vis mer\"; web shows the quote plus an `isSafeLinkHref`-guarded `#:~:text=` link of the first 8 words; connector shows the quote only. `ArtifactProvenance` is the report footer. The citation chip and Sources-tab rows open the viewer, and only when the server sent a passage.\n- **Action:** `chat.open_cited_passage` is registered.\n- **Taxonomy script:** gen-sse-event-taxonomy.py needs no change, because it checks event names only and no event name was added.",
+   "deviations": [
+    "`chat.open_cited_passage` uses ownerPlane 'data' instead of the design's 'frontend': `PlaneOwner` has no 'frontend' value, and the only server read the action makes is Data Plane's chunk read.",
+    "The provenance source rows have no `read_at`: the pipeline records no per-source read time. They carry number, url and title; `generated_at` is stamped once for the report.",
+    "Passage and provenance ride the Citation and Artifact variants as one optional field each (`passage`, `provenance`) instead of three loose fields. This keeps the edits at other files' construction sites to one line each.",
+    "The FE keeps the locator in the wire shape `{document_id, chunk_index}` so a live frame and a stored turn read the same (the history read passes raw records through)."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs: in `anchor_citations`'s `events.push(ChatEvent::Citation { ... origin: citation.origin.clone(), })` add `passage: citation.passage.clone(),` after the origin line; in tests `fn recorded(...)` RecordedCitation literal and in `a_connector_citation_is_never_anchored_by_number`'s RecordedCitation literal add `passage: None,` after `origin: ...,`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs: in the fn building `ChatEvent::Citation { id: format!(\"conn-{}\", ...) ... origin: \"connector\".to_owned(), }` (~line 602) add `passage: None,` after the origin line",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: add `passage: None,` after `origin: \"web\".to_owned(),` in the two ChatEvent::Citation constructions (web_search citation `Some(ChatEvent::Citation { id: format!(\"web-{}-{}\", rank + 1, hit.url) ...` ~7600 and `citations: vec![ChatEvent::Citation { id: format!(\"web-1-{}\", hit.url) ...` ~8078); in the test match `ChatEvent::Artifact { id, kind, title, content, version, } =>` (~13852, asserting id \"q3-rapport\") add `..` after `version,`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifacts.rs: in `artifact_event` add `provenance: None,` after `version,` inside `ChatEvent::Artifact { ... }`; in test `events_carry_the_wire_shape_the_client_parses` add `..` after `version,` in the `ChatEvent::Artifact { id, kind, title, content, version, }` pattern",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs: tests `fn published(...)` RecordedArtifact literal add `provenance: None,` after `version,`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/result_validation.rs: test `vec![crate::sse_events::RecordedArtifact { ... }]` (~862) add `provenance: None,` after the version field",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs: after `the_web_reader_goldens_are_rows_decided_as_named` add the same test named `the_cited_passage_goldens_are_rows_decided_as_named` with rows [(\"e_zdr_turn_kb_citation_passage_streams_not_persisted\", \"zdr\"), (\"e_waived_research_metadata_not_persisted\", \"waived\")]",
+    "Re-pin and re-vendor zdr-posture-matrix.json (two new e_ rows): refresh apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256 and copy the file and its .sha256 to rust/crates/mp-contracts/tests/fixtures, rust/services/execution-core/tests/fixtures and rust/services/model-gateway/tests/fixtures; then check the zdr-contract-schema \"rows must differ\" rule and that the resolver decides the azure-openai + explicit_zdr row as zdr/explicit_zdr (if it returns org_zdr, change that row's expect.code)",
+    "Regenerate the SSE payload golden: `MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden` (new optional keys citation.quote, citation.locator, artifact.provenance), refresh its .sha256, update the digest pinned in scripts/tests/zdr-contract-sync.test.sh, copy it over the SPA vendored copy (I hand-edited src/shared/api/contracts/sse-event-payloads.json to the expected result), then `pnpm gen:chat-events` (I hand-edited chat-event-payloads.generated.ts to match)",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts: add `type CitationLocator, type ResearchProvenance` to the `@/shared/api/chat-client` import; in `Citation` after `origin?: ...` add `/** The passage this source contributed (EP-2-S4), when the server sent one. */ quote?: string` and `/** Where a knowledge source's passage sits in Data Plane, in the wire shape. */ locator?: CitationLocator`; in `ChatArtifact` after `history?` add `/** A research report's provenance stamp (EP-2-S4), in the wire shape. */ provenance?: ResearchProvenance`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts: `normalizeCitation` parameter type add `quote?: string; locator?: CitationLocator` and in the returned object add `...(event.quote ? { quote: event.quote } : {}), ...(event.locator ? { locator: event.locator } : {}),` after the origin spread; `normalizeArtifact` parameter add `provenance?: ResearchProvenance` and return `...(event.provenance ? { provenance: event.provenance } : {}),` after version (types imported from '@/shared/api/chat-client'). Without this the live stream drops the passage before the viewer sees it.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx: import `{ ArtifactProvenance } from './ArtifactProvenance'`; in `ArtifactViewer`, right after the closing `</div>` that ends the Switch body and before `</section>`, add `<ArtifactProvenance provenance={(artifact() as { provenance?: unknown }).provenance} />`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after `'chat.inspect_run_request': exempt('no_owner_executor', 'read'),` add `'chat.open_cited_passage': exempt('no_owner_executor', 'read'),`",
+    "Guard: regenerate the agent-action-admission golden (and its vendored copies) for the new chat.open_cited_passage action. Note: action-registry.test.ts now expects 275 actions; another builder adding an action in this batch will conflict on that line.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css (next to .verevon-chat-citation-chip rules): `.verevon-chat-cited-passage{position:fixed;inset:0 0 0 auto;width:min(420px,100vw);z-index:60;overflow:auto;padding:16px;background:var(--surface,#fff);box-shadow:-8px 0 24px rgb(0 0 0/.12)}` `.verevon-chat-cited-passage__header{display:flex;justify-content:space-between;gap:8px}` `.verevon-chat-cited-passage__quote,.verevon-chat-source-card__quote{margin:8px 0;padding-left:10px;border-left:3px solid currentColor;opacity:.85}` `.verevon-chat-citation-chip__passage,.verevon-chat-source-card__passage{font-size:12px}`",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: under model-gateway environment after `MODEL_GATEWAY_WEB_SEARCH_BATCH: ${MODEL_GATEWAY_WEB_SEARCH_BATCH:-false}` add `      MODEL_GATEWAY_CITATION_PASSAGES: ${MODEL_GATEWAY_CITATION_PASSAGES:-false}`",
+    "Owner (not the lead or guard): apps/Model Plane/deploy/.env.example needs `MODEL_GATEWAY_CITATION_PASSAGES=false` with a comment 'EP-2-S4 cited passages and research provenance stamp; only the literal true enables'",
+    "shared-edit apps/Model Plane/docs/ZDR.md: at the end of section 5.5 (after the learning-review [live-only] paragraph) add: 'Cited passages and the research stamp (EP-2-S4, behind MODEL_GATEWAY_CITATION_PASSAGES): a citation may carry `quote` (the passage, at most 400 characters) and, for org knowledge, `locator` (document_id and chunk_index); a deep-research report artifact may carry `provenance` (question, sub-queries, read sources, model, coverage). All three stream live on every turn and are stored in the assistant message metadata (citations, artifacts) only on a persistent turn, erased with the message by the GDPR path. A ZDR or waived turn stores neither (session_flow::persistable_citations / persistable_artifacts; goldens e_zdr_turn_kb_citation_passage_streams_not_persisted, e_waived_research_metadata_not_persisted). The viewer\\'s \"more\" read is Data Plane\\'s ACL\\'d chunk read and stores nothing.'"
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/result_validation.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway does not compile until the shared one-line edits land (new `passage`/`provenance` fields on ChatEvent::Citation/Artifact and RecordedCitation/RecordedArtifact, constructed in citation_anchors.rs, connector_reads.rs, tool_loop.rs, artifacts.rs, artifact_revisions.rs, result_validation.rs)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the chat-normalizers.ts shared edit lands, `normalizeCitation`/`normalizeArtifact` drop quote, locator and provenance from live frames, so the viewer and footer work only on reloaded history."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof owed with the switch on: KB turn chip -> quote -> 'Vis mer' returns the chunk; a second user without document access sees 'Du har ikke tilgang' (Data Plane returns empty chunks, not 403); a deep-research report shows the stamp; a waived turn's stored message metadata has no quote/locator/provenance keys (psql keys-only); screenshots at 1280 and 375 px."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The knowledge locator is the first GroundingFact of the citation's document, which matches the chunk the context block numbered from only when the pack facts and Grounding.facts share order; a later citation of a second chunk from the same document reuses the first chunk's locator."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "GetChunks has no chunk_index filter, so 'Vis mer' downloads every chunk of the document (the viewer caps rendering at 6,000 chars); a large document is a large response."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The browser-local thread cache keeps live citations including quote/locator for a waived turn on that device; the server stores none (D12), but the client cache is not cleared of them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No golden or test proves the ZDR direct stream (zdr_answer_stream) emits quote/locator with the switch on; only `knowledge_passages` is unit-tested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "ResearchProvenance has no per-source read_at (the pipeline does not record read times); add it if the stamp must say when each page was read."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-2-S8",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-2",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs",
+    "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/subagent/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agents_runs.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/WideResearchStart.test.tsx"
+   ],
+   "notes": "I wrote the slice's code and unit tests. Nothing was compiled or run, as the code-first order requires. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-2-S8.patch (98,601 bytes). It does not compile until the guard applies the lead_todo edits, mainly the `Kind::Integer` arm and `OrgPolicy.max_fan_out_items` in model-gateway `src/org_agent_policy.rs`.\n\n**Proto**\n- `RunAgentRequest.wide_research = 25` holds a new `WideResearchRequest {item_cap=1, items=2, batch_id=3, retry_of_child_run_id=4}`. The change is additive, every field is commented, and 25 is the number reserved in round A.\n\n**Org policy**\n- mp-contracts has a new `Kind::Integer` and the key `research.max_fan_out_items`: the strictness order is \"0\" to \"16\", the default is \"8\", the fail-closed value is \"0\", and the status is enforced.\n- Also added: the constants `RESEARCH_MAX_FAN_OUT_ITEMS`, `DEFAULT_MAX_FAN_OUT_ITEMS` and `MAX_FAN_OUT_ITEMS`, and `fan_out_items_of()`.\n- The Go twin in capability-core accepts the same key: the \"integer\" kind decodes a float64, refuses fractions, negatives, quoted numbers and values over 16, and `effective` gives a stored document without the key its default.\n\n**Execution-core**\n- `subagent::wide_research_child_ceiling` passes `item_cap` as the org ceiling.\n- In `research_fan_out`: `plan_wide_research` splits items at the cap and refuses a cap of 0; `wide_research_goal_context` seeds the goal; `dropped_items_note` is added to a finished answer so items past the cap are always named.\n- In `agent.rs`, `admit_wide_research` runs before the first heartbeat, on fresh, non-scheduled runs only. It refuses ZDR with the typed `agentic` refusal and refuses runs while the fan-out tool is switched off with the existing `disabled_refusal`.\n\n**Model-gateway**\n- `InvokeRequest.wide_research` is raw JSON and is read only when `WIDE_RESEARCH_ENTRY_ENABLED` is the literal `true`.\n- `wide_research_request` clamps the ask to the org cap. When the policy mode is not Enforce, the platform default of 8 applies. If the policy cannot be read at dispatch, the run gets cap 0 and execution-core refuses it.\n- `spawn_run_dispatch` sets `wide_research` and `max_subagents = min(budget, item_cap)`; with the switch off the run request is unchanged.\n- `POST /v1/research/wide/estimate` is pure compute. It answers 404 when the switch is off, refuses ZDR callers with the typed `agentic` refusal, returns typed `org_policy_unavailable` when the policy cannot be read, and gives `usd_low`/`usd_high` as null on subscription routes or unpriced models. Error bodies are `{error:{code,message,details:{}}}`.\n- `zdr_features` classifies the new field as refused with feature `agentic`, with rows added in `zdr_feature_table.rs`.\n\n**BFF and SPA**\n- BFF `POST /api/v1/agents/wide-research/estimate` passes through a closed body: unknown fields are dropped.\n- SPA:\n  - `chat-client.ts` gains `wideResearch`, which is sent only on agentic, non-ZDR turns, plus `estimateWideResearch`, the normaliser, the presets and the list parser.\n  - The action contract `chat.wide_research_start` has risk medium.\n  - The `WideResearchStart` card and its tests are new.\n\n**Deviations**\n- I did not add the posture-matrix goldens: they are feature refusals, which the hard rule keeps out of that matrix. They are covered as named test cases, `e_zdr_token_wide_research_run_refused` in `zdr_feature_table.rs` and `e_zdr_token_wide_research_estimate_refused` in the `http_routes` tests.\n- The org cap travels as `WideResearchRequest.item_cap` rather than through `OrgPolicyContext`, whose next field is reserved for EP-9; execution-core takes it as `org_ceiling`.\n- The card is not mounted in the composer; the composer files belong to other slices, so mounting is listed under needs_other_files.\n- I did not edit `.env.example`, compose or the ledger.\n- No migration is needed: the policy is stored in a JSONB document.",
+   "deviations": [
+    "The zdr-posture-matrix.json rows e_zdr_token_wide_research_estimate_refused and e_zdr_token_wide_research_run_refused were not added: both are feature refusals, which the hard rule keeps out of the matrix. They are named test cases instead, in model-gateway tests/zdr_feature_table.rs (run) and the http_routes wide_research_tests (estimate). zdr-posture-matrix.json is unchanged.",
+    "The org cap travels to execution-core as WideResearchRequest.item_cap, already min(the person's ask, the org's research.max_fan_out_items), and execution-core passes it as org_ceiling. Adding an OrgPolicyContext field would collide with EP-9's reserved web=4.",
+    "Org agent policy gained a new Kind::Integer, whose strictness order is the tokens \"0\" to \"16\", rather than an enum of strings, so the stored value is a JSON integer as D5 says.",
+    "WideResearchStart.tsx is a standalone card with an injectable estimate loader and an onStart callback. It is not mounted in the composer or page, because those files are not owned by this slice.",
+    "The estimate's concurrency is the constant 4 (execution-core's default): the gateway cannot read WIDE_RESEARCH_FAN_OUT_CONCURRENCY from execution-core's environment."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs (REQUIRED to compile, because the match on Kind is exhaustive): in fn token_of, replace the block from `let read = match def.kind {` down to the closing `};` with:\n    // An integer key's token is its decimal form, held here so the match can lend it out.\n    let count;\n    let read = match def.kind {\n        Kind::Enum => value.as_str(),\n        Kind::Bool => value\n            .as_bool()\n            .map(|flag| if flag { \"true\" } else { \"false\" }),\n        Kind::AllowList => value.get(\"mode\").and_then(Value::as_str),\n        Kind::Integer => {\n            count = value.as_u64().map(|n| n.to_string());\n            count.as_deref()\n        }\n    };\n(the following `read.filter(...)` lines stay as they are).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs (REQUIRED to compile): in `pub struct OrgPolicy`, after `pub restrictive: bool,`, add:\n    /// The most items one wide-research run may fan out (`research.max_fan_out_items`, EP-2 S8). A value this build\n    /// cannot read is 0: wide research off for the org.\n    pub max_fan_out_items: u32,\nIn `OrgPolicy::from_settings`, inside `Self { ... }` after the `restrictive: ...,` field, add:\n            max_fan_out_items: token(mp_contracts::org_agent_policy::RESEARCH_MAX_FAN_OUT_ITEMS)\n                .parse()\n                .unwrap_or(0),\nAlso add a test in its `mod tests`, for example: `assert_eq!(OrgPolicy::from_settings(0, \"\", &settings(json!({}))).max_fan_out_items, 8); assert_eq!(OrgPolicy::from_settings(1, \"d\", &settings(json!({\"research.max_fan_out_items\": 3}))).max_fan_out_items, 3); assert_eq!(OrgPolicy::from_settings(1, \"d\", &settings(json!({\"research.max_fan_out_items\": \"x\"}))).max_fan_out_items, 0);`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs (REQUIRED to compile; this is the test helper make_request, a full InvokeRequest literal): after the line `agent_autonomy_cap: None,` (around :622) add `            wide_research: None,`",
+    "shared-edit apps/Model Plane/api/contracts/org-agent-policy-schema.json (REQUIRED, because the mp-contracts golden test and the Go TestOrgAgentPolicySchemaMatchesTheGolden compare key by key): append to `settings`, after the reference_uploads row: {\"key\": \"research.max_fan_out_items\", \"kind\": \"integer\", \"strictness_order\": [\"0\",\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\",\"10\",\"11\",\"12\",\"13\",\"14\",\"15\",\"16\"], \"default\": \"8\", \"fail_closed_value\": \"0\", \"status\": \"enforced\"}. Also add `integer` to the description's list of kinds if it has one. The file uses LF line endings.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `'chat.inspect_run_request': exempt('no_owner_executor', 'read'),` add `  'chat.wide_research_start': exempt('no_owner_executor', 'external_write'),`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts (owned by EP-10-S1): raise the expected action count by 1 (from 274 plus whatever else this batch adds) and add the comment line `    // +1 after EP-2-S8 registered chat.wide_research_start, the composer's wide-research entry.`",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, next to MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE, add:\n      # EP-2 S8: the composer's wide-research entry (estimate route + wide_research on a Do run). Only the literal true.\n      WIDE_RESEARCH_ENTRY_ENABLED: ${WIDE_RESEARCH_ENTRY_ENABLED:-false}",
+    "owner/lead: apps/Model Plane/deploy/.env.example: WIDE_RESEARCH_ENTRY_ENABLED=false with the comment 'EP-2 S8 wide-research entry; only the literal true' (the owner edits .env.example).",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (newest first): '2026-11-04 - Wide research: org item cap in agent policy (EP-2 S8, D5). research.max_fan_out_items is a capability-core org agent-policy key (integer, tighten-only, default 8, hard max 16, fail-closed 0 = wide research off), stored in the existing JSONB, no migration. The gateway reads it (ORG_AGENT_POLICY_MODE=enforce, otherwise the platform default of 8 applies), clamps the person's ask, and sends WideResearchRequest.item_cap (RunAgentRequest field 25); execution-core uses it as the run's org child ceiling and names items past it in the answer. The entry is behind WIDE_RESEARCH_ENTRY_ENABLED (default off). No confirm gate in v1 (D4); the estimate card is shown before Start.'",
+    "shared-edit apps/Model Plane/docs/ZDR.md: in the 'Features refused with a typed code' row, add that a wide-research run (InvokeRequest.wide_research) and POST /v1/research/wide/estimate are refused under ZDR with zdr_feature_not_supported, feature agentic (EP-2 S8); the estimate stores nothing.",
+    "guard: regenerate the Go proto bindings (buf generate in apps/Model Plane/proto) for WideResearchRequest / RunAgentRequest.wide_research, and run buf lint and buf breaking.",
+    "guard: compile and test mp-contracts (lib plus tests/org_agent_policy_golden.rs), execution-core --lib (subagent::tests, research_fan_out tests, runtime_loop::agent a_wide_research_* tests), model-gateway --lib (wide_research_tests, sse tests a_wide_research_run_delegates_no_wider_than_its_item_cap and the_wide_research_request_is_built_only_behind_its_switch), model-gateway --test zdr_feature_table --test zdr_refusal_inventory, execution-core --test zdr_refusal_inventory, go test ./services/capability-core/..., the BFF gateway cargo tests (agents_runs wide_research_tests), and vitest on src/features/chat/components/WideResearchStart.test.tsx."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs (Kind::Integer arm + OrgPolicy.max_fan_out_items; see lead_todo)",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (test literal wide_research: None)",
+    "apps/Model Plane/api/contracts/org-agent-policy-schema.json (golden row)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "Composer mount for WideResearchStart (the chat composer / ChatPage, or a ComposerTrays item): render the card from a 'Bred forskning' composer button and, in onStart, send the turn with planMode true and wideResearch = choice. Its owner is another slice; it is a follow-up for the S8 live proof."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Prove live with org cap 5 and 10 items: the estimate shows items_after_cap 5, the run fans out 5 children, and the answer ends with the 'Not researched' list naming the other 5; capture the capability-core policy row (keys only) and screenshots of the card at 1280 and 375 px."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF estimate pass-through forwards no capability bearer. With ORG_AGENT_POLICY_MODE=enforce and a cold policy cache, wide_research_org_cap calls ensure() with an empty bearer and the estimate may answer 503 org_policy_unavailable; verify on the stack whether the gateway middleware attaches a capability bearer to this route."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "When ORG_AGENT_POLICY_MODE is off or shadow, the org key is not read and every org gets the platform default of 8, so an org's stricter research.max_fan_out_items only binds once the policy mode is enforce; the ledger and the flip plan must say so."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A Do turn from the SPA is a planMode run (READ_ONLY rung). Confirm live that subagent.research_fan_out children run under a plan-mode parent; if they do not, the entry must send an execute-capable turn instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Execution-core acts on RunAgentRequest.wide_research whenever the field is present, with no switch of its own. Only the gateway, behind WIDE_RESEARCH_ENTRY_ENABLED, sends it; an executor-side switch would be defence in depth."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No chat-client unit test yet asserts that the invoke body carries wide_research only on an agentic, non-ZDR turn, nor tests normalizeWideResearchEstimate. Add one beside the existing chat-client parse tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A ZDR invoke body that carries wide_research without the agentic feature is now refused (feature agentic) even with the switch off. Before, the gateway ignored the unknown field; this is tighter, never looser."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The estimate's minutes and USD come from fixed per-round assumptions (30-90 s per round; 6-18k input and 0.5-1.5k output tokens per round), and the card calls them an estimate; tune these against WS27 meter data after the live proof."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S3",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-3",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsList.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsHub.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/automations/lib/automation-state.ts",
+    "apps/Frontend Plane/verevonv3/src/features/automations/lib/automation-state.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ScheduledRunsPanel.test.tsx",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/cron_fires_test.go"
+   ],
+   "notes": "Built the Run now button and the Manuell chip in the shared hub list, the paused reason read from last_outcome, and the additive content-free fire_key on the fires JSON. Unit tests are written, nothing was compiled or run (code-first order). Run now shows only to the schedule's creator, on the full hub, when features.run_now is true and the approval has not lapsed. The request id is made per press and kept only after an unknown answer; typed copy covers run_now_in_flight, run_now_rate_limited, approval_expired and fire_not_authorized; a successful press re-reads open results. Patch staged, not committed: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-6-S3.patch (7 files, 392 insertions, 83 deletions).",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts: in `export interface CronScheduleFire` (about line 147), after the line `  withheld_effects: number` and before the closing brace, add `  /** The fire's key: the schedule slot's time, or manual:<request id> for a Run now (EP-6-S3). */` and `  fire_key?: string`. AutomationsList.tsx and ScheduledRunsPanel.test.tsx read fire.fire_key, so the typecheck needs this line.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsHubSummary.tsx: line 159, replace `automationStateOf(schedule, null, now)` with `automationStateOf(schedule, now)`. automationStateOf lost its lastFire parameter; without this the typecheck fails on arity.",
+    "No regeneration or lead-only step: no .proto, migration, agent-action-admission golden, prompt-tool manifest or zdr-posture row changes in this slice. Run the two test_commands after the shared edits are applied.",
+    "Merge check: AutomationsList.tsx is edited directly (see deviations). No other W3-14 slice lists it or cron-client.ts; confirm nothing parallel (EP-6-S4 follow-up work) touches AutomationsList.tsx."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentsHubSummary.tsx"
+   ],
+   "deviations": [
+    "AutomationsList.tsx is edited directly, though it is not in the slice's file list: since EP-6-S4 the row actions, the list resource and the fires chip live there, so the change cannot sit in AutomationsHub.tsx or ScheduledRunsPanel.tsx, which are now thin mounts and are unchanged.",
+    "The mine list calls listCronSchedules with the same creator filter listMySchedules applies, so the features flag arrives with the rows; listMySchedules stays for AgentsHubSummary.",
+    "Run now is not offered on an expired row (renewal is the way back); the approval_expired copy still answers the race.",
+    "The request id is kept after a lost answer (no answer or a 5xx) and dropped after any 4xx answer; the design said reuse on any retry.",
+    "The Manuell chip sits beside the origin chip Plan, which every fire keeps.",
+    "A successful Run now opens that schedule's results (when VITE_SCHEDULE_RESULTS is on) and re-reads them, so the new fire shows first, as the design's DoD asks.",
+    "automationStateOf(schedule, now) dropped its lastFire parameter, so the paused reason now comes from last_outcome in every mount (chat, Settings, agents card)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before CRON_RUN_NOW_ENABLED goes on, prove the path live as the creator: Run now answers 'Kjøringen er startet.', the new fire tops See results with the Manuell chip, and a second press inside the in-flight window gets run_now_in_flight."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "With CRON_RUN_NOW_ENABLED off, paused reasons ('Pauset etter feil') still show in chat, Settings and the agents card, because the reason now comes from last_outcome, which the list returns whatever the flag; the design requires it but no switch gates it, so the owner should confirm."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The kept request id lives in component memory only: after a lost answer and a page reload, the next press uses a new id and can start a second manual fire; OD-9's in-flight limit stops it only while the first fire is pending or running."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Run now is offered on paused schedules because the server allows it (it checks creator, approval and limits, not enabled); OD-1 does not rule on paused schedules, so the owner should confirm."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "crypto.randomUUID() needs a secure context; on an http origin other than localhost a press throws before the busy state is set and shows nothing. Other call sites share this, so any fix belongs codebase-wide."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The W3-14 entry for EP-6-S3 still names AutomationsHub.tsx and ScheduledRunsPanel.tsx; update it to AutomationsList.tsx and cron-client.ts before the next batch."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S1",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-4",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/write_preview.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-preview.test.tsx"
+   ],
+   "notes": "The slice is built: the code and its unit tests are written, and nothing was compiled or run (code-first order). The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-10-S1.patch (86,922 bytes). It only adds lines (1,817), and every edited file keeps its own line endings: CRLF for Rust and proto, LF for the SPA files.\n\nS3 had already landed, so write_preview.rs reuses `is_mail_send`, `mail_recipients`, `WRITE_OPERATIONS` and the `FIELD_*` constants from provider_writes and approval_edit. No helper was copied. The provider is looked up from the operation in `WRITE_OPERATIONS`, because the descriptor input carries no provider.\n\nHow it works:\n- **session-core store:** `read_descriptor_for_owner` returns one of `NotFound`, `NoDescriptor` or `Descriptor`. The approval must be REQUESTED and unexpired, owned by the caller, on a run that is `persistent` (so a waived run is refused, D9). It decrypts with the same key binding used when the descriptor was saved.\n- **session-core handler:** `get_approval_preview` sits right after `get_approval`. Its gate order is: ZDR/waived refusal, then scope check (`orchestration:read`), then org, then a user-bound credential, then the store read. Every other case answers NOT_FOUND. A pending approval with no descriptor (for example `browser_human_assist`, per round B C-B4) gets the preview with kind `none`. Revision is always 0 until S4.\n- **model-gateway:** `GET /v1/orchestration/approvals/:approval_id/preview` is behind `APPROVAL_WRITE_PREVIEW_ENABLED`, read with the strict parser. With it off the route answers 404 `preview_unavailable`. Then `continuation_gate` runs. Not-found, permission-denied and unimplemented all map to one 404 `approval_not_found`, and typed ZDR refusals keep their body. The answer is `{data:{preview}}`.\n- **BFF:** a plain GET pass-through.\n- **SPA:** the `approvals.preview` action contract is added first. Then `getApprovalPreview` (a 404 becomes `null`), and `WritePreview` / `WritePreviewDisclosure`, which fetch once on first open and show the body as plain text with `pre-wrap`. The disclosure renders inside `ApprovalRequests` only when `VITE_APPROVAL_WRITE_PREVIEW` is the literal `true` and the approval is a mail send. That keeps the card unchanged with every switch off.\n\nI also added the new method to the three model-gateway test doubles, which return unimplemented. These are test files of a crate this slice changes.",
+   "deviations": [
+    "I added no zdr-posture-matrix.json row `e_zdr_token_approval_preview_refused`, and did not change zdr_posture_matrix.rs. A ZDR-bearer refusal on the plain route would duplicate an existing matrix row (the hard rule forbids this). The refusal is proven instead by the gateway test `preview_route_refuses_zdr_token` and the session-core test `preview_refuses_zdr_and_waived_identities`. It reuses the existing durable-mutation refusal and adds no new feature key.",
+    "The SPA cannot read the cause's `action_key`: the gateway deliberately keeps it out of the approval it sends to the browser (test `approval_value_omits_action_key`). So `isMailSendApproval` checks two things: `cause.tool === 'execute_provider_action'`, and an approval reason that starts with the mp-contracts mail-send summary text `send an email to `.",
+    "I added an SPA switch `VITE_APPROVAL_WRITE_PREVIEW` (strict `'true'`, default off) beside the gateway switch. Without it the disclosure button would appear with every switch off.",
+    "Ownership check: the design asks for `authorize_run_owner(Read)`. The store query is stricter: the approval and the run must both belong to the caller, so an org admin cannot read another user's draft (D4 says owner only).",
+    "Preview kind adds `none` (the no-descriptor form, C-B4) to the design's `mail_send` / `other`. It is documented in the proto comment and in the action contract's output enum."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/browser_events.rs: inside `impl OrchestrationCoreService for NeverResolvingOrchestration`, right after the `get_quarantine_preview` method (8-space indent), add:\n        async fn get_approval_preview(\n            &self,\n            _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,\n        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {\n            Err(tonic::Status::unimplemented(\"get_approval_preview is not served by this double\"))\n        }",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: inside `impl OrchestrationCoreService for MockOrchestration` (~line 12592), right after its `get_quarantine_preview` method, add the same `get_approval_preview` method as above. Without it the execution-core tests will not compile once the proto has the new RPC.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the line `'approvals.decide': exempt('irreversible_destructive', 'destructive'),` add `'approvals.preview': exempt('approval_authority', 'read'),`. The map must cover every action id (exhaustive by type), so typecheck fails without this row.",
+    "Regenerate the agent-action-admission golden (src/shared/api/contracts/agent-action-admission.json and its vendored copies) for the new `approvals.preview` row, and the prompt-tool manifest if it lists registry actions.",
+    "Regenerate proto bindings (`buf generate` in apps/Model Plane/proto: Go under go/gen/model_plane/v1). Run `buf lint` and `buf breaking --against proto/baseline.binpb`: the changes are one new RPC and three new messages, all additive.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment block add `APPROVAL_WRITE_PREVIEW_ENABLED: ${APPROVAL_WRITE_PREVIEW_ENABLED:-false}`. The owner adds the same name to apps/Model Plane/deploy/.env.example. I did not touch either file.",
+    "Owner/lead: document the SPA switch `VITE_APPROVAL_WRITE_PREVIEW=true` (default off) wherever verevonv3 VITE switches are listed. It must be on together with the gateway switch for the disclosure to show.",
+    "Docs (not my files): add a row to MP docs/ZDR.md for the approval preview. A ZDR bearer is refused by continuation_gate with zdr_durable_mutation_forbidden, and a waived credential by session-core (waiver route mismatch); there is no new store and no new feature key. Add the D4 ledger entry (owner-only decrypted preview, never stored) to MP/docs/decisions/ledger.md.",
+    "Guard compile and test: cargo test -p mp-contracts write_preview; -p session-core --lib preview; session-core --bin preview -- --ignored --test-threads=1 (DB harness: the 5 `approval_preview_db_tests`); -p model-gateway --lib approval_preview_route_tests; BFF cargo test orchestration; vitest on WritePreview.test.tsx, ChatMessages.approval-preview.test.tsx, orchestration-client.test.ts and action-registry.test.ts. Some new session-core and gateway lines exceed 100 chars, matching nearby code; run `cargo fmt` if the guard enforces it."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The design's S10 check is still open. Show the preview for one Gmail and one Outlook draft on a rebuilt session-core, model-gateway and BFF with both switches on, and capture a session-core log showing no descriptor text. Do this before flipping APPROVAL_WRITE_PREVIEW_ENABLED or VITE_APPROVAL_WRITE_PREVIEW."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The SPA decides a card is a mail send from the approval reason starting with `send an email to ` (mp-contracts `provider_effect_summary`). Rewording that summary would silently hide the disclosure. A typed, non-content `effect_kind` on the browser approval projection would be sturdier."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "`preview_is_never_logged` is a source scan of the handler body (no tracing macro, no event write), not a tracing-capture test. A log line added in `read_descriptor_for_owner` or `mp_contracts::write_preview` would not be caught."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "`approvals.preview` is exempted from the model as `approval_authority` / side-effect `read` in the lead-applied model-access row. Confirm this reason over `human_identity_or_security` when the admission golden is regenerated."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The preview has no CSS for its new `verevon-chat-approval__preview*` / `__disclosure*` classes; only `pre-wrap` is set inline. Add styling in the chat stylesheet with S6, which owns the editable card."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-1-S2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-5",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.human-assist.test.tsx"
+   ],
+   "notes": "The slice is built dark behind EXECUTION_BROWSER_HUMAN_ASSIST (default off, strict parser, read once through a OnceLock, with a cfg(test) thread-local override). Nothing was compiled or run. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-1-S2.patch (54 KB). It was cut in a worktree detached at model-plane e2cbee780.\n\nexecution-core, browser_session.rs:\n- `page_view` turns a strong login, captcha, consent or waf challenge into one of four `browser_help_needed` refusals, one per kind. That happens only with the switch on, and only when Quarry offers no recovery (recovery is exhausted or not_applicable). Every other kind, and every challenge with the switch off, stays BLOCKED.\n- On an open, `establish` keeps the session for the person instead of releasing it.\n- A per-run in-process `RunHelp` map caps requests at 2 per run and holds the pending kind. It sits beside S1's `held_runs` and is cleared by `release_run`.\n- A released `browser.open` re-observes the kept page instead of starting a new Quarry run, so the person's sign-in is not lost.\n- `decline_help` closes the session and returns `browser_help_declined`.\n- `observe` clears the pending kind.\n\nexecution-core, agent.rs:\n- Phase 3 reads `help_kind`. The run pauses (cause `browser_human_assist`, holding the page) only at depth 0, outside ZDR or waived routes, when no other pause holds the round and the call is not a released one, and while under the cap. In every other case the model gets BLOCKED.\n- A call the person declined earlier (WS13 S4 denial memory) ends the session and the model gets HELP_DECLINED.\n- `approval_cause_for_pause` (now `pub(crate)`) stores `assist_kind=<kind>`, `assist_origin=agent` and host = the session host when help is pending. Otherwise it stores `user_takeover/person` as before.\n- A help pause publishes no BrowserRunPaused, because Quarry's control has not moved yet.\n- The pause's tool input is the refused call itself, not the design's `browser.observe{}`, so the fold and release fingerprints agree.\n\nSPA:\n- `ApprovalCause` gets `assistKind`, `assistOrigin` and `host`.\n- New `BROWSER_ASSIST_KINDS` and `browserAssistKindOf`.\n- Per-kind nb/en copy with the host taken from the record. The login copy includes the D9 line saying sign-in through another site is not supported yet.\n- Labels for Take over and Skip this site, a line for when Take over is not available, and an attention/push line with no host.\n- `ChatMessages`: a new `BrowserHumanAssistCard`. `ApprovalRequests` sends agent-origin help causes to it and takes two new optional props, `browserControl` and `onBrowserTakeOver`. Take over appears only when both are present (the D1 gate) and calls `onTakeOver(sessionId, controlEpoch)`. Skip sends `onDecide(id, 'reject')`.\n\nWith the switch off the server never raises an agent-origin cause and the client does not parse `assistOrigin` yet, so behaviour is unchanged.\n\nUnit tests written, all names as in the design: in `browser_session.rs`, strong_login_challenge_raises_human_assist_when_switch_on, strong_captcha_raises_human_assist, rate_limit_and_paywall_stay_blocked, switch_off_keeps_blocked_refusal, third_help_request_in_a_run_is_blocked, declined_help_closes_session_and_tells_model and assist_cause_carries_kind_origin_and_host_only; plus a new describe block in `approval-copy.test.ts` and the new `ChatMessages.human-assist.test.tsx`. CRLF is kept in both Rust files and LF in the TS files.",
+   "deviations": [
+    "Assumed D1 = (a) grant owner of record (Quarry Q-1): Take over is offered only when the parent passes a bound browser control and onBrowserTakeOver; without them the card shows only Skip this site and says take over is not available yet",
+    "Assumed D4 = (a) Quarry ChallengeSignal only, no model tool in W3",
+    "Assumed D7 = agent only (Quarry applies read_only to the agent, not to the person's steps); no MP code depends on it, it gates only the live proof on read-level sites",
+    "Assumed D9 = (a) a sign-in that crosses hosts is refused by the run fence, and the login card says sign-in through another site is not supported yet",
+    "The pause's tool input is the refused call itself, not browser.observe{} as the design says, so the fold and release fingerprints match; a released browser.open re-observes the kept page instead of opening a new run",
+    "Recovery 'not_applicable' counts as no recovery left (the design says 'exhausted'), so a strong login wall with no recovery offered still asks the person",
+    "The typed 403 CHALLENGE_DETECTED refusal (details.next user_takeover_or_other_source) stays BLOCKED: challenge_from_refusal in quarry_agent.rs (not my file) always reads it as kind unknown, so no assist kind can be named",
+    "A help pause publishes no BrowserRunPaused event: the person has not taken over yet, and browser_events.rs has no human_assist reason",
+    "The 2-per-run cap and the pending kind are kept in process memory (like S1's held_runs), not counted from durable approvals",
+    "Skip this site is answered through WS13 S4 denial memory: on the next challenge the run sees the declined call, closes the session and tells the model browser_help_declined"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts: in normalizeApprovalCause, after `stepUpRequired: cause.step_up_required === true,` add `    assistKind: str(cause.assist_kind),` / `    assistOrigin: str(cause.assist_origin),` / `    host: str(cause.host),`",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: in fn approval_cause_value json!, after `\"rule_id\": empty_to_null(&cause.rule_id),` add `        \"assist_kind\": empty_to_null(&cause.assist_kind),` / `        \"assist_origin\": empty_to_null(&cause.assist_origin),` / `        \"host\": empty_to_null(&cause.host),` (owner-only approval projection; cause already allowlists these through keep_browser_assist_facts)",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment, after `      EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}` add `      EXECUTION_BROWSER_HUMAN_ASSIST: ${EXECUTION_BROWSER_HUMAN_ASSIST:-false}`",
+    "owner: add EXECUTION_BROWSER_HUMAN_ASSIST=false to apps/Model Plane/deploy/.env.example (agents must not edit it)",
+    "guard compile: cd \"apps/Model Plane/rust\" && cargo test -p execution-core --lib browser_session (uses crate::runtime_loop::agent::approval_cause_for_pause, now pub(crate)); cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/shared/approvals/approval-copy.test.ts src/features/chat/components/ChatMessages.human-assist.test.tsx; tsc6 -p tsconfig.app.json"
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts (parse assist_kind/assist_origin/host into ApprovalCause)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (approval_cause_value projects assist_kind/assist_origin/host)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts and the ChatMessages ConversationNodeContext/MessageBlock props: pass browserControl (the turn's ChatRunBrowserControl) and onBrowserTakeOver (changeBrowserControl(org, sessionId, 'human_takeover', epoch), only while chatBrowserTakeoverEnabled() and the turn is not ZDR) down to ApprovalRequests",
+    "apps/Application Plane/notification-core (Web Push body for a browser_human_assist approval must use the host-free 'Verevon needs you in the browser' line) and the WS16 attention rail label (use browserAssistAttentionLine)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D1 = (a) grant owner of record: the help card's Take over button needs Quarry Q-1 (beneficiary = grant owner_id) and the chat turn's browser binding. Until both are live, the card offers only Skip this site."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D4 = (a): only Quarry's ChallengeSignal raises a help request. The model has no browser.request_help tool, so page text cannot steer it into sending the person to a page."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D7 = read_only applies to the agent only; Quarry's K3-6 contract (D2-961) must let the person's own steps type into a read-level run, or a sign-in by hand is refused."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Assumed D9 = (a): a sign-in that leaves the run fence ends in Quarry's navigation refusal, and the login card says sign-in through another site is not supported yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Quarry's ChallengeStrength documents a login form as non_signal, so a real sign-in page may never arrive as a strong login challenge and S2 would never fire on it. Verify Quarry's classifier on the crawl-fixture login page before switch-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Skip this site (deny) only reaches the model through WS13 S4 denial memory on a later challenge. A denied help pause that is never continued keeps the held page open until the grant TTL or the Quarry runtime ends it (S5 owns expiry)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The help approval's step is the refused browser.open{url} or browser.observe{}, and its release re-observes the kept page. The in-place resume of a help pause (fold claim, release covers, single re-dispatch) has no integration test and needs a live proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The 2-per-run cap and the pending assist kind live in process memory (RunHelp map). A restart resets them, and a paused run that is never resumed leaves its entry in the map until the process exits."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The typed 403 CHALLENGE_DETECTED path (details.next user_takeover_or_other_source) stays BLOCKED, because challenge_from_refusal in quarry_agent.rs reads its kind as unknown. Parse details.kind there if the agent path should also ask for help."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A help pause publishes no BrowserRunPaused, because browser_events.rs has no human_assist reason. When the person later gives back, the run stream shows a BrowserRunResumed with no matching paused event."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The design's crawl-fixture live proof is still to do: a strong login challenge pauses the run with an agent-origin cause and the host; then Take over, sign in, Give back, and the run observes the logged-in page. Evidence: approval cause JSON and the run events."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-1-S3",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-6",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.takeover.test.tsx"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-1-S3.patch (29749 bytes). I wrote the code and tests but ran nothing, as the code-first order says. I kept CRLF in the Rust files and LF in the TS files. There is no new flag, proto field or migration. The hand-back runs only behind S1's existing switch EXECUTION_BROWSER_TAKEOVER_PAUSE, so with that switch off the behaviour is byte-identical to before.\n\n- browser_session.rs: added MAX_PERSON_NOTE_CHARS = 500. The note is framed as `<person_note>...</person_note>` with its closing tag escaped the same way wrap_untrusted escapes the page's, and a blank note adds no line. hand_back() takes one fresh observe through the existing observe and fence, then appends the note. It logs `note_chars` only, never the text. hand_back_answers() says a paused observe is answered by that look, so the page is not read twice. Tests: note_is_framed_and_capped, empty_note_adds_no_line, resume_observes_once_before_redispatch, note_never_logged (uses a test-local tracing::Subscriber built on the `tracing` crate alone, because execution-core has no tracing-subscriber dependency).\n- agent.rs: when a released Do browser call meets agent control again, the loop reads the note via released_hand_back_note. That function calls GetApproval with the resume approval_id and the run's org_id. It accepts only a granted approval of this run whose cause is `browser_human_assist`, and returns its decision_reason. The loop then does one hand_back look. A paused observe is answered by the look. Any other paused call is re-dispatched, and when it completes, its output is read after the look and the note. A failed call keeps its closed refusal text unchanged. If GetApproval fails, the call runs as in S1, with no look. Pure helpers are hand_back_note_of, hand_back_observed and after_hand_back, tested in a new `mod browser_hand_back`.\n- quarry_agent.rs: client_has_no_receipt_or_timeline_reader reads the file's own source with include_str. It pins the exact public method list of QuarryAgentClient and fails if the impl body mentions receipt, timeline, frames, /events or projection.\n- ChatLiveRunPanel.tsx: an optional note textarea (maxLength 500, nb/en label) shows only while the person holds the browser, the switch is on and the turn is not ZDR. On an accepted give-back the note is trimmed, capped and passed as `onBrowserGiveBack(runId, note)`, then cleared. A stale-epoch give-back keeps the note. Four new tests, plus the existing give-back assertion updated to `(runId, '')`.",
+   "deviations": [
+    "The design names a trait the test implements for the compile-level check. I used a source scan of the client's impl block instead (exact public method list plus forbidden route words). It fails on any new method; a trait would not.",
+    "The design's S3 text says QuarryAgentClient has only start_run, step, close_run, ready and run_control. That is out of date: it also has attach_run, release_attach, tab_state, open_tab, select_tab, close_tab, mark_tab, step_attached and devtools (WS8.G, E3.2, WS9.E). The pinned list includes them, and the test comment explains devtools.",
+    "If the look succeeds but the re-dispatched non-observe call then fails, the call's refusal text is kept unchanged so the loop's and retry classifier's matching still works, and the look and the note are dropped for that call (see depth findings)."
+   ],
+   "lead_todo": [
+    "SPA wiring (not in my files): nothing passes onBrowserGiveBack to ChatLiveRunPanel yet. Whichever file wires it (the chat turn owner, e.g. use-chat-controller.ts or the ChatView that renders the panel) must decide the open browser_human_assist approval with DecideApprovalRequest.decision_reason = note, empty when there is no note. The signature is now (runId: string, note: string) => void.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css: next to `.verevon-chat-run-panel__control-error` (around line 24101), add `.verevon-chat-run-panel__give-back-note { display: grid; gap: 4px; margin-top: 8px; font-size: 12px; } .verevon-chat-run-panel__give-back-note textarea { width: 100%; resize: vertical; font: inherit; }`.",
+    "Guard: compile and run `cargo test -p execution-core --lib browser_session`, `--lib runtime_loop::agent::browser_hand_back`, `--lib quarry_agent::tests::client_has_no_receipt_or_timeline_reader`, and `pnpm exec vitest run src/features/chat/components/ChatLiveRunPanel.takeover.test.tsx`. No proto, golden or generated code needs regenerating."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A paused browser.open is re-dispatched after give-back. open_with then ends the session the person just signed into and starts a new Quarry run, which loses the login carry-over; S4 (hand-back hygiene) should answer a paused open with the look instead of re-running it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "QuarryAgentClient::devtools (WS9.E MCP console tool) can read the console of any service-owned run, Do-loop sessions included. Today only the fact that the Do session's quarry_run_id never reaches the model keeps it from that run; nothing binds the console tool to its own grant's run."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "This is unproven live: that session-core's GetApproval, called with execution-core's session bearer after ConsumeApproval, returns the granted browser_human_assist approval with the person's decision_reason intact. If it does not, the note and the look are silently skipped (a warn line with the code only)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the full run_rounds release path (GetApproval fake, hand-back look, re-dispatch). The fake session-core in agent.rs tests answers get_approval as unimplemented, so only the pure helpers and browser_session functions are covered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The note is dropped when the paused call fails after give-back, and also when the observe that answers a paused observe fails. In both cases the model reads only the closed refusal, so the person's note is lost for that turn."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The SPA caps the note by UTF-16 code units (maxLength/slice) and execution-core caps it by chars. Both are 500, so the server cap is never tighter than what the person typed."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "S6 must still grep run events, transcript and execution-core logs for a marker the tester typed into the page (expect 0 hits) and for the note marker (expect it only in model input)."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-1-S4",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-7",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-1-S4.patch (20161 bytes), cut from model-plane e2cbee780. Nothing compiled or run (code-first order). CRLF kept in both files.\n\nbrowser_session.rs:\n- There is now a per-process typed-by-person set, keyed by Do run id, built the same way as S1's held_runs.\n  - Set by end_hold. It now goes through a private take_hold, so a hold that ends counts as a hand-back.\n  - Also set when observe gets TAKEN_OVER, and when open_with refuses with TAKEN_OVER.\n  - Cleared when the agent's open succeeds, and when release_run runs.\n- page_view takes a new typed_by_person flag. When it is set, the text of textbox, searchbox, combobox and spinbutton targets is dropped (case-insensitive). ref_id, role and name stay, so the model can still name the field.\n  - open passes false.\n  - observe passes the run's flag. browser.act ends in observe, so it is covered too.\n- release_run now goes through release_run_with, which takes a lazy Quarry client factory. The client is still built only when a page exists, and the hold and flag are cleared first. This makes \"run end closes the Quarry run\" testable.\n- A comment in establish records that StartRunParams::new sends no profile (D8).\n- Tests: typed_field_text_dropped_after_handback, field_text_kept_before_any_takeover, agent_open_clears_typed_by_person, a_takeover_refusal_drops_field_text_with_the_pause_off, do_loop_never_requests_persistent_profile (checks the captured start body), run_end_closes_quarry_run_after_handback.\n  - Each test uses its own run id, because the set is shared by the whole process.\n  - The two existing page_view test calls now pass false.\n\nquarry_agent.rs:\n- Doc comment on StartRunParams.profile_id.\n- Test start_run_params_new_asks_for_no_profile.\n\nNo flag, migration or proto change, as the slice says. Nothing outside these two files needed editing: agent.rs already calls end_hold on the give-back path.",
+   "deviations": [
+    "The typed-by-person mark is also set when a step comes back TAKEN_OVER (observe, and the open pre-check), not only when the resume follows a browser_human_assist approval. Reason: with EXECUTION_BROWSER_TAKEOVER_PAUSE off, the person can give the page back without any pause, and the next observe would otherwise show what they typed. This only changes behaviour after a Quarry USER_TOOK_OVER, which requires Quarry takeover enforcement to be on.",
+    "The flag is a per-process set keyed by Do run id rather than a field on BrowserSession. A field would have meant shared edits to BrowserSession literals in runtime_loop/agent.rs and tool_bridge/mod.rs, plus a non-atomic read-modify-write on the state map. The set is still cleared by the next open and by the run's end."
+   ],
+   "lead_todo": [
+    "guard: cargo test -p execution-core --lib browser_session and --lib quarry_agent (Windows: --lib)."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The role-based drop only covers targets whose role is textbox, searchbox, combobox or spinbutton; a typed value exposed through a field's accessible name, a contenteditable region, or a role Quarry leaves empty still reaches the model, so Quarry Q-2 field-value redaction must land before EP-1 goes default-on (S6)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The typed-by-person and hold sets are in-process only; if a takeover pause resumes on a different execution-core replica, or after a restart, the mark is lost — but the StateStore browser session is lost too in that case, so the session is gone rather than leaking."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "S6 live proof still owed: type a marker password into the fixture form during a takeover, give back, then grep model input records and run events for it, expecting 0 hits."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no agent.rs-level test that the resumed in-place call (released_browser_call_still_held -> end_hold -> re-dispatched observe) yields a redacted view; it is covered only at the browser_session level through hold_for_person/end_hold."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-1-S5",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_5775f1fa-f92-8",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+   ],
+   "notes": "I wrote the code and the tests but did not compile or run anything. The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-14/EP-1-S5.patch (27.5 KB, built against model-plane e2cbee780). There is no migration and no proto change. CRLF line endings are kept in both files.\n\nWhat is built:\n- browser_session.rs: EXECUTION_BROWSER_ASSIST_TTL_SECONDS is read once per process by assist_ttl_from/assist_ttl_seconds. It takes whole seconds, clamps them to 300-3600, and falls back to 1800 when the value is missing or not a number. It is a setting, not a switch.\n- New refusal HELP_TIMED_OUT (browser_help_timed_out, \"The person did not give the browser back in time.\").\n- held_runs is now a map of Hold::Person(number) or Hold::TimedOut. hold_for_person now returns the hold's number. expire_hold_after starts a task that sleeps for the TTL plus a 60 s grace. If that same hold still stands, expire_hold marks the run TimedOut, closes the Quarry run and revokes the grant using the pause-time bearer. take_help_timed_out gives the timeout refusal exactly once.\n- revalidate_after_handback reads the grant back with the continue's own (click-time) bearer. A grant that is inactive, refused or past its expires_at ends the session and returns browser_session_lost. A refused bearer returns browser_credential_expired and keeps the page.\n- handback_without_bearer covers a continue with no browser bearer: it returns the timeout refusal first, then browser_credential_expired if the run still holds a page.\n- agent.rs: approval_ttl_seconds(cause) replaces the hard-coded 3600. Only BrowserHumanAssist uses the assist TTL. The takeover pause now starts expire_hold_after. The dispatch check before a released Do browser call now calls released_browser_call_refusal: timeout first, then the S1 still-held check, then the grant read-back. When there is no dispatch it uses handback_without_bearer.\n- Every new path is gated by EXECUTION_BROWSER_TAKEOVER_PAUSE plus the BrowserHumanAssist cause, so behaviour is unchanged while that switch is off.\n\nTests (written, not run):\n- browser_session.rs, in a new mod handback_tests with its own fake broker so it does not collide with the shared FakeBroker: assist_ttl_defaults_to_1800_and_clamps, resume_uses_click_time_bearer_not_stored_one, expired_grant_at_resume_maps_to_session_lost, a_refused_click_time_bearer_keeps_the_page_and_asks_to_sign_in, timed_out_assist_releases_session_and_tells_model, an_earlier_wait_never_ends_a_later_hold_or_a_given_back_run, a_continue_without_a_browser_bearer_asks_to_sign_in_again.\n- agent.rs: only_a_takeover_pause_waits_the_assist_ttl, plus an expires_in_seconds assertion added to the S1 test a_browser_takeover_pause_is_stored_under_browser_human_assist.\n\nI did not need to change runtime_loop/resume.rs.",
+   "deviations": [
+    "The park branch is not built. WS03-S8 run_parkable requires !holds_release, and a resumed takeover call always holds an approval release, so it can never park. A continue with no fresh bearer therefore always gets the CREDENTIAL_EXPIRED refusal (browser_credential_expired), which the design names as the fallback.",
+    "browser_help_timed_out reaches the model only when the run touches the browser again after the expiry. Example: the give-back was accepted just before the deadline but its continue arrives after the page was closed. Nothing in the current tree resumes a Do run when session-core marks an approval APPROVAL_STATE_TIMED_OUT, so the model cannot be told in that case without a cross-service trigger."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core service environment, next to EXECUTION_BROWSER_TAKEOVER_PAUSE, add `EXECUTION_BROWSER_ASSIST_TTL_SECONDS: ${EXECUTION_BROWSER_ASSIST_TTL_SECONDS:-1800}`",
+    "owner: .env.example line `EXECUTION_BROWSER_ASSIST_TTL_SECONDS=1800` (whole seconds, clamped 300-3600; read only by a takeover pause)",
+    "guard: cargo test -p execution-core --lib browser_session and --lib runtime_loop (new tests are in mod handback_tests and in the agent.rs tests module)"
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "No Do-loop path reacts to APPROVAL_STATE_TIMED_OUT: a takeover nobody gives back leaves the run AwaitingApproval for good, and the model never reads browser_help_timed_out, until session-core or the gateway sends a close-on-timeout continue to execution-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The expiry wait is an in-process tokio task: if execution-core restarts during a takeover, the held page, the wait and the timeout marker are all lost, and Quarry's own lease sweep (Q-5) is the only thing that closes the run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "expire_hold revokes the grant with the bearer from pause time, which may have lapsed after 30-60 minutes; the revoke then fails (it is logged) and the grant ends only at its own TTL of up to 30 minutes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The assist TTL may be up to 3600 s while the run grant asks for 1800 s (GRANT_TTL_SECONDS), so any takeover longer than the grant ends in browser_session_lost at give-back; the owner should consider capping the assist TTL at the grant TTL."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Set EXECUTION_BROWSER_ASSIST_TTL_SECONDS=300, take over and wait: the approval's expires_at should be about 300 s, and after 360 s the Quarry run should return 404 on the owner projection and the grant should be revoked."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "A Hold::TimedOut entry for a run that is never resumed stays in the process-wide held_runs map; it is cleared only by release_run or take_help_timed_out."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn (EP-2-S4, EP-2-S8, EP-6-S3, EP-10-S1, EP-1-S2, EP-1-S3, EP-1-S4, EP-1-S5)",
+    "outcome": "All 8 patches are in. EP-2-S8 conflicted with EP-2-S4 in action-registry.ts, and EP-1-S4 conflicted with EP-1-S3 in browser_session.rs; I resolved both by keeping both sides. EP-10-S1 was refused the first time because of the unmerged index and applied cleanly after the resolve. EP-1-S5 conflicted in browser_session.rs and agent.rs; I resolved it by hand. Then git reset -q, and the index is empty. git diff --stat shows every slice's files changed.",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.local2.yaml (apps/Model Plane/proto)",
+    "outcome": "execution.pb.go, orchestration.pb.go and orchestration_grpc.pb.go differed and were copied into go/gen/model_plane/v1",
+    "clean": true
+   },
+   {
+    "command": "bash apps/Model Plane/scripts/tests/go-gen-drift.sh",
+    "outcome": "go-gen-drift: 48 generated Go files match go/gen/model_plane",
+    "clean": true
+   },
+   {
+    "command": "buf generate --template ../../../.plan-work/buf.gen.py-remote.yaml",
+    "outcome": "execution_pb2.py and orchestration_pb2.py differed and were copied into python/mp-events-py/src/mp_events/_gen/model_plane/v1. No runtime-version lines were added.",
+    "clean": true
+   },
+   {
+    "command": "buf lint / buf breaking --against baseline.binpb",
+    "outcome": "breaking: rc 0. lint: pre-existing debt of 1924 findings (W3-13 had 1923). The one extra finding is in runs.proto (field 'connection' comment), a file this batch did not touch; it came in with a main merge. No lint finding on the new WideResearch or ApprovalPreview messages.",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 passed. The golden gained 39 lines (approvals.preview, chat.open_cited_passage, chat.wide_research_start). I copied it byte-identically to MP api/contracts, capability-core testdata, execution-core fixtures and model-gateway fixtures. The .sha256 is now 6a2c16cf..., and the zdr-contract-sync pin was updated.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "9 passed, no manifest change",
+    "clean": true
+   },
+   {
+    "command": "node scripts/tests/zdr-contract-schema.mjs",
+    "outcome": "ok, the matrix is well formed and consistent. The 'rows must differ' rule holds with the two new EP-2-S4 rows.",
+    "clean": true
+   },
+   {
+    "command": "node scripts/gen-chat-event-types.mjs",
+    "outcome": "Regenerated chat-event-payloads.generated.ts; identical to the builder's hand edit",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished with 0 errors. The only warnings are pre-existing ones (dead code, unused axum::Json in old tests).",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "Finished with 0 errors, pre-existing warnings only",
+    "clean": true
+   },
+   {
+    "command": "go build ./... and go vet ./... (capability-core, orchestrator-core); go build ./... in every Model Plane Go service and go/gen",
+    "outcome": "all clean",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "First run: 5 errors from the batch. After the fixes: 0 errors. The baseline error in schedule-contract.test.ts no longer appears.",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "slice": "EP-2-S4 + EP-2-S8",
+    "what": "Resolved the 3-way conflict by keeping both the chatOpenCitedPassageInput schema and the chatWideResearchStartInput schema, and both registry entries. Also escaped three unescaped apostrophes (organisation's ×2, person's) in the chat.wide_research_start single-quoted description. They were a syntax error in EP-2-S8's patch."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "slice": "EP-1-S3 + EP-1-S4",
+    "what": "Merged EP-1-S4 onto the S2+S3 file. page_view takes S4's typed_by_person parameter and keeps S3's challenge_refusal(challenge, human_assist_enabled()). In establish, S2's keep-the-page-on-a-help-wall match is kept, and the page_view call now passes false. release_run delegates to S4's release_run_with, which runs take_hold, forget_typed_by_person and then S2's forget_help. The S3 and S4 test blocks are kept one after the other."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "slice": "EP-1-S4 + EP-1-S5",
+    "what": "Added S5's imports (AtomicU64, Ordering, SystemTime, UNIX_EPOCH) next to the existing HashMap/HashSet import. S4's take_hold relied on HashSet::remove returning a bool; with S5's HashMap<String, Hold> it now returns matches!(remove(run_id), Some(Hold::Person(_))), so a timed-out hold is not treated as a hand-back."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "slice": "EP-1-S3 + EP-1-S5",
+    "what": "Replaced S1's still_taken_over with S5's handback_refusal (released_browser_call_refusal / handback_without_bearer). S3's hand-back look is now gated on handback_refusal.is_none(). The outcome is failed(refusal.text()) when a refusal is set, before S3's hand_back_answers branch."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "slice": "EP-1-S3",
+    "what": "maxLength -> maxlength on the give-back note textarea (Solid's attribute types)"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx",
+    "slice": "EP-10-S1",
+    "what": "aria-expanded={open() ? 'true' : 'false'} (repo idiom; a boolean is not assignable)"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-preview.test.tsx",
+    "slice": "EP-10-S1",
+    "what": "disclosures()[0]! and mock.calls[0]?.[0] (noUncheckedIndexedAccess)"
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+    "slice": "EP-10-S1",
+    "what": "fetchMock.mock.calls[0]?.[0] (noUncheckedIndexedAccess)"
+   },
+   {
+    "file": "apps/Model Plane/rust/services/{execution-core/tests/loop_fold_zdr_matrix.rs, execution-core/tests/zdr_mcp_golden.rs, model-gateway/tests/zdr_mcp_observation_golden.rs, model-gateway/tests/zdr_posture_matrix.rs}",
+    "slice": "EP-2-S4",
+    "what": "Raised the matrix consumer counts for the two new rows: ENFORCEMENT_ROWS 30->32, ZDR 6->7, WAIVED 3->4. This is the same kind of pin bump W3-02 made in afe1eb159."
+   }
+  ],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/orchestration_grpc.pb.go",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/execution_pb2.py",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py",
+   "agent-action-admission.json (SPA source, apps/Model Plane/api/contracts, capability-core testdata, execution-core and model-gateway fixtures) + api/contracts/agent-action-admission.json.sha256 + zdr-contract-sync pin",
+   "zdr-posture-matrix.json.sha256 re-pinned; matrix + .sha256 vendored to mp-contracts, execution-core and model-gateway tests/fixtures; zdr-contract-sync pin updated",
+   "org-agent-policy-schema.json.sha256 + zdr-contract-sync pin (after adding the research.max_fan_out_items row)",
+   "apps/Model Plane/api/contracts/sse-event-payloads.json (+ .sha256, the SPA .sha256 copy, and the zdr-contract-sync pin): promoted from the builder's hand-edited SPA vendored copy, NOT produced by MP_UPDATE_GOLDEN",
+   "apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts (gen:chat-events; same output as the builder's version)"
+  ],
+  "shared_edits_applied": [
+   "model-gateway/src/citation_anchors.rs: passage: citation.passage.clone() in anchor_citations, plus passage: None in both test RecordedCitation literals (EP-2-S4)",
+   "model-gateway/src/connector_reads.rs: passage: None in the connector Citation (EP-2-S4)",
+   "model-gateway/src/tool_loop.rs: passage: None in both web Citation constructions, and `..` in the q3-rapport Artifact test pattern (EP-2-S4)",
+   "model-gateway/src/artifacts.rs: provenance: None in artifact_event, and `..` in the events_carry_the_wire_shape test pattern (EP-2-S4)",
+   "model-gateway/src/artifact_revisions.rs: provenance: None in the published() test literal (EP-2-S4)",
+   "model-gateway/src/result_validation.rs: provenance: None in the test RecordedArtifact (EP-2-S4)",
+   "model-gateway/tests/zdr_posture_matrix.rs: new test the_cited_passage_goldens_are_rows_decided_as_named (EP-2-S4)",
+   "verevonv3 chat-types.ts: CitationLocator/ResearchProvenance imports; quote/locator on Citation; provenance on ChatArtifact (EP-2-S4)",
+   "verevonv3 chat-normalizers.ts: normalizeCitation now carries quote/locator, and normalizeArtifact carries provenance (EP-2-S4)",
+   "verevonv3 ChatArtifactPanel.tsx: imports ArtifactProvenance and renders it after the viewer body, before </section> (EP-2-S4)",
+   "verevonv3 model-access.ts: chat.open_cited_passage (EP-2-S4), chat.wide_research_start (EP-2-S8), approvals.preview (EP-10-S1)",
+   "verevonv3 action-registry.test.ts: action count 275 -> 277, with comment lines for EP-2-S8 and EP-10-S1",
+   "verevonv3 styles/global.css: cited-passage sheet, quote and passage rules after the citation-chip group label (EP-2-S4); give-back-note rules after .verevon-chat-run-panel__control-error (EP-1-S3); CRLF kept",
+   "model-gateway/src/org_agent_policy.rs: Kind::Integer arm in token_of; OrgPolicy.max_fan_out_items and its from_settings read; test org_agent_policy_reads_the_wide_research_item_cap (EP-2-S8)",
+   "model-gateway/src/normalize.rs: wide_research: None in make_request (EP-2-S8)",
+   "apps/Model Plane/api/contracts/org-agent-policy-schema.json: research.max_fan_out_items row. The description lists no kinds, so it was left as is (EP-2-S8)",
+   "apps/Model Plane/deploy/docker-compose.yml: MODEL_GATEWAY_CITATION_PASSAGES (EP-2-S4), WIDE_RESEARCH_ENTRY_ENABLED (EP-2-S8) and APPROVAL_WRITE_PREVIEW_ENABLED (EP-10-S1) on model-gateway; EXECUTION_BROWSER_HUMAN_ASSIST (EP-1-S2) and EXECUTION_BROWSER_ASSIST_TTL_SECONDS=1800 (EP-1-S5) on execution-core, after EXECUTION_DO_BROWSER_ENABLED, because the compose file has no EXECUTION_BROWSER_TAKEOVER_PAUSE line",
+   "verevonv3 cron-client.ts: fire_key?: string on CronScheduleFire (EP-6-S3)",
+   "verevonv3 AgentsHubSummary.tsx: automationStateOf(schedule, now) (EP-6-S3)",
+   "execution-core/src/browser_events.rs and runtime_loop/agent.rs MockOrchestration: get_approval_preview unimplemented double (EP-10-S1)",
+   "model-gateway/src/http_routes.rs approval_cause_value: assist_kind, assist_origin and host (EP-1-S2)",
+   "verevonv3 orchestration-client.ts normalizeApprovalCause: assistKind, assistOrigin and host (EP-1-S2)",
+   "apps/Model Plane/docs/ZDR.md: EP-2-S4 paragraph at the end of 5.5; the 'Features refused with a typed code' row now names wide research and its estimate refusal (EP-2-S8) and the write-approval preview's posture (EP-10-S1)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/deploy/.env.example: MODEL_GATEWAY_CITATION_PASSAGES, WIDE_RESEARCH_ENTRY_ENABLED, APPROVAL_WRITE_PREVIEW_ENABLED, EXECUTION_BROWSER_HUMAN_ASSIST, EXECUTION_BROWSER_ASSIST_TTL_SECONDS (owner only)",
+   "apps/Model Plane/docs/decisions/ledger.md: EP-2-S8 D5 entry and EP-10-S1 D4 entry (lead books)",
+   "EP-10-S1: documenting VITE_APPROVAL_WRITE_PREVIEW wherever verevonv3 VITE switches are listed (owner/lead)",
+   "EP-1-S2 / EP-1-S3 / EP-2-S8 follow-ups that need design or other owners: wiring browserControl/onBrowserTakeOver into use-chat-controller and ChatMessages; the onBrowserGiveBack(runId, note) caller for ChatLiveRunPanel; the notification-core Web Push line and the WS16 attention rail label; the composer mount for WideResearchStart",
+   "All 'guard: run tests' items (cargo test, go test, vitest suites): not run under the no-tests rule"
+  ],
+  "still_broken": [],
+  "notes": "Everything compiles. The Rust MP workspace (all targets), the BFF gateway (all targets), Go build and vet, and tsc6 (0 errors) are all clean. No tests were run beyond the two allowed generation steps.\n\nThings the lead should check:\n1. The SSE payload golden was not produced by `MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden`, which the no-tests rule kept me from running. I took the builder's hand-edited SPA vendored copy as the canonical `apps/Model Plane/api/contracts/sse-event-payloads.json` and re-pinned it (sha ab385cc9...) in both .sha256 files and in zdr-contract-sync. The lead's test run should run `sse_event_payload_golden`; if the golden differs, regenerate it and re-pin it.\n2. The zdr-posture matrix now has 32 rows (zdr 7, waived 4). I bumped ENFORCEMENT_ROWS/ZDR/WAIVED in four consumer tests. `e_zdr_turn_kb_citation_passage_streams_not_persisted` expects `explicit_zdr`. That matches the existing `e_browser_do_tools_refused_under_zdr` row with the same bearer and explicit_zdr inputs, but it is not test-verified.\n3. Merge judgement in browser_session.rs (EP-1-S4 + EP-1-S5): take_hold reports a hand-back only for `Hold::Person`. A hold that expired (`TimedOut`) does not mark typed_by_person, because its page was already closed.\n4. The buf lint count went from 1923 to 1924, from runs.proto (not this batch). buf breaking is clean.\n5. Builder bug fixed: unescaped apostrophes in the EP-2-S8 description in action-registry.ts.\n\nScratch merge files are in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/w314guard/ (and .plan-work/buf-lint-w314.json, gen-out, gen-py). They are untracked and can be deleted."
+ }
+}

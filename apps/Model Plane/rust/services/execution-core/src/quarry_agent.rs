@@ -850,16 +850,21 @@ pub fn is_user_took_over(error: &AgentClientError) -> bool {
 /// Quarry's word for a run whose browser a person holds (`BrowserControlMode::HumanTakeover`).
 pub const HUMAN_TAKEOVER_MODE: &str = "human_takeover";
 
-/// Who holds a whole Quarry run's browser, read from its owner projection (EP-1). Only the two
-/// fields the Do loop decides on are read; the projection's page and tab fields are not.
+/// Who holds a whole Quarry run's browser, read from its owner projection (EP-1). Only the fields the
+/// Do loop decides on are read; the projection's page and tab fields are not. Quarry writes the
+/// projection camelCase (`controlMode`, `controlEpoch`, `grantId`); the snake_case names are read too.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct RunControl {
     /// `agent_control` or `human_takeover`.
-    #[serde(default)]
+    #[serde(default, alias = "controlMode")]
     pub control_mode: String,
     /// Bumped by Quarry on every flip; a give-back is a later epoch than its takeover.
-    #[serde(default)]
+    #[serde(default, alias = "controlEpoch")]
     pub control_epoch: u64,
+    /// The broker grant the run was started with (`grantId`), empty when Quarry names none. The
+    /// console tool reads a run only when this is the grant the call holds (EP-1, WS9.E).
+    #[serde(default, alias = "grantId")]
+    pub grant_id: String,
 }
 
 impl RunControl {
@@ -2485,6 +2490,7 @@ impl QuarryAgentClient {
         run_id: &str,
         org_id: &str,
     ) -> Result<RunControl, AgentClientError> {
+        check_quarry_path_id(run_id)?;
         let endpoint = self.url(&format!("/v1/agent/runs/{run_id}/browser-session"));
         let resp = self
             .send_with_auth_retry(org_id, None, || self.http.get(&endpoint))
@@ -4904,8 +4910,65 @@ mod tests {
         assert!(!RunControl {
             control_mode: "agent_control".to_owned(),
             control_epoch: 2,
+            grant_id: String::new(),
         }
         .person_holds());
+    }
+
+    /// Quarry answers the projection in camelCase, so the Do loop reads the control and the grant the
+    /// run was started with under those names. A reader that only knew snake_case would never see a
+    /// takeover, and every check that waits on it would pass.
+    #[tokio::test]
+    async fn run_control_reads_the_quarry_wire_names() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/agent/runs/run_abc/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "runId": "run_abc",
+                    "leaseId": "lease_1",
+                    "live": true,
+                    "zdr": false,
+                    "controlMode": "human_takeover",
+                    "controlEpoch": 4,
+                    "grantId": "grant-abc",
+                    "tabs": []
+                },
+                "meta": {"request_id": "req_1"},
+                "error": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+
+        let control = client
+            .run_control("run_abc", "org_1")
+            .await
+            .expect("the owner reads its run's control");
+
+        assert!(control.person_holds());
+        assert_eq!(control.control_epoch, 4);
+        assert_eq!(control.grant_id, "grant-abc");
+    }
+
+    /// A run id goes into a URL path, so a value that is not a Quarry id is refused before any request.
+    #[tokio::test]
+    async fn run_control_refuses_a_run_id_that_is_not_a_quarry_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let client = QuarryAgentClient::new(server.uri(), "svc").unwrap();
+
+        for run_id in ["", "run/../other", "run?x=1", "run%2Fother"] {
+            assert!(
+                client.run_control(run_id, "org_1").await.is_err(),
+                "{run_id:?} is not a Quarry run id"
+            );
+        }
     }
 
     /// EP-1 S3: nothing a person did during a takeover reaches the model, so the client has no

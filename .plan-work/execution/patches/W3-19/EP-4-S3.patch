@@ -1,0 +1,999 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.bridge.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.bridge.test.tsx
+new file mode 100644
+index 000000000..7341cb568
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.bridge.test.tsx	
+@@ -0,0 +1,183 @@
++// @vitest-environment jsdom
++
++/**
++ * The widget bridge in the frame (EP-4 S3). A widget may size itself, stage a
++ * follow-up the person clicks and ask to open a safe link the person confirms;
++ * nothing it posts is sent or opened on its own, and with the switch off there
++ * is no shim and no listener at all.
++ */
++
++import { fireEvent, render } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { MAX_WIDGET_HEIGHT } from '../lib/widget-bridge'
++import { InlineWidget, InlineWidgetAnswer } from './InlineWidget'
++
++const SOURCE = '<title>Lånekalkulator</title><button onclick="verevon.suggest(\'Vis for 25 år\')">25 år</button>'
++
++/** Stands in for the frame's window; the host compares `event.source` with it by identity. */
++const FRAME_WINDOW = { name: 'widget-frame' }
++
++function code() {
++  return <pre class="test-code">{SOURCE}</pre>
++}
++
++function mount(onSelectFollowUp?: (text: string) => void) {
++  const view = render(() => (
++    <InlineWidgetAnswer onSelectFollowUp={onSelectFollowUp}>
++      <InlineWidget source={SOURCE} fallback={code()} />
++    </InlineWidgetAnswer>
++  ))
++  const frame = view.container.querySelector('iframe') as HTMLIFrameElement
++  Object.defineProperty(frame, 'contentWindow', { configurable: true, value: FRAME_WINDOW })
++  return { ...view, frame }
++}
++
++function post(type: string, payload: unknown, source: unknown = FRAME_WINDOW, origin = 'null') {
++  const event = new MessageEvent('message', { data: { v: 1, type, payload }, origin })
++  Object.defineProperty(event, 'source', { value: source })
++  window.dispatchEvent(event)
++  flush()
++}
++
++afterEach(() => {
++  vi.unstubAllEnvs()
++  vi.restoreAllMocks()
++  document.body.innerHTML = ''
++})
++
++describe('InlineWidget bridge', () => {
++  it('followup is staged not sent', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const onSelectFollowUp = vi.fn()
++    const { container, unmount } = mount(onSelectFollowUp)
++
++    for (let i = 0; i < 20; i += 1) post('followup', { text: 'Vis for 25 år' })
++
++    const chips = container.querySelectorAll('.verevon-chat-followup-chip')
++    expect(chips).toHaveLength(1)
++    expect(chips[0]?.textContent).toBe('Vis for 25 år')
++    // The chip says where it comes from: the widget, not Verevon.
++    expect(container.textContent).toContain('Forslag fra widgeten:')
++    expect(onSelectFollowUp).not.toHaveBeenCalled()
++    unmount()
++  })
++
++  it('clicking the chip calls onSelectFollowUp once', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const onSelectFollowUp = vi.fn()
++    const { container, unmount } = mount(onSelectFollowUp)
++
++    post('followup', { text: 'Vis for 25 år' })
++    fireEvent.click(container.querySelector('.verevon-chat-followup-chip')!)
++    flush()
++
++    expect(onSelectFollowUp).toHaveBeenCalledTimes(1)
++    expect(onSelectFollowUp).toHaveBeenCalledWith('Vis for 25 år')
++    expect(container.querySelector('.verevon-chat-followup-chip')).toBeNull()
++
++    // The slot is free again: the widget may stage its next suggestion.
++    post('followup', { text: 'Vis for 30 år' })
++    expect(container.querySelector('.verevon-chat-followup-chip')?.textContent).toBe('Vis for 30 år')
++    unmount()
++  })
++
++  it('stages nothing without a follow-up handler', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const { container, unmount } = mount(undefined)
++    post('followup', { text: 'Vis for 25 år' })
++    expect(container.querySelector('.verevon-chat-followup-chip')).toBeNull()
++    unmount()
++  })
++
++  it('unsafe link is refused', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const { container, unmount } = mount(vi.fn())
++
++    post('open_link', { url: 'javascript:alert(1)' })
++    expect(container.querySelector('a')).toBeNull()
++    expect(container.querySelector('[role="note"]')?.textContent).toBe('Lenke blokkert: ukjent adresse')
++    unmount()
++  })
++
++  it('a safe link waits for the person to open it', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const open = vi.spyOn(window, 'open')
++    const { container, getByText, unmount } = mount(vi.fn())
++
++    post('open_link', { url: 'https://example.com/rente' })
++    // A second request does not replace the one the person is reading.
++    post('open_link', { url: 'https://evil.example' })
++    expect(open).not.toHaveBeenCalled()
++    const link = container.querySelector('a')
++    expect(link?.getAttribute('href')).toBe('https://example.com/rente')
++    expect(link?.getAttribute('target')).toBe('_blank')
++    expect(link?.getAttribute('rel')).toBe('noopener noreferrer')
++    expect(container.textContent).toContain('https://example.com/rente')
++    expect(container.textContent).not.toContain('evil.example')
++
++    fireEvent.click(getByText('Avbryt'))
++    flush()
++    expect(container.querySelector('a')).toBeNull()
++    unmount()
++  })
++
++  it('size sets the frame height, clamped', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const { frame, unmount } = mount(vi.fn())
++
++    post('size', { height: 240 })
++    expect(frame.style.height).toBe('240px')
++    post('size', { height: 50_000 })
++    expect(frame.style.height).toBe(`${MAX_WIDGET_HEIGHT}px`)
++    unmount()
++  })
++
++  it('ignores another window and a non-null origin', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const onSelectFollowUp = vi.fn()
++    const { container, frame, unmount } = mount(onSelectFollowUp)
++
++    post('size', { height: 240 }, window)
++    post('followup', { text: 'Fra siden' }, { name: 'another-frame' })
++    post('followup', { text: 'Fra en annen origin' }, FRAME_WINDOW, 'http://localhost:5173')
++    expect(frame.style.height).toBe('')
++    expect(container.querySelector('.verevon-chat-followup-chip')).toBeNull()
++    unmount()
++  })
++
++  it('listener removed on unmount', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const added = vi.spyOn(window, 'addEventListener')
++    const removed = vi.spyOn(window, 'removeEventListener')
++    const { unmount } = mount(vi.fn())
++
++    const listeners = added.mock.calls.filter(([type]) => type === 'message').map(([, listener]) => listener)
++    expect(listeners).toHaveLength(1)
++    unmount()
++    expect(removed.mock.calls.filter(([type, listener]) => type === 'message' && listener === listeners[0])).toHaveLength(1)
++  })
++
++  it('switch off: no shim and no listener', () => {
++    const added = vi.spyOn(window, 'addEventListener')
++    const onSelectFollowUp = vi.fn()
++    const { container, frame, unmount } = mount(onSelectFollowUp)
++
++    expect(frame.getAttribute('srcdoc') ?? '').not.toContain('window.verevon')
++    expect(added.mock.calls.filter(([type]) => type === 'message')).toHaveLength(0)
++    post('followup', { text: 'Vis for 25 år' })
++    post('size', { height: 240 })
++    expect(container.querySelector('.verevon-chat-followup-chip')).toBeNull()
++    expect(frame.style.height).toBe('')
++    unmount()
++  })
++
++  it('switch on: the shim is in the frame before the widget', () => {
++    vi.stubEnv('VITE_CHAT_WIDGET_BRIDGE', 'true')
++    const { frame, unmount } = mount(vi.fn())
++    const srcdoc = frame.getAttribute('srcdoc') ?? ''
++    expect(srcdoc).toContain('window.verevon')
++    expect(srcdoc.indexOf('window.verevon')).toBeLessThan(srcdoc.indexOf('<body>'))
++    unmount()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx
+index 91c2d0e10..26b58a1c3 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/InlineWidget.tsx	
+@@ -5,7 +5,12 @@
+  * The frame is `sandbox="allow-scripts"` and nothing else, the same isolation as
+  * `ArtifactHtmlPreview`: `allow-same-origin` beside `allow-scripts` would let the
+  * widget lift its own sandbox, and forms, popups and top navigation stay closed.
+- * There is no bridge yet: nothing the frame posts is listened to.
++ *
++ * With `VITE_CHAT_WIDGET_BRIDGE` on (EP-4 S3) the frame gets the bridge shim and
++ * one `message` listener: a widget may size itself, stage a follow-up chip the
++ * person clicks, and ask to open a safe link the person confirms
++ * (`chat.stage_widget_followup`, `chat.open_widget_link`; limits in
++ * `widget-bridge.ts`). Off, nothing the frame posts is listened to.
+  */
+ 
+ import { createContext, createMemo, createSignal, onCleanup, Show, useContext } from 'solid-js'
+@@ -13,11 +18,18 @@ import type { JSX } from '@solidjs/web'
+ import { useI18n } from '@/shared/i18n'
+ import { sandboxWidgetDocument } from '@/shared/lib/sandbox-html'
+ import { MAX_WIDGET_CHARS, isWithinLiveWindow, widgetThemeCss, widgetTitle, widgetTooLong } from '../lib/inline-widget'
++import { BRIDGE_SHIM, createAnswerFollowupBudget, createWidgetBridgeHost, type TokenBucket } from '../lib/widget-bridge'
+ import './inline-widget.css'
+ 
+ /** `VITE_CHAT_INLINE_WIDGETS`, literal `'true'` only. Off: a widget fence is an ordinary code block. */
+ export const inlineWidgetsEnabled = () => import.meta.env.VITE_CHAT_INLINE_WIDGETS === 'true'
+ 
++/**
++ * `VITE_CHAT_WIDGET_BRIDGE`, literal `'true'` only; it acts only where a widget
++ * already runs (the switch above). Off: no shim in the frame and no listener.
++ */
++export const widgetBridgeEnabled = () => import.meta.env.VITE_CHAT_WIDGET_BRIDGE === 'true'
++
+ export type InlineWidgetSurfaceKind = 'live' | 'inert'
+ 
+ /**
+@@ -28,6 +40,28 @@ export type InlineWidgetSurfaceKind = 'live' | 'inert'
+  */
+ export const InlineWidgetSurface = createContext<InlineWidgetSurfaceKind>('inert')
+ 
++/** What one assistant answer gives its widgets: the follow-up handler and the budget they share. */
++type InlineWidgetAnswerScope = {
++  /** Read when a follow-up arrives: a turn without the handler stages nothing. */
++  followUpHandler: () => ((text: string) => void) | undefined
++  followupBudget: TokenBucket
++}
++
++const InlineWidgetAnswerContext = createContext<InlineWidgetAnswerScope | undefined>(undefined)
++
++/**
++ * Wraps one assistant answer, so its widgets' staged follow-ups go through the
++ * answer's own follow-up handler (the one its follow-up chips use) and share one
++ * budget. Without it a widget stages nothing.
++ */
++export function InlineWidgetAnswer(props: { onSelectFollowUp?: (text: string) => void; children: JSX.Element }): JSX.Element {
++  const scope: InlineWidgetAnswerScope = {
++    followUpHandler: () => props.onSelectFollowUp,
++    followupBudget: createAnswerFollowupBudget(),
++  }
++  return <InlineWidgetAnswerContext value={scope}>{props.children}</InlineWidgetAnswerContext>
++}
++
+ /** Whether a widget fence drawn here may run. */
+ export function useInlineWidgetsLive(): boolean {
+   return useContext(InlineWidgetSurface) === 'live' && inlineWidgetsEnabled()
+@@ -87,8 +121,75 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
+   const live = createMemo(() => activated() || isWithinLiveWindow(mountedWidgets(), seq))
+ 
+   const title = createMemo(() => widgetTitle(props.source) ?? i18n.tr('Interaktiv widget', 'Interactive widget'))
++  // Read once: a frame keeps the bridge it was drawn with.
++  const bridgeOn = widgetBridgeEnabled()
+   // The theme is read once per source: the frame reloads whenever srcdoc changes.
+-  const documentHtml = createMemo(() => sandboxWidgetDocument(props.source, hostThemeCss()))
++  const documentHtml = createMemo(() =>
++    sandboxWidgetDocument(props.source, hostThemeCss(), bridgeOn ? { bridgeShim: BRIDGE_SHIM } : {}),
++  )
++
++  const answer = useContext(InlineWidgetAnswerContext)
++  let frameElement: HTMLIFrameElement | undefined
++  const [height, setHeight] = createSignal<number | null>(null)
++  const [stagedFollowup, setStagedFollowup] = createSignal<string | null>(null)
++  const [pendingLink, setPendingLink] = createSignal<string | null>(null)
++  const [linkRefused, setLinkRefused] = createSignal(false)
++
++  const bridge = bridgeOn
++    ? createWidgetBridgeHost({
++      frameWindow: () => frameElement?.contentWindow ?? null,
++      // Outside an answer scope a frame still gets a budget of its own, but stages nothing (no handler).
++      followupBudget: answer?.followupBudget ?? createAnswerFollowupBudget(),
++    })
++    : null
++
++  if (bridge) {
++    const onMessage = (event: MessageEvent) => {
++      const outcome = bridge.handle(event)
++      if (!outcome.ok) {
++        if (outcome.reason === 'unsafe_link') setLinkRefused(true)
++        return
++      }
++      const action = outcome.action
++      if (!action) return
++      switch (action.kind) {
++        case 'resize':
++          setHeight(action.height)
++          return
++        case 'stage_followup':
++          if (!answer?.followUpHandler()) {
++            bridge.releaseFollowup()
++            return
++          }
++          setStagedFollowup(action.text)
++          return
++        case 'confirm_link':
++          // One question at a time: a widget cannot stack link prompts over the one the person reads.
++          if (pendingLink() === null) {
++            setLinkRefused(false)
++            setPendingLink(action.url)
++          }
++          return
++      }
++    }
++    window.addEventListener('message', onMessage)
++    onCleanup(() => window.removeEventListener('message', onMessage))
++  }
++
++  // The expanded frame fills the overlay; a widget's own height applies inline only.
++  const frameStyle = () => {
++    const asked = height()
++    return asked !== null && !expanded() ? { height: `${asked}px` } : undefined
++  }
++
++  const clearFollowup = () => {
++    setStagedFollowup(null)
++    bridge?.releaseFollowup()
++  }
++  const sendFollowup = (text: string) => {
++    clearFollowup()
++    answer?.followUpHandler()?.(text)
++  }
+ 
+   return (
+     <figure
+@@ -125,14 +226,63 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
+         }
+       >
+         <iframe
++          ref={(element) => { frameElement = element }}
+           class="verevon-inline-widget__frame"
+           title={title()}
+           sandbox={WIDGET_SANDBOX}
+           srcdoc={documentHtml()}
+           referrerpolicy="no-referrer"
+           loading="lazy"
++          style={frameStyle()}
+         />
+       </Show>
++      <Show when={stagedFollowup()}>
++        {(text) => (
++          <div
++            class="verevon-chat-followups"
++            role="group"
++            aria-label={i18n.tr('Forslag fra widgeten', 'Suggestion from the widget')}
++          >
++            <span class="verevon-inline-widget__note">{i18n.tr('Forslag fra widgeten:', 'Suggestion from the widget:')}</span>
++            <button type="button" class="verevon-chat-followup-chip" onClick={() => sendFollowup(text())}>
++              {text()}
++            </button>
++            <button type="button" class="verevon-inline-widget__action" onClick={clearFollowup}>
++              {i18n.tr('Avvis', 'Dismiss')}
++            </button>
++          </div>
++        )}
++      </Show>
++      <Show when={pendingLink()}>
++        {(url) => (
++          <div
++            class="verevon-chat-followups"
++            role="group"
++            aria-label={i18n.tr('Lenke fra widgeten', 'Link from the widget')}
++          >
++            <span class="verevon-inline-widget__note">
++              {i18n.tr('Widgeten vil åpne:', 'The widget wants to open:')} {url()}
++            </span>
++            <a
++              class="verevon-chat-followup-chip"
++              href={url()}
++              target="_blank"
++              rel="noopener noreferrer"
++              onClick={() => setPendingLink(null)}
++            >
++              {i18n.tr('Åpne lenken', 'Open the link')}
++            </a>
++            <button type="button" class="verevon-inline-widget__action" onClick={() => setPendingLink(null)}>
++              {i18n.tr('Avbryt', 'Cancel')}
++            </button>
++          </div>
++        )}
++      </Show>
++      <Show when={linkRefused()}>
++        <p class="verevon-inline-widget__note" role="note">
++          {i18n.tr('Lenke blokkert: ukjent adresse', 'Link blocked: unsupported address')}
++        </p>
++      </Show>
+       <Show when={showCode()}>
+         <div class="verevon-inline-widget__code">{props.fallback}</div>
+       </Show>
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.test.ts
+new file mode 100644
+index 000000000..16ae5e4b4
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.test.ts	
+@@ -0,0 +1,200 @@
++import { describe, expect, it } from 'vitest'
++import {
++  BRIDGE_SHIM,
++  FOLLOWUPS_PER_ANSWER_PER_MINUTE,
++  MAX_BRIDGE_MESSAGE_BYTES,
++  MAX_FOLLOWUP_CHARS,
++  MAX_WIDGET_HEIGHT,
++  MIN_WIDGET_HEIGHT,
++  SIZE_MESSAGES_PER_SECOND,
++  createAnswerFollowupBudget,
++  createWidgetBridgeHost,
++  parseWidgetBridgeEvent,
++  type WidgetBridgeEvent,
++} from './widget-bridge'
++
++/** Stands in for the frame's `contentWindow`; the bridge only compares identity. */
++const FRAME = { name: 'frame' }
++
++function event(data: unknown, overrides: Partial<WidgetBridgeEvent> = {}): WidgetBridgeEvent {
++  return { source: FRAME, origin: 'null', data, ...overrides }
++}
++
++function envelope(type: string, payload: unknown = {}) {
++  return { v: 1, type, payload }
++}
++
++function clock(start = 0) {
++  let at = start
++  return { now: () => at, advance: (ms: number) => { at += ms } }
++}
++
++describe('parseWidgetBridgeEvent', () => {
++  it('foreign source is ignored', () => {
++    expect(parseWidgetBridgeEvent(event(envelope('ready'), { source: { name: 'other' } }), FRAME)).toEqual({ ok: false, reason: 'foreign_source' })
++    expect(parseWidgetBridgeEvent(event(envelope('ready'), { source: null }), FRAME)).toEqual({ ok: false, reason: 'foreign_source' })
++    // A frame that is not mounted has no window: nothing is accepted, not even a null source.
++    expect(parseWidgetBridgeEvent(event(envelope('ready'), { source: null }), null)).toEqual({ ok: false, reason: 'foreign_source' })
++  })
++
++  it('non null origin is ignored', () => {
++    for (const origin of ['http://localhost:5173', 'https://evil.example', '']) {
++      expect(parseWidgetBridgeEvent(event(envelope('ready'), { origin }), FRAME)).toEqual({ ok: false, reason: 'non_null_origin' })
++    }
++  })
++
++  it('unknown type is dropped', () => {
++    expect(parseWidgetBridgeEvent(event(envelope('fetch', { url: 'https://x.example' })), FRAME)).toEqual({ ok: false, reason: 'unknown_type' })
++    expect(parseWidgetBridgeEvent(event(envelope('storage_set')), FRAME)).toEqual({ ok: false, reason: 'unknown_type' })
++  })
++
++  it('a message that is not the version 1 envelope is malformed', () => {
++    for (const data of [
++      'size',
++      ['size'],
++      null,
++      { type: 'size', payload: { height: 200 } },
++      { v: 2, type: 'size', payload: { height: 200 } },
++      { v: 1, type: 7 },
++      { v: 1, type: 'ready', id: 9 },
++      { v: 1, type: 'ready', id: 'x'.repeat(65) },
++    ]) {
++      expect(parseWidgetBridgeEvent(event(data), FRAME)).toEqual({ ok: false, reason: 'malformed' })
++    }
++    const cyclic: Record<string, unknown> = { v: 1, type: 'ready' }
++    cyclic.self = cyclic
++    expect(parseWidgetBridgeEvent(event(cyclic), FRAME)).toEqual({ ok: false, reason: 'malformed' })
++  })
++
++  it('oversized payload is dropped', () => {
++    const text = 'a'.repeat(MAX_BRIDGE_MESSAGE_BYTES)
++    expect(parseWidgetBridgeEvent(event(envelope('followup', { text })), FRAME)).toEqual({ ok: false, reason: 'oversized' })
++    // The limit is bytes, not characters: multi-byte text reaches it sooner.
++    const wide = 'ø'.repeat(MAX_BRIDGE_MESSAGE_BYTES / 2)
++    expect(parseWidgetBridgeEvent(event(envelope('followup', { text: wide })), FRAME)).toEqual({ ok: false, reason: 'oversized' })
++  })
++
++  it('height is clamped', () => {
++    const height = (value: unknown) => parseWidgetBridgeEvent(event(envelope('size', { height: value })), FRAME)
++    expect(height(240)).toEqual({ ok: true, message: { type: 'size', id: undefined, height: 240 } })
++    expect(height(10)).toMatchObject({ ok: true, message: { height: MIN_WIDGET_HEIGHT } })
++    expect(height(-5)).toMatchObject({ ok: true, message: { height: MIN_WIDGET_HEIGHT } })
++    expect(height(99_999)).toMatchObject({ ok: true, message: { height: MAX_WIDGET_HEIGHT } })
++    expect(height(200.6)).toMatchObject({ ok: true, message: { height: 201 } })
++    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, '300', null]) {
++      expect(height(bad)).toEqual({ ok: false, reason: 'invalid_payload' })
++    }
++  })
++
++  it('a follow-up is trimmed, non-empty and at most the limit', () => {
++    expect(parseWidgetBridgeEvent(event(envelope('followup', { text: '  Vis for 25 år ' })), FRAME)).toEqual({
++      ok: true,
++      message: { type: 'followup', id: undefined, text: 'Vis for 25 år' },
++    })
++    expect(parseWidgetBridgeEvent(event(envelope('followup', { text: 'x'.repeat(MAX_FOLLOWUP_CHARS) })), FRAME).ok).toBe(true)
++    for (const text of ['   ', 'x'.repeat(MAX_FOLLOWUP_CHARS + 1), 42]) {
++      expect(parseWidgetBridgeEvent(event(envelope('followup', { text })), FRAME)).toEqual({ ok: false, reason: 'invalid_payload' })
++    }
++    expect(parseWidgetBridgeEvent(event(envelope('followup', 'text')), FRAME)).toEqual({ ok: false, reason: 'invalid_payload' })
++  })
++
++  it('a link must be a safe link', () => {
++    expect(parseWidgetBridgeEvent(event(envelope('open_link', { url: 'https://example.com/rente' })), FRAME)).toEqual({
++      ok: true,
++      message: { type: 'open_link', id: undefined, url: 'https://example.com/rente' },
++    })
++    for (const url of ['javascript:alert(1)', 'data:text/html,x', '/api/v1/me', '//evil.example', 'java\nscript:alert(1)']) {
++      expect(parseWidgetBridgeEvent(event(envelope('open_link', { url })), FRAME)).toEqual({ ok: false, reason: 'unsafe_link' })
++    }
++  })
++})
++
++describe('createWidgetBridgeHost', () => {
++  function host(now = clock()) {
++    const budget = createAnswerFollowupBudget(now.now)
++    return { bridge: createWidgetBridgeHost({ frameWindow: () => FRAME, followupBudget: budget, now: now.now }), budget, now }
++  }
++
++  it('followups are rate limited', () => {
++    const { bridge, now } = host()
++    const suggest = () => bridge.handle(event(envelope('followup', { text: 'Vis for 25 år' })))
++
++    // One staged at a time: a loop on suggest() shows one chip.
++    expect(suggest()).toEqual({ ok: true, action: { kind: 'stage_followup', text: 'Vis for 25 år' } })
++    for (let i = 0; i < 20; i += 1) expect(suggest()).toEqual({ ok: false, reason: 'followup_already_staged' })
++
++    // Each send frees the slot, but the answer's budget holds at five a minute.
++    for (let i = 1; i < FOLLOWUPS_PER_ANSWER_PER_MINUTE; i += 1) {
++      bridge.releaseFollowup()
++      expect(suggest().ok).toBe(true)
++    }
++    bridge.releaseFollowup()
++    expect(suggest()).toEqual({ ok: false, reason: 'rate_limited' })
++
++    now.advance(60_000 / FOLLOWUPS_PER_ANSWER_PER_MINUTE)
++    expect(suggest().ok).toBe(true)
++    expect(bridge.drops()).toMatchObject({ followup_already_staged: 20, rate_limited: 1 })
++  })
++
++  it('the follow-up budget is shared by the widgets of one answer', () => {
++    const now = clock()
++    const budget = createAnswerFollowupBudget(now.now)
++    const frames = Array.from({ length: FOLLOWUPS_PER_ANSWER_PER_MINUTE + 1 }, () =>
++      createWidgetBridgeHost({ frameWindow: () => FRAME, followupBudget: budget, now: now.now }),
++    )
++    const results = frames.map((frame) => frame.handle(event(envelope('followup', { text: 'Neste' }))).ok)
++    expect(results.filter(Boolean)).toHaveLength(FOLLOWUPS_PER_ANSWER_PER_MINUTE)
++    expect(results.at(-1)).toBe(false)
++  })
++
++  it('size messages are limited per second', () => {
++    const { bridge, now } = host()
++    const resize = () => bridge.handle(event(envelope('size', { height: 300 })))
++    for (let i = 0; i < SIZE_MESSAGES_PER_SECOND; i += 1) {
++      expect(resize()).toEqual({ ok: true, action: { kind: 'resize', height: 300 } })
++    }
++    expect(resize()).toEqual({ ok: false, reason: 'rate_limited' })
++    now.advance(1000)
++    expect(resize().ok).toBe(true)
++  })
++
++  it('ready needs no action and a safe link asks for confirmation', () => {
++    const { bridge } = host()
++    expect(bridge.handle(event(envelope('ready')))).toEqual({ ok: true, action: null })
++    expect(bridge.handle(event(envelope('open_link', { url: 'https://example.com' })))).toEqual({
++      ok: true,
++      action: { kind: 'confirm_link', url: 'https://example.com' },
++    })
++  })
++
++  it('counts drops per reason but not other frames’ traffic', () => {
++    const { bridge } = host()
++    bridge.handle(event(envelope('nope')))
++    bridge.handle(event(envelope('open_link', { url: 'javascript:x' })))
++    bridge.handle(event(envelope('ready'), { source: { name: 'other' } }))
++    expect(bridge.drops()).toEqual({ unknown_type: 1, unsafe_link: 1 })
++  })
++})
++
++describe('BRIDGE_SHIM', () => {
++  it('cannot end the script element it is written into', () => {
++    expect(BRIDGE_SHIM.toLowerCase()).not.toContain('</script')
++  })
++
++  it('posts version 1 envelopes for the three widget calls and ready', () => {
++    const posted: Array<{ data: unknown; target: string }> = []
++    const scope: { verevon?: { resize(h: unknown): void; suggest(t: unknown): void; openLink(u: unknown): void } } = {}
++    const parent = { postMessage: (data: unknown, target: string) => posted.push({ data, target }) }
++    new Function('window', 'parent', BRIDGE_SHIM)(scope, parent)
++    scope.verevon?.resize(240)
++    scope.verevon?.suggest('Vis for 25 år')
++    scope.verevon?.openLink('https://example.com')
++    expect(posted).toEqual([
++      { data: { v: 1, type: 'ready', payload: {} }, target: '*' },
++      { data: { v: 1, type: 'size', payload: { height: 240 } }, target: '*' },
++      { data: { v: 1, type: 'followup', payload: { text: 'Vis for 25 år' } }, target: '*' },
++      { data: { v: 1, type: 'open_link', payload: { url: 'https://example.com' } }, target: '*' },
++    ])
++    expect(Object.isFrozen(scope.verevon)).toBe(true)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.ts
+new file mode 100644
+index 000000000..f2d0982d5
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/widget-bridge.ts	
+@@ -0,0 +1,232 @@
++/**
++ * The narrow widget bridge (EP-4 S3): the only messages an inline widget may post
++ * to the host, and the limits the host holds it to.
++ *
++ * A widget may size itself, propose a follow-up the person may send, and ask to
++ * open a safe link. Nothing else crosses the frame: the host sends nothing back,
++ * the widget gets no storage, no network and no host data. A follow-up is staged
++ * as a chip the person clicks (D3), never sent by the widget, so a widget can
++ * never drive the model on its own; a link opens only from the person's click on
++ * the host's own confirmation.
++ *
++ * Pure: the host state takes its clock and frame as arguments, so every limit is
++ * testable without a frame.
++ */
++
++import { isSafeLinkHref } from './safe-href'
++
++/** The envelope version. A message without `v: 1` is dropped. */
++export const WIDGET_BRIDGE_VERSION = 1
++
++/** The serialized envelope's size limit: the bridge carries a height, a sentence or a URL, never content. */
++export const MAX_BRIDGE_MESSAGE_BYTES = 8 * 1024
++
++/** The height a widget may ask for: below 80 px it would vanish, above 1200 px it would bury the answer. */
++export const MIN_WIDGET_HEIGHT = 80
++export const MAX_WIDGET_HEIGHT = 1200
++
++/** A follow-up is a question, not a document. Longer ones are dropped, not cut, so the chip never misquotes. */
++export const MAX_FOLLOWUP_CHARS = 500
++
++/** Follow-ups one answer's widgets may stage per minute, together. */
++export const FOLLOWUPS_PER_ANSWER_PER_MINUTE = 5
++
++/** Size messages one frame may send per second; a resize loop beyond it is ignored, not echoed. */
++export const SIZE_MESSAGES_PER_SECOND = 20
++
++/** Longer than any request id a widget needs; bounds what the host keeps of it. */
++const MAX_ID_CHARS = 64
++
++/**
++ * The script the frame gets before the widget when the bridge is on. It only
++ * posts envelopes; the target is `'*'` because an opaque-origin frame has no
++ * origin to name, and the host checks `event.source` instead.
++ */
++export const BRIDGE_SHIM =
++  '(function(){' +
++  'var post=function(type,payload){parent.postMessage({v:1,type:type,payload:payload},"*")};' +
++  'window.verevon=Object.freeze({' +
++  'resize:function(h){post("size",{height:Number(h)})},' +
++  'suggest:function(t){post("followup",{text:String(t)})},' +
++  'openLink:function(u){post("open_link",{url:String(u)})}' +
++  '});' +
++  'post("ready",{})' +
++  '})()'
++
++export type WidgetBridgeMessage =
++  | { type: 'ready'; id?: string }
++  | { type: 'size'; id?: string; height: number }
++  | { type: 'followup'; id?: string; text: string }
++  | { type: 'open_link'; id?: string; url: string }
++
++/** Why a message was dropped. Kept as a count per reason, never shown to the widget. */
++export type WidgetBridgeDrop =
++  | 'foreign_source'
++  | 'non_null_origin'
++  | 'malformed'
++  | 'oversized'
++  | 'unknown_type'
++  | 'invalid_payload'
++  | 'unsafe_link'
++  | 'rate_limited'
++  | 'followup_already_staged'
++
++export type WidgetBridgeParse = { ok: true; message: WidgetBridgeMessage } | { ok: false; reason: WidgetBridgeDrop }
++
++/** The parts of a `MessageEvent` the bridge reads. */
++export type WidgetBridgeEvent = { source: unknown; origin: string; data: unknown }
++
++function isPlainObject(value: unknown): value is Record<string, unknown> {
++  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
++  const proto = Object.getPrototypeOf(value)
++  return proto === Object.prototype || proto === null
++}
++
++/** UTF-8 size of the envelope as JSON; null when it does not serialize (cycles, BigInt). */
++function serializedBytes(data: unknown): number | null {
++  try {
++    const json = JSON.stringify(data)
++    return json === undefined ? null : new TextEncoder().encode(json).length
++  } catch {
++    return null
++  }
++}
++
++/** A height in px, clamped; null when it is not a finite number. */
++export function clampWidgetHeight(raw: unknown): number | null {
++  if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
++  return Math.min(MAX_WIDGET_HEIGHT, Math.max(MIN_WIDGET_HEIGHT, Math.round(raw)))
++}
++
++/**
++ * Read one posted message. Accepted only from this frame's own window
++ * (`frameWindow`) and from the opaque origin (`'null'`) a sandboxed frame without
++ * `allow-same-origin` always has; anything else is dropped before its data is read.
++ */
++export function parseWidgetBridgeEvent(event: WidgetBridgeEvent, frameWindow: unknown): WidgetBridgeParse {
++  if (frameWindow == null || event.source !== frameWindow) return { ok: false, reason: 'foreign_source' }
++  if (event.origin !== 'null') return { ok: false, reason: 'non_null_origin' }
++
++  const data = event.data
++  if (!isPlainObject(data)) return { ok: false, reason: 'malformed' }
++  const bytes = serializedBytes(data)
++  if (bytes === null) return { ok: false, reason: 'malformed' }
++  if (bytes > MAX_BRIDGE_MESSAGE_BYTES) return { ok: false, reason: 'oversized' }
++  if (data.v !== WIDGET_BRIDGE_VERSION || typeof data.type !== 'string') return { ok: false, reason: 'malformed' }
++  if (data.id !== undefined && (typeof data.id !== 'string' || data.id.length > MAX_ID_CHARS)) {
++    return { ok: false, reason: 'malformed' }
++  }
++  const id = data.id as string | undefined
++  const payload = data.payload === undefined ? {} : data.payload
++  if (!isPlainObject(payload)) return { ok: false, reason: 'invalid_payload' }
++
++  switch (data.type) {
++    case 'ready':
++      return { ok: true, message: { type: 'ready', id } }
++    case 'size': {
++      const height = clampWidgetHeight(payload.height)
++      if (height === null) return { ok: false, reason: 'invalid_payload' }
++      return { ok: true, message: { type: 'size', id, height } }
++    }
++    case 'followup': {
++      const text = typeof payload.text === 'string' ? payload.text.trim() : ''
++      if (!text || text.length > MAX_FOLLOWUP_CHARS) return { ok: false, reason: 'invalid_payload' }
++      return { ok: true, message: { type: 'followup', id, text } }
++    }
++    case 'open_link': {
++      if (typeof payload.url !== 'string') return { ok: false, reason: 'invalid_payload' }
++      const url = payload.url.trim()
++      if (!isSafeLinkHref(url)) return { ok: false, reason: 'unsafe_link' }
++      return { ok: true, message: { type: 'open_link', id, url } }
++    }
++    default:
++      return { ok: false, reason: 'unknown_type' }
++  }
++}
++
++export type TokenBucket = { take(): boolean }
++
++/** `capacity` tokens, refilled evenly over `periodMs`; a take with no whole token left fails. */
++export function createTokenBucket(capacity: number, periodMs: number, now: () => number = Date.now): TokenBucket {
++  let tokens = capacity
++  let last = now()
++  return {
++    take() {
++      const at = now()
++      tokens = Math.min(capacity, tokens + ((at - last) * capacity) / periodMs)
++      last = at
++      if (tokens < 1) return false
++      tokens -= 1
++      return true
++    },
++  }
++}
++
++/** The follow-up budget all widgets of one answer share. */
++export function createAnswerFollowupBudget(now: () => number = Date.now): TokenBucket {
++  return createTokenBucket(FOLLOWUPS_PER_ANSWER_PER_MINUTE, 60_000, now)
++}
++
++/** What the host does with an accepted message. */
++export type WidgetBridgeAction =
++  | { kind: 'resize'; height: number }
++  | { kind: 'stage_followup'; text: string }
++  | { kind: 'confirm_link'; url: string }
++
++export type WidgetBridgeOutcome = { ok: true; action: WidgetBridgeAction | null } | { ok: false; reason: WidgetBridgeDrop }
++
++export type WidgetBridgeHost = {
++  handle(event: WidgetBridgeEvent): WidgetBridgeOutcome
++  /** The person sent or dismissed the staged chip: the widget may stage another. */
++  releaseFollowup(): void
++  /** Drops per reason since the frame mounted. */
++  drops(): Readonly<Partial<Record<WidgetBridgeDrop, number>>>
++}
++
++/**
++ * One frame's side of the bridge: the envelope check, one staged follow-up at a
++ * time, the answer's shared follow-up budget and the frame's own size budget.
++ */
++export function createWidgetBridgeHost(options: {
++  frameWindow: () => unknown
++  followupBudget: TokenBucket
++  now?: () => number
++}): WidgetBridgeHost {
++  const sizeBudget = createTokenBucket(SIZE_MESSAGES_PER_SECOND, 1000, options.now)
++  const dropped: Partial<Record<WidgetBridgeDrop, number>> = {}
++  let followupStaged = false
++
++  const drop = (reason: WidgetBridgeDrop): WidgetBridgeOutcome => {
++    dropped[reason] = (dropped[reason] ?? 0) + 1
++    return { ok: false, reason }
++  }
++
++  return {
++    handle(event) {
++      const parsed = parseWidgetBridgeEvent(event, options.frameWindow())
++      // A foreign source is another frame's or the page's own traffic, not this widget's to count.
++      if (!parsed.ok) return parsed.reason === 'foreign_source' ? parsed : drop(parsed.reason)
++      const message = parsed.message
++      switch (message.type) {
++        case 'ready':
++          return { ok: true, action: null }
++        case 'size':
++          return sizeBudget.take() ? { ok: true, action: { kind: 'resize', height: message.height } } : drop('rate_limited')
++        case 'followup':
++          // The slot is checked first, so a widget looping on suggest() does not spend the answer's budget.
++          if (followupStaged) return drop('followup_already_staged')
++          if (!options.followupBudget.take()) return drop('rate_limited')
++          followupStaged = true
++          return { ok: true, action: { kind: 'stage_followup', text: message.text } }
++        case 'open_link':
++          return { ok: true, action: { kind: 'confirm_link', url: message.url } }
++      }
++    },
++    releaseFollowup() {
++      followupStaged = false
++    },
++    drops() {
++      return { ...dropped }
++    },
++  }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index a7aff5401..d919a6988 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1087,6 +1087,35 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers the widget bridge as low-risk actions the model cannot execute (EP-4-S3)', () => {
++    const stage = getActionDescriptor('chat.stage_widget_followup')
++    expect(stage).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.stage_widget_followup')).toBe(false)
++    expect(stage?.description ?? '').toContain('Never model-executable')
++    expect(stage?.inputSchema.safeParse({ text: 'Vis for 25 år' }).success).toBe(true)
++    expect(stage?.inputSchema.safeParse({ text: 'x'.repeat(500) }).success).toBe(true)
++    for (const input of [
++      { text: '' },
++      { text: 'x'.repeat(501) },
++      // The widget, the answer and the thread are the host's: a caller names only the text.
++      { text: 'Neste', threadId: 'thread-1' },
++      { text: 'Neste', send: true },
++    ]) {
++      expect(stage?.inputSchema.safeParse(input).success).toBe(false)
++    }
++
++    const link = getActionDescriptor('chat.open_widget_link')
++    expect(link).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.open_widget_link')).toBe(false)
++    expect(link?.description ?? '').toContain('Never model-executable')
++    for (const url of ['https://example.com/rente', 'http://example.com', 'mailto:ola@example.com']) {
++      expect(link?.inputSchema.safeParse({ url }).success).toBe(true)
++    }
++    for (const url of ['javascript:alert(1)', 'data:text/html,x', '/api/v1/me', '//evil.example', 'https://a.example/\nx', `https://a.example/${'x'.repeat(8 * 1024)}`]) {
++      expect(link?.inputSchema.safeParse({ url }).success).toBe(false)
++    }
++  })
++
+   function registered(id: string) {
+     return actionRegistry.find((action) => action.id === id)
+   }
+@@ -1566,7 +1595,8 @@ describe('action registry', () => {
+     // +1 after EP-9-W2 registered org.set_web_policy, the organization's web access switch.
+     // +3 after EP-9-C1 registered org.set_retention, org.place_legal_hold and org.release_legal_hold.
+     // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
+-    expect(ids).toHaveLength(301)
++    // +2 after EP-4-S3 registered chat.stage_widget_followup and chat.open_widget_link, the widget bridge.
++    expect(ids).toHaveLength(303)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index ad4a0881a..447102c36 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1355,6 +1355,25 @@ const chatGoalAutoToggleInput = z
+   })
+   .strict()
+ 
++// A follow-up an inline widget proposed (EP-4 S3), staged as a chip the person clicks. Only the text: the widget,
++// the answer and the thread are the host's, and the bridge's own limit is 500 characters.
++const chatStageWidgetFollowupInput = z
++  .object({
++    text: z.string().min(1).max(500),
++  })
++  .strict()
++
++// A link an inline widget asked to open (EP-4 S3). Web and mail only, as `isSafeLinkHref` in the chat feature
++// decides, and never longer than the bridge's 8 KiB message; the person opens it from the host's confirmation.
++const chatOpenWidgetLinkInput = z
++  .object({
++    url: z
++      .string()
++      .max(8 * 1024)
++      .regex(/^(?:https?:|mailto:)[^\u0000-\u001f\u007f]*$/i),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4674,6 +4693,28 @@ export const actionRegistry = [
+     inputSchema: chatGoalAutoToggleInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.stage_widget_followup',
++    label: 'Stage a follow-up an inline widget proposed',
++    description: 'Show a follow-up question an inline widget in a chat answer proposed as a chip under that widget, labelled as coming from the widget. Nothing is sent: only the person\'s click on the chip puts it through the answer\'s ordinary follow-up handler, the same one the answer\'s suggested follow-ups use. At most one chip per widget at a time, five per answer per minute, and 500 characters; anything over is dropped. Never model-executable: a widget is model output, and the person decides every turn it proposes.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatStageWidgetFollowupInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'chat.open_widget_link',
++    label: 'Open a link an inline widget asked for',
++    description: 'Show a link an inline widget in a chat answer asked to open, with its full address, under that widget; the person opens it in a new tab with no referrer, or cancels. Web and mail addresses only: any other scheme is refused with a note and nothing is opened. Nothing is sent to the server. Never model-executable: a widget is model output, and the person decides where they go.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatOpenWidgetLinkInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts b/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts
+index 8707feba1..570ffc70c 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.test.ts	
+@@ -57,6 +57,25 @@ describe('sandboxWidgetDocument', () => {
+   it('keeps the CSP first when the widget is a full document with its own head', () => {
+     expectCspFirst(sandboxWidgetDocument('<html><head><meta http-equiv="refresh" content="0"></head><body>x</body></html>', theme))
+   })
++
++  it('writes no script without the bridge, the same document as before', () => {
++    const plain = sandboxWidgetDocument('<p>w</p>', theme)
++    expect(sandboxWidgetDocument('<p>w</p>', theme, {})).toBe(plain)
++    expect(sandboxWidgetDocument('<p>w</p>', theme, { bridgeShim: '' })).toBe(plain)
++    expect(parse(plain).head.querySelector('script')).toBeNull()
++  })
++
++  it('puts the bridge shim after the CSP and theme and before the widget', () => {
++    const shim = 'window.verevon={}'
++    const output = sandboxWidgetDocument('<script>verevon.resize(200)</script>', theme, { bridgeShim: shim })
++    expectCspFirst(output)
++    const head = parse(output).head
++    expect(head.children[1]?.tagName).toBe('STYLE')
++    expect(head.children[2]?.tagName).toBe('SCRIPT')
++    expect(head.children[2]?.textContent).toBe(shim)
++    expect(output.indexOf(shim)).toBeLessThan(output.indexOf('<body>'))
++    expect(output.indexOf(shim)).toBeGreaterThan(output.indexOf(theme))
++  })
+ })
+ 
+ describe('sandboxHtmlDocument is unchanged by the widget wrapper', () => {
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts b/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts
+index e9285eb04..523795db3 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/lib/sandbox-html.ts	
+@@ -47,8 +47,13 @@ const WIDGET_BASE_CSS =
+  * (`themeCss`, the `:root{--vv-*}` rule from `widgetThemeCss`) and a base reset,
+  * then the widget. `themeCss` is host-built from filtered token values; the
+  * widget's own markup only ever lands in the body.
++ *
++ * With `bridgeShim` (EP-4 S3, the bridge switch on) the host's own script goes
++ * after the theme and before the body, so `window.verevon` exists before any
++ * widget script runs. Without it the document is exactly the S1 one.
+  */
+-export function sandboxWidgetDocument(html: string, themeCss: string): string {
++export function sandboxWidgetDocument(html: string, themeCss: string, options: { bridgeShim?: string } = {}): string {
+   const source = html.trim()
+-  return `<!doctype html><html><head>${CSP_META}<style>${themeCss}${WIDGET_BASE_CSS}</style></head><body>${source}</body></html>`
++  const shim = options.bridgeShim ? `<script>${options.bridgeShim}</script>` : ''
++  return `<!doctype html><html><head>${CSP_META}<style>${themeCss}${WIDGET_BASE_CSS}</style>${shim}</head><body>${source}</body></html>`
+ }

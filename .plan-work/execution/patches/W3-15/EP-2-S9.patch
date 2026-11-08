@@ -1,0 +1,1708 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.test.tsx
+index d46389b29..d8ab1af4c 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.test.tsx	
+@@ -8,6 +8,16 @@ import type { RunEventHandlers } from '@/shared/api/run-console-client'
+ const hoisted = vi.hoisted(() => ({
+   subscriptions: [] as Array<{ handlers: Record<string, unknown>; runId: string }>,
+   runDetail: null as { status: string } | null,
++  /** Per-run detail for the children a reloaded panel reads (EP-2 S9); falls back to `runDetail`. */
++  runDetails: {} as Record<string, { status: string }>,
++  lineageEdges: [] as Array<{
++    parentRunId: string
++    childRunId: string
++    goalSummary: string
++    batchId: string
++    status: string
++  }>,
++  lineageThreads: [] as string[],
+ }))
+ 
+ vi.mock('@/shared/api/run-console-client', () => ({
+@@ -19,7 +29,14 @@ vi.mock('@/shared/api/run-console-client', () => ({
+ }))
+ 
+ vi.mock('@/shared/api/runs-client', () => ({
+-  getRun: async () => hoisted.runDetail,
++  getRun: async (runId: string) => hoisted.runDetails[runId] ?? hoisted.runDetail,
++}))
++
++vi.mock('@/shared/api/orchestration-client', () => ({
++  getLineageEdges: async (threadId: string) => {
++    hoisted.lineageThreads.push(threadId)
++    return hoisted.lineageEdges
++  },
+ }))
+ 
+ import { ChatWideResearchPanel } from './ChatWideResearchPanel'
+@@ -38,6 +55,9 @@ async function tick(times = 1): Promise<void> {
+ beforeEach(() => {
+   hoisted.subscriptions.length = 0
+   hoisted.runDetail = null
++  hoisted.runDetails = {}
++  hoisted.lineageEdges = []
++  hoisted.lineageThreads.length = 0
+ })
+ 
+ describe('ChatWideResearchPanel', () => {
+@@ -237,4 +257,105 @@ describe('ChatWideResearchPanel', () => {
+     expect(unresolved?.getAttribute('data-status')).toBe('unknown')
+     expect(unresolved?.textContent).toContain('Fullførte ikke')
+   })
++
++  it('does not read the lineage without a threadId, so a live-only host starts empty as before', async () => {
++    hoisted.lineageEdges = [
++      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
++      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
++    ]
++    const { container } = render(() => <ChatWideResearchPanel runId="run_1" />)
++    await tick(3)
++
++    expect(hoisted.lineageThreads).toHaveLength(0)
++    expect(container.querySelector('.verevon-wide-research')).toBeNull()
++  })
++
++  it('restores the grid after a reload from the lineage, with each card status read from its child run', async () => {
++    hoisted.runDetail = { status: 'completed' }
++    hoisted.runDetails = {
++      c0: { status: 'completed' },
++      c1: { status: 'failed' },
++      c2: { status: 'running' },
++    }
++    hoisted.lineageEdges = [
++      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'detached' },
++      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
++      // A retry of item B started from a later run: it joins the batch it retried.
++      { parentRunId: 'run_2', childRunId: 'c2', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
++      // Another run's fan-out and a standalone delegation are not this run's grid.
++      { parentRunId: 'run_9', childRunId: 'x0', goalSummary: 'other', batchId: 'b9', status: 'attached' },
++      { parentRunId: 'run_1', childRunId: 'x1', goalSummary: 'lone task', batchId: '', status: 'attached' },
++    ]
++    const { container } = render(() => <ChatWideResearchPanel runId="run_1" threadId="thread_1" />)
++    await tick(4)
++
++    expect(hoisted.lineageThreads).toEqual(['thread_1'])
++    const cards = [...container.querySelectorAll('.verevon-wide-research__card')]
++    expect(cards).toHaveLength(3)
++    expect(container.textContent).not.toContain('other')
++    expect(container.textContent).not.toContain('lone task')
++    const status = (index: number) => cards[index]?.getAttribute('data-status')
++    expect(status(0)).toBe('done')
++    expect(status(1)).toBe('failed')
++    // The parent run ended, so a child still shown running did not finish.
++    expect(status(2)).toBe('unknown')
++  })
++
++  it('joins live stop events onto the cards it seeded from the lineage', async () => {
++    hoisted.runDetails = { c0: { status: 'running' }, c1: { status: 'running' } }
++    hoisted.lineageEdges = [
++      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
++      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
++    ]
++    const { container } = render(() => <ChatWideResearchPanel runId="run_1" threadId="thread_1" />)
++    await tick(4)
++
++    handlers().onSubagentStopped?.({ childRunId: 'c0', status: 'completed' })
++    flush()
++    await tick()
++
++    const cards = [...container.querySelectorAll('.verevon-wide-research__card')]
++    expect(cards).toHaveLength(2)
++    expect(cards.find((card) => card.textContent?.includes('item A'))?.getAttribute('data-status')).toBe('done')
++    expect(cards.find((card) => card.textContent?.includes('item B'))?.getAttribute('data-status')).toBe('running')
++  })
++
++  it('offers "Prøv igjen" only on an item without an answer, and only when the host can retry', async () => {
++    hoisted.runDetails = { c0: { status: 'completed' }, c1: { status: 'failed' } }
++    hoisted.lineageEdges = [
++      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
++      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
++    ]
++    const onRetryItem = vi.fn(async () => {})
++    const { container } = render(() => (
++      <ChatWideResearchPanel runId="run_1" threadId="thread_1" onRetryItem={onRetryItem} />
++    ))
++    await tick(4)
++
++    const cardFor = (text: string) => [...container.querySelectorAll('.verevon-wide-research__card')]
++      .find((card) => card.textContent?.includes(text))
++    expect(cardFor('item A')?.querySelector('.verevon-wide-research__retry')).toBeNull()
++    const button = cardFor('item B')?.querySelector<HTMLButtonElement>('.verevon-wide-research__retry')
++    expect(button?.textContent).toContain('Prøv igjen')
++
++    button?.click()
++    flush()
++    await tick()
++
++    expect(onRetryItem).toHaveBeenCalledTimes(1)
++    expect(onRetryItem).toHaveBeenCalledWith({ childRunId: 'c1', batchId: 'b1', goalSummary: 'item B' })
++  })
++
++  it('offers no retry when the host does not wire one', async () => {
++    hoisted.runDetails = { c0: { status: 'failed' }, c1: { status: 'failed' } }
++    hoisted.lineageEdges = [
++      { parentRunId: 'run_1', childRunId: 'c0', goalSummary: 'item A', batchId: 'b1', status: 'attached' },
++      { parentRunId: 'run_1', childRunId: 'c1', goalSummary: 'item B', batchId: 'b1', status: 'attached' },
++    ]
++    const { container } = render(() => <ChatWideResearchPanel runId="run_1" threadId="thread_1" />)
++    await tick(4)
++
++    expect(container.querySelectorAll('.verevon-wide-research__card')).toHaveLength(2)
++    expect(container.querySelector('.verevon-wide-research__retry')).toBeNull()
++  })
+ })
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx
+index 6e725e528..12d883dc7 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatWideResearchPanel.tsx	
+@@ -13,11 +13,18 @@
+  * sibling of the chat page's flex row) gives the card grid the rail's width
+  * and lets the rail's own hide/collapse rules apply to it.
+  *
+- * It only knows what it watched: sub-agent lifecycle events are not part of
+- * the durable replay projection (which carries browser evidence only), so a
+- * panel mounted after the fact — a reload mid- or post-run — starts empty
+- * rather than reconstructing cards it never saw. (Carrying these events into
+- * the durable replay is a session-core change, not attempted here.)
++ * Sub-agent lifecycle events are not part of the durable replay projection
++ * (which carries browser evidence only), so a panel mounted after the fact — a
++ * reload mid- or post-run — seeds its cards from the thread's lineage instead
++ * (EP-2 S9, when it is given the `threadId`): every edge in a batch this run
++ * started, titled by the goal the edge stored, its status read from the child
++ * run. Live events then join as before. Without a `threadId` it starts empty,
++ * as it always did. An item the child token budget stopped never started, so
++ * it has no edge and no card; the run's answer names it.
++ *
++ * A failed, refused or unfinished card offers "Prøv igjen" when the host passes
++ * `onRetryItem` (action `chat.wide_research_retry_item`): a one-item retry in
++ * the same batch, whose item execution-core reads back from that child run.
+  *
+  * Honest-state contract, mirroring `chat-run-watch.ts`'s
+  * `screenshotStateFor`: a card never spins forever. It is `running` once its
+@@ -30,10 +37,15 @@
+ 
+ import { For, Show, createEffect, createSignal } from 'solid-js'
+ import { CircleCheck, CircleX, Loader2, Slash } from '@/shared/icons'
++import { getLineageEdges } from '@/shared/api/orchestration-client'
+ import { streamRunEvents } from '@/shared/api/run-console-client'
+ import { getRun } from '@/shared/api/runs-client'
+ import { useI18n } from '@/shared/i18n'
+ 
++/** Most cards seeded from the lineage, each one a run read: twice the largest fan-out (16), so a
++ * batch with retries still fits. */
++const MAX_SEEDED_ITEMS = 32
++
+ /** Mirrors `ChatLiveRunPanel`'s own copy (module-local there, not exported) —
+  * both independently decide "this run cannot emit more work" from the same
+  * durable run status vocabulary. */
+@@ -75,6 +87,24 @@ function stoppedEventStatusToItemStatus(status: string | undefined): WideResearc
+   return 'failed'
+ }
+ 
++/** A seeded card's status from its child run's durable status: still running until the run
++ * reaches a terminal status, then the same mapping a stop event gets. */
++function runStatusToItemStatus(status: string | undefined): WideResearchItemStatus {
++  return isTerminalRunStatus(status) ? stoppedEventStatusToItemStatus(status) : 'running'
++}
++
++/** The card states a person may retry: an item that did not produce an answer. */
++function isRetryable(status: WideResearchItemStatus): boolean {
++  return status === 'failed' || status === 'refused' || status === 'unknown'
++}
++
++/** What a retry needs: the child run whose item runs again, and the batch it joins. */
++export type WideResearchRetryRequest = {
++  childRunId: string
++  batchId: string
++  goalSummary: string
++}
++
+ function statusPillClass(status: WideResearchItemStatus): string {
+   switch (status) {
+     case 'done':
+@@ -92,11 +122,37 @@ function statusPillClass(status: WideResearchItemStatus): string {
+ export function ChatWideResearchPanel(props: {
+   /** Orchestration run id for the turn being watched; null hides the panel. */
+   runId: string | null
++  /** The run's thread: with it, a panel mounted after the fact seeds its cards from the lineage. */
++  threadId?: string | null
++  /** Starts a one-item retry (`chat.wide_research_retry_item`); without it no card offers one. */
++  onRetryItem?: (request: WideResearchRetryRequest) => Promise<void> | void
+ }) {
+   const i18n = useI18n()
+   const [items, setItems] = createSignal<WideResearchItem[]>([])
++  const [retrying, setRetrying] = createSignal<ReadonlySet<string>>(new Set())
+   let activeGeneration = 0
+ 
++  const retry = async (item: WideResearchItem) => {
++    const onRetryItem = props.onRetryItem
++    if (!onRetryItem || retrying().has(item.childRunId)) return
++    setRetrying((current) => new Set([...current, item.childRunId]))
++    try {
++      await onRetryItem({
++        childRunId: item.childRunId,
++        batchId: item.batchId,
++        goalSummary: item.goalSummary,
++      })
++    } catch {
++      // The host reports a failed send where it reports any other; the card stays retryable.
++    } finally {
++      setRetrying((current) => {
++        const next = new Set(current)
++        next.delete(item.childRunId)
++        return next
++      })
++    }
++  }
++
+   const statusLabel = (status: WideResearchItemStatus): string => {
+     switch (status) {
+       case 'running':
+@@ -113,8 +169,8 @@ export function ChatWideResearchPanel(props: {
+   }
+ 
+   createEffect(
+-    () => props.runId,
+-    (runId) => {
++    () => [props.runId, props.threadId ?? null] as const,
++    ([runId, threadId]) => {
+       const generation = ++activeGeneration
+       setItems([])
+       if (!runId) return
+@@ -124,9 +180,13 @@ export function ChatWideResearchPanel(props: {
+         if (generation !== activeGeneration) return
+         setItems(apply)
+       }
++      // Set once the run is known to have ended, so cards seeded after that
++      // are resolved the same way as the ones already shown.
++      let runEnded = false
+       // Any item still `running` when the run ends did not finish — never
+       // left as a perpetual spinner.
+       const markUnresolved = () => {
++        runEnded = true
+         update((current) => current.map((item) => (
+           item.status === 'running' ? { ...item, status: 'unknown' } : item
+         )))
+@@ -148,6 +208,47 @@ export function ChatWideResearchPanel(props: {
+           // is temporarily unavailable — same posture as `ChatLiveRunPanel`.
+         })
+ 
++      // Replay after a reload (EP-2 S9): every edge in a batch this run
++      // started, retries in that batch included, each card's status read from
++      // its child run. A card the live stream already shows keeps its live
++      // state. A failed read leaves the panel to the live stream, as before.
++      if (threadId) {
++        void getLineageEdges(threadId, controller.signal)
++          .then(async (edges) => {
++            const batches = new Set(
++              edges
++                .filter((edge) => edge.parentRunId === runId && edge.batchId)
++                .map((edge) => edge.batchId),
++            )
++            const replayed = edges
++              .filter((edge) => batches.has(edge.batchId))
++              .slice(0, MAX_SEEDED_ITEMS)
++            const seeded = await Promise.all(replayed.map(async (edge): Promise<WideResearchItem> => {
++              let status: WideResearchItemStatus = 'unknown'
++              try {
++                status = runStatusToItemStatus((await getRun(edge.childRunId, controller.signal))?.status)
++              } catch {
++                // Unreadable: "did not finish" rather than a spinner nothing will stop.
++              }
++              return {
++                childRunId: edge.childRunId,
++                batchId: edge.batchId,
++                goalSummary: edge.goalSummary,
++                status,
++              }
++            }))
++            if (controller.signal.aborted) return
++            update((current) => [
++              ...seeded.filter((item) => !current.some((live) => live.childRunId === item.childRunId)),
++              ...current,
++            ])
++            if (runEnded) markUnresolved()
++          })
++          .catch(() => {
++            // The live stream remains the source of truth.
++          })
++      }
++
+       void streamRunEvents(
+         runId,
+         {
+@@ -250,6 +351,17 @@ export function ChatWideResearchPanel(props: {
+                         </Show>
+                         {statusLabel(item.status)}
+                       </span>
++                      <Show when={props.onRetryItem && isRetryable(item.status)}>
++                        <button
++                          type="button"
++                          class="verevon-wide-research__retry"
++                          data-action-id="chat.wide_research_retry_item"
++                          disabled={retrying().has(item.childRunId)}
++                          onClick={() => void retry(item)}
++                        >
++                          {i18n.tr('Prøv igjen', 'Try again')}
++                        </button>
++                      </Show>
+                     </article>
+                   )}
+                 </For>
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 6a99b4a43..6461d9be2 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1133,6 +1133,15 @@ const chatWideResearchStartInput = z
+   })
+   .strict()
+ 
++// The same bounds model-gateway applies before it forwards a retry (EP-2 S9): printable ASCII ids,
++// a child run id of at most 128 characters and a batch id of at most 256.
++const chatWideResearchRetryItemInput = z
++  .object({
++    childRunId: z.string().min(1).max(128).regex(/^[\x21-\x7e]+$/),
++    batchId: z.string().min(1).max(256).regex(/^[\x21-\x7e]+$/),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4110,6 +4119,17 @@ export const actionRegistry = [
+     inputSchema: chatWideResearchStartInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.wide_research_retry_item',
++    label: 'Retry a wide-research item',
++    description: 'Run one item of a wide-research fan-out again as its own one-item wide-research turn in the same conversation. The item is not sent from the browser: execution-core reads it back from the child run that failed, under the person\'s own credential, and only from a fan-out item of this conversation; the new attempt joins the same batch, so the grid shows it beside its siblings. Counts against the organisation\'s item cap like any wide-research run; a zero-retention session is refused. Never model-executable: a model does not spend on the person\'s behalf.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: chatWideResearchRetryItemInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts
+index 73d517671..ef6a552f7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
+@@ -806,6 +806,58 @@ export async function getLineage(threadId: string, signal?: AbortSignal): Promis
+   )
+ }
+ 
++/**
++ * One lineage edge as the wide-research grid reads it back after a reload (EP-2 S9). `goalSummary`
++ * and `batchId` are what the fan-out stored when the item started; `status` is the edge's own
++ * (`attached`/`detached`), not how the item ended, which is the child run's status.
++ */
++export type LineageEdgeSummary = {
++  parentRunId: string
++  childRunId: string
++  goalSummary: string
++  batchId: string
++  status: string
++}
++
++function lineageText(value: unknown): string {
++  return typeof value === 'string' ? value : ''
++}
++
++/**
++ * The edges of a lineage payload (`{ lineage: { edges } }`, or the inner object). An edge without a
++ * child run id is dropped; a missing goal, batch or status reads as empty, as an edge stored before
++ * those fields existed comes back.
++ */
++export function normalizeLineageEdges(payload: unknown): LineageEdgeSummary[] {
++  if (!payload || typeof payload !== 'object') return []
++  const root = payload as Record<string, unknown>
++  const lineage = root.lineage && typeof root.lineage === 'object'
++    ? root.lineage as Record<string, unknown>
++    : root
++  if (!Array.isArray(lineage.edges)) return []
++  return lineage.edges.flatMap((edge): LineageEdgeSummary[] => {
++    if (!edge || typeof edge !== 'object' || Array.isArray(edge)) return []
++    const raw = edge as Record<string, unknown>
++    const childRunId = lineageText(raw.child_run_id)
++    if (!childRunId) return []
++    return [{
++      parentRunId: lineageText(raw.parent_run_id),
++      childRunId,
++      goalSummary: lineageText(raw.goal_summary),
++      batchId: lineageText(raw.batch_id),
++      status: lineageText(raw.status),
++    }]
++  })
++}
++
++/** A thread's lineage edges, parsed ({@link normalizeLineageEdges}). */
++export async function getLineageEdges(
++  threadId: string,
++  signal?: AbortSignal,
++): Promise<LineageEdgeSummary[]> {
++  return normalizeLineageEdges(await getLineage(threadId, signal))
++}
++
+ // ── Run questions (build plan WS14 S3) ───────────────────────────────────────
+ // A question a run put to the person. It is its own store (`run_questions`), never an
+ // approval: an answer is information and grants nothing. Dark until a later slice creates
+diff --git a/apps/Model Plane/proto/model_plane/v1/orchestration.proto b/apps/Model Plane/proto/model_plane/v1/orchestration.proto
+index f61eba0a4..1907b13e1 100644
+--- a/apps/Model Plane/proto/model_plane/v1/orchestration.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/orchestration.proto	
+@@ -683,6 +683,21 @@ message LineageEdge {
+ 
+   // When the edge was recorded.
+   google.protobuf.Timestamp spawned_at = 4;
++
++  // The delegated goal `AttachSubagentRequest.goal_summary` stored on the edge (Wave 3 EP-2 S9;
++  // additive readback of a value session-core already keeps). Empty for an edge stored without
++  // one: a ZDR run, or a caller that predates the field.
++  string goal_summary = 5;
++
++  // The fan-out batch `AttachSubagentRequest.batch_id` stored on the edge (Wave 3 EP-2 S9;
++  // additive). Empty for a standalone `subagent.task` delegation. A reloaded wide-research
++  // panel groups its cards by it.
++  string batch_id = 6;
++
++  // The edge's own `subagent_edges.status` value ("attached" or "detached") (Wave 3 EP-2 S9;
++  // additive). It says whether the child is still linked, not how the child run ended: that is
++  // the child run's own status.
++  string status = 7;
+ }
+ 
+ // Aggregated subagent lineage for a thread.
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index 2e23d0bd6..77084644c 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -740,13 +740,36 @@ struct UsageTally {
+     legs: std::sync::Arc<
+         std::sync::Mutex<std::collections::BTreeMap<(String, String), pb::RunUsageLeg>>,
+     >,
++    /// The metered tokens of ONE wide-research item's child loop (EP-2 S9), when this tally is
++    /// that child's: its rounds still go into the shared `legs`, and their metered tokens also
++    /// here, so the fan-out can sum what its finished children spent. `None` everywhere else.
++    item_metered: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+ }
+ 
+ impl UsageTally {
++    /// This tally, also counting each round's metered tokens into `meter` (EP-2 S9): the tally a
++    /// wide-research item's child loop records into.
++    fn metering_into(&self, meter: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
++        Self {
++            legs: std::sync::Arc::clone(&self.legs),
++            item_metered: Some(meter),
++        }
++    }
++
+     /// Count one round that returned a provider response, under the provider and
+     /// model that served it. Called only for a round the route guard accepted, and
+     /// never for a continuation's seeded round, which no provider answered.
+     fn record(&self, response: &pb::InferResponse) {
++        if let Some(meter) = &self.item_metered {
++            meter.fetch_add(
++                crate::subagent::research_fan_out::metered_tokens(
++                    &response.provider_used,
++                    response.input_tokens,
++                    response.output_tokens,
++                ),
++                std::sync::atomic::Ordering::Relaxed,
++            );
++        }
+         // A negative count is a provider bug; it must not subtract from the run.
+         let count = |tokens: i32| u64::try_from(tokens).unwrap_or(0);
+         let mut legs = self
+@@ -1881,6 +1904,60 @@ fn admit_wide_research(
+         .map_err(tonic::Status::failed_precondition)
+ }
+ 
++/// The one-item plan of a wide-research retry (Wave 3 EP-2 S9). The item is the goal the retried
++/// child run recorded, read back from session-core under the person's own session credential, so
++/// session-core's run-owner check decides whether this person may read it; the run must also be a
++/// fan-out item of this thread ([`research_fan_out::retry_item_goal`]). Every failure is the same
++/// refusal, returned before the run's first heartbeat, so nothing of the run is written and the
++/// refusal does not say whether the run exists.
++///
++/// [`research_fan_out::retry_item_goal`]: crate::subagent::research_fan_out::retry_item_goal
++async fn retry_wide_research_plan(
++    session_channel: &Channel,
++    session_bearer: Option<&str>,
++    req: &pb::RunAgentRequest,
++    child_run_id: &str,
++    cap: u32,
++) -> Result<crate::subagent::research_fan_out::WideResearchPlan, tonic::Status> {
++    use crate::subagent::research_fan_out;
++    use mp_contracts::model_plane::v1::run_service_client::RunServiceClient;
++
++    let refused =
++        || tonic::Status::failed_precondition(research_fan_out::retry_unavailable_refusal());
++    let request = authenticated_session_request(
++        pb::GetRunRequest {
++            run_id: child_run_id.to_owned(),
++        },
++        session_bearer,
++    )
++    .map_err(|_| refused())?;
++    let detail = match RunServiceClient::new(session_channel.clone())
++        .get_run(request)
++        .await
++    {
++        Ok(response) => response.into_inner(),
++        Err(error) => {
++            warn!(
++                run_id = %req.run_id,
++                code = ?error.code(),
++                reason = %status_reason(&error),
++                "run_agent: the wide-research item to retry could not be read back"
++            );
++            return Err(refused());
++        }
++    };
++    let goal = research_fan_out::retry_item_goal(
++        &req.thread_id,
++        &detail.thread_id,
++        &detail.parent_run_id,
++        &detail.agent_id,
++        &detail.goal,
++    )
++    .map_err(tonic::Status::failed_precondition)?;
++    research_fan_out::plan_wide_research(&[goal], cap.min(1))
++        .map_err(tonic::Status::failed_precondition)
++}
++
+ /// [`run_agent_with_route`] with whether the offered tool set is derivable (WS03 S8-A): the
+ /// body of the route-level driver. `derivable` is the offer's own claim; an approval
+ /// continuation is never derivable whatever it says, because its tools are the snapshot's.
+@@ -2012,9 +2089,24 @@ async fn run_agent_with_route_parkable(
+     // person's ask as `wide_research.item_cap`, which is the org ceiling here. Only a fresh run
+     // reads it; a continuation or a scheduled run keeps the shape it started with. A refusal
+     // returns before the run's first heartbeat, so nothing of the run is written.
++    //
++    // A one-item retry (EP-2 S9) is admitted the same way first, so a ZDR turn, the switch off
++    // or an org cap of 0 refuses it before session-core is asked for anything.
+     let wide_research = match req.wide_research.as_ref() {
+         Some(wide) if resumed.is_none() && scheduled.is_none() => {
+-            Some(admit_wide_research(&req, wide)?)
++            let plan = admit_wide_research(&req, wide)?;
++            Some(if wide.retry_of_child_run_id.is_empty() {
++                plan
++            } else {
++                retry_wide_research_plan(
++                    &session_channel,
++                    session_bearer.as_deref(),
++                    &req,
++                    &wide.retry_of_child_run_id,
++                    plan.cap,
++                )
++                .await?
++            })
+         }
+         _ => None,
+     };
+@@ -5508,23 +5600,75 @@ impl LoopSubagentDispatch<'_, '_> {
+         // the model-supplied item id: that is free text, and a lineage row is
+         // not the place to store it.
+         let label = crate::subagent::label(research_fan_out::RESEARCH_TOOL_NAME);
+-        let batch_id = self.parent_step_id.to_owned();
++        // A one-item retry joins the batch it retries (EP-2 S9), so the person's grid groups the
++        // new attempt with its siblings; every other call is its own batch.
++        let batch_id = self
++            .parent
++            .req
++            .wide_research
++            .as_ref()
++            .and_then(|wide| {
++                research_fan_out::retry_batch_id(&wide.retry_of_child_run_id, &wide.batch_id)
++            })
++            .unwrap_or(self.parent_step_id)
++            .to_owned();
+         let semaphore =
+             std::sync::Arc::new(tokio::sync::Semaphore::new(research_fan_out::concurrency()));
+         let consumed = std::sync::atomic::AtomicU32::new(0);
+         let max_rounds_per_item = request.max_rounds_per_item;
+         let result_schema_hint = request.result_schema_hint.as_deref();
++        // The children's token budget (EP-2 S9, decision D4): what the call's FINISHED children
++        // spent, checked before each item starts. Off (`WIDE_RESEARCH_CHILD_BUDGET_ENFORCED`), a
++        // spent budget is logged once and every item still starts.
++        let child_budget = research_fan_out::ChildBudget::from_env();
++        let finished_spent = std::sync::atomic::AtomicU64::new(0);
++        let spent_logged = std::sync::atomic::AtomicBool::new(false);
+ 
+         let results: Vec<FanOutItemResult> = futures::future::join_all(
+             request.items.iter().enumerate().map(|(index, item)| {
+                 let semaphore = std::sync::Arc::clone(&semaphore);
+                 let batch_id = batch_id.as_str();
+                 let consumed = &consumed;
++                let finished_spent = &finished_spent;
++                let spent_logged = &spent_logged;
+                 async move {
+                     let _permit = semaphore
+                         .acquire()
+                         .await
+                         .expect("fan-out semaphore is never closed");
++                    // Checked once this item holds its permit, so a sibling that finished while
++                    // it waited is counted; before the ceiling claim, so an item the budget stops
++                    // spends no child slot.
++                    let spent = finished_spent.load(std::sync::atomic::Ordering::Relaxed);
++                    match child_budget.check(spent) {
++                        research_fan_out::BudgetCheck::Within => {}
++                        research_fan_out::BudgetCheck::SpentNotEnforced => {
++                            if !spent_logged.swap(true, std::sync::atomic::Ordering::Relaxed) {
++                                warn!(
++                                    run_id = %self.parent.req.run_id,
++                                    spent,
++                                    budget = child_budget.tokens,
++                                    "run_agent: research_fan_out children spent their token \
++                                     budget; not enforced, so the remaining items still start"
++                                );
++                            }
++                        }
++                        research_fan_out::BudgetCheck::Reached => {
++                            info!(
++                                run_id = %self.parent.req.run_id,
++                                spent,
++                                budget = child_budget.tokens,
++                                item_index = index,
++                                "run_agent: research_fan_out item not started; the children's \
++                                 token budget is spent"
++                            );
++                            return FanOutItemResult::budget_reached(
++                                item,
++                                spent,
++                                child_budget.tokens,
++                            );
++                        }
++                    }
+                     // Resolve this item's share of the pool BEFORE claiming a
+                     // child-ceiling slot. It depends only on the item's index, so
+                     // no item's outcome depends on another's — but it matters
+@@ -5564,6 +5708,7 @@ impl LoopSubagentDispatch<'_, '_> {
+                     }
+                     let item_step_id = format!("{}.{index}", self.parent_step_id);
+                     let prompt = research_fan_out::compose_item_prompt(item, result_schema_hint);
++                    let item_meter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                     let (result, rounds) = run_delegated_child(
+                         self.parent,
+                         &item_step_id,
+@@ -5574,9 +5719,16 @@ impl LoopSubagentDispatch<'_, '_> {
+                         pb::SubagentRole::Researcher,
+                         Some(batch_id),
+                         None,
++                        Some(&item_meter),
+                     )
+                     .await;
+                     consumed.fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
++                    // Added while this item still holds its permit, so the next item to start
++                    // sees what this one spent.
++                    finished_spent.fetch_add(
++                        item_meter.load(std::sync::atomic::Ordering::Relaxed),
++                        std::sync::atomic::Ordering::Relaxed,
++                    );
+                     match result {
+                         Ok(answer) => FanOutItemResult::ok(item, answer),
+                         Err(error) => FanOutItemResult::failed(item, error),
+@@ -6474,6 +6626,7 @@ async fn run_subagent(
+         SUBAGENT_LINEAGE_ROLE,
+         None,
+         role,
++        None,
+     )
+     .await
+ }
+@@ -6497,6 +6650,9 @@ async fn run_subagent(
+ /// the child then holds only the parent's tools that role allows and its run is
+ /// recorded as `agent_ref@version`. `None` for every other delegation.
+ ///
++/// `item_meter` is where a wide-research item's child counts its metered tokens (EP-2 S9), so
++/// its fan-out can hold its children to their token budget. `None` for every other delegation.
++///
+ /// Returns the rounds consumed alongside the result — including on failure —
+ /// because the caller must charge them either way.
+ #[allow(clippy::too_many_arguments)] // a cohesive description of one delegation
+@@ -6510,6 +6666,7 @@ async fn run_delegated_child(
+     role: pb::SubagentRole,
+     batch_id: Option<&str>,
+     agent_role: Option<&pb::AgentRoleSpec>,
++    item_meter: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>,
+ ) -> (Result<String, String>, u32) {
+     // A run-wide refusal (a spent usage limit, an expired sign-in) that another
+     // loop of the run already met ends the run: this delegation is not started,
+@@ -6629,8 +6786,12 @@ async fn run_delegated_child(
+         subagent_roles: None,
+         // The parent's deadline, copied: one limit for the whole run.
+         deadline: parent.deadline,
+-        // The parent's tally, shared: the delegate's rounds are the run's.
+-        usage: parent.usage.clone(),
++        // The parent's tally, shared: the delegate's rounds are the run's. A wide-research
++        // item's also counts its metered tokens for its fan-out's child budget (EP-2 S9).
++        usage: item_meter.map_or_else(
++            || parent.usage.clone(),
++            |meter| parent.usage.metering_into(std::sync::Arc::clone(meter)),
++        ),
+         // A delegated loop's rounds are not listed: they fall inside the parent round's dispatch.
+         round_timing: None,
+         result_store: parent.result_store.clone(),
+@@ -11443,6 +11604,9 @@ mod tests {
+         /// Status `MockRunService` reports for a child run. `completed` unless a
+         /// replay test needs to prove the still-in-flight refusal.
+         replayed_run_status: Option<String>,
++        /// Agent id `MockRunService` reports for a run. `task` unless a wide-research
++        /// retry test needs a fan-out item (EP-2 S9).
++        run_agent_id: Option<String>,
+         plan_transitions: Vec<(i32, i32)>, // (from, to)
+         approvals: Vec<(String, String)>,  // (step_id, reason)
+         /// The `continuation_mode` of every `CreateApproval` the mock accepted, in
+@@ -12632,7 +12796,10 @@ mod tests {
+                 run_id: run_id.to_owned(),
+                 thread_id: sample_request().thread_id,
+                 parent_run_id: sample_request().run_id,
+-                agent_id: "task".to_owned(),
++                agent_id: rec
++                    .run_agent_id
++                    .clone()
++                    .unwrap_or_else(|| "task".to_owned()),
+                 status: rec
+                     .replayed_run_status
+                     .clone()
+@@ -13650,6 +13817,64 @@ mod tests {
+         );
+     }
+ 
++    /// A one-item retry (EP-2 S9) reads its item back from the child run under the person's own
++    /// session credential (session-core's run-owner check), and only from a fan-out item of the
++    /// same thread; every other case is the one refusal.
++    #[tokio::test]
++    async fn a_research_fan_out_retry_reads_its_item_back_only_from_a_fan_out_child_of_the_thread()
++    {
++        use crate::subagent::research_fan_out::{retry_unavailable_refusal, RESEARCH_TOOL_NAME};
++
++        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder {
++            run_agent_id: Some(crate::subagent::label(RESEARCH_TOOL_NAME).to_owned()),
++            ..Recorder::default()
++        }));
++        let session_channel = spawn_session_channel(rec.clone()).await;
++        let req = sample_request();
++
++        let plan =
++            retry_wide_research_plan(&session_channel, Some("session-token"), &req, "run-child", 4)
++                .await
++                .expect("a fan-out item of this thread");
++        assert_eq!(plan.kept, ["the delegated goal"]);
++        assert_eq!(plan.cap, 1, "a retry is one item, whatever the org allows");
++        assert!(plan.dropped.is_empty());
++
++        // An org with wide research off still refuses the retry.
++        let off = retry_wide_research_plan(&session_channel, Some("session-token"), &req, "c", 0)
++            .await
++            .expect_err("cap 0");
++        assert_eq!(
++            off.message(),
++            crate::subagent::research_fan_out::wide_research_off_refusal()
++        );
++
++        // No forwardable credential: session-core is never asked.
++        let anonymous = retry_wide_research_plan(&session_channel, None, &req, "run-child", 4)
++            .await
++            .expect_err("no credential");
++        assert_eq!(anonymous.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(anonymous.message(), retry_unavailable_refusal());
++
++        // A run of another conversation.
++        let elsewhere = pb::RunAgentRequest {
++            thread_id: "thread-other".to_owned(),
++            ..sample_request()
++        };
++        let refused =
++            retry_wide_research_plan(&session_channel, Some("session-token"), &elsewhere, "c", 4)
++                .await
++                .expect_err("another thread");
++        assert_eq!(refused.message(), retry_unavailable_refusal());
++
++        // A child that is not a fan-out item.
++        rec.lock().unwrap().run_agent_id = None;
++        let task = retry_wide_research_plan(&session_channel, Some("session-token"), &req, "c", 4)
++            .await
++            .expect_err("a subagent.task child");
++        assert_eq!(task.message(), retry_unavailable_refusal());
++    }
++
+     fn sample_agent_skill(name: &str, keywords: &[&str], content: &str) -> pb::AgentSkill {
+         pb::AgentSkill {
+             id: format!("sk-{name}"),
+@@ -23887,6 +24112,68 @@ mod tests {
+         );
+     }
+ 
++    /// Six items, four in flight at once, and every mock round spends two metered tokens: the
++    /// first four start before any child finished, and the last two wait for a permit until one
++    /// has. With the child budget enforced at one token they end `budget_reached` and never
++    /// start; with it only logged (the default) all six run (EP-2 S9).
++    async fn research_fan_out_with_child_budget(enforced: bool) -> (usize, ObservedMessages) {
++        let _budget = crate::subagent::research_fan_out::BudgetOverride::set(enforced, 1);
++        let items: Vec<String> = (0..6)
++            .map(|i| format!(r#"{{"id":"q{i}","goal":"look up {i}"}}"#))
++            .collect();
++        let input = format!(r#"{{"items":[{}]}}"#, items.join(","));
++        let mut script = vec![Scripted::ToolCalls {
++            content: String::new(),
++            calls: vec![research_fan_out_call("fan-1", &input)],
++        }];
++        let started = if enforced { 4 } else { 6 };
++        for i in 0..started {
++            script.push(Scripted::Answer(format!("finding {i}")));
++        }
++        script.push(Scripted::Answer("Collected the findings.".to_owned()));
++
++        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
++        let session_channel = spawn_session_channel(rec.clone()).await;
++        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
++        let inference_channel =
++            spawn_inference_channel_with_messages(script, observed.clone()).await;
++
++        let mut req = sample_request();
++        req.max_rounds = 10;
++        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
++        assert_eq!(resp.status, "completed");
++        assert_eq!(resp.final_output, "Collected the findings.");
++        let edges = rec.lock().unwrap().lineage_edges.len();
++        (edges, observed)
++    }
++
++    #[tokio::test]
++    async fn research_fan_out_stops_starting_items_once_the_enforced_child_budget_is_spent() {
++        if crate::subagent::research_fan_out::concurrency() != 4 {
++            return; // the arithmetic below assumes the default of four in flight
++        }
++        let (edges, observed) = research_fan_out_with_child_budget(true).await;
++        assert_eq!(
++            edges, 4,
++            "an item the budget stops registers no child run, and a started one is never stopped"
++        );
++        assert!(
++            observed_text_contains(&observed, "budget: 2 of 6 item(s) were not started"),
++            "the parent reads how many items the budget stopped"
++        );
++        assert!(observed_text_contains(&observed, "Reason: budget_reached"));
++    }
++
++    #[tokio::test]
++    async fn research_fan_out_only_logs_a_spent_child_budget_when_not_enforced() {
++        if crate::subagent::research_fan_out::concurrency() != 4 {
++            return;
++        }
++        let (edges, observed) = research_fan_out_with_child_budget(false).await;
++        assert_eq!(edges, 6, "with the switch off every item starts, as before the budget");
++        assert!(!observed_text_contains(&observed, "budget_reached"));
++    }
++
+     /// A per-run ceiling hit PARTWAY through a fan-out degrades to "some ran,
+     /// the rest were refused" — and the parent is told, per item, with the real
+     /// reason. The ceiling is shared with `subagent.task`: one delegation
+diff --git a/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs b/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs
+index 0b1cd6bce..29c9ecbcf 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/subagent/research_fan_out.rs	
+@@ -374,6 +374,23 @@ impl FanOutItemResult {
+             error: Some(reason),
+         }
+     }
++
++    /// An item not started because the fan-out's child token budget was spent (EP-2 S9). It is a
++    /// refusal whose reason starts with [`BUDGET_REACHED`], so the merge can count it.
++    #[must_use]
++    pub fn budget_reached(item: &FanOutItem, spent: u64, budget: u64) -> Self {
++        Self::refused(item, budget_reached_refusal(spent, budget))
++    }
++
++    /// Whether this item ended unstarted at the child token budget.
++    #[must_use]
++    pub fn is_budget_reached(&self) -> bool {
++        self.status == ItemStatus::Refused
++            && self
++                .error
++                .as_deref()
++                .is_some_and(|reason| reason.starts_with(BUDGET_REACHED))
++    }
+ }
+ 
+ /// Cap on how many source URLs one item contributes to the merged digest, so
+@@ -561,6 +578,17 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
+         "verification: {{\"checked\": {}, \"confirmed\": {confirmed}}}",
+         results.len()
+     );
++    // Only when the child token budget stopped items (EP-2 S9), so a digest without that is
++    // what it was before the budget existed.
++    let unstarted = results.iter().filter(|r| r.is_budget_reached()).count();
++    if unstarted > 0 {
++        let _ = writeln!(
++            head,
++            "budget: {unstarted} of {} item(s) were not started because the fan-out's child \
++             token budget was spent.",
++            results.len()
++        );
++    }
+ 
+     let answered = results.iter().filter(|r| r.answer.is_some()).count();
+     // What every section costs before any answer is added, at a given number of
+@@ -725,6 +753,183 @@ pub fn dropped_items_note(plan: &WideResearchPlan) -> Option<String> {
+     Some(note)
+ }
+ 
++/// Env var: the switch that makes the fan-out's child token budget refuse items (Wave 3 EP-2 S9,
++/// decision D4). Opt-in: only the literal `true` enables it. Off, a spent budget is logged and
++/// every item still starts, so a fan-out runs exactly as it did before the budget existed.
++pub const BUDGET_ENFORCED_ENV: &str = "WIDE_RESEARCH_CHILD_BUDGET_ENFORCED";
++
++/// Env var: the metered tokens all children of one fan-out call may spend before no further item
++/// starts (EP-2 S9).
++pub const CHILD_TOKEN_BUDGET_ENV: &str = "WIDE_RESEARCH_CHILD_TOKEN_BUDGET";
++
++/// Default child token budget of one fan-out call (decision D4: 400,000 metered tokens).
++pub const DEFAULT_CHILD_TOKEN_BUDGET: u64 = 400_000;
++
++/// What an item's refusal reason starts with when the child token budget stopped it, and the
++/// status the person's grid shows for it.
++pub const BUDGET_REACHED: &str = "budget_reached";
++
++/// Whether the child token budget is enforced, from an already-read env value: only `true`.
++#[must_use]
++pub fn parse_budget_enforced(raw: Option<&str>) -> bool {
++    raw.is_some_and(|value| value.trim() == "true")
++}
++
++/// The child token budget, from an already-read env value: unset, unparsable or zero falls back
++/// to [`DEFAULT_CHILD_TOKEN_BUDGET`]. Zero is not "no budget": switching enforcement off is how a
++/// deployment runs without one.
++#[must_use]
++pub fn parse_child_token_budget(raw: Option<&str>) -> u64 {
++    raw.and_then(|value| value.trim().parse::<u64>().ok())
++        .filter(|&budget| budget > 0)
++        .unwrap_or(DEFAULT_CHILD_TOKEN_BUDGET)
++}
++
++#[cfg(test)]
++thread_local! {
++    /// A per-thread stand-in for the two budget env vars (`(enforced, budget)`), for the same
++    /// reason as [`ENABLED_OVERRIDE`].
++    static BUDGET_OVERRIDE: std::cell::Cell<Option<(bool, u64)>> =
++        const { std::cell::Cell::new(None) };
++}
++
++/// Forces [`ChildBudget::from_env`] on the current thread until dropped. Test-only.
++#[cfg(test)]
++pub(crate) struct BudgetOverride;
++
++#[cfg(test)]
++impl BudgetOverride {
++    pub(crate) fn set(enforced: bool, budget: u64) -> Self {
++        BUDGET_OVERRIDE.with(|cell| cell.set(Some((enforced, budget))));
++        Self
++    }
++}
++
++#[cfg(test)]
++impl Drop for BudgetOverride {
++    fn drop(&mut self) {
++        BUDGET_OVERRIDE.with(|cell| cell.set(None));
++    }
++}
++
++/// One fan-out call's child token budget, resolved once when the call is dispatched.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ChildBudget {
++    /// Metered tokens all of the call's finished children may spend.
++    pub tokens: u64,
++    /// Whether a spent budget stops further items, or is only logged.
++    pub enforced: bool,
++}
++
++/// What the budget says about starting the next item.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum BudgetCheck {
++    /// Budget left: start the item.
++    Within,
++    /// Spent, but not enforced: start the item and log it.
++    SpentNotEnforced,
++    /// Spent and enforced: the item ends [`BUDGET_REACHED`] without starting.
++    Reached,
++}
++
++impl ChildBudget {
++    /// This deployment's budget.
++    #[must_use]
++    pub fn from_env() -> Self {
++        #[cfg(test)]
++        if let Some((enforced, tokens)) = BUDGET_OVERRIDE.with(std::cell::Cell::get) {
++            return Self { tokens, enforced };
++        }
++        Self {
++            tokens: parse_child_token_budget(std::env::var(CHILD_TOKEN_BUDGET_ENV).ok().as_deref()),
++            enforced: parse_budget_enforced(std::env::var(BUDGET_ENFORCED_ENV).ok().as_deref()),
++        }
++    }
++
++    /// Checked before each item starts, against the metered tokens of the call's FINISHED children.
++    /// A started item is never stopped by it: the check sits before the start, so a child in
++    /// flight when the budget runs out finishes, and the budget can be overshot by what the
++    /// children in flight spend.
++    #[must_use]
++    pub fn check(self, finished_spent: u64) -> BudgetCheck {
++        if finished_spent < self.tokens {
++            BudgetCheck::Within
++        } else if self.enforced {
++            BudgetCheck::Reached
++        } else {
++            BudgetCheck::SpentNotEnforced
++        }
++    }
++}
++
++/// The metered tokens one inference round adds to a fan-out's child budget: its input and output,
++/// unless the ChatGPT subscription served it. A subscription round is usage, not spend, so it adds
++/// none (the gateway's run ceiling counts the same way); its rounds still count against the run's
++/// round budget. A negative count is a provider bug and adds nothing.
++#[must_use]
++pub fn metered_tokens(provider_used: &str, input_tokens: i32, output_tokens: i32) -> u64 {
++    if provider_used == mp_contracts::agentic_subscription::PROVIDER_ID {
++        return 0;
++    }
++    let count = |tokens: i32| u64::try_from(tokens).unwrap_or(0);
++    count(input_tokens).saturating_add(count(output_tokens))
++}
++
++/// The refusal an item ends with when the child token budget was spent before it started. Aimed at
++/// the parent model, which should answer from the items that ran rather than delegate again.
++#[must_use]
++pub fn budget_reached_refusal(spent: u64, budget: u64) -> String {
++    format!(
++        "{BUDGET_REACHED}: not started, because this fan-out's children had already spent {spent} \
++         of their {budget}-token budget. Answer from the items that ran and name this one as not \
++         researched."
++    )
++}
++
++/// The fan-out batch a retry run's items join (EP-2 S9): the batch named on the request when it
++/// is a retry, so the retried item is grouped with the batch it came from. `None` for every other
++/// run, whose fan-out call names its own batch.
++#[must_use]
++pub fn retry_batch_id<'a>(retry_of_child_run_id: &str, batch_id: &'a str) -> Option<&'a str> {
++    (!retry_of_child_run_id.is_empty() && !batch_id.is_empty()).then_some(batch_id)
++}
++
++/// What a retry is refused with when the child run cannot be read back or is not a fan-out item
++/// of this conversation. One text for every cause, so a refusal does not say whether a run with
++/// that id exists for someone else.
++#[must_use]
++pub fn retry_unavailable_refusal() -> String {
++    "That wide-research item cannot be retried: it is not an item of a wide-research run in this \
++     conversation that you can read."
++        .to_owned()
++}
++
++/// The item a retry runs again: the retried child run's goal, after checking the run is a fan-out
++/// item (its agent is this tool's label and it has a parent run) of the same thread as the retry.
++/// The caller reads the run under the person's own credential, so session-core's run-owner check
++/// has already passed.
++///
++/// # Errors
++///
++/// [`retry_unavailable_refusal`] for a run of another thread, one that is not a fan-out item, or
++/// one with no goal left to research.
++pub fn retry_item_goal(
++    thread_id: &str,
++    child_thread_id: &str,
++    child_parent_run_id: &str,
++    child_agent_id: &str,
++    child_goal: &str,
++) -> Result<String, String> {
++    let is_item = !thread_id.is_empty()
++        && child_thread_id == thread_id
++        && !child_parent_run_id.is_empty()
++        && child_agent_id == super::label(RESEARCH_TOOL_NAME);
++    match wide_research_item(child_goal) {
++        Some(goal) if is_item => Ok(goal),
++        _ => Err(retry_unavailable_refusal()),
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -1154,4 +1359,136 @@ mod tests {
+         assert!(refusal.contains(RESEARCH_TOOL_NAME), "{refusal}");
+         assert!(refusal.contains("subagent.task"), "{refusal}");
+     }
++
++    #[test]
++    fn the_budget_switch_is_only_the_literal_true_and_the_budget_defaults_to_400k() {
++        for (raw, on) in [
++            (None, false),
++            (Some("false"), false),
++            (Some("1"), false),
++            (Some("TRUE"), false),
++            (Some("yes"), false),
++            (Some("true"), true),
++        ] {
++            assert_eq!(parse_budget_enforced(raw), on, "{raw:?}");
++        }
++        assert_eq!(DEFAULT_CHILD_TOKEN_BUDGET, 400_000, "decision D4");
++        assert_eq!(parse_child_token_budget(None), DEFAULT_CHILD_TOKEN_BUDGET);
++        assert_eq!(parse_child_token_budget(Some("junk")), DEFAULT_CHILD_TOKEN_BUDGET);
++        assert_eq!(parse_child_token_budget(Some("0")), DEFAULT_CHILD_TOKEN_BUDGET);
++        assert_eq!(parse_child_token_budget(Some(" 50000 ")), 50_000);
++    }
++
++    #[test]
++    fn a_spent_budget_refuses_only_when_enforced() {
++        let enforced = ChildBudget {
++            tokens: 100,
++            enforced: true,
++        };
++        assert_eq!(enforced.check(0), BudgetCheck::Within);
++        assert_eq!(enforced.check(99), BudgetCheck::Within);
++        assert_eq!(enforced.check(100), BudgetCheck::Reached);
++        assert_eq!(enforced.check(5_000), BudgetCheck::Reached);
++        let logged = ChildBudget {
++            tokens: 100,
++            enforced: false,
++        };
++        assert_eq!(logged.check(99), BudgetCheck::Within);
++        assert_eq!(logged.check(100), BudgetCheck::SpentNotEnforced);
++    }
++
++    #[test]
++    fn subscription_rounds_spend_no_metered_tokens() {
++        assert_eq!(metered_tokens("anthropic", 1_200, 300), 1_500);
++        assert_eq!(
++            metered_tokens(mp_contracts::agentic_subscription::PROVIDER_ID, 1_200, 300),
++            0,
++            "a subscription child never trips the token budget"
++        );
++        assert_eq!(metered_tokens("anthropic", -5, 10), 10, "a negative count adds nothing");
++    }
++
++    #[test]
++    fn budget_reached_items_are_refused_named_and_counted_in_the_digest() {
++        let items: Vec<FanOutItem> = (0..10)
++            .map(|i| item(&format!("q{i}"), &format!("question {i}")))
++            .collect();
++        let mut results: Vec<FanOutItemResult> = items
++            .iter()
++            .take(6)
++            .map(|item| FanOutItemResult::ok(item, format!("answer {}", item.id)))
++            .collect();
++        results.extend(
++            items
++                .iter()
++                .skip(6)
++                .map(|item| FanOutItemResult::budget_reached(item, 410_000, 400_000)),
++        );
++        assert!(results[6].is_budget_reached());
++        assert!(!results[0].is_budget_reached());
++        assert!(
++            !FanOutItemResult::refused(&items[0], "per-run limit".to_owned()).is_budget_reached(),
++            "another refusal is not a budget refusal"
++        );
++
++        let merged = merge(&results);
++        assert!(merged.contains("verification: {\"checked\": 10, \"confirmed\": 6}"));
++        assert!(
++            merged.contains("budget: 4 of 10 item(s) were not started"),
++            "{merged}"
++        );
++        assert_eq!(merged.matches("Reason: budget_reached").count(), 4, "{merged}");
++        for item in items.iter().skip(6) {
++            assert!(merged.contains(&item.id), "an unstarted item is still named: {merged}");
++        }
++    }
++
++    #[test]
++    fn a_digest_without_a_budget_refusal_has_no_budget_line() {
++        let results = vec![
++            FanOutItemResult::ok(&item("a", "question a"), "answer a".to_owned()),
++            FanOutItemResult::refused(&item("b", "question b"), "per-run limit".to_owned()),
++        ];
++        assert!(!merge(&results).contains("budget:"));
++    }
++
++    #[test]
++    fn a_retry_joins_the_batch_it_names_and_only_a_retry_does() {
++        assert_eq!(
++            retry_batch_id("run-child", "run-1:tool_1_fan-1"),
++            Some("run-1:tool_1_fan-1")
++        );
++        assert_eq!(retry_batch_id("", "run-1:tool_1_fan-1"), None);
++        assert_eq!(retry_batch_id("run-child", ""), None);
++    }
++
++    #[test]
++    fn a_retry_reads_back_only_a_fan_out_item_of_the_same_thread() {
++        let label = super::super::label(RESEARCH_TOOL_NAME);
++        assert_eq!(
++            retry_item_goal("thread-1", "thread-1", "run-parent", label, "  look up A \n"),
++            Ok("look up A".to_owned())
++        );
++        let refused = Err(retry_unavailable_refusal());
++        // Another conversation's run, even one the person owns.
++        assert_eq!(
++            retry_item_goal("thread-1", "thread-2", "run-parent", label, "look up A"),
++            refused
++        );
++        // A top-level run, or a child that is not a fan-out item.
++        assert_eq!(
++            retry_item_goal("thread-1", "thread-1", "", label, "look up A"),
++            refused
++        );
++        assert_eq!(
++            retry_item_goal("thread-1", "thread-1", "run-parent", "task", "look up A"),
++            refused
++        );
++        // A child with no goal left (a zero-retention child stores none).
++        assert_eq!(
++            retry_item_goal("thread-1", "thread-1", "run-parent", label, "   "),
++            refused
++        );
++        assert_eq!(retry_item_goal("", "", "run-parent", label, "look up A"), refused);
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index cd449ad52..8103969fb 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -9301,16 +9301,33 @@ fn lineage_value(lineage: &SubagentLineage) -> Value {
+     json!({
+         "thread_id": lineage.thread_id,
+         "max_depth": lineage.max_depth,
+-        "edges": lineage.edges.iter().map(|edge| {
+-            json!({
+-                "parent_run_id": edge.parent_run_id,
+-                "child_run_id": edge.child_run_id,
+-                "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
+-            })
+-        }).collect::<Vec<_>>(),
++        "edges": lineage.edges.iter().map(lineage_edge_value).collect::<Vec<_>>(),
+     })
+ }
+ 
++/// One lineage edge. The goal, batch and edge status (Wave 3 EP-2 S9) are added only when
++/// session-core returned them, so an edge without them serialises exactly as it did before: a
++/// reloaded wide-research panel groups its cards by `batch_id` and titles them by `goal_summary`.
++fn lineage_edge_value(edge: &mp_contracts::model_plane::v1::LineageEdge) -> Value {
++    let mut value = json!({
++        "parent_run_id": edge.parent_run_id,
++        "child_run_id": edge.child_run_id,
++        "role": enum_name(SubagentRole::try_from(edge.role).ok().as_ref()),
++    });
++    if let Some(object) = value.as_object_mut() {
++        for (key, field) in [
++            ("goal_summary", &edge.goal_summary),
++            ("batch_id", &edge.batch_id),
++            ("status", &edge.status),
++        ] {
++            if !field.is_empty() {
++                object.insert(key.to_owned(), Value::String(field.clone()));
++            }
++        }
++    }
++    value
++}
++
+ fn empty_to_null(value: &str) -> Value {
+     if value.is_empty() {
+         Value::Null
+@@ -9983,7 +10000,8 @@ pub struct InvokeRequest {
+     #[serde(default)]
+     pub agent_autonomy_cap: Option<serde_json::Value>,
+     /// Wave 3 EP-2 S8 — a wide-research run from the composer's "Bred forskning" entry:
+-    /// `{item_cap, items}`. Kept as raw JSON and read only on an agentic turn while
++    /// `{item_cap, items}`, or a one-item retry `{retry_of_child_run_id, batch_id}` (EP-2 S9).
++    /// Kept as raw JSON and read only on an agentic turn while
+     /// `WIDE_RESEARCH_ENTRY_ENABLED` is on ([`wide_research_request`]), so a body carrying it is
+     /// parsed exactly as before with the switch off. It only narrows a run: the gateway clamps
+     /// `item_cap` to the org's `research.max_fan_out_items`.
+@@ -10017,6 +10035,18 @@ const MAX_WIDE_RESEARCH_REQUEST_ITEMS: usize = 64;
+ /// Longest item forwarded; execution-core cuts at the same length.
+ const MAX_WIDE_RESEARCH_ITEM_CHARS: usize = 500;
+ 
++/// Longest child run id a retry may name (EP-2 S9); run ids are ULID-based and far shorter.
++const MAX_WIDE_RESEARCH_RUN_ID_CHARS: usize = 128;
++
++/// Longest batch id a retry may name (EP-2 S9): a batch id is the fan-out call's step id.
++const MAX_WIDE_RESEARCH_BATCH_ID_CHARS: usize = 256;
++
++/// Whether a retry's run or batch id is one execution-core may look up: non-empty, at most `max`
++/// characters, printable ASCII with no whitespace. Anything else is not an id this platform minted.
++fn wide_research_retry_id_ok(id: &str, max: usize) -> bool {
++    !id.is_empty() && id.len() <= max && id.bytes().all(|byte| byte.is_ascii_graphic())
++}
++
+ /// Items in flight at once in one fan-out: execution-core's `WIDE_RESEARCH_FAN_OUT_CONCURRENCY`
+ /// default. The gateway cannot read that executor's environment, so the estimate states this.
+ const WIDE_RESEARCH_CONCURRENCY: u32 = 4;
+@@ -10050,7 +10080,7 @@ impl WideResearchCap {
+ /// The wide-research request a Do run carries (Wave 3 EP-2 S8), from the turn's raw JSON.
+ ///
+ /// `None` with the switch off, for a ZDR or waived turn, and for a body that is not
+-/// `{item_cap?, items?}`. Items are trimmed, blank ones skipped, each cut to 500 characters and at
++/// `{item_cap?, items?}` or a retry `{retry_of_child_run_id, batch_id?}` (EP-2 S9). Items are trimmed, blank ones skipped, each cut to 500 characters and at
+ /// most 64 kept; `item_cap` is the person's ask (the item count when absent) clamped to the org
+ /// cap, so a request can only narrow. An org cap of 0 is sent as 0, and execution-core refuses the
+ /// run: wide research is off for that org.
+@@ -10067,6 +10097,10 @@ pub fn wide_research_request(
+         item_cap: Option<u32>,
+         #[serde(default)]
+         items: Vec<String>,
++        #[serde(default)]
++        retry_of_child_run_id: Option<String>,
++        #[serde(default)]
++        batch_id: Option<String>,
+     }
+ 
+     if !enabled || zdr_or_waived {
+@@ -10075,6 +10109,24 @@ pub fn wide_research_request(
+     let input = raw
+         .filter(|raw| raw.is_object())
+         .and_then(|raw| serde_json::from_value::<Input>(raw.clone()).ok())?;
++    // A one-item retry (EP-2 S9): execution-core reads the item back from the child run, owner
++    // checked, so the body's items are not forwarded; the cap is one item, and an org with wide
++    // research off is still sent 0. A malformed id is no request at all, never a fresh fan-out.
++    if let Some(child_run_id) = input.retry_of_child_run_id.as_deref() {
++        let batch_id = input.batch_id.as_deref().unwrap_or_default();
++        if !wide_research_retry_id_ok(child_run_id, MAX_WIDE_RESEARCH_RUN_ID_CHARS)
++            || !(batch_id.is_empty()
++                || wide_research_retry_id_ok(batch_id, MAX_WIDE_RESEARCH_BATCH_ID_CHARS))
++        {
++            return None;
++        }
++        return Some(mp_contracts::model_plane::v1::WideResearchRequest {
++            item_cap: cap.items.min(1),
++            items: Vec::new(),
++            batch_id: batch_id.to_owned(),
++            retry_of_child_run_id: child_run_id.to_owned(),
++        });
++    }
+     let items: Vec<String> = input
+         .items
+         .iter()
+@@ -10414,6 +10466,81 @@ mod wide_research_tests {
+         assert_eq!(flood.items.len(), MAX_WIDE_RESEARCH_REQUEST_ITEMS);
+     }
+ 
++    #[test]
++    fn a_wide_research_retry_is_one_item_named_by_its_child_run() {
++        let body = json!({
++            "retry_of_child_run_id": "run-01jchild",
++            "batch_id": "run-1:tool_1_fan-1",
++            "items": ["ignored"],
++            "item_cap": 9,
++        });
++        let retry = wide_research_request(true, Some(&body), false, org(8)).expect("on");
++        assert_eq!(retry.item_cap, 1);
++        assert!(retry.items.is_empty(), "execution-core reads the item back itself");
++        assert_eq!(retry.retry_of_child_run_id, "run-01jchild");
++        assert_eq!(retry.batch_id, "run-1:tool_1_fan-1");
++        // An org with wide research off is still refused by execution-core.
++        let off = wide_research_request(true, Some(&body), false, org(0)).expect("on");
++        assert_eq!(off.item_cap, 0);
++        // A retry is a non-ZDR, switched-on request like any other.
++        assert_eq!(wide_research_request(false, Some(&body), false, org(8)), None);
++        assert_eq!(wide_research_request(true, Some(&body), true, org(8)), None);
++    }
++
++    #[test]
++    fn a_wide_research_retry_with_a_malformed_id_is_no_request() {
++        for body in [
++            json!({"retry_of_child_run_id": ""}),
++            json!({"retry_of_child_run_id": "run 1"}),
++            json!({"retry_of_child_run_id": "r".repeat(MAX_WIDE_RESEARCH_RUN_ID_CHARS + 1)}),
++            json!({"retry_of_child_run_id": "run-1", "batch_id": "a\nb"}),
++        ] {
++            assert_eq!(
++                wide_research_request(true, Some(&body), false, org(8)),
++                None,
++                "{body}"
++            );
++        }
++    }
++
++    #[test]
++    fn a_lineage_edge_adds_goal_batch_and_status_only_when_stored() {
++        let lineage = SubagentLineage {
++            thread_id: "thread-1".to_owned(),
++            max_depth: 1,
++            edges: vec![
++                mp_contracts::model_plane::v1::LineageEdge {
++                    parent_run_id: "run-p".to_owned(),
++                    child_run_id: "run-old".to_owned(),
++                    role: SubagentRole::Generic as i32,
++                    ..Default::default()
++                },
++                mp_contracts::model_plane::v1::LineageEdge {
++                    parent_run_id: "run-p".to_owned(),
++                    child_run_id: "run-item".to_owned(),
++                    role: SubagentRole::Researcher as i32,
++                    goal_summary: "look up carrier docs".to_owned(),
++                    batch_id: "run-p:tool_1_fan-1".to_owned(),
++                    status: "attached".to_owned(),
++                    ..Default::default()
++                },
++            ],
++        };
++        let value = lineage_value(&lineage);
++        // An edge without the readback fields serialises exactly as before them.
++        assert_eq!(
++            value["edges"][0],
++            json!({
++                "parent_run_id": "run-p",
++                "child_run_id": "run-old",
++                "role": SubagentRole::Generic.as_str_name(),
++            })
++        );
++        assert_eq!(value["edges"][1]["goal_summary"], "look up carrier docs");
++        assert_eq!(value["edges"][1]["batch_id"], "run-p:tool_1_fan-1");
++        assert_eq!(value["edges"][1]["status"], "attached");
++    }
++
+     #[test]
+     fn wide_research_cap_without_an_enforced_policy_is_the_platform_default() {
+         let platform = WideResearchCap::of(None);
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs
+index fb8013ebe..e2b21971c 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs	
+@@ -762,6 +762,7 @@ impl OrchestrationCoreService for MockOrchestration {
+                     child_run_id: "run-child".into(),
+                     role: 1,
+                     spawned_at: None,
++                    ..Default::default()
+                 }],
+             }),
+         }))
+diff --git a/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs
+index cb59a2202..6e0dff23a 100644
+--- a/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs	
+@@ -1218,6 +1218,16 @@ fn subagent_edge_metadata(goal_summary: &str, batch_id: &str) -> JsonValue {
+     JsonValue::Object(metadata)
+ }
+ 
++/// One text field [`subagent_edge_metadata`] stored, read back (Wave 3 EP-2 S9). Empty when the
++/// edge was stored without it, or when the stored value is not a string.
++fn subagent_edge_metadata_text(metadata: &JsonValue, key: &str) -> String {
++    metadata
++        .get(key)
++        .and_then(JsonValue::as_str)
++        .unwrap_or_default()
++        .to_owned()
++}
++
+ // ---------------------------------------------------------------------------
+ // Timestamp + JSON helpers
+ // ---------------------------------------------------------------------------
+@@ -1838,6 +1848,9 @@ fn lineage_edge_from_row(row: &store::SubagentEdgeRow) -> proto::LineageEdge {
+         child_run_id: row.child_run_id.clone(),
+         role: subagent_role_from_str(&row.role),
+         spawned_at: Some(ts(row.attached_at)),
++        goal_summary: subagent_edge_metadata_text(&row.metadata, "goal_summary"),
++        batch_id: subagent_edge_metadata_text(&row.metadata, "batch_id"),
++        status: row.status.clone(),
+     }
+ }
+ 
+@@ -1918,7 +1931,7 @@ async fn fetch_lineage_for_thread(
+              FROM subagent_edges e \
+              JOIN lineage l ON l.child_run_id = e.parent_run_id \
+          ) \
+-         SELECT parent_run_id, child_run_id, role, attached_at \
++         SELECT parent_run_id, child_run_id, role, status, metadata, attached_at \
+          FROM lineage \
+          ORDER BY attached_at ASC",
+     )
+@@ -1926,13 +1939,23 @@ async fn fetch_lineage_for_thread(
+     .fetch_all(pool)
+     .await?;
+ 
++    // The edge's goal and batch ride its `metadata` JSONB ([`subagent_edge_metadata`]); they and
++    // the edge status are read back so a reloaded wide-research panel can rebuild its grid
++    // (Wave 3 EP-2 S9). An edge stored without them reads back with empty strings, so the proto
++    // an older edge yields differs only by the edge status.
+     let edges: Vec<proto::LineageEdge> = rows
+         .iter()
+-        .map(|r| proto::LineageEdge {
+-            parent_run_id: r.get::<String, _>("parent_run_id"),
+-            child_run_id: r.get::<String, _>("child_run_id"),
+-            role: subagent_role_from_str(r.get::<&str, _>("role")),
+-            spawned_at: Some(ts(r.get::<DateTime<Utc>, _>("attached_at"))),
++        .map(|r| {
++            let metadata = r.get::<JsonValue, _>("metadata");
++            proto::LineageEdge {
++                parent_run_id: r.get::<String, _>("parent_run_id"),
++                child_run_id: r.get::<String, _>("child_run_id"),
++                role: subagent_role_from_str(r.get::<&str, _>("role")),
++                spawned_at: Some(ts(r.get::<DateTime<Utc>, _>("attached_at"))),
++                goal_summary: subagent_edge_metadata_text(&metadata, "goal_summary"),
++                batch_id: subagent_edge_metadata_text(&metadata, "batch_id"),
++                status: r.get::<String, _>("status"),
++            }
+         })
+         .collect();
+ 
+@@ -5067,9 +5090,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+             // dedicated columns yet — reusing the existing `metadata` JSONB
+             // column `attach_subagent` already accepted (previously always
+             // an empty object) avoids a migration for two additive, optional
+-            // fields. `LineageEdge`/`ListChildren` readback is unchanged in
+-            // this pass (not needed by the live run panel, which reads the
+-            // broadcast event below); only the live SSE path carries them.
++            // fields. The lineage read returns them on `LineageEdge` since
++            // Wave 3 EP-2 S9 (`fetch_lineage_for_thread`), so a reloaded
++            // wide-research panel rebuilds its grid.
+             store::attach_subagent(
+                 &self.pool,
+                 &req.parent_run_id,
+@@ -5080,11 +5103,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+             .await
+             .map_err(|e| Status::internal(e.to_string()))?;
+ 
++            // The live event's edge stays as it was: the goal and batch already travel on the
++            // event itself, and the readback fields are for the lineage read (EP-2 S9).
+             let edge = proto::LineageEdge {
+                 parent_run_id: req.parent_run_id.clone(),
+                 child_run_id: req.child_run_id.clone(),
+                 role: req.role,
+                 spawned_at: Some(now_ts()),
++                ..Default::default()
+             };
+             let lineage = fetch_lineage_for_thread(&self.pool, &req.thread_id)
+                 .await
+@@ -6175,6 +6201,26 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn a_lineage_edge_reads_back_the_goal_and_batch_it_stored() {
++        let stored = subagent_edge_metadata("look up carrier docs", "run-1:tool_1_fan-1");
++        assert_eq!(
++            subagent_edge_metadata_text(&stored, "goal_summary"),
++            "look up carrier docs"
++        );
++        assert_eq!(
++            subagent_edge_metadata_text(&stored, "batch_id"),
++            "run-1:tool_1_fan-1"
++        );
++        // An edge stored before the fields existed reads back empty, as the proto did.
++        let old = serde_json::json!({});
++        assert_eq!(subagent_edge_metadata_text(&old, "goal_summary"), "");
++        assert_eq!(subagent_edge_metadata_text(&old, "batch_id"), "");
++        // A value that is not text is not passed through as one.
++        let odd = serde_json::json!({ "batch_id": 7 });
++        assert_eq!(subagent_edge_metadata_text(&odd, "batch_id"), "");
++    }
++
+     #[test]
+     fn subagent_role_unknown_falls_back_to_generic() {
+         assert_eq!(
+@@ -6241,6 +6287,7 @@ mod tests {
+             child_run_id: "b".into(),
+             role: 0,
+             spawned_at: None,
++            ..Default::default()
+         }];
+         assert_eq!(compute_max_depth(&edges), 1);
+     }
+@@ -6253,18 +6300,21 @@ mod tests {
+                 child_run_id: "b".into(),
+                 role: 0,
+                 spawned_at: None,
++                ..Default::default()
+             },
+             proto::LineageEdge {
+                 parent_run_id: "b".into(),
+                 child_run_id: "c".into(),
+                 role: 0,
+                 spawned_at: None,
++                ..Default::default()
+             },
+             proto::LineageEdge {
+                 parent_run_id: "c".into(),
+                 child_run_id: "d".into(),
+                 role: 0,
+                 spawned_at: None,
++                ..Default::default()
+             },
+         ];
+         assert_eq!(compute_max_depth(&edges), 3);
+@@ -8940,6 +8990,68 @@ mod tests {
+             db.cleanup().await;
+         }
+ 
++        // -----------------------------------------------------------------
++        // lineage readback (Wave 3 EP-2 S9)
++        // -----------------------------------------------------------------
++
++        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
++        async fn lineage_reads_back_goal_batch_and_status_and_leaves_old_edges_empty() {
++            let db = PlanGateDb::connect().await;
++            let parent = db.new_run(&db.thread).await;
++            let fan_out_child = db.new_run(&db.thread).await;
++            let old_child = db.new_run(&db.thread).await;
++            store::attach_subagent(
++                &db.pool,
++                &parent,
++                &fan_out_child,
++                "researcher",
++                &subagent_edge_metadata("look up carrier docs", "run-1:tool_1_fan-1"),
++            )
++            .await
++            .expect("attach fan-out child");
++            // An edge stored before the fields existed: the empty object.
++            store::attach_subagent(
++                &db.pool,
++                &parent,
++                &old_child,
++                "generic",
++                &serde_json::json!({}),
++            )
++            .await
++            .expect("attach old child");
++            store::detach_subagent(&db.pool, &parent, &old_child)
++                .await
++                .expect("detach old child");
++
++            let lineage = fetch_lineage_for_thread(&db.pool, &db.thread)
++                .await
++                .expect("lineage");
++            let edge = |child: &str| {
++                lineage
++                    .edges
++                    .iter()
++                    .find(|edge| edge.child_run_id == child)
++                    .cloned()
++                    .expect("edge present")
++            };
++            let fan_out = edge(&fan_out_child);
++            assert_eq!(fan_out.goal_summary, "look up carrier docs");
++            assert_eq!(fan_out.batch_id, "run-1:tool_1_fan-1");
++            assert_eq!(fan_out.status, "attached");
++            let old = edge(&old_child);
++            assert_eq!(old.goal_summary, "");
++            assert_eq!(old.batch_id, "");
++            assert_eq!(old.status, "detached");
++
++            sqlx::query("DELETE FROM subagent_edges WHERE parent_run_id = $1")
++                .bind(&parent)
++                .execute(&db.pool)
++                .await
++                .expect("cleanup edges");
++            db.cleanup().await;
++        }
++
+         // -----------------------------------------------------------------
+         // approve with edits: rewrite, reorder, remove, add
+         // -----------------------------------------------------------------

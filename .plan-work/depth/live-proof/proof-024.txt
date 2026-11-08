@@ -1,0 +1,31 @@
+== applied org-core migrations from 021
+             version              
+----------------------------------
+ 021_org_model_entitlements
+ 022_siem_destinations
+ 023_org_browser_sites
+ 024_org_core_app_least_privilege
+
+== effective privileges of org_core_app (S I U D) on the 021-023 tables
+           table_name           | s | i | u | d 
+--------------------------------+---+---+---+---
+ org_browser_site_history       | t | t | f | f
+ org_browser_site_policy        | t | t | t | f
+ org_browser_site_rules         | t | t | f | t
+ org_model_policies             | t | t | f | t
+ org_model_policy_history       | t | t | f | f
+ org_model_policy_revisions     | t | t | t | f
+ organization_siem_audit_outbox | t | t | f | f
+ siem_destinations              | t | t | t | t
+ user_browser_site_prefs        | t | t | t | t
+
+== behaviour: as org_core_app, UPDATE and DELETE on the history tables must be refused (rolled back either way)
+BEGIN
+SET
+SAVEPOINT
+psql:/tmp/proof-024.sql:19: ERROR:  permission denied for table org_model_policy_history
+ROLLBACK
+SAVEPOINT
+psql:/tmp/proof-024.sql:22: ERROR:  permission denied for table org_browser_site_history
+ROLLBACK
+ROLLBACK

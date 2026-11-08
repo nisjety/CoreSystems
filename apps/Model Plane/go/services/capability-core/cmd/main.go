@@ -397,6 +397,12 @@ func main() {
 		}
 	}
 
+	// EP-7 W4-F T2: the event trigger fire path (the webhook_received consumer and the fire sweeper). Strict
+	// literal true; off by default. It needs the same fresh Control authorizer as the cron sweeper.
+	if os.Getenv("EVENT_TRIGGER_FIRE_ENABLED") == "true" {
+		startEventTriggerFire(ctx, pool, cronAuthorizer, cronAuthErr)
+	}
+
 	// Watch sweeper (S4.3): claims due space_watches, polls each one's source
 	// adapter, and commits what it saw. Single-flight across replicas via the
 	// same FOR UPDATE SKIP LOCKED claim the cron sweeper uses — except the claim

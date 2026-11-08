@@ -887,3 +887,144 @@ describe('AgentRunConsole history replay status', () => {
     await waitFor(() => expect(document.querySelector('.verevon-run-console__status')?.textContent).toBe(label))
   })
 })
+
+// The per-action brief (F-t3-050 R2): with VITE_BROWSER_ACTION_BRIEF on, one row carries a browser
+// action's gate, decision and observation; off, every browser event keeps its own row.
+describe('AgentRunConsole per-action brief (F-t3-050 R2)', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockStreamRunEvents.mockReset()
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockDecideApproval.mockReset()
+    mockResumeRun.mockReset().mockResolvedValue(undefined)
+    mockCancelRun.mockReset().mockResolvedValue(undefined)
+    mockGetRun.mockReset().mockResolvedValue(runDetail())
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockWatchRun.mockReset().mockResolvedValue({ watching: true })
+    mockUnwatchRun.mockReset().mockResolvedValue(undefined)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  /** Starts a run and hands back the handlers the console gave the event stream. */
+  async function startRun(): Promise<RunEventHandlers> {
+    let runEventHandlers: RunEventHandlers | undefined
+    mockStreamChat.mockImplementation((_request: unknown, handlers: ChatStreamHandlers) => {
+      handlers.onConnected?.({ runId: 'run_1', threadId: 'thread_1', model: 'balanced' })
+      return new Promise<void>(() => {})
+    })
+    mockStreamRunEvents.mockImplementation((_runId: string, handlers: RunEventHandlers) => {
+      runEventHandlers = handlers
+      return new Promise<void>(() => {})
+    })
+    fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Buy a book' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
+    await waitFor(() => expect(runEventHandlers).toBeDefined())
+    return runEventHandlers!
+  }
+
+  it('gives a gated browser action one row that carries its gate, decision and observation', async () => {
+    vi.stubEnv('VITE_BROWSER_ACTION_BRIEF', 'true')
+    renderConsole()
+    const handlers = await startRun()
+
+    handlers.onBrowserAction?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'act_0001',
+      actionType: 'click',
+      url: 'https://www.shop.example.com/cart',
+      reason: 'Open the cart',
+      at: '2026-11-08T10:00:00Z',
+    })
+    handlers.onBrowserActionApprovalRequired?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'act_0001',
+      riskCategory: 'checkout',
+      approvalId: 'appr_1',
+      at: '2026-11-08T10:00:01Z',
+    })
+    handlers.onBrowserActionDecided?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'act_0001',
+      approvalId: 'appr_1',
+      decision: 'granted',
+      decidedBy: 'user_1',
+      at: '2026-11-08T10:00:02Z',
+    })
+    handlers.onBrowserObservation?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'act_0001',
+      status: 'success',
+      pageUrl: 'https://www.shop.example.com/cart',
+      pageTitle: 'Your cart',
+      at: '2026-11-08T10:00:03Z',
+    })
+    flush()
+
+    await screen.findByText('Klikk · shop.example.com')
+    const rows = document.querySelectorAll('.verevon-run-timeline__row--browser')
+    expect(rows).toHaveLength(1)
+    const row = rows[0] as HTMLElement
+    expect(row.textContent).toContain('Open the cart')
+    expect(row.textContent).toContain('Utsjekk/betaling · Godkjent')
+    expect(row.textContent).toContain('Observert: Your cart')
+    expect(row.textContent).toContain('Ingen skjermbilde for dette steget.')
+    expect(row.textContent).toContain('Vellykket')
+  })
+
+  it('keeps a row for each browser event while the switch is off', async () => {
+    renderConsole()
+    const handlers = await startRun()
+
+    handlers.onBrowserAction?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'act_0001',
+      actionType: 'click',
+      url: 'https://shop.example.com/cart',
+      at: '2026-11-08T10:00:00Z',
+    })
+    handlers.onBrowserObservation?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'act_0001',
+      status: 'success',
+      pageUrl: 'https://shop.example.com/cart',
+      pageTitle: 'Your cart',
+      at: '2026-11-08T10:00:03Z',
+    })
+    flush()
+
+    await screen.findByText('Observert · Your cart')
+    expect(document.querySelectorAll('.verevon-run-timeline__row--browser')).toHaveLength(2)
+  })
+
+  it('adds no row for a decision on an action that raised no gate', async () => {
+    vi.stubEnv('VITE_BROWSER_ACTION_BRIEF', 'true')
+    renderConsole()
+    const handlers = await startRun()
+
+    handlers.onBrowserActionDecided?.({
+      runId: 'run_1',
+      planId: 'plan_1',
+      actionId: 'start_run',
+      decision: 'granted',
+      decidedBy: 'user_1',
+      at: '2026-11-08T10:00:00Z',
+    })
+    flush()
+
+    expect(document.querySelectorAll('.verevon-run-timeline__row--browser')).toHaveLength(0)
+  })
+})

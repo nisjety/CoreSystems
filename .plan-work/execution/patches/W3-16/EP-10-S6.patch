@@ -1,0 +1,1790 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-edit.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-edit.test.tsx
+new file mode 100644
+index 000000000..a726b09f7
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.approval-edit.test.tsx	
+@@ -0,0 +1,253 @@
++// @vitest-environment jsdom
++
++/**
++ * "Send with my edits" on a paused mail send's approval card (EP-10-S6). Edit mode exists only when
++ * the gateway marks the draft `can_edit` and the card can send an edited approval; an edited
++ * approval is ONCE only, the WS13-S5 step-up runs first, an unchanged form is a plain approval and
++ * a 409 approval_changed refetches the draft while keeping the person's text.
++ */
++
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
++import { ApiError } from '@/shared/api/http'
++import type { Approval, ApprovalEdit, ApprovalPreview } from '@/shared/api/orchestration-client'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import { ApprovalRequests } from './ChatMessages'
++
++const { mockGetApprovalPreview, mockConfirmStepUp } = vi.hoisted(() => ({
++  mockGetApprovalPreview: vi.fn(),
++  mockConfirmStepUp: vi.fn(),
++}))
++vi.mock('@/shared/api/orchestration-client', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/shared/api/orchestration-client')>()),
++  getApprovalPreview: mockGetApprovalPreview,
++}))
++vi.mock('@/shared/approvals/step-up', () => ({ confirmStepUp: mockConfirmStepUp }))
++
++const MAIL_SEND: Approval = {
++  id: 'approval-mail',
++  kind: 'APPROVAL_KIND_TOOL_CALL',
++  cause: {
++    code: 'provider_write',
++    tool: 'execute_provider_action',
++    scopeOptions: ['once', 'thread', 'run'],
++    stepUpRequired: false,
++  },
++  detail: "send an email to a@example.com with the subject 'Status'; it opens 'Hei'",
++}
++
++const PREVIEW: ApprovalPreview = {
++  kind: 'mail_send',
++  provider: 'google',
++  operation: 'gmail.send',
++  connectionId: 'conn-1',
++  to: ['a@example.com'],
++  subject: 'Status',
++  bodyText: 'Hei, the whole body',
++  hasHtml: false,
++  isReply: false,
++  rawOnly: false,
++  editableFields: ['to', 'subject', 'body_text'],
++  actionFingerprint: 'f'.repeat(64),
++  revision: 0,
++  canEdit: true,
++}
++
++type DecideEdited = (approvalId: string, edit: ApprovalEdit) => Promise<void>
++
++/** Renders the card. `null` for `onDecideEdited` is a card that cannot send an edited approval. */
++function show(
++  approvals: Approval[],
++  onDecideEdited: Mock<DecideEdited> | null = vi.fn<DecideEdited>().mockResolvedValue(undefined),
++) {
++  const onDecide = vi.fn()
++  render(() => (
++    <I18nProvider>
++      <ApprovalRequests approvals={approvals} onDecide={onDecide} onDecideEdited={onDecideEdited ?? undefined} />
++    </I18nProvider>
++  ))
++  return { onDecide, onDecideEdited: onDecideEdited ?? vi.fn<DecideEdited>() }
++}
++
++/** Solid applies a handler's updates on flush, so the DOM is read only after one. */
++const act = (fire: () => void) => {
++  fire()
++  flush()
++}
++
++const button = (name: string | RegExp) => screen.getByRole('button', { name })
++const queryButton = (name: string | RegExp) => screen.queryByRole('button', { name })
++
++async function openEditor() {
++  act(() => fireEvent.click(button('Show the full email')))
++  await waitFor(() => expect(button('Edit before sending')).toBeTruthy())
++  act(() => fireEvent.click(button('Edit before sending')))
++}
++
++const editSubject = (value: string) =>
++  act(() => fireEvent.input(screen.getByLabelText(/Subject/), { target: { value } }))
++
++beforeEach(() => {
++  window.localStorage.setItem(localeStorageKey, 'en')
++  vi.stubEnv('VITE_APPROVAL_WRITE_PREVIEW', 'true')
++  mockGetApprovalPreview.mockReset()
++  mockConfirmStepUp.mockReset()
++})
++
++afterEach(() => {
++  cleanup()
++  vi.unstubAllEnvs()
++  try {
++    window.localStorage.clear()
++  } catch {
++    // ignore
++  }
++})
++
++describe('the editable approval card', () => {
++  it('offers no edit mode without can_edit', async () => {
++    mockGetApprovalPreview.mockResolvedValue({ ...PREVIEW, canEdit: false })
++    show([MAIL_SEND])
++    act(() => fireEvent.click(button('Show the full email')))
++    await waitFor(() => expect(screen.getByText(PREVIEW.bodyText)).toBeTruthy())
++    expect(queryButton('Edit before sending')).toBeNull()
++  })
++
++  it('offers no edit mode on a card that cannot send an edited approval', async () => {
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    show([MAIL_SEND], null)
++    act(() => fireEvent.click(button('Show the full email')))
++    await waitFor(() => expect(screen.getByText(PREVIEW.bodyText)).toBeTruthy())
++    expect(queryButton('Edit before sending')).toBeNull()
++  })
++
++  it('sends a plain approval while the form equals the draft', async () => {
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    const { onDecide, onDecideEdited } = show([MAIL_SEND])
++    await openEditor()
++
++    expect(button('Approve')).toBeTruthy()
++    act(() => fireEvent.click(button('Approve')))
++    expect(onDecide).toHaveBeenCalledWith('approval-mail', 'approve')
++    expect(onDecideEdited).not.toHaveBeenCalled()
++  })
++
++  it('becomes Send with my edits, hides the standing scopes and sends the patch once', async () => {
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    const { onDecide, onDecideEdited } = show([MAIL_SEND])
++    expect(button('Approve for this thread')).toBeTruthy()
++    await openEditor()
++    editSubject('Revised status')
++
++    expect(queryButton('Approve')).toBeNull()
++    expect(queryButton('Approve for this thread')).toBeNull()
++    expect(queryButton('Approve for this run')).toBeNull()
++
++    act(() => fireEvent.click(button('Send with my edits')))
++    await waitFor(() => expect(onDecideEdited).toHaveBeenCalledTimes(1))
++    expect(onDecideEdited).toHaveBeenCalledWith('approval-mail', {
++      patch: { subject: 'Revised status' },
++      baseFingerprint: PREVIEW.actionFingerprint,
++    })
++    expect(onDecide).not.toHaveBeenCalled()
++  })
++
++  it('blocks the send while a recipient is not a valid address', async () => {
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    const { onDecideEdited } = show([MAIL_SEND])
++    await openEditor()
++    const add = screen.getByLabelText('Add a recipient')
++    act(() => fireEvent.input(add, { target: { value: 'not-an-address' } }))
++    act(() => fireEvent.keyDown(add, { key: 'Enter' }))
++
++    const send = button('Send with my edits') as HTMLButtonElement
++    expect(send.disabled).toBe(true)
++    act(() => fireEvent.click(send))
++    expect(onDecideEdited).not.toHaveBeenCalled()
++  })
++
++  it('asks for the step-up password first, then sends the edited approval', async () => {
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    mockConfirmStepUp.mockResolvedValue(undefined)
++    const stepUp: Approval = { ...MAIL_SEND, cause: { ...MAIL_SEND.cause!, stepUpRequired: true } }
++    const { onDecideEdited } = show([stepUp])
++    await openEditor()
++    editSubject('Revised status')
++
++    act(() => fireEvent.click(button('Send with my edits')))
++    expect(onDecideEdited).not.toHaveBeenCalled()
++    const password = document.querySelector<HTMLInputElement>('input[type="password"]')
++    expect(password).not.toBeNull()
++    act(() => fireEvent.input(password!, { target: { value: 'pw' } }))
++    expect(button('Confirm and send with my edits')).toBeTruthy()
++    act(() => fireEvent.submit(document.querySelector('form.verevon-chat-approval__confirm')!))
++
++    await waitFor(() => expect(onDecideEdited).toHaveBeenCalledTimes(1))
++    expect(mockConfirmStepUp).toHaveBeenCalledWith('pw')
++    expect(onDecideEdited.mock.calls[0]?.[1]).toMatchObject({ patch: { subject: 'Revised status' } })
++  })
++
++  it("on a 409 approval_changed refetches the draft and keeps the person's text", async () => {
++    const changed: ApprovalPreview = { ...PREVIEW, subject: 'Server subject', actionFingerprint: 'e'.repeat(64) }
++    mockGetApprovalPreview.mockResolvedValueOnce(PREVIEW).mockResolvedValueOnce(changed)
++    const refused = vi
++      .fn<DecideEdited>()
++      .mockRejectedValue(new ApiError('changed', 409, 'approval_changed'))
++    const { onDecide } = show([MAIL_SEND], refused)
++    await openEditor()
++    editSubject('My own subject')
++
++    act(() => fireEvent.click(button('Send with my edits')))
++    await waitFor(() => expect(mockGetApprovalPreview).toHaveBeenCalledTimes(2))
++    await waitFor(() => expect(screen.getByText('Your version')).toBeTruthy())
++    expect(screen.getByText('My own subject')).toBeTruthy()
++    expect(screen.getByRole('alert').textContent).toContain('The draft changed since you opened it')
++    await waitFor(() =>
++      expect((screen.getByLabelText(/Subject/) as HTMLInputElement).value).toBe('Server subject'),
++    )
++    // Nothing is pending against the new draft until the person edits it again.
++    expect(button('Approve')).toBeTruthy()
++    expect(onDecide).not.toHaveBeenCalled()
++  })
++
++  it('words any other refusal without the raw server message', async () => {
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    const refused = vi
++      .fn<DecideEdited>()
++      .mockRejectedValue(new ApiError('internal sentence', 403, 'approval_edit_disabled'))
++    show([MAIL_SEND], refused)
++    await openEditor()
++    editSubject('Revised')
++
++    act(() => fireEvent.click(button('Send with my edits')))
++    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
++    expect(screen.getByRole('alert').textContent).not.toContain('internal sentence')
++  })
++
++  it('is usable from the keyboard alone at a narrow width', async () => {
++    window.innerWidth = 375
++    window.dispatchEvent(new Event('resize'))
++    mockGetApprovalPreview.mockResolvedValue(PREVIEW)
++    const { onDecideEdited } = show([MAIL_SEND])
++    await openEditor()
++
++    // Every control of the editor is a native, focusable element in reading order.
++    const add = screen.getByLabelText('Add a recipient')
++    add.focus()
++    expect(document.activeElement).toBe(add)
++    act(() => fireEvent.input(add, { target: { value: 'b@example.com' } }))
++    act(() => fireEvent.keyDown(add, { key: ',' }))
++    expect(screen.getByRole('button', { name: 'Remove b@example.com' })).toBeTruthy()
++
++    const send = button('Send with my edits')
++    send.focus()
++    act(() => fireEvent.click(send))
++    await waitFor(() => expect(onDecideEdited).toHaveBeenCalledTimes(1))
++    expect(onDecideEdited).toHaveBeenCalledWith('approval-mail', {
++      patch: { to: ['a@example.com', 'b@example.com'] },
++      baseFingerprint: PREVIEW.actionFingerprint,
++    })
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx
+index 8c7311cde..8d4784bea 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx	
+@@ -1,10 +1,18 @@
+ import { ForkAction, threadForkEnabled } from './ForkAction'
+ import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
+ import { RunNotifyButton } from './RunNotifyButton'
+-import { WritePreviewDisclosure, approvalWritePreviewEnabled, isMailSendApproval } from './WritePreview'
+ import {
++  WritePreviewDisclosure,
++  approvalWritePreviewEnabled,
++  isMailSendApproval,
++  mailEditProblemText,
++  type MailEditDraft,
++} from './WritePreview'
++import {
++  approvalEditRefusalOf,
+   type Approval,
+   type ApprovalDecision,
++  type ApprovalEdit,
+   type ApprovalScope,
+   type PlanStepEdit,
+ } from '@/shared/api/orchestration-client'
+@@ -204,6 +212,8 @@ export function MessageBlock(props: {
+    */
+   onScheduleThis?: () => void
+   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
++  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
++  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
+   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
+   onRejectPlan?: (planId: string, reason: string) => void
+   planApproval?: PlanApprovalStatus
+@@ -338,6 +348,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
+           <ApprovalRequests
+             approvals={node.approvals}
+             onDecide={ctx.onApprovalDecision}
++            onDecideEdited={ctx.onApprovalEditedDecision}
+           />
+         }
+       >
+@@ -517,6 +528,8 @@ export function AssistantMessage(props: {
+   /** See `MessageBlock`'s doc — same "Planlegg dette" affordance, forwarded through. */
+   onScheduleThis?: () => void
+   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
++  /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
++  onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
+   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
+   onRejectPlan?: (planId: string, reason: string) => void
+   planApproval?: PlanApprovalStatus
+@@ -678,6 +691,7 @@ export function AssistantMessage(props: {
+       onViewSteps: props.onViewSteps,
+       onViewAttachments: props.onViewAttachments,
+       onApprovalDecision: props.onApprovalDecision,
++      onApprovalEditedDecision: props.onApprovalEditedDecision,
+       onApprovePlan: props.onApprovePlan,
+       onRejectPlan: props.onRejectPlan,
+       onSelectFollowUp: props.onSelectFollowUp,
+@@ -2325,8 +2339,67 @@ export function ApprovalRequests(props: {
+   browserControl?: ChatRunBrowserControl
+   /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
+   onBrowserTakeOver?: (sessionId: string, expectedEpoch: number | null) => void
++  /**
++   * Sends an approval with the person's edits to a drafted mail send (EP-10-S6), for this one call.
++   * It rejects with the typed `ApiError`, so a 409 `approval_changed` keeps the card and the
++   * person's text. Absent: the card offers no edit mode.
++   */
++  onDecideEdited?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
+ }) {
+   const i18n = useI18n()
++  // The person's pending edits by approval id (EP-10-S6). Present only while the form differs from
++  // the draft; an edited approval is ONCE only (decision D1), so a standing scope hides meanwhile.
++  const [drafts, setDrafts] = createSignal<Record<string, MailEditDraft>>({})
++  // Bumped on a 409 approval_changed: the disclosure refetches the draft and keeps the person's text.
++  const [conflicts, setConflicts] = createSignal<Record<string, number>>({})
++  const [editErrors, setEditErrors] = createSignal<Record<string, string>>({})
++  const [editBusy, setEditBusy] = createSignal<string | null>(null)
++
++  const noteDraft = (approvalId: string, draft: MailEditDraft | null) => {
++    setDrafts((current) => {
++      const next = { ...current }
++      if (draft) next[approvalId] = draft
++      else delete next[approvalId]
++      return next
++    })
++  }
++
++  const noteEditError = (approvalId: string, message: string | null) => {
++    setEditErrors((current) => {
++      const next = { ...current }
++      if (message) next[approvalId] = message
++      else delete next[approvalId]
++      return next
++    })
++  }
++
++  const sendEdited = async (approvalId: string, edit: ApprovalEdit) => {
++    const send = props.onDecideEdited
++    if (!send || editBusy() !== null) return
++    setEditBusy(approvalId)
++    noteEditError(approvalId, null)
++    try {
++      await send(approvalId, edit)
++      noteDraft(approvalId, null)
++    } catch (error) {
++      const refusal = approvalEditRefusalOf(error)
++      if (refusal === 'approval_changed') {
++        setConflicts((current) => ({ ...current, [approvalId]: (current[approvalId] ?? 0) + 1 }))
++      }
++      noteEditError(
++        approvalId,
++        refusal
++          ? mailEditProblemText(refusal, i18n.tr)
++          : translateApiError(error, i18n.tr, {
++              no: 'Godkjenningen med endringene gikk ikke gjennom.',
++              en: 'The approval with your edits did not go through.',
++            }),
++      )
++    } finally {
++      setEditBusy(null)
++    }
++  }
++
+   // An approval whose cause asks for a fresh password confirmation before it is granted (build
+   // plan WS13 S5). Only the grant asks; a denial never does.
+   const [confirming, setConfirming] = createSignal<string | null>(null)
+@@ -2353,12 +2426,18 @@ export function ApprovalRequests(props: {
+   }
+ 
+   const approve = (approval: Approval, scope?: ApprovalScope) => {
++    const draft = scope === undefined ? drafts()[approval.id] : undefined
++    if (draft?.problem) return
+     if (approval.cause?.stepUpRequired) {
+       setConfirmError(null)
+       setConfirmingScope(scope)
+       setConfirming(approval.id)
+       return
+     }
++    if (draft) {
++      void sendEdited(approval.id, draft.edit)
++      return
++    }
+     decide(approval.id, 'approve', scope)
+   }
+ 
+@@ -2392,6 +2471,12 @@ export function ApprovalRequests(props: {
+     }
+     const scope = confirmingScope()
+     cancelConfirmation()
++    // The step-up runs first for an edited grant exactly as for a plain one (WS13-S5).
++    const draft = scope === undefined ? drafts()[approval.id] : undefined
++    if (draft && !draft.problem) {
++      void sendEdited(approval.id, draft.edit)
++      return
++    }
+     decide(approval.id, 'approve', scope)
+   }
+ 
+@@ -2437,7 +2522,19 @@ export function ApprovalRequests(props: {
+               {(reason) => <p class="verevon-chat-approval__detail">{reason()}</p>}
+             </Show>
+             <Show when={approvalWritePreviewEnabled() && isMailSendApproval(approval)}>
+-              <WritePreviewDisclosure approvalId={approval.id} />
++              <WritePreviewDisclosure
++                approvalId={approval.id}
++                editable={props.onDecideEdited !== undefined}
++                onDraftChange={(draft) => noteDraft(approval.id, draft)}
++                conflict={conflicts()[approval.id] ?? 0}
++              />
++            </Show>
++            <Show when={editErrors()[approval.id]}>
++              {(message) => (
++                <p class="verevon-chat-approval__error" role="alert">
++                  {message()}
++                </p>
++              )}
+             </Show>
+             <Show
+               when={confirming() === approval.id}
+@@ -2446,11 +2543,14 @@ export function ApprovalRequests(props: {
+                   <button
+                     type="button"
+                     class="verevon-chat-approval__approve"
++                    disabled={Boolean(drafts()[approval.id]?.problem) || editBusy() === approval.id}
+                     onClick={() => approve(approval)}
+                   >
+-                    {i18n.tr('Godkjenn', 'Approve')}
++                    {drafts()[approval.id]
++                      ? i18n.tr('Send med mine endringer', 'Send with my edits')
++                      : i18n.tr('Godkjenn', 'Approve')}
+                   </button>
+-                  <Show when={offersStandingScope(approval, 'thread')}>
++                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'thread')}>
+                     <button
+                       type="button"
+                       class="verevon-chat-approval__approve"
+@@ -2459,7 +2559,7 @@ export function ApprovalRequests(props: {
+                       {i18n.tr('Godkjenn for denne tråden', 'Approve for this thread')}
+                     </button>
+                   </Show>
+-                  <Show when={offersStandingScope(approval, 'run')}>
++                  <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'run')}>
+                     <button
+                       type="button"
+                       class="verevon-chat-approval__approve"
+@@ -2511,7 +2611,9 @@ export function ApprovalRequests(props: {
+                   >
+                     {confirmBusy()
+                       ? i18n.tr('Bekrefter…', 'Confirming…')
+-                      : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
++                      : drafts()[approval.id] && confirmingScope() === undefined
++                        ? i18n.tr('Bekreft og send med mine endringer', 'Confirm and send with my edits')
++                        : i18n.tr('Bekreft og godkjenn', 'Confirm and approve')}
+                   </button>
+                   <button
+                     type="button"
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx
+index 5e1c051be..330485bc9 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.test.tsx	
+@@ -6,13 +6,23 @@
+  */
+ 
+ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
+-import { flush } from 'solid-js'
++import { createSignal, flush } from 'solid-js'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import { ApiError } from '@/shared/api/http'
+ import type { Approval, ApprovalPreview } from '@/shared/api/orchestration-client'
+ import { I18nProvider } from '@/shared/i18n'
+ import { localeStorageKey } from '@/shared/i18n/locales'
+-import { WritePreview, WritePreviewDisclosure, isMailSendApproval, type WritePreviewState } from './WritePreview'
++import {
++  WritePreview,
++  WritePreviewDisclosure,
++  isMailSendApproval,
++  mailEditDraft,
++  mailEditFieldsOf,
++  previewIsEditable,
++  recipientLooksValid,
++  type MailEditDraft,
++  type WritePreviewState,
++} from './WritePreview'
+ 
+ const MAIL: ApprovalPreview = {
+   kind: 'mail_send',
+@@ -165,3 +175,183 @@ describe('isMailSendApproval', () => {
+     expect(isMailSendApproval({ ...base, cause: undefined })).toBe(false)
+   })
+ })
++
++describe('the edit contract on the card (EP-10-S6)', () => {
++  const EDITABLE: ApprovalPreview = { ...MAIL, to: ['a@example.com'], canEdit: true }
++
++  it('is editable only when the gateway says so, for a normalised mail send with editable fields', () => {
++    expect(previewIsEditable(EDITABLE)).toBe(true)
++    expect(previewIsEditable({ ...EDITABLE, canEdit: undefined })).toBe(false)
++    expect(previewIsEditable({ ...EDITABLE, canEdit: false })).toBe(false)
++    expect(previewIsEditable({ ...EDITABLE, rawOnly: true })).toBe(false)
++    expect(previewIsEditable({ ...EDITABLE, kind: 'other' })).toBe(false)
++    expect(previewIsEditable({ ...EDITABLE, editableFields: [] })).toBe(false)
++  })
++
++  it('checks a recipient as one mailbox', () => {
++    for (const ok of ['a@example.com', 'Ola Nordmann <ola@example.no>', '  b@example.org ']) {
++      expect(recipientLooksValid(ok)).toBe(true)
++    }
++    for (const bad of ['', 'not-an-address', 'a@b', 'a@example.com, b@example.com', 'x <a@example.com', 'a@exa mple.com']) {
++      expect(recipientLooksValid(bad)).toBe(false)
++    }
++    expect(recipientLooksValid(`${'a'.repeat(320)}@example.com`)).toBe(false)
++  })
++
++  it('patches only the changed, editable fields, and an unchanged form is no edit', () => {
++    const fields = mailEditFieldsOf(EDITABLE)
++    expect(mailEditDraft(EDITABLE, fields)).toBeNull()
++
++    expect(mailEditDraft(EDITABLE, { ...fields, subject: 'New' })).toEqual({
++      edit: { patch: { subject: 'New' }, baseFingerprint: EDITABLE.actionFingerprint },
++      problem: null,
++    })
++    // A field the server does not offer for editing never enters the patch.
++    expect(mailEditDraft({ ...EDITABLE, editableFields: ['to'] }, { ...fields, subject: 'New' })).toBeNull()
++  })
++
++  it('names the first limit an edit breaks, in the server order', () => {
++    const fields = mailEditFieldsOf(EDITABLE)
++    expect(mailEditDraft(EDITABLE, { ...fields, to: ['nope'] })?.problem).toBe('invalid_recipient')
++    expect(mailEditDraft(EDITABLE, { ...fields, to: [] })?.problem).toBe('invalid_recipient')
++    expect(
++      mailEditDraft(EDITABLE, { ...fields, to: Array.from({ length: 51 }, (_, i) => `r${i}@example.com`) })?.problem,
++    ).toBe('too_many_recipients')
++    expect(mailEditDraft(EDITABLE, { ...fields, subject: 'a\nBcc: x@example.com' })?.problem).toBe('invalid_subject')
++    expect(mailEditDraft(EDITABLE, { ...fields, bodyText: 'x'.repeat(48 * 1024 + 1) })?.problem).toBe('edit_too_large')
++    expect(mailEditDraft(EDITABLE, { ...fields, to: ['nope'], subject: 'a\nb' })?.problem).toBe('invalid_recipient')
++  })
++})
++
++describe('WritePreviewDisclosure edit mode (EP-10-S6)', () => {
++  const EDITABLE: ApprovalPreview = { ...MAIL, to: ['a@example.com'], canEdit: true }
++
++  function showEditable(options: {
++    load: (approvalId: string) => Promise<ApprovalPreview | null>
++    editable?: boolean
++    conflict?: () => number
++  }) {
++    const drafts: (MailEditDraft | null)[] = []
++    render(() => (
++      <I18nProvider>
++        <WritePreviewDisclosure
++          approvalId="appr_1"
++          load={options.load}
++          editable={options.editable ?? true}
++          onDraftChange={(draft) => drafts.push(draft)}
++          conflict={options.conflict?.() ?? 0}
++        />
++      </I18nProvider>
++    ))
++    fireEvent.click(screen.getByRole('button', { name: 'Show the full email' }))
++    flush()
++    return drafts
++  }
++
++  const lastDraft = (drafts: (MailEditDraft | null)[]) => drafts[drafts.length - 1] ?? null
++
++  const startEditing = async () => {
++    await waitFor(() => expect(screen.getByRole('button', { name: 'Edit before sending' })).toBeTruthy())
++    fireEvent.click(screen.getByRole('button', { name: 'Edit before sending' }))
++    flush()
++  }
++
++  it('offers no edit without can_edit or without a card that can send edits', async () => {
++    showEditable({ load: vi.fn().mockResolvedValue(MAIL) })
++    await waitFor(() => expect(screen.getByText('Quarterly status')).toBeTruthy())
++    expect(screen.queryByRole('button', { name: 'Edit before sending' })).toBeNull()
++    cleanup()
++
++    showEditable({ load: vi.fn().mockResolvedValue(EDITABLE), editable: false })
++    await waitFor(() => expect(screen.getByText('Quarterly status')).toBeTruthy())
++    expect(screen.queryByRole('button', { name: 'Edit before sending' })).toBeNull()
++  })
++
++  it('reports the edit as the person types and nothing for an unchanged form', async () => {
++    const drafts = showEditable({ load: vi.fn().mockResolvedValue(EDITABLE) })
++    await startEditing()
++    expect(lastDraft(drafts)).toBeNull()
++
++    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'Revised status' } })
++    flush()
++    expect(lastDraft(drafts)?.edit).toEqual({
++      patch: { subject: 'Revised status' },
++      baseFingerprint: EDITABLE.actionFingerprint,
++    })
++    expect(screen.getByText('14 / 998', { exact: false })).toBeTruthy()
++
++    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: EDITABLE.subject } })
++    flush()
++    expect(lastDraft(drafts)).toBeNull()
++  })
++
++  it('adds and removes recipient chips from the keyboard and flags an invalid one', async () => {
++    const drafts = showEditable({ load: vi.fn().mockResolvedValue(EDITABLE) })
++    await startEditing()
++
++    const add = screen.getByLabelText('Add a recipient')
++    fireEvent.input(add, { target: { value: 'not-an-address' } })
++    fireEvent.keyDown(add, { key: 'Enter' })
++    flush()
++    expect(lastDraft(drafts)?.problem).toBe('invalid_recipient')
++    expect(screen.getByRole('alert').textContent).toContain('not a valid email address')
++
++    fireEvent.click(screen.getByRole('button', { name: 'Remove not-an-address' }))
++    flush()
++    expect(lastDraft(drafts)).toBeNull()
++
++    fireEvent.input(add, { target: { value: 'b@example.com' } })
++    fireEvent.keyDown(add, { key: 'Enter' })
++    flush()
++    expect(lastDraft(drafts)?.edit.patch).toEqual({ to: ['a@example.com', 'b@example.com'] })
++    expect(lastDraft(drafts)?.problem).toBeNull()
++  })
++
++  it('says the formatting goes only once the body of a formatted mail changes', async () => {
++    showEditable({ load: vi.fn().mockResolvedValue({ ...EDITABLE, hasHtml: true }) })
++    await startEditing()
++    expect(screen.queryByText(/Formatting will be removed/)).toBeNull()
++
++    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'Only the subject' } })
++    flush()
++    expect(screen.queryByText(/Formatting will be removed/)).toBeNull()
++
++    fireEvent.input(screen.getByLabelText(/Message/), { target: { value: 'A new body' } })
++    flush()
++    expect(screen.getByText(/Formatting will be removed/)).toBeTruthy()
++  })
++
++  it('discards the edits back to the draft', async () => {
++    const drafts = showEditable({ load: vi.fn().mockResolvedValue(EDITABLE) })
++    await startEditing()
++    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'Changed' } })
++    flush()
++
++    fireEvent.click(screen.getByRole('button', { name: 'Discard edits' }))
++    flush()
++    expect(lastDraft(drafts)).toBeNull()
++    expect(screen.getByText('Quarterly status')).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Edit before sending' })).toBeTruthy()
++  })
++
++  it("refetches the draft on a conflict and keeps the person's text as their version", async () => {
++    const changed: ApprovalPreview = { ...EDITABLE, subject: 'Server subject', actionFingerprint: 'e'.repeat(64) }
++    const load = vi.fn().mockResolvedValueOnce(EDITABLE).mockResolvedValueOnce(changed)
++    const [conflict, setConflict] = createSignal(0)
++    const drafts = showEditable({ load, conflict })
++    await startEditing()
++    fireEvent.input(screen.getByLabelText(/Subject/), { target: { value: 'My own subject' } })
++    flush()
++
++    setConflict(1)
++    flush()
++    await waitFor(() => expect(load).toHaveBeenCalledTimes(2))
++    await waitFor(() => expect(screen.getByText('Your version')).toBeTruthy())
++    expect(screen.getByText('My own subject')).toBeTruthy()
++    await waitFor(() =>
++      expect((screen.getByLabelText(/Subject/) as HTMLInputElement).value).toBe('Server subject'),
++    )
++    // The form starts again from the new draft, so nothing is pending until the person edits it.
++    expect(lastDraft(drafts)).toBeNull()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx
+index 5c8ce0871..290fb7c5f 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/WritePreview.tsx	
+@@ -1,5 +1,19 @@
+-import { For, Show, createSignal } from 'solid-js'
+-import { getApprovalPreview, type Approval, type ApprovalPreview } from '@/shared/api/orchestration-client'
++import { For, Show, createEffect, createSignal } from 'solid-js'
++import {
++  getApprovalPreview,
++  type Approval,
++  type ApprovalEdit,
++  type ApprovalPreview,
++} from '@/shared/api/orchestration-client'
++import {
++  MAX_BODY_TEXT_BYTES,
++  MAX_RECIPIENTS,
++  MAX_RECIPIENT_BYTES,
++  MAX_SUBJECT_BYTES,
++  checkMailEditLimits,
++  type ApprovalEditCode,
++  type MailSendPatch,
++} from '@/shared/approvals/approval-edit-limits'
+ import { translateApiError, useI18n } from '@/shared/i18n'
+ 
+ /**
+@@ -114,24 +128,306 @@ export function WritePreview(props: { state: WritePreviewState }) {
+   )
+ }
+ 
++/** The mail fields the person may change before approving (EP-10-S6, decision D2). */
++export type MailEditFields = {
++  to: string[]
++  subject: string
++  bodyText: string
++}
++
++/**
++ * The person's pending changes to a draft: the edit to send and the first limit it breaks, or null
++ * when it may be sent. The server (session-core, mp-contracts `approval_edit.rs`) is the authority;
++ * `problem` only keeps the form from sending what it will refuse.
++ */
++export type MailEditDraft = {
++  edit: ApprovalEdit
++  problem: ApprovalEditCode | null
++}
++
++const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length
++
++// One address: local part, `@`, a dotted domain, with none of the characters that would let one
++// entry name two mailboxes or break a header. Bare (`a@example.com`) or named (`Ola <a@example.com>`).
++const ADDRESS = String.raw`[^\s@<>(),;:"\[\]\\]+@[^\s@<>(),;:"\[\]\\]+\.[^\s@<>(),;:"\[\]\\]+`
++const BARE_RECIPIENT = new RegExp(`^${ADDRESS}$`)
++const NAMED_RECIPIENT = new RegExp(`^[^<>\\r\\n,;]*<${ADDRESS}>$`)
++
++/**
++ * Whether a recipient looks like one RFC 5322 mailbox. A first check for the form only: the
++ * server parses every address again and refuses `invalid_recipient` on its own.
++ */
++export function recipientLooksValid(value: string): boolean {
++  const trimmed = value.trim()
++  if (trimmed.length === 0 || utf8Bytes(trimmed) > MAX_RECIPIENT_BYTES) return false
++  return BARE_RECIPIENT.test(trimmed) || NAMED_RECIPIENT.test(trimmed)
++}
++
++/**
++ * Whether the person may edit this draft: the gateway says so (`can_edit`, server-controlled), it
++ * is a normalised mail send (a Gmail `raw` draft is preview-only) and it names editable fields.
++ */
++export function previewIsEditable(preview: ApprovalPreview): boolean {
++  return (
++    preview.canEdit === true &&
++    preview.kind === 'mail_send' &&
++    !preview.rawOnly &&
++    preview.editableFields.length > 0
++  )
++}
++
++/** The form's starting values: exactly the draft. */
++export function mailEditFieldsOf(preview: ApprovalPreview): MailEditFields {
++  return { to: [...preview.to], subject: preview.subject, bodyText: preview.bodyText }
++}
++
++const sameRecipients = (left: readonly string[], right: readonly string[]): boolean =>
++  left.length === right.length && left.every((recipient, index) => recipient === right[index])
++
++/**
++ * The edit the form holds against its draft, or null when nothing changed. Only a changed, editable
++ * field goes into the patch, so an unchanged form is a plain approval and editing only the subject
++ * keeps a formatted body. Problems are checked in the server's order: recipients, subject, body.
++ */
++export function mailEditDraft(preview: ApprovalPreview, fields: MailEditFields): MailEditDraft | null {
++  const editable = new Set(preview.editableFields)
++  const patch: MailSendPatch = {}
++  const to = fields.to.map((recipient) => recipient.trim())
++  if (editable.has('to') && !sameRecipients(to, preview.to)) patch.to = to
++  if (editable.has('subject') && fields.subject !== preview.subject) patch.subject = fields.subject
++  if (editable.has('body_text') && fields.bodyText !== preview.bodyText) patch.bodyText = fields.bodyText
++  if (patch.to === undefined && patch.subject === undefined && patch.bodyText === undefined) return null
++  const recipientProblem =
++    patch.to === undefined
++      ? null
++      : (checkMailEditLimits({ to: patch.to }) ??
++        (patch.to.every(recipientLooksValid) ? null : 'invalid_recipient'))
++  return {
++    edit: { patch, baseFingerprint: preview.actionFingerprint },
++    problem: recipientProblem ?? checkMailEditLimits({ subject: patch.subject, bodyText: patch.bodyText }),
++  }
++}
++
++type Translate = ReturnType<typeof useI18n>['tr']
++
++/** What the person reads for a limit their edit breaks, or a refusal the server sent back. */
++export function mailEditProblemText(code: string, tr: Translate): string {
++  switch (code) {
++    case 'invalid_recipient':
++      return tr(
++        'Minst én mottaker er ikke en gyldig e-postadresse.',
++        'At least one recipient is not a valid email address.',
++      )
++    case 'too_many_recipients':
++      return tr(`Høyst ${MAX_RECIPIENTS} mottakere.`, `At most ${MAX_RECIPIENTS} recipients.`)
++    case 'invalid_subject':
++      return tr(
++        `Emnet kan ikke ha linjeskift og høyst ${MAX_SUBJECT_BYTES} byte.`,
++        `The subject cannot have line breaks and is at most ${MAX_SUBJECT_BYTES} bytes.`,
++      )
++    case 'invalid_body':
++      return tr('Meldingen kan ikke være tom.', 'The message cannot be empty.')
++    case 'edit_too_large':
++      return tr('Meldingen er for lang.', 'The message is too long.')
++    case 'no_change':
++      return tr('Ingenting er endret.', 'Nothing was changed.')
++    case 'not_editable':
++      return tr(
++        'Denne handlingen kan ikke endres. Godkjenn eller avvis den slik den er.',
++        'This action cannot be edited. Approve or reject it as drafted.',
++      )
++    case 'revision_limit':
++      return tr('Handlingen er endret for mange ganger.', 'This action was edited too many times.')
++    case 'approval_changed':
++      return tr(
++        'Utkastet er endret siden du åpnet det. Se over det nye utkastet; din versjon står nedenfor.',
++        'The draft changed since you opened it. Review the new draft; your version is kept below.',
++      )
++    default:
++      return tr('Endringene ble ikke tatt imot.', 'The edits were not accepted.')
++  }
++}
++
++/**
++ * The editable draft (EP-10-S6): recipient chips, subject and body, with live limit counters. It
++ * holds no state of its own beyond the address being typed; every change goes to `onChange`.
++ */
++function MailEditor(props: {
++  preview: ApprovalPreview
++  fields: MailEditFields
++  problem: ApprovalEditCode | null
++  onChange: (fields: MailEditFields) => void
++  onDiscard: () => void
++}) {
++  const i18n = useI18n()
++  const [typed, setTyped] = createSignal('')
++  const editable = (field: string) => props.preview.editableFields.includes(field)
++
++  const addTyped = () => {
++    const entries = typed()
++      .split(/[,;\n]/)
++      .map((entry) => entry.trim())
++      .filter((entry) => entry.length > 0)
++    if (entries.length === 0) return
++    setTyped('')
++    props.onChange({ ...props.fields, to: [...props.fields.to, ...entries] })
++  }
++
++  const remove = (index: number) =>
++    props.onChange({ ...props.fields, to: props.fields.to.filter((_, at) => at !== index) })
++
++  const bodyChanged = () => props.fields.bodyText !== props.preview.bodyText
++
++  return (
++    <div class="verevon-chat-approval__edit">
++      <Show when={editable('to')}>
++        <fieldset class="verevon-chat-approval__edit-recipients">
++          <legend>
++            {i18n.tr('Til', 'To')}{' '}
++            <span class="verevon-chat-approval__edit-count">
++              {props.fields.to.length} / {MAX_RECIPIENTS}
++            </span>
++          </legend>
++          <ul class="verevon-chat-approval__edit-chips">
++            <For each={props.fields.to}>
++              {(recipient, index) => (
++                <li
++                  class="verevon-chat-approval__edit-chip"
++                  data-invalid={recipientLooksValid(recipient) ? undefined : ''}
++                >
++                  <span>{recipient}</span>
++                  <button
++                    type="button"
++                    aria-label={i18n.tr(`Fjern ${recipient}`, `Remove ${recipient}`)}
++                    onClick={() => remove(index())}
++                  >
++                    ×
++                  </button>
++                </li>
++              )}
++            </For>
++          </ul>
++          <label class="verevon-chat-approval__edit-label">
++            {i18n.tr('Legg til mottaker', 'Add a recipient')}
++            <input
++              type="email"
++              multiple
++              autocomplete="off"
++              value={typed()}
++              onInput={(event) => setTyped(event.currentTarget.value)}
++              onKeyDown={(event) => {
++                if (event.key === 'Enter' || event.key === ',') {
++                  event.preventDefault()
++                  addTyped()
++                }
++              }}
++            />
++          </label>
++          <button type="button" class="verevon-chat-approval__edit-add" onClick={addTyped}>
++            {i18n.tr('Legg til', 'Add')}
++          </button>
++        </fieldset>
++      </Show>
++      <Show when={editable('subject')}>
++        <label class="verevon-chat-approval__edit-label">
++          {i18n.tr('Emne', 'Subject')}{' '}
++          <span class="verevon-chat-approval__edit-count">
++            {utf8Bytes(props.fields.subject.trim())} / {MAX_SUBJECT_BYTES}
++          </span>
++          <input
++            type="text"
++            value={props.fields.subject}
++            onInput={(event) => props.onChange({ ...props.fields, subject: event.currentTarget.value })}
++          />
++        </label>
++      </Show>
++      <Show when={editable('body_text')}>
++        <label class="verevon-chat-approval__edit-label">
++          {i18n.tr('Melding', 'Message')}{' '}
++          <span class="verevon-chat-approval__edit-count">
++            {utf8Bytes(props.fields.bodyText)} / {MAX_BODY_TEXT_BYTES}
++          </span>
++          <textarea
++            rows={8}
++            value={props.fields.bodyText}
++            onInput={(event) => props.onChange({ ...props.fields, bodyText: event.currentTarget.value })}
++          />
++        </label>
++        <Show when={props.preview.hasHtml && bodyChanged()}>
++          <p class="verevon-chat-approval__preview-note">
++            {i18n.tr(
++              'Formateringen fjernes: e-posten sendes som ren tekst.',
++              'Formatting will be removed: the email is sent as plain text.',
++            )}
++          </p>
++        </Show>
++      </Show>
++      <Show when={props.problem}>
++        {(code) => (
++          <p class="verevon-chat-approval__error" role="alert">
++            {mailEditProblemText(code(), i18n.tr)}
++          </p>
++        )}
++      </Show>
++      <button type="button" class="verevon-chat-approval__edit-discard" onClick={() => props.onDiscard()}>
++        {i18n.tr('Forkast endringene', 'Discard edits')}
++      </button>
++    </div>
++  )
++}
++
++/** The person's own text, kept read-only after the draft changed under them (409 approval_changed). */
++function YourVersion(props: { fields: MailEditFields }) {
++  const i18n = useI18n()
++  return (
++    <div class="verevon-chat-approval__your-version" role="note">
++      <p class="verevon-chat-approval__preview-note">{i18n.tr('Din versjon', 'Your version')}</p>
++      <dl class="verevon-chat-approval__preview-fields">
++        <dt>{i18n.tr('Til', 'To')}</dt>
++        <dd>{props.fields.to.join(', ')}</dd>
++        <dt>{i18n.tr('Emne', 'Subject')}</dt>
++        <dd>{props.fields.subject}</dd>
++        <dt>{i18n.tr('Melding', 'Message')}</dt>
++        <dd>
++          <pre class="verevon-chat-approval__preview-body" style={{ 'white-space': 'pre-wrap' }}>
++            {props.fields.bodyText}
++          </pre>
++        </dd>
++      </dl>
++    </div>
++  )
++}
++
+ /**
+  * "Show the full email" on a mail send's approval card. The draft is fetched once, on the first
+  * open, and kept for the life of the card; closing only hides it.
++ *
++ * Edit mode (EP-10-S6) is offered only when the card can send an edited approval (`editable`) and
++ * the gateway marked the draft `can_edit`. Every change is reported through `onDraftChange` (null
++ * when the form equals the draft). Each increase of `conflict` (the card's 409 approval_changed)
++ * refetches the draft, starts the form again from it and keeps the person's text as "your version".
+  */
+ export function WritePreviewDisclosure(props: {
+   approvalId: string
+   load?: (approvalId: string) => Promise<ApprovalPreview | null>
++  editable?: boolean
++  onDraftChange?: (draft: MailEditDraft | null) => void
++  conflict?: number
+ }) {
+   const i18n = useI18n()
+   const [open, setOpen] = createSignal(false)
+   const [state, setState] = createSignal<WritePreviewState | undefined>(undefined)
++  const [fields, setFields] = createSignal<MailEditFields | null>(null)
++  const [problem, setProblem] = createSignal<ApprovalEditCode | null>(null)
++  const [yourVersion, setYourVersion] = createSignal<MailEditFields | null>(null)
+ 
+-  const fetchOnce = async () => {
+-    if (state() !== undefined) return
++  // Answers the draft it read (or null), so a caller acts on it without re-reading the signal.
++  const load = async (): Promise<ApprovalPreview | null> => {
+     setState({ status: 'loading' })
+     try {
+       const preview = await (props.load ?? getApprovalPreview)(props.approvalId)
+       setState(preview ? { status: 'ready', preview } : { status: 'unavailable' })
++      return preview
+     } catch (failure) {
+       setState({
+         status: 'error',
+@@ -140,15 +436,77 @@ export function WritePreviewDisclosure(props: {
+           en: 'The email could not be loaded.',
+         }),
+       })
++      return null
+     }
+   }
+ 
++  const fetchOnce = async () => {
++    if (state() !== undefined) return
++    await load()
++  }
++
+   const toggle = () => {
+     const next = !open()
+     setOpen(next)
+     if (next) void fetchOnce()
+   }
+ 
++  const ready = () => {
++    const current = state()
++    return current?.status === 'ready' ? current.preview : undefined
++  }
++
++  const editablePreview = () => {
++    const preview = ready()
++    return props.editable && preview && previewIsEditable(preview) ? preview : undefined
++  }
++
++  // The draft and the form while the person is editing it; undefined shows the read-only preview.
++  const editing = () => {
++    const preview = editablePreview()
++    const form = fields()
++    return preview && form ? { preview, form } : undefined
++  }
++
++  // Every change is reported from the values just computed: a Solid 2 signal read right after
++  // its write may still answer the old value until the next flush.
++  const change = (preview: ApprovalPreview, next: MailEditFields) => {
++    setFields(next)
++    const draft = mailEditDraft(preview, next)
++    setProblem(draft?.problem ?? null)
++    props.onDraftChange?.(draft)
++  }
++
++  const startEditing = (preview: ApprovalPreview) => {
++    setYourVersion(null)
++    change(preview, mailEditFieldsOf(preview))
++  }
++
++  const discard = () => {
++    setFields(null)
++    setProblem(null)
++    setYourVersion(null)
++    props.onDraftChange?.(null)
++  }
++
++  createEffect(
++    () => props.conflict ?? 0,
++    (conflict) => {
++      if (conflict === 0) return
++      const kept = fields()
++      setYourVersion(kept)
++      setFields(null)
++      setProblem(null)
++      props.onDraftChange?.(null)
++      setOpen(true)
++      void load().then((preview) => {
++        if (kept && preview && props.editable && previewIsEditable(preview)) {
++          change(preview, mailEditFieldsOf(preview))
++        }
++      })
++    },
++  )
++
+   return (
+     <div class="verevon-chat-approval__disclosure">
+       <button
+@@ -161,7 +519,40 @@ export function WritePreviewDisclosure(props: {
+           ? i18n.tr('Skjul e-posten', 'Hide the email')
+           : i18n.tr('Vis hele e-posten', 'Show the full email')}
+       </button>
+-      <Show when={open() ? state() : undefined}>{(current) => <WritePreview state={current()} />}</Show>
++      <Show when={open() ? state() : undefined}>
++        {(current) => (
++          <Show
++            when={editing()}
++            fallback={
++              <>
++                <WritePreview state={current()} />
++                <Show when={editablePreview()}>
++                  {(preview) => (
++                    <button
++                      type="button"
++                      class="verevon-chat-approval__edit-start"
++                      onClick={() => startEditing(preview())}
++                    >
++                      {i18n.tr('Endre før sending', 'Edit before sending')}
++                    </button>
++                  )}
++                </Show>
++              </>
++            }
++          >
++            {(session) => (
++              <MailEditor
++                preview={session().preview}
++                fields={session().form}
++                problem={problem()}
++                onChange={(next) => change(session().preview, next)}
++                onDiscard={discard}
++              />
++            )}
++          </Show>
++        )}
++      </Show>
++      <Show when={yourVersion()}>{(kept) => <YourVersion fields={kept()} />}</Show>
+     </div>
+   )
+ }
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts
+index b2701f95b..992301fcb 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
+@@ -78,6 +78,7 @@ import {
+   runQuestionErrorCodeOf,
+   resumeRun,
+   type ApprovalDecision,
++  type ApprovalEdit,
+   type PlanStepEdit,
+ } from '@/shared/api/orchestration-client'
+ import { getRun, listRuns } from '@/shared/api/runs-client'
+@@ -2833,6 +2834,32 @@ export function useChatController() {
+     }
+   }
+ 
++  /**
++   * "Send with my edits" (EP-10-S6): approve once with the person's changes to a drafted mail send.
++   * Unlike a plain decision the card stays until the server accepts the edit, and a refused edit
++   * rejects with the typed `ApiError`, so a 409 approval_changed keeps the person's text on the card.
++   * Only the resume after an accepted edit falls back to the plain re-sync.
++   */
++  const handleEditedApprovalDecision = async (
++    turnId: string,
++    approvalId: string,
++    edit: ApprovalEdit,
++  ): Promise<void> => {
++    if (isForeignOriginThread(state.threadId)) return
++    const runId = state.turns.find((turn) => turn.id === turnId)?.runId
++    invalidateApprovalRefresh(turnId)
++    await decideApproval(approvalId, 'approve', undefined, undefined, 'once', false, edit)
++    setState((s) => {
++      const turn = s.turns.find((t) => t.id === turnId)
++      if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
++    })
++    try {
++      if (runId) await resumeRun(runId)
++    } catch {
++      void refreshTurnApprovals(turnId)
++    }
++  }
++
+   /**
+    * A mid-run message the run ended before receiving.
+    *
+@@ -4854,6 +4881,7 @@ export function useChatController() {
+     handleScroll,
+     scrollToBottom,
+     handleApprovalDecision,
++    handleEditedApprovalDecision,
+     refreshApprovalsForRun,
+     handleComposerSubmit,
+     handleStop,
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index ef79c1519..3f13da2a7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -340,6 +340,43 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('takes an edit with an approval only, within the mail limits (EP-10-S6)', () => {
++    const fingerprint = 'a'.repeat(64)
++    const edit = { patch: { subject: 'New subject' }, baseFingerprint: fingerprint }
++    for (const id of ['approvals.decide', 'orchestration.decide_approval']) {
++      const schema = getActionDescriptor(id)?.inputSchema
++      const base = { approvalId: 'appr_1', decision: 'approve' as const }
++
++      expect(schema?.safeParse({ ...base, edit }).success).toBe(true)
++      expect(
++        schema?.safeParse({
++          ...base,
++          edit: { patch: { to: ['a@example.com'], bodyText: 'Hei' }, baseFingerprint: fingerprint },
++        }).success,
++      ).toBe(true)
++
++      // A rejection sends nothing, so it carries no edit.
++      expect(schema?.safeParse({ ...base, decision: 'reject', edit }).success).toBe(false)
++      // The draft the person saw is named by its 64-hex fingerprint.
++      expect(schema?.safeParse({ ...base, edit: { ...edit, baseFingerprint: 'abc' } }).success).toBe(false)
++      // Only recipients, subject and body: the connection, operation and threading are frozen.
++      for (const forged of [{ connectionId: 'conn-2' }, { operation: 'gmail.delete' }, { threadId: 't' }, { bodyHtml: '<b>x</b>' }]) {
++        expect(schema?.safeParse({ ...base, edit: { ...edit, patch: { ...edit.patch, ...forged } } }).success).toBe(false)
++      }
++      expect(schema?.safeParse({ ...base, edit: { ...edit, extra: true } }).success).toBe(false)
++      // An empty patch, a header-breaking subject, no recipients and too many are refused.
++      for (const patch of [
++        {},
++        { subject: 'a\r\nBcc: x@example.com' },
++        { to: [] },
++        { to: Array.from({ length: 51 }, (_, i) => `r${i}@example.com`) },
++        { bodyText: 'x'.repeat(48 * 1024 + 1) },
++      ]) {
++        expect(schema?.safeParse({ ...base, edit: { patch, baseFingerprint: fingerprint } }).success).toBe(false)
++      }
++    }
++  })
++
+   it('registers the approval preview as a low-risk read the model cannot execute (EP-10-S1)', () => {
+     const preview = getActionDescriptor('approvals.preview')
+ 
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index cba17033d..df4992fb7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1,6 +1,7 @@
+ import { z } from 'zod'
+ import type { ActionDescriptor } from '@/shared/actions/types'
+ import { spaceActions } from '@/shared/actions/domains/spaces'
++import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
+ 
+ const sourceInput = z.object({
+   sourceId: z.string().min(1),
+@@ -1570,17 +1571,50 @@ const chatAnswerQuestionInput = z
+     message: 'A skip carries no answers, and an answer carries at least one.',
+   })
+ 
++// The person's changes to a drafted mail send (EP-10-S6, decision D2): recipients, subject and the
++// plain-text body, nothing else. At least one field; the limits are the server's (EP-10-S3), checked
++// here only so a form never sends what the server will refuse.
++const approvalEditPatch = z
++  .object({
++    to: z.array(z.string().trim().min(1)).optional(),
++    subject: z.string().optional(),
++    bodyText: z.string().optional(),
++  })
++  .strict()
++  .superRefine((patch, ctx) => {
++    if (patch.to === undefined && patch.subject === undefined && patch.bodyText === undefined) {
++      ctx.addIssue({ code: 'custom', message: 'no_change' })
++      return
++    }
++    const code = checkMailEditLimits(patch)
++    if (code) ctx.addIssue({ code: 'custom', message: code })
++  })
++
++// "Send with my edits" (EP-10-S6, decision D1): the patch and the fingerprint of the draft the
++// person saw. A draft that changed since is a 409 approval_changed, never a silent overwrite.
++export const approvalEditInput = z
++  .object({
++    patch: approvalEditPatch,
++    baseFingerprint: z.string().regex(/^[0-9a-fA-F]{64}$/),
++  })
++  .strict()
++
+ // The decision on a pending approval (build plan WS13 S2). The decider is the verified credential's,
+ // never an input, so a field naming one, a decision source or a grant is refused rather than ignored.
+-// `scope` is how far the decision reaches; only `once` exists until standing grants do.
++// `scope` is how far the decision reaches; only `once` exists until standing grants do. An `edit`
++// rides an approval only (EP-10-S6): a rejection has nothing to send.
+ const approvalsDecideInput = z
+   .object({
+     approvalId: z.string().min(1),
+     decision: z.enum(['approve', 'reject']),
+     reason: z.string().max(500).optional(),
+     scope: z.literal('once').optional(),
++    edit: approvalEditInput.optional(),
+   })
+   .strict()
++  .refine((input) => input.edit === undefined || input.decision === 'approve', {
++    message: 'edit_requires_grant',
++  })
+ 
+ // The full draft behind a pending write approval (EP-10-S1). Only the approval id is an input: the
+ // org and the owner are the verified credential's.
+@@ -1607,6 +1641,8 @@ const approvalsPreviewOutput = z.object({
+   editableFields: z.array(z.string()),
+   actionFingerprint: z.string(),
+   revision: z.number().int().nonnegative(),
++  // The gateway takes "Send with my edits" for this draft (EP-10-S6); server-controlled.
++  canEdit: z.boolean().optional(),
+ })
+ 
+ const chatClearThreadsInput = z.object({})
+@@ -1659,11 +1695,17 @@ const audioDictateInput = z.object({
+  */
+ export const ORCHESTRATION_APPROVAL_REASON_MAX = 1000
+ 
+-export const orchestrationDecideApprovalInput = z.object({
+-  approvalId: z.string().min(1),
+-  decision: z.enum(['approve', 'reject']),
+-  reason: z.string().trim().max(ORCHESTRATION_APPROVAL_REASON_MAX).optional(),
+-})
++export const orchestrationDecideApprovalInput = z
++  .object({
++    approvalId: z.string().min(1),
++    decision: z.enum(['approve', 'reject']),
++    reason: z.string().trim().max(ORCHESTRATION_APPROVAL_REASON_MAX).optional(),
++    // "Send with my edits" (EP-10-S6): approved for this one call only, never with a reject.
++    edit: approvalEditInput.optional(),
++  })
++  .refine((input) => input.edit === undefined || input.decision === 'approve', {
++    message: 'edit_requires_grant',
++  })
+ 
+ const orchestrationResumeRunInput = z.object({
+   runId: z.string().min(1),
+@@ -4043,7 +4085,7 @@ export const actionRegistry = [
+   {
+     id: 'approvals.decide',
+     label: 'Decide an approval',
+-    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
++    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. An approval may carry edit {patch, baseFingerprint}: the person\'s changes to a drafted mail send (to, subject, bodyText only), approved for this one call; an edit with a reject is refused edit_requires_grant, a draft that changed since the person saw it is a 409 approval_changed, and while edits are switched off the server refuses it 403 approval_edit_disabled. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
+     ownerPlane: 'model',
+     risk: 'high',
+     requiresApproval: false,
+@@ -4319,7 +4361,7 @@ export const actionRegistry = [
+   {
+     id: 'orchestration.decide_approval',
+     label: 'Decide orchestration approval',
+-    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on. On a reject, reason may carry redirect text (what the person wants the agent to do instead); it is capped at 1000 characters. A reject with reason aborts the run today unless the owner accepts the redirect.',
++    description: 'Approve or reject a pending orchestration-run approval. This is the human checkpoint the run is waiting on. On a reject, reason may carry redirect text (what the person wants the agent to do instead); it is capped at 1000 characters. A reject with reason aborts the run today unless the owner accepts the redirect. An approve may carry edit {patch, baseFingerprint} (to, subject, bodyText of a drafted mail send), for this one call only: never with a reject, a standing scope or Always; a changed draft is a 409 approval_changed.',
+     ownerPlane: 'model',
+     risk: 'high',
+     requiresApproval: false,
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts
+index c1a1cb0db..be4778269 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts	
+@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import { ApiError } from './http'
+ import {
+   answerQuestion,
++  approvalEditRefusalOf,
+   chatRunContinueFrameRefusalOf,
+   chatRunContinueHttpRefusalOf,
+   chatRunContinueParkFailureOf,
+@@ -190,6 +191,89 @@ describe('decideApproval', () => {
+     expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '' })
+     expect(result?.status).toBe('GRANTED')
+   })
++
++  const edit = { patch: { subject: 'Revised', to: ['a@example.com'] }, baseFingerprint: 'f'.repeat(64) }
++
++  it('sends an edit as {patch, baseFingerprint} with a once approval and nothing else (EP-10-S6)', async () => {
++    const fetchMock = vi.fn().mockResolvedValue(
++      jsonResponse({ approval: { id: 'appr_1', run_id: 'run_1', state: 'APPROVAL_STATE_GRANTED' } }),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    await decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, edit)
++
++    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
++    expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '', edit })
++  })
++
++  it('refuses an edit with a reject, a standing scope, Always or a broken limit before sending', async () => {
++    const fetchMock = vi.fn()
++    vi.stubGlobal('fetch', fetchMock)
++
++    const refusals = [
++      decideApproval('appr_1', 'reject', undefined, undefined, 'once', false, edit),
++      decideApproval('appr_1', 'approve', undefined, undefined, 'thread', false, edit),
++      decideApproval('appr_1', 'approve', undefined, undefined, 'thread', true, edit),
++      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, {
++        ...edit,
++        patch: { subject: 'a\r\nBcc: x@example.com' },
++      }),
++      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, { ...edit, baseFingerprint: 'abc' }),
++      decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, { ...edit, patch: {} }),
++    ]
++    for (const refusal of refusals) {
++      await expect(refusal).rejects.toMatchObject({ status: 400, code: 'invalid_approval_decision' })
++    }
++    expect(fetchMock).not.toHaveBeenCalled()
++  })
++
++  it('surfaces a changed draft and a refused patch as typed edit refusals', async () => {
++    for (const [status, code] of [
++      [409, 'approval_changed'],
++      [422, 'invalid_recipient'],
++      [403, 'approval_edit_disabled'],
++    ] as const) {
++      vi.stubGlobal(
++        'fetch',
++        vi.fn().mockResolvedValue(
++          new Response(JSON.stringify({ error: { code, message: code, details: {} } }), {
++            status,
++            headers: { 'Content-Type': 'application/json' },
++          }),
++        ),
++      )
++      const error = await decideApproval('appr_1', 'approve', undefined, undefined, 'once', false, edit).catch(
++        (failure: unknown) => failure,
++      )
++      expect(error).toBeInstanceOf(ApiError)
++      expect(approvalEditRefusalOf(error)).toBe(code)
++    }
++    expect(approvalEditRefusalOf(new ApiError('x', 500, 'internal'))).toBeNull()
++    expect(approvalEditRefusalOf(new Error('x'))).toBeNull()
++  })
++})
++
++describe('getApprovalPreview can_edit (EP-10-S6)', () => {
++  afterEach(() => {
++    vi.unstubAllGlobals()
++  })
++
++  it('reads can_edit only as the literal true', async () => {
++    for (const [value, expected] of [
++      [true, true],
++      [false, false],
++      ['true', false],
++      [undefined, false],
++    ] as const) {
++      vi.stubGlobal(
++        'fetch',
++        vi.fn().mockResolvedValue(
++          jsonResponse({ preview: { kind: 'mail_send', to: ['a@example.com'], can_edit: value } }),
++        ),
++      )
++      expect((await getApprovalPreview('appr_1'))?.canEdit).toBe(expected)
++    }
++  })
+ })
+ 
+ /** plan-gate §2.2/§2.3: the wire shape `approvePlan`/`rejectPlan` share. */
+@@ -884,6 +968,7 @@ describe('getApprovalPreview (EP-10-S1)', () => {
+       editableFields: ['to', 'subject', 'body_text'],
+       actionFingerprint: 'f'.repeat(64),
+       revision: 0,
++      canEdit: false,
+     })
+   })
+ 
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts
+index ef6a552f7..8ca40abda 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
+@@ -5,6 +5,7 @@ import {
+   orchestrationDecideApprovalInput,
+ } from '@/shared/actions/action-registry'
+ import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
++import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
+ import { ApiError, requestJson } from './http'
+ import { readSseStream, type SseEvent } from './sse'
+ 
+@@ -228,13 +229,22 @@ export async function decideApproval(
+   signal?: AbortSignal,
+   scope: ApprovalScope = 'once',
+   promote = false,
++  edit?: ApprovalEdit,
+ ): Promise<Approval | null> {
+-  const checked = orchestrationDecideApprovalInput.safeParse({ approvalId, decision, reason: reason ?? '' })
+-  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else.
++  const checked = orchestrationDecideApprovalInput.safeParse({
++    approvalId,
++    decision,
++    reason: reason ?? '',
++    ...(edit ? { edit } : {}),
++  })
++  // "Always" (build plan WS13 S7) is an approval of a thread grant and nothing else. An edit
++  // (EP-10-S6, decision D1) is approved for this one call only: never with a standing scope or
++  // "Always". The server refuses both too; refusing here keeps the person from believing it went.
+   if (
+     !checked.success ||
+     !APPROVAL_SCOPES.includes(scope) ||
+-    (promote && (decision !== 'approve' || scope !== 'thread'))
++    (promote && (decision !== 'approve' || scope !== 'thread')) ||
++    (edit !== undefined && (scope !== 'once' || promote))
+   ) {
+     throw new ApiError('Ugyldig godkjenningsavgjørelse.', 400, 'invalid_approval_decision')
+   }
+@@ -242,12 +252,16 @@ export async function decideApproval(
+     `/api/v1/orchestration/approvals/${encodeURIComponent(approvalId)}/decide`,
+     {
+       method: 'POST',
+-      // The scope and "Always" are sent only when asked for: the one decision carries neither field.
++      // The scope, "Always" and an edit are sent only when asked for: the one plain decision
++      // carries none of them, so an unedited approval is byte-identical to before EP-10-S6.
+       body: JSON.stringify({
+         decision,
+         reason: checked.data.reason ?? '',
+         ...(scope === 'once' ? {} : { scope }),
+         ...(promote ? { promote: true } : {}),
++        ...(checked.data.edit
++          ? { edit: { patch: checked.data.edit.patch, baseFingerprint: checked.data.edit.baseFingerprint } }
++          : {}),
+       }),
+       signal,
+     },
+@@ -255,6 +269,42 @@ export async function decideApproval(
+   return payload.approval ? normalizeApproval(payload.approval) : null
+ }
+ 
++/**
++ * "Send with my edits" (EP-10-S6): the person's changes to a drafted mail send and the fingerprint
++ * of the draft they saw (`ApprovalPreview.actionFingerprint`).
++ */
++export type ApprovalEdit = {
++  patch: MailSendPatch
++  baseFingerprint: string
++}
++
++/**
++ * The typed refusals of an edited approval (EP-10-S4 gateway and BFF): the draft changed since it
++ * was read (409 `approval_changed`), it was edited too often (409 `revision_limit`), edits are
++ * switched off or not the caller's (403), or the patch broke a limit (422, the EP-10-S3 codes).
++ */
++export const APPROVAL_EDIT_REFUSALS = [
++  'approval_changed',
++  'revision_limit',
++  'approval_edit_disabled',
++  'edit_owner_only',
++  'edit_requires_grant',
++  'edit_requires_once',
++  'invalid_patch',
++  'invalid_base_fingerprint',
++  ...APPROVAL_EDIT_CODES,
++] as const
++
++export type ApprovalEditRefusal = (typeof APPROVAL_EDIT_REFUSALS)[number]
++
++/** The edit refusal an error carries, or null when it is some other failure. */
++export function approvalEditRefusalOf(error: unknown): ApprovalEditRefusal | null {
++  if (!(error instanceof ApiError) || error.code === null) return null
++  return (APPROVAL_EDIT_REFUSALS as readonly string[]).includes(error.code)
++    ? (error.code as ApprovalEditRefusal)
++    : null
++}
++
+ /**
+  * A rule an "Always" choice on an MCP tool's approval proposed (build plan WS13 S7). It is not a rule
+  * until the person confirms it: confirming writes a digest-pinned user-scope allow.
+@@ -447,6 +497,11 @@ export type ApprovalPreview = {
+   editableFields: string[]
+   actionFingerprint: string
+   revision: number
++  /**
++   * The gateway takes "Send with my edits" for this draft (EP-10-S6): its edit switch is on and the
++   * draft has editable fields. Server-stated, never guessed; absent reads as false.
++   */
++  canEdit?: boolean
+ }
+ 
+ const APPROVAL_PREVIEW_KINDS: ReadonlySet<string> = new Set(['mail_send', 'other', 'none'])
+@@ -491,6 +546,7 @@ export async function getApprovalPreview(
+     editableFields: textList(raw.editable_fields),
+     actionFingerprint: str(raw.action_fingerprint) ?? '',
+     revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
++    canEdit: raw.can_edit === true,
+   }
+ }
+ 
+diff --git a/apps/Frontend Plane/verevonv3/tests/e2e/approval-edit.spec.ts b/apps/Frontend Plane/verevonv3/tests/e2e/approval-edit.spec.ts
+new file mode 100644
+index 000000000..d86025e90
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/tests/e2e/approval-edit.spec.ts	
+@@ -0,0 +1,196 @@
++import { expect, test, type Page, type Route } from '@playwright/test'
++
++/**
++ * "Send with my edits" on a paused mail send (EP-10-S6), in the browser against a mocked API.
++ *
++ * The chat stream, the run's approvals, the draft preview, the decision and the resume are all
++ * answered by this spec (`page.route`), so no model is called and nothing is sent. What is checked:
++ *
++ *  - edit mode appears only when the preview says `can_edit`;
++ *  - the decision body carries exactly `{decision, reason, edit: {patch, baseFingerprint}}`, the
++ *    patch holding only the changed fields, and never a standing scope;
++ *  - a 409 `approval_changed` refetches the draft and keeps the person's text as "Your version";
++ *  - the card works at 1280 and 375 px.
++ *
++ * The full-email disclosure is behind the SPA switch, so run it against a second dev server started
++ * with `VITE_APPROVAL_WRITE_PREVIEW=true` (5173 is the main checkout):
++ *
++ *   E2E_APPROVAL_EDIT=1 LOCAL_E2E_BASE_URL=http://localhost:5174 pnpm exec playwright test --project=chat tests/e2e/approval-edit.spec.ts
++ */
++
++const ENABLED = process.env.E2E_APPROVAL_EDIT === '1'
++const STREAM_PATH = '/api/v1/chat/stream'
++const RUN_ID = 'run_edit_1'
++const APPROVAL_ID = 'appr_edit_1'
++const COMPOSER = 'form textarea'
++
++const APPROVAL = {
++  id: APPROVAL_ID,
++  run_id: RUN_ID,
++  kind: 'APPROVAL_KIND_TOOL_CALL',
++  state: 'APPROVAL_STATE_REQUESTED',
++  cause: {
++    code: 'provider_write',
++    tool: 'execute_provider_action',
++    scope_options: ['once', 'thread'],
++    step_up_required: false,
++  },
++  reason: "send an email to kari@example.com with the subject 'Status'; it opens 'Hei Kari'",
++}
++
++const PREVIEW = {
++  kind: 'mail_send',
++  provider: 'google',
++  operation: 'gmail.send',
++  connection_id: 'conn-1',
++  to: ['kari@example.com'],
++  subject: 'Status',
++  body_text: 'Hei Kari,\n\nHer er statusen for uke 42.\n\nHilsen',
++  has_html: false,
++  is_reply: false,
++  raw_only: false,
++  editable_fields: ['to', 'subject', 'body_text'],
++  action_fingerprint: 'f'.repeat(64),
++  revision: 0,
++  format: 'plain_text',
++  can_edit: true,
++}
++
++/** One server-sent event: `event:` names the frame, `data:` carries its JSON payload. */
++function frame(event: string, data: Record<string, unknown>): string {
++  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
++}
++
++/** A turn that drafts a mail and pauses its run for the person's approval. */
++function pausedTurn(): string {
++  return [
++    frame('connected', { ok: true, request_id: 'edit-req-1', thread_id: 'edit-thread-1', run_id: RUN_ID }),
++    frame('chunk', { delta: 'Jeg har skrevet e-posten. ' }),
++    frame('step_update', { id: RUN_ID, status: 'paused', title: 'Approval' }),
++    frame('done', { request_id: 'edit-req-1', done: true, model_used: 'balanced' }),
++  ].join('')
++}
++
++const json = (route: Route, status: number, body: unknown) =>
++  route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
++
++type Mocks = {
++  previews: Record<string, unknown>[]
++  decideStatus: number[]
++  decisions: unknown[]
++}
++
++/** Answers every endpoint the card touches. Each preview read and each decision takes the next answer. */
++async function mockApi(page: Page, mocks: Mocks) {
++  let previewReads = 0
++  let decides = 0
++  await page.route(`**${STREAM_PATH}`, (route) => {
++    if (route.request().method() !== 'POST') return route.continue()
++    return route.fulfill({ status: 200, contentType: 'text/event-stream', body: pausedTurn() })
++  })
++  await page.route(`**/api/v1/orchestration/runs/${RUN_ID}/approvals`, (route) =>
++    json(route, 200, { data: { approvals: decides > 0 && mocks.decideStatus[decides - 1] === 200 ? [] : [APPROVAL] } }),
++  )
++  await page.route(`**/api/v1/orchestration/approvals/${APPROVAL_ID}/preview`, (route) => {
++    const preview = mocks.previews[Math.min(previewReads, mocks.previews.length - 1)]
++    previewReads += 1
++    return json(route, 200, { data: { preview } })
++  })
++  await page.route(`**/api/v1/orchestration/approvals/${APPROVAL_ID}/decide`, (route) => {
++    mocks.decisions.push(route.request().postDataJSON())
++    const status = mocks.decideStatus[Math.min(decides, mocks.decideStatus.length - 1)] ?? 200
++    decides += 1
++    if (status === 409) {
++      return json(route, 409, {
++        error: {
++          code: 'approval_changed',
++          message: 'This approval changed since you opened it. Review it again.',
++          details: {},
++        },
++      })
++    }
++    return json(route, 200, { data: { approval: { ...APPROVAL, state: 'APPROVAL_STATE_GRANTED' } } })
++  })
++  await page.route(`**/api/v1/orchestration/runs/${RUN_ID}/resume`, (route) => json(route, 200, { data: {} }))
++}
++
++async function pauseOnDraft(page: Page) {
++  await page.addInitScript(() => window.localStorage.setItem('verevon.locale', 'en'))
++  await page.goto('/chat')
++  const composer = page.locator(COMPOSER)
++  await expect(composer).toBeVisible()
++  await composer.fill('Send Kari the status for week 42')
++  await page.locator('form button[type="submit"]').click()
++  const card = page
++    .locator('.verevon-chat-approval')
++    .filter({ has: page.locator('.verevon-chat-approval__disclosure') })
++  await expect(card).toBeVisible()
++  await card.getByRole('button', { name: 'Show the full email' }).click()
++  await expect(card.getByText('Her er statusen for uke 42.', { exact: false })).toBeVisible()
++  return card
++}
++
++test.describe('editable approval card (EP-10-S6)', () => {
++  test.skip(!ENABLED, 'E2E_APPROVAL_EDIT=1 and a dev server with VITE_APPROVAL_WRITE_PREVIEW=true are needed')
++
++  for (const width of [1280, 375]) {
++    test(`sends only the changed fields as a once approval at ${width} px`, async ({ page }) => {
++      await page.setViewportSize({ width, height: 900 })
++      const mocks: Mocks = { previews: [PREVIEW], decideStatus: [200], decisions: [] }
++      await mockApi(page, mocks)
++      const card = await pauseOnDraft(page)
++
++      await card.getByRole('button', { name: 'Edit before sending' }).click()
++      await card.getByLabel(/Subject/).fill('Status for week 42')
++      await expect(card.getByRole('button', { name: 'Approve for this thread' })).toHaveCount(0)
++      // Evidence for the slice: the edit state at this width.
++      await page.screenshot({ path: test.info().outputPath(`approval-edit-${width}.png`) })
++
++      await card.getByRole('button', { name: 'Send with my edits' }).click()
++      await expect.poll(() => mocks.decisions.length).toBe(1)
++      expect(mocks.decisions[0]).toEqual({
++        decision: 'approve',
++        reason: '',
++        edit: { patch: { subject: 'Status for week 42' }, baseFingerprint: 'f'.repeat(64) },
++      })
++      await expect(card).toHaveCount(0)
++    })
++  }
++
++  test('shows no edit mode when the preview does not say can_edit', async ({ page }) => {
++    const mocks: Mocks = { previews: [{ ...PREVIEW, can_edit: false }], decideStatus: [200], decisions: [] }
++    await mockApi(page, mocks)
++    const card = await pauseOnDraft(page)
++
++    await expect(card.getByRole('button', { name: 'Edit before sending' })).toHaveCount(0)
++    await card.getByRole('button', { name: 'Approve', exact: true }).click()
++    await expect.poll(() => mocks.decisions.length).toBe(1)
++    expect(mocks.decisions[0]).toEqual({ decision: 'approve', reason: '' })
++  })
++
++  test("a changed draft refetches the preview and keeps the person's text", async ({ page }) => {
++    const changed = { ...PREVIEW, subject: 'Status (revised by the agent)', action_fingerprint: 'e'.repeat(64) }
++    const mocks: Mocks = { previews: [PREVIEW, changed], decideStatus: [409, 200], decisions: [] }
++    await mockApi(page, mocks)
++    const card = await pauseOnDraft(page)
++
++    await card.getByRole('button', { name: 'Edit before sending' }).click()
++    await card.getByLabel(/Subject/).fill('My subject')
++    await card.getByRole('button', { name: 'Send with my edits' }).click()
++
++    await expect(card.getByText('Your version')).toBeVisible()
++    await expect(card.getByText('My subject')).toBeVisible()
++    await expect(card.getByLabel(/Subject/)).toHaveValue('Status (revised by the agent)')
++    await expect(card.getByRole('alert')).toContainText('The draft changed since you opened it')
++
++    // A second edit is made against the new draft and names its fingerprint.
++    await card.getByLabel(/Subject/).fill('My subject again')
++    await card.getByRole('button', { name: 'Send with my edits' }).click()
++    await expect.poll(() => mocks.decisions.length).toBe(2)
++    expect(mocks.decisions[1]).toEqual({
++      decision: 'approve',
++      reason: '',
++      edit: { patch: { subject: 'My subject again' }, baseFingerprint: 'e'.repeat(64) },
++    })
++  })
++})

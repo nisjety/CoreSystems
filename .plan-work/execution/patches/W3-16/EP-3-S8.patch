@@ -1,0 +1,960 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs
+index 043ccb5e6..cd272cdd4 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs	
+@@ -222,6 +222,13 @@ pub(crate) struct SpaceFeatureFlags {
+     /// the browser sent. A rollout control, never an authorization input: the field is a framing
+     /// hint, is never stored, and grants nothing.
+     pub(crate) chat_locale_hint: bool,
++    /// `CHAT_ARTIFACT_PROMOTE_ENABLED` (EP-3 S8): `POST /api/v1/chat/documents` accepts
++    /// `origin: chat-artifact` with a `source_ref`, refuses a Zero Data Retention caller with the
++    /// typed 412 itself, and the composer capabilities report `artifact_promote`. Only the literal
++    /// `true` turns it on, never by default in development. Off, the route is what it was: `origin`
++    /// and `source_ref` are ignored and every copy is a `chat-attachment`. A rollout control, never
++    /// an authorization input: documents-api decides under the user's own scoped token.
++    pub(crate) chat_artifact_promote: bool,
+     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
+     /// Off restores pass-through. A rollout control, never an authorization input.
+     pub(crate) denials_typed: bool,
+@@ -489,6 +496,9 @@ impl SpaceFeatureFlags {
+             memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
+             agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
+             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
++            chat_artifact_promote: chat_artifact_promote_from(
++                env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
++            ),
+             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
+             dm_api: space_flag("SPACE_DM_API"),
+             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
+@@ -945,6 +955,12 @@ fn model_entitlement_admin_from(value: Option<&str>) -> bool {
+     value == Some("true")
+ }
+ 
++/// Exactly the word `true` (EP-3 S8): a promote switch that a stray `1` turned on would start
++/// copying thread work product into the knowledge base before anyone chose to.
++fn chat_artifact_promote_from(value: Option<&str>) -> bool {
++    value == Some("true")
++}
++
+ fn dev_flags_allowed(app_env: &str) -> bool {
+     !matches!(app_env.to_ascii_lowercase().as_str(), "production" | "prod")
+ }
+@@ -1057,9 +1073,9 @@ fn canonical_public_origin(value: &str, production_like: bool) -> Result<String>
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        canonical_public_origin, continue_park_form_from, dev_flags_allowed,
+-        model_entitlement_admin_from, service_token_is_secure, standard_http_client,
+-        validate_service_token_distinctness,
++        canonical_public_origin, chat_artifact_promote_from, continue_park_form_from,
++        dev_flags_allowed, model_entitlement_admin_from, service_token_is_secure,
++        standard_http_client, validate_service_token_distinctness, SpaceFeatureFlags,
+     };
+ 
+     #[tokio::test]
+@@ -1238,6 +1254,31 @@ mod tests {
+         ] {
+             assert!(!model_entitlement_admin_from(value), "{value:?}");
+         }
++    }
++
++    /// EP-3 S8: the artifact promote switch is on only for the exact word `true`, read once in
++    /// `SpaceFeatureFlags::from_env`, and the documents handler sees it only through `AppState`.
++    #[test]
++    fn the_chat_artifact_promote_flag_is_on_only_for_the_exact_word_true() {
++        assert!(chat_artifact_promote_from(Some("true")));
++        for value in [
++            None,
++            Some(""),
++            Some("false"),
++            Some("TRUE"),
++            Some(" true"),
++            Some("true "),
++            Some("1"),
++            Some("yes"),
++            Some("on"),
++        ] {
++            assert!(!chat_artifact_promote_from(value), "{value:?}");
++        }
++        assert!(!SpaceFeatureFlags::default().chat_artifact_promote);
++        let documents = include_str!("domains/chat/documents.rs").replace("\r\n", "\n");
++        let handlers = documents.split("#[cfg(test)]\nmod tests").next().unwrap_or(&documents);
++        assert!(!handlers.contains("CHAT_ARTIFACT_PROMOTE_ENABLED"), "a handler reads the env");
++        assert!(!handlers.contains("env::var"), "a handler reads the env");
+         let config = include_str!("config.rs").replace("\r\n", "\n");
+         let production = config.split("#[cfg(test)]\nmod tests").next().unwrap_or(&config);
+         assert_eq!(production.matches("\"MODEL_ENTITLEMENT_ADMIN_ENABLED\"").count(), 1);
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs
+index 98a05fbb8..f4bfe33f7 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/documents.rs	
+@@ -40,9 +40,136 @@ fn text_field(payload: &Value, key: &str) -> Option<String> {
+         .map(str::to_owned)
+ }
+ 
++/// The `metadata.origin` of a chat attachment, and the only one while the promote switch is off.
++const CHAT_ATTACHMENT_ORIGIN: &str = "chat-attachment";
++/// The `metadata.origin` of an artifact revision saved to knowledge (EP-3 S8).
++const CHAT_ARTIFACT_ORIGIN: &str = "chat-artifact";
++/// Longest thread or artifact id a `source_ref` may carry. Ids are opaque labels, never content.
++const MAX_SOURCE_REF_ID_CHARS: usize = 256;
++/// The composer capabilities are a handful of booleans; anything larger is not that answer.
++const CAPABILITIES_BODY_LIMIT: usize = 64 * 1024;
++
++/// A body this route refuses with 400 and the typed envelope.
++#[derive(Debug)]
++struct BodyRefusal {
++    code: &'static str,
++    message: &'static str,
++    details: Value,
++}
++
++/// The document's `metadata` (EP-3 S8).
++///
++/// Off, it is the fixed attachment origin whatever the body says, exactly as before the switch
++/// existed. On, the caller may name an origin from the allowlist, and a `chat-artifact` copy must
++/// carry its `source_ref` (thread, artifact, version) so the Data Plane source trace says which
++/// revision it came from. Only those three keys are copied: the rest of the body never reaches
++/// metadata. The reference is the caller's own label for its own copy, not a grant: the copy is
++/// made from the text in the body, under the user's token, and reads nothing from the thread.
++fn document_metadata(payload: &Value, promote_enabled: bool) -> Result<Value, BodyRefusal> {
++    if !promote_enabled {
++        return Ok(json!({ "origin": CHAT_ATTACHMENT_ORIGIN }));
++    }
++    let origin = match payload.get("origin") {
++        None | Some(Value::Null) => CHAT_ATTACHMENT_ORIGIN,
++        Some(Value::String(origin)) if origin == CHAT_ATTACHMENT_ORIGIN => CHAT_ATTACHMENT_ORIGIN,
++        Some(Value::String(origin)) if origin == CHAT_ARTIFACT_ORIGIN => CHAT_ARTIFACT_ORIGIN,
++        Some(_) => {
++            return Err(BodyRefusal {
++                code: "invalid_origin",
++                message: "`origin` must be `chat-attachment` or `chat-artifact`.",
++                details: json!({ "allowed": [CHAT_ATTACHMENT_ORIGIN, CHAT_ARTIFACT_ORIGIN] }),
++            })
++        }
++    };
++    match (origin, payload.get("source_ref").filter(|value| !value.is_null())) {
++        (CHAT_ARTIFACT_ORIGIN, Some(source_ref)) => Ok(json!({
++            "origin": CHAT_ARTIFACT_ORIGIN,
++            "source_ref": parse_source_ref(source_ref)?,
++        })),
++        (CHAT_ARTIFACT_ORIGIN, None) => Err(invalid_source_ref(
++            "A `chat-artifact` copy needs `source_ref` with `thread_id`, `artifact_id` and `version`.",
++        )),
++        (_, Some(_)) => Err(invalid_source_ref(
++            "`source_ref` is only accepted with `origin: chat-artifact`.",
++        )),
++        (origin, None) => Ok(json!({ "origin": origin })),
++    }
++}
++
++/// `{thread_id, artifact_id, version}`: two non-empty ids and a version of at least 1.
++fn parse_source_ref(source_ref: &Value) -> Result<Value, BodyRefusal> {
++    let id = |key: &str| {
++        source_ref
++            .get(key)
++            .and_then(Value::as_str)
++            .map(str::trim)
++            .filter(|value| !value.is_empty() && value.chars().count() <= MAX_SOURCE_REF_ID_CHARS)
++            .map(str::to_owned)
++    };
++    let version = source_ref
++        .get("version")
++        .and_then(Value::as_u64)
++        .filter(|version| *version >= 1);
++    match (id("thread_id"), id("artifact_id"), version) {
++        (Some(thread_id), Some(artifact_id), Some(version)) => Ok(json!({
++            "thread_id": thread_id,
++            "artifact_id": artifact_id,
++            "version": version,
++        })),
++        _ => Err(invalid_source_ref(
++            "`source_ref` needs a `thread_id`, an `artifact_id` and a `version` of at least 1.",
++        )),
++    }
++}
++
++fn invalid_source_ref(message: &'static str) -> BodyRefusal {
++    BodyRefusal {
++        code: "invalid_source_ref",
++        message,
++        details: json!({ "field": "source_ref" }),
++    }
++}
++
++/// Adds `artifact_promote: true` to a successful composer-capabilities answer when the promote
++/// switch is on (EP-3 S8). The switch is the BFF's own, so the gateway cannot report it; the SPA
++/// reads one capabilities answer either way. Off, or for any answer that is not a success, the
++/// response passes through untouched, so a capability is never offered on a guess.
++pub(super) async fn with_promote_capability(response: Response, enabled: bool) -> Response {
++    if !enabled || !response.status().is_success() {
++        return response;
++    }
++    let (mut parts, body) = response.into_parts();
++    let Ok(bytes) = axum::body::to_bytes(body, CAPABILITIES_BODY_LIMIT).await else {
++        // The body is gone; an error the SPA reads as "nothing offered" is the honest answer.
++        return (
++            StatusCode::BAD_GATEWAY,
++            Json(crate::envelope::error(
++                "capabilities_unavailable",
++                "The composer capabilities could not be read.",
++            )),
++        )
++            .into_response();
++    };
++    let mut payload = serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null);
++    let Some(data) = payload.get_mut("data").and_then(Value::as_object_mut) else {
++        return Response::from_parts(parts, axum::body::Body::from(bytes));
++    };
++    data.insert("artifact_promote".to_owned(), Value::Bool(true));
++    // The body changed length; the old header would truncate or stall the reply.
++    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
++    Response::from_parts(parts, axum::body::Body::from(payload.to_string()))
++}
++
+ /// POST /api/v1/chat/documents — persist a chat text attachment as a durable
+ /// Data Plane v2 document so retrieval can ground later turns on it.
+ ///
++/// With `CHAT_ARTIFACT_PROMOTE_ENABLED` on (EP-3 S8) it also saves one artifact
++/// revision to knowledge (`origin: chat-artifact` plus `source_ref`). That copy
++/// is independent of the thread: it follows Data Plane retention and erase, so
++/// deleting the chat leaves it. With the switch on the BFF refuses a Zero Data
++/// Retention caller (request or org posture) with the typed 412 itself, before
++/// documents-api is called, instead of relying on the upstream to refuse.
++///
+ /// This used to forward to model-gateway `/v1/chat/documents`, which is dead:
+ /// that handler calls `DocumentService.CreateDocument` over gRPC, and Data
+ /// Plane v2 has disabled the method, answering every call with
+@@ -70,6 +197,17 @@ pub(crate) async fn upload_chat_document(
+             .into_response();
+     };
+ 
++    let promote_enabled = state.space_features.chat_artifact_promote;
++    if promote_enabled {
++        // A durable copy of chat content is exactly what Zero Data Retention forbids; an
++        // undecidable posture answers 503 rather than guessing.
++        if let Some(refusal) =
++            crate::zdr::durable_write_refusal(&state, &user, Some(&headers), Some(&payload)).await
++        {
++            return refusal.into_response();
++        }
++    }
++
+     // Title and content are the document; without them there is nothing to
+     // ground on, and documents-api would reject the row anyway.
+     let (Some(title), Some(content)) = (
+@@ -88,6 +226,21 @@ pub(crate) async fn upload_chat_document(
+             .into_response();
+     };
+ 
++    let metadata = match document_metadata(&payload, promote_enabled) {
++        Ok(metadata) => metadata,
++        Err(refusal) => {
++            return (
++                StatusCode::BAD_REQUEST,
++                Json(crate::envelope::error_with_details(
++                    refusal.code,
++                    refusal.message,
++                    refusal.details,
++                )),
++            )
++                .into_response()
++        }
++    };
++
+     let org_id = {
+         let resolved = crate::upstream::authorized_org_id(&state, &user).await;
+         (!resolved.is_empty()).then_some(resolved)
+@@ -100,7 +253,7 @@ pub(crate) async fn upload_chat_document(
+         "title": title,
+         "content": content,
+         "zdr_classification": "internal",
+-        "metadata": { "origin": "chat-attachment" },
++        "metadata": metadata,
+     });
+ 
+     // documents-api answers with the document row itself, whose `document_id`
+@@ -120,3 +273,166 @@ pub(crate) async fn upload_chat_document(
+     .await
+     .into_response()
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use axum::http::HeaderValue;
++
++    fn user() -> AuthenticatedUser {
++        AuthenticatedUser {
++            user_id: "user-test".to_owned(),
++            user_email: "user@example.test".to_owned(),
++            user_name: "User Test".to_owned(),
++            user_image: None,
++            email_verified: true,
++            auth_role: Some("member".to_owned()),
++            active_org_id: Some("org-test".to_owned()),
++            authorized_membership: Some(crate::middleware::AuthorizedMembership {
++                organization_id: "org-test".to_owned(),
++                role: "member".to_owned(),
++            }),
++        }
++    }
++
++    fn artifact_body() -> Value {
++        json!({
++            "title": "Rapport",
++            "content": "tekst",
++            "origin": "chat-artifact",
++            "source_ref": { "thread_id": "thread-1", "artifact_id": "report", "version": 2 },
++        })
++    }
++
++    async fn body_json(response: Response) -> Value {
++        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
++        serde_json::from_slice(&bytes).unwrap()
++    }
++
++    #[test]
++    fn origin_allowlist_rejects_unknown() {
++        for origin in [json!("knowledge"), json!("CHAT-ARTIFACT"), json!(""), json!(7)] {
++            let refusal = document_metadata(&json!({ "origin": origin }), true).unwrap_err();
++            assert_eq!(refusal.code, "invalid_origin", "{origin}");
++            // A list travels under a named key: the SPA client drops array details.
++            assert!(refusal.details["allowed"].is_array());
++        }
++        assert_eq!(
++            document_metadata(&json!({}), true).unwrap(),
++            json!({ "origin": "chat-attachment" })
++        );
++        assert_eq!(
++            document_metadata(&json!({ "origin": "chat-attachment" }), true).unwrap(),
++            json!({ "origin": "chat-attachment" })
++        );
++    }
++
++    #[test]
++    fn source_ref_lands_in_metadata() {
++        let mut body = artifact_body();
++        // Keys beyond the three are dropped, and the ids are trimmed.
++        body["source_ref"]["owner"] = json!("someone-else");
++        body["source_ref"]["thread_id"] = json!(" thread-1 ");
++        assert_eq!(
++            document_metadata(&body, true).unwrap(),
++            json!({
++                "origin": "chat-artifact",
++                "source_ref": { "thread_id": "thread-1", "artifact_id": "report", "version": 2 },
++            })
++        );
++    }
++
++    #[test]
++    fn an_artifact_copy_needs_a_whole_source_ref_and_an_attachment_takes_none() {
++        let mut missing = artifact_body();
++        missing.as_object_mut().unwrap().remove("source_ref");
++        assert_eq!(document_metadata(&missing, true).unwrap_err().code, "invalid_source_ref");
++        for broken in [
++            json!({ "thread_id": "thread-1", "artifact_id": "report", "version": 0 }),
++            json!({ "thread_id": "thread-1", "artifact_id": "report", "version": 1.5 }),
++            json!({ "thread_id": "", "artifact_id": "report", "version": 1 }),
++            json!({ "thread_id": "thread-1", "artifact_id": "x".repeat(257), "version": 1 }),
++            json!({ "thread_id": "thread-1", "version": 1 }),
++            json!("thread-1/report/1"),
++        ] {
++            let mut body = artifact_body();
++            body["source_ref"] = broken.clone();
++            let refusal = document_metadata(&body, true).unwrap_err();
++            assert_eq!(refusal.code, "invalid_source_ref", "{broken}");
++            assert_eq!(refusal.details, json!({ "field": "source_ref" }));
++        }
++        let mut attachment = artifact_body();
++        attachment["origin"] = json!("chat-attachment");
++        assert_eq!(document_metadata(&attachment, true).unwrap_err().code, "invalid_source_ref");
++    }
++
++    #[test]
++    fn switch_off_ignores_artifact_origin() {
++        // Off, the metadata is what the route always wrote, and nothing in the body is refused.
++        for body in [
++            artifact_body(),
++            json!({ "origin": "anything", "source_ref": "junk" }),
++            json!({}),
++        ] {
++            assert_eq!(
++                document_metadata(&body, false).unwrap(),
++                json!({ "origin": "chat-attachment" })
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn zdr_caller_refused_412() {
++        let mut state = AppState::for_tests();
++        state.space_features.chat_artifact_promote = true;
++        // The request's own posture decides first, so no upstream is ever called.
++        let mut headers = HeaderMap::new();
++        headers.insert("x-zdr", HeaderValue::from_static("true"));
++        let response = upload_chat_document(
++            State(state.clone()),
++            Extension(user()),
++            headers,
++            Bytes::from(artifact_body().to_string()),
++        )
++        .await;
++        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
++        assert_eq!(
++            body_json(response).await["error"]["code"],
++            json!(crate::zdr::ZDR_DURABLE_MUTATION_FORBIDDEN)
++        );
++
++        // A temporary chat says so in the body; that alone refuses too.
++        let mut body = artifact_body();
++        body["zdr"] = json!(true);
++        let response = upload_chat_document(
++            State(state),
++            Extension(user()),
++            HeaderMap::new(),
++            Bytes::from(body.to_string()),
++        )
++        .await;
++        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
++    }
++
++    #[tokio::test]
++    async fn capabilities_gain_artifact_promote_only_with_the_switch_on() {
++        let answer = || {
++            (StatusCode::OK, Json(json!({ "data": { "artifact_history": true } }))).into_response()
++        };
++        let on = body_json(with_promote_capability(answer(), true).await).await;
++        assert_eq!(on, json!({ "data": { "artifact_history": true, "artifact_promote": true } }));
++
++        let off = body_json(with_promote_capability(answer(), false).await).await;
++        assert_eq!(off, json!({ "data": { "artifact_history": true } }));
++
++        // A failed capabilities read stays a failure: nothing is offered on a guess.
++        let failed = (
++            StatusCode::NOT_FOUND,
++            Json(crate::envelope::error("not_found", "No such route.")),
++        )
++            .into_response();
++        let failed = with_promote_capability(failed, true).await;
++        assert_eq!(failed.status(), StatusCode::NOT_FOUND);
++        assert!(body_json(failed).await["data"].is_null());
++    }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx
+index b24f09643..28f1fe103 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.history.test.tsx	
+@@ -60,6 +60,7 @@ const ON: ComposerCapabilities = {
+   contextRefs: false,
+   threadReferences: false,
+   selectionEdit: false,
++  artifactPromote: false,
+ }
+ 
+ beforeEach(() => {
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.promote.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.promote.test.tsx
+new file mode 100644
+index 000000000..bb9fa7067
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.promote.test.tsx	
+@@ -0,0 +1,152 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import type { ChatDocumentUpload, ComposerCapabilities } from '@/shared/api/chat-client'
++
++// EP-3 S8: a document artifact on the chat surface can be saved to knowledge when the BFF says promote is on.
++
++type UploadOptions = { origin?: string; sourceRef?: { threadId: string; artifactId: string; version: number } }
++
++const capabilitiesMock = vi.hoisted(() => vi.fn<() => Promise<ComposerCapabilities>>())
++const uploadMock = vi.hoisted(() =>
++  vi.fn<(title: string, content: string, options?: UploadOptions) => Promise<ChatDocumentUpload>>(),
++)
++vi.mock('@/shared/api/chat-client', async (importOriginal) => ({
++  ...(await importOriginal<typeof import('@/shared/api/chat-client')>()),
++  getComposerCapabilities: () => capabilitiesMock(),
++  uploadChatDocument: (title: string, content: string, options?: UploadOptions) => uploadMock(title, content, options),
++}))
++
++import { ArtifactsPanel } from './ChatArtifactPanel'
++import type { ArtifactPanelItem, ChatArtifact, ChatTurn } from './chat-types'
++
++const SAVE = 'Lagre kopi i kunnskapsbasen'
++
++function turn(artifact: ChatArtifact): ChatTurn {
++  return {
++    attachments: [],
++    artifacts: [artifact],
++    content: 'Lag et dokument',
++    createdAt: '2026-11-04T10:00:00.000Z',
++    id: 'turn-2',
++    role: 'assistant',
++    streaming: false,
++    tools: [],
++  }
++}
++
++const report: ChatArtifact = {
++  id: 'report',
++  kind: 'document',
++  title: 'Rapport',
++  content: 'andre utkast',
++  version: 2,
++  history: [{ content: 'første utkast', title: 'Rapport', version: 1 }],
++}
++
++function item(artifact: ChatArtifact = report): ArtifactPanelItem {
++  return { artifact, turn: turn(artifact) }
++}
++
++const PROMOTE_ON: ComposerCapabilities = {
++  artifactHistory: false,
++  artifactEditing: false,
++  contextRefs: false,
++  threadReferences: false,
++  selectionEdit: false,
++  artifactPromote: true,
++}
++
++beforeEach(() => {
++  capabilitiesMock.mockResolvedValue(PROMOTE_ON)
++  uploadMock.mockResolvedValue({ documentId: 'doc-9', status: 'queued' })
++})
++
++afterEach(() => {
++  cleanup()
++  capabilitiesMock.mockReset()
++  uploadMock.mockReset()
++})
++
++/** Let the capability read and the upload resolve, then run Solid's queued updates. */
++async function settle() {
++  for (let index = 0; index < 5; index += 1) {
++    await Promise.resolve()
++    flush()
++  }
++}
++
++describe('ArtifactsPanel save to knowledge', () => {
++  it('save_to_knowledge_sends_revision_on_screen', async () => {
++    const { container } = render(() => (
++      <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />
++    ))
++    await vi.waitFor(() => {
++      flush()
++      expect(screen.getByRole('button', { name: SAVE })).toBeTruthy()
++    })
++
++    // Step back to v1: the copy is the revision the person is reading, not the newest one.
++    fireEvent.click(screen.getByRole('button', { name: 'Forrige versjon' }))
++    flush()
++    fireEvent.click(screen.getByRole('button', { name: SAVE }))
++    await settle()
++
++    expect(uploadMock).toHaveBeenCalledTimes(1)
++    expect(uploadMock).toHaveBeenCalledWith('Rapport', 'første utkast', {
++      origin: 'chat-artifact',
++      sourceRef: { threadId: 'thread-1', artifactId: 'report', version: 1 },
++    })
++    // The confirmation says the copy outlives the chat, and links it.
++    expect(container.textContent).toContain('blir værende hvis samtalen slettes')
++    expect(screen.getByRole('link', { name: 'Åpne kopien' }).getAttribute('href')).toBe('/knowledge?source=doc-9')
++  })
++
++  it('a refused save says so and links nothing', async () => {
++    uploadMock.mockRejectedValue(new Error('zdr_durable_mutation_forbidden'))
++    render(() => <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />)
++    const save = await vi.waitFor(() => {
++      flush()
++      return screen.getByRole('button', { name: SAVE })
++    })
++    fireEvent.click(save)
++    await settle()
++    expect(screen.getByRole('alert').textContent).toContain('Kunne ikke lagre kopien')
++    expect(screen.queryByRole('link', { name: 'Åpne kopien' })).toBeNull()
++  })
++
++  it('hidden_for_non_document_kinds', async () => {
++    const code: ChatArtifact = { id: 'script', kind: 'code', title: 'script.ts', content: 'const a = 1', version: 1 }
++    const html: ChatArtifact = { id: 'page', kind: 'html', title: 'Side', content: '<p>hei</p>', version: 1 }
++    for (const artifact of [code, html]) {
++      render(() => <ArtifactsPanel items={[item(artifact)]} history={{ threadId: 'thread-1', temporary: false }} />)
++      await settle()
++      expect(capabilitiesMock).toHaveBeenCalled()
++      expect(screen.queryByRole('button', { name: SAVE })).toBeNull()
++      cleanup()
++    }
++  })
++
++  it('hidden while the BFF says promote is off', async () => {
++    capabilitiesMock.mockResolvedValue({ ...PROMOTE_ON, artifactPromote: false })
++    render(() => <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: false }} />)
++    await settle()
++    expect(capabilitiesMock).toHaveBeenCalledTimes(1)
++    expect(screen.queryByRole('button', { name: SAVE })).toBeNull()
++  })
++
++  it('a temporary thread and a room never offer it', async () => {
++    render(() => <ArtifactsPanel items={[item()]} history={{ threadId: 'thread-1', temporary: true }} />)
++    await settle()
++    expect(screen.queryByRole('button', { name: SAVE })).toBeNull()
++    cleanup()
++
++    render(() => <ArtifactsPanel items={[item()]} surface="room" history={{ threadId: 'thread-1', temporary: false }} />)
++    await settle()
++    expect(screen.queryByRole('button', { name: SAVE })).toBeNull()
++    expect(capabilitiesMock).not.toHaveBeenCalled()
++    expect(uploadMock).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx
+index 565a0b47c..5e1698e82 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx	
+@@ -13,9 +13,15 @@
+  * stored revision (action `chat.list_artifact_revisions`), so the stepper
+  * survives a reload and another device and names who made each revision. A
+  * room and a temporary thread never ask.
++ *
++ * With the BFF's promote switch on (EP-3 S8, `artifact_promote`), a document
++ * artifact in a chat thread can be saved to knowledge (action
++ * `chat.save_artifact_to_knowledge`): the revision on screen becomes an
++ * independent Data Plane document that stays when the chat is deleted.
+  */
+ import {
+   AlertCircle,
++  BookOpen,
+   Check,
+   ChevronLeft,
+   ChevronRight,
+@@ -96,6 +102,7 @@ import {
+   type ArtifactRevision,
+   getComposerCapabilities,
+   listArtifactRevisions,
++  uploadChatDocument,
+ } from '@/shared/api/chat-client'
+ import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
+ import { useI18n } from '@/shared/i18n'
+@@ -158,6 +165,8 @@ export function ArtifactsPanel(props: {
+   const [requestedId, setRequestedId] = createSignal<string | null>(null)
+   /** The thread to read stored history for, once the gateway says its history is on. */
+   const [historyThreadId, setHistoryThreadId] = createSignal<string | null>(null)
++  /** The thread a document revision may be saved to knowledge from, once the BFF says promote is on. */
++  const [promoteThreadId, setPromoteThreadId] = createSignal<string | null>(null)
+   // While the editor is open the other artifacts cannot be picked: switching would drop unsaved text.
+   const [editorOpen, setEditorOpen] = createSignal(false)
+ 
+@@ -169,10 +178,13 @@ export function ArtifactsPanel(props: {
+     },
+     (threadId) => {
+       setHistoryThreadId(null)
++      setPromoteThreadId(null)
+       if (!threadId) return
+       let cancelled = false
+       void getComposerCapabilities().then((capabilities) => {
+-        if (!cancelled && capabilities.artifactHistory) setHistoryThreadId(threadId)
++        if (cancelled) return
++        if (capabilities.artifactHistory) setHistoryThreadId(threadId)
++        if (capabilities.artifactPromote) setPromoteThreadId(threadId)
+       })
+       return () => { cancelled = true }
+     },
+@@ -218,6 +230,7 @@ export function ArtifactsPanel(props: {
+               item={item()}
+               surface={props.surface}
+               historyThreadId={historyThreadId()}
++              promoteThreadId={promoteThreadId()}
+               editing={props.editing}
+               onEditorOpenChange={setEditorOpen}
+             />
+@@ -275,6 +288,8 @@ export function ArtifactViewer(props: {
+   surface?: ViewerSurface
+   /** Set only when the server's history is on for a chat thread that is not temporary. */
+   historyThreadId?: string | null
++  /** Set only when the BFF's promote switch is on for a chat thread that is not temporary (EP-3 S8). */
++  promoteThreadId?: string | null
+   editing?: ArtifactEditing
+   onEditorOpenChange?: (open: boolean) => void
+ }) {
+@@ -303,6 +318,9 @@ export function ArtifactViewer(props: {
+   const [editorOpen, setEditorOpen] = createSignal(false)
+   const [restoring, setRestoring] = createSignal(false)
+   const [restoreFailure, setRestoreFailure] = createSignal<string | null>(null)
++  const [promoting, setPromoting] = createSignal(false)
++  /** The outcome of the last "save to knowledge" for this artifact; `documentId` links the copy. */
++  const [promoteResult, setPromoteResult] = createSignal<{ ok: true; documentId: string } | { ok: false } | null>(null)
+ 
+   const artifact = createMemo(() => savedRevisions().reduce(
+     (carried, saved) => mergeArtifactVersion(carried, {
+@@ -372,6 +390,13 @@ export function ArtifactViewer(props: {
+       && !artifactContentMissing(artifact().content)
+   })
+   const onLatest = createMemo(() => revisionIndex() >= versions().length - 1)
++  /** Save to knowledge (EP-3 S8): a document whose text arrived, on the chat surface, outside the editor. */
++  const canPromote = createMemo(() => Boolean(props.promoteThreadId)
++    && surface() === 'chat'
++    && artifact().kind === 'document'
++    && renderKind() === 'document'
++    && !missing()
++    && !editorOpen())
+ 
+   const openEditor = (open: boolean) => {
+     setEditorOpen(open)
+@@ -410,6 +435,26 @@ export function ArtifactViewer(props: {
+     }
+   }
+ 
++  /** Copies the revision on screen, not the newest one: that is the text the person chose to keep. */
++  const saveToKnowledge = async () => {
++    const threadId = props.promoteThreadId
++    if (!threadId || promoting()) return
++    const shown = displayed()
++    setPromoting(true)
++    setPromoteResult(null)
++    try {
++      const saved = await uploadChatDocument(title(), shown.content, {
++        origin: 'chat-artifact',
++        sourceRef: { threadId, artifactId: shown.id, version: shown.version },
++      })
++      setPromoteResult({ ok: true, documentId: saved.documentId })
++    } catch {
++      setPromoteResult({ ok: false })
++    } finally {
++      setPromoting(false)
++    }
++  }
++
+   // Reset the revision cursor, the HTML source toggle, and any image failure
+   // when the panel switches to a different artifact — a new selection must open
+   // on the newest revision in preview mode. Keyed on the id alone so a version
+@@ -426,6 +471,7 @@ export function ArtifactViewer(props: {
+       setExportFailed(false)
+       setSavedRevisions([])
+       setRestoreFailure(null)
++      setPromoteResult(null)
+       openEditor(false)
+     },
+   )
+@@ -671,6 +717,17 @@ export function ArtifactViewer(props: {
+               </Switch>
+             </button>
+           </Show>
++          <Show when={canPromote()}>
++            <button
++              type="button"
++              class="verevon-chat-artifact-action"
++              disabled={promoting()}
++              onClick={() => void saveToKnowledge()}
++            >
++              <BookOpen size={14} />
++              {i18n.tr('Lagre kopi i kunnskapsbasen', 'Save a copy to knowledge')}
++            </button>
++          </Show>
+           <Show when={renderKind() === 'document' && !missing()}>
+             <MessageMenu
+               align="auto"
+@@ -706,6 +763,31 @@ export function ArtifactViewer(props: {
+       <Show when={restoreFailure()}>
+         {(message) => <p class="verevon-chat-feedback-reasons__note" role="alert">{message()}</p>}
+       </Show>
++      <Show when={promoteResult()}>
++        {(result) => {
++          const outcome = result()
++          return outcome.ok
++            ? (
++              <p class="verevon-chat-feedback-reasons__note" role="status">
++                {i18n.tr(
++                  'Kopien er lagret i kunnskapsbasen. Den blir værende hvis samtalen slettes, og senere endringer her blir ikke med.',
++                  'The copy is saved to knowledge. It stays if the chat is deleted, and later edits here do not carry over.',
++                )}
++                <Show when={outcome.documentId}>
++                  {' '}
++                  <a href={`/knowledge?source=${encodeURIComponent(outcome.documentId)}`}>
++                    {i18n.tr('Åpne kopien', 'Open the copy')}
++                  </a>
++                </Show>
++              </p>
++            )
++            : (
++              <p class="verevon-chat-feedback-reasons__note" role="alert">
++                {i18n.tr('Kunne ikke lagre kopien i kunnskapsbasen. Prøv igjen.', 'Could not save the copy to knowledge. Please try again.')}
++              </p>
++            )
++        }}
++      </Show>
+ 
+       <div class="verevon-chat-artifact-view__body">
+         <Show
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index ef79c1519..793ddaeae 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -789,6 +789,31 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers saving an artifact version to knowledge as an irreversible person-only Data write (EP-3-S8)', () => {
++    const promote = getActionDescriptor('chat.save_artifact_to_knowledge')
++
++    expect(promote).toMatchObject({ ownerPlane: 'data', risk: 'medium', requiresApproval: false, reversible: false })
++    expect(isModelExecutableAction('chat.save_artifact_to_knowledge')).toBe(false)
++    expect(MODEL_ACCESS['chat.save_artifact_to_knowledge']).toMatchObject({ access: 'none' })
++
++    const schema = promote?.inputSchema
++    const valid = { threadId: 't1', artifactId: 'report', version: 2, title: 'Rapport', content: 'tekst' }
++    expect(schema?.safeParse(valid).success).toBe(true)
++    for (const input of [
++      { ...valid, version: 0 },
++      { ...valid, version: 1.5 },
++      { ...valid, threadId: '' },
++      { ...valid, artifactId: 'x'.repeat(257) },
++      { ...valid, content: '   ' },
++      { ...valid, content: 'x'.repeat(200_001) },
++      { threadId: 't1', artifactId: 'report', title: 'Rapport', content: 'tekst' },
++      // The owner is read from the person's token, never named by a client.
++      { ...valid, orgId: 'org_x' },
++    ]) {
++      expect(schema?.safeParse(input).success).toBe(false)
++    }
++  })
++
+   it('registers the cited-passage viewer as a low-risk read the model cannot execute (EP-2-S4)', () => {
+     const open = getActionDescriptor('chat.open_cited_passage')
+ 
+@@ -1251,7 +1276,8 @@ describe('action registry', () => {
+     // +2 after EP-3-S5 registered chat.set_context_refs and chat.pick_context_ref, the composer's context chips.
+     // +2 after EP-2-S5 registered chat.research_plan_start and chat.research_plan_cancel, the deep-research plan card.
+     // +1 after EP-2-S9 registered chat.wide_research_retry_item, the wide-research grid's per-item retry.
+-    expect(ids).toHaveLength(285)
++    // +1 after EP-3-S8 registered chat.save_artifact_to_knowledge, the Output panel's copy to knowledge.
++    expect(ids).toHaveLength(286)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index cba17033d..0841a67ce 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1229,6 +1229,20 @@ const chatRestoreArtifactRevisionInput = z
+   })
+   .strict()
+ 
++// Save one artifact revision to knowledge (EP-3 S8): the text on screen becomes a Data Plane document owned
++// by the person. The ids name the source revision for the document's trace only; the BFF bounds them to 256
++// characters and copies nothing from the thread. No org or user field: documents-api reads the owner from
++// the person's own scoped token.
++const chatSaveArtifactToKnowledgeInput = z
++  .object({
++    threadId: z.string().min(1).max(256),
++    artifactId: z.string().min(1).max(256),
++    version: z.number().int().min(1),
++    title: z.string().trim().min(1).max(256),
++    content: z.string().trim().min(1).max(200_000),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4129,6 +4143,17 @@ export const actionRegistry = [
+     inputSchema: chatRestoreArtifactRevisionInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.save_artifact_to_knowledge',
++    label: 'Save an artifact version to knowledge',
++    description: 'Copy the document artifact version shown in the Output panel into the person\'s knowledge base as a new Data Plane document (origin chat-artifact), with the thread, artifact and version kept in its source trace. The copy is independent: later edits of the artifact do not sync, and it stays when the chat is deleted, under Data Plane retention and erase. Refused under zero data retention and in a temporary chat. Off until the gateway\'s artifact promote switch is on. Not reversible from the chat: the copy is removed from the knowledge page. Never model-executable: a model does not decide what enters the knowledge base.',
++    ownerPlane: 'data',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: false,
++    inputSchema: chatSaveArtifactToKnowledgeInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'chat.submit_feedback',
+     label: 'Submit chat feedback',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index 5abf726c7..5afdbb765 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -3256,6 +3256,16 @@ export type ChatDocumentUpload = {
+   status: string
+ }
+ 
++/** Where a chat document came from; the server refuses any other origin (EP-3 S8). */
++export type ChatDocumentOrigin = 'chat-attachment' | 'chat-artifact'
++
++/** The artifact revision a `chat-artifact` copy was made from, kept in the document's source trace. */
++export type ChatDocumentSourceRef = {
++  threadId: string
++  artifactId: string
++  version: number
++}
++
+ /**
+  * Ingest an attached TEXT document so the conversation can retrieve it.
+  *
+@@ -3272,16 +3282,32 @@ export type ChatDocumentUpload = {
+  *
+  * Refused server-side under ZDR (412) — a temporary chat must not leave a
+  * durable document behind. Callers should skip it rather than rely on that.
++ *
++ * `options.origin` `chat-artifact` with `sourceRef` saves one artifact
++ * revision to knowledge (EP-3 S8, action `chat.save_artifact_to_knowledge`):
++ * the copy is the text sent here, independent of the thread, and the server
++ * honours it only while its promote switch is on. Without options the body is
++ * exactly the attachment body it always was.
+  */
+ export async function uploadChatDocument(
+   title: string,
+   content: string,
++  options: { origin?: ChatDocumentOrigin; sourceRef?: ChatDocumentSourceRef } = {},
+ ): Promise<ChatDocumentUpload> {
++  const body: Record<string, unknown> = { title, content, source: 'chat-upload', type: 'text' }
++  if (options.origin) body.origin = options.origin
++  if (options.sourceRef) {
++    body.source_ref = {
++      thread_id: options.sourceRef.threadId,
++      artifact_id: options.sourceRef.artifactId,
++      version: options.sourceRef.version,
++    }
++  }
+   const raw = await requestJson<Record<string, unknown>>(
+     '/api/v1/chat/documents',
+     {
+       method: 'POST',
+-      body: JSON.stringify({ title, content, source: 'chat-upload', type: 'text' }),
++      body: JSON.stringify(body),
+     },
+   )
+   return {
+@@ -3841,6 +3867,8 @@ export type ComposerCapabilities = {
+   contextRefs: boolean
+   threadReferences: boolean
+   selectionEdit: boolean
++  /** Save an artifact revision to knowledge (EP-3 S8): the BFF's own switch, added to the gateway's answer. */
++  artifactPromote: boolean
+ }
+ 
+ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
+@@ -3849,6 +3877,7 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
+   contextRefs: false,
+   threadReferences: false,
+   selectionEdit: false,
++  artifactPromote: false,
+ }
+ 
+ /**
+@@ -3869,6 +3898,7 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
+     contextRefs: record?.context_refs === true,
+     threadReferences: record?.thread_references === true,
+     selectionEdit: record?.selection_edit === true,
++    artifactPromote: record?.artifact_promote === true,
+   }
+ }
+ 

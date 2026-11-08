@@ -1,0 +1,3656 @@
+diff --git a/apps/Control Plane/org-core/internal/http/retention_handlers.go b/apps/Control Plane/org-core/internal/http/retention_handlers.go
+new file mode 100644
+index 000000000..6b211fea9
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/http/retention_handlers.go	
+@@ -0,0 +1,326 @@
++package http
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"log"
++	"net/http"
++	"strings"
++	"time"
++
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/modelentitlement"
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
++	"github.com/gin-gonic/gin"
++)
++
++// retentionService is the seam the retention routes depend on (EP-9 C1).
++// *retention.Service satisfies it; the handler tests use the real service over an
++// in-memory store, so the real routes and service-auth middleware run without a
++// database.
++type retentionService interface {
++	Policy(ctx context.Context, orgID string) (*retention.Policy, error)
++	PutPolicy(ctx context.Context, orgID string, actor retention.Actor, req retention.PutRequest) (*retention.Policy, error)
++	Holds(ctx context.Context, orgID string) (retention.HoldList, error)
++	PlaceHold(ctx context.Context, orgID string, actor retention.Actor, req retention.PlaceHoldRequest) (retention.PlaceResult, error)
++	ReleaseHold(ctx context.Context, orgID, holdID string, actor retention.Actor) (retention.Hold, error)
++	Check(ctx context.Context, orgID string, req retention.CheckRequest) (retention.CheckResult, error)
++}
++
++// SetRetention wires the retention service (EP-9 C1). With the switch on and no
++// service the routes answer 503 instead of serving a policy they cannot read.
++func (s *Server) SetRetention(service retentionService) {
++	s.retention = service
++}
++
++const (
++	// retentionTimeout bounds one admin read or write.
++	retentionTimeout = 5 * time.Second
++	// retentionCheckTimeout bounds the sweeper's check, as the other internal
++	// reads are bounded, so a slow database fails the pass instead of holding it.
++	retentionCheckTimeout = 3 * time.Second
++)
++
++// The roles each retention act needs, read from org-core's membership table. An
++// admin sets the window; a hold is placed and released by an owner or a
++// compliance member, so an admin who could be the subject of a matter cannot lift
++// it; anyone who may act on holds may read them.
++var (
++	retentionPolicyRoles = []string{"owner", "admin"}
++	legalHoldReadRoles   = []string{"owner", "admin", "compliance"}
++	legalHoldWriteRoles  = []string{"owner", "compliance"}
++)
++
++// registerRetentionRoutes mounts the routes only when ORG_RETENTION_POLICY_ENABLED
++// is "true": off, nothing is mounted and every path answers as it did before.
++func (s *Server) registerRetentionRoutes(v1, internal *gin.RouterGroup, guard gin.HandlerFunc) {
++	if !s.retentionOn {
++		return
++	}
++	// Admin routes, on behalf of a signed user. The handlers check the role against
++	// the membership table; the guard is the same second layer the other mutations
++	// use.
++	v1.GET("/organizations/:id/retention", s.getRetentionPolicy)
++	v1.PUT("/organizations/:id/retention", guard, s.putRetentionPolicy)
++	v1.GET("/organizations/:id/legal-holds", s.listLegalHolds)
++	v1.POST("/organizations/:id/legal-holds", guard, s.placeLegalHold)
++	v1.POST("/organizations/:id/legal-holds/:holdId/release", guard, s.releaseLegalHold)
++	// The sweeper's question (EP-9 C2/C3): the window and which threads are held.
++	// Own scope org:retention-policy:read:any, held by session-core alone; no-store.
++	internal.POST("/orgs/:orgId/retention/check", s.checkRetentionInternal)
++}
++
++// writeRetentionError answers with the typed envelope. details is always an
++// object; a list goes under a named key.
++func writeRetentionError(c *gin.Context, status int, code, message string, details gin.H) {
++	if details == nil {
++		details = gin.H{}
++	}
++	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"code": code, "message": message, "details": details}})
++}
++
++func retentionRoleIn(role string, allowed []string) bool {
++	normalized := modelentitlement.NormalizeRole(role)
++	for _, candidate := range allowed {
++		if normalized == candidate {
++			return true
++		}
++	}
++	return false
++}
++
++// authorizeRetention resolves the caller and their role from org-core's
++// membership table, never from the forwarded header, and requires one of allowed.
++func (s *Server) authorizeRetention(c *gin.Context, orgID string, allowed []string) (retention.Actor, bool) {
++	callerID := strings.TrimSpace(c.GetHeader("x-user-id"))
++	if callerID == "" {
++		writeRetentionError(c, http.StatusUnauthorized, "unauthenticated", "user not authenticated", nil)
++		return retention.Actor{}, false
++	}
++	if s.callerRoles == nil || s.retention == nil {
++		writeRetentionError(c, http.StatusServiceUnavailable, "retention_unavailable", "retention policy unavailable", nil)
++		return retention.Actor{}, false
++	}
++	role, err := s.callerRoles.CallerRole(c.Request.Context(), orgID, callerID)
++	if err != nil {
++		log.Printf("retention: caller role lookup failed for org=%s: %v", orgID, err)
++		writeRetentionError(c, http.StatusInternalServerError, "internal_error", "failed to resolve caller role", nil)
++		return retention.Actor{}, false
++	}
++	if strings.TrimSpace(role) == "" {
++		writeRetentionError(c, http.StatusForbidden, "forbidden", "not a member of this organization", nil)
++		return retention.Actor{}, false
++	}
++	if !retentionRoleIn(role, allowed) {
++		writeRetentionError(c, http.StatusForbidden, "forbidden", "this needs one of these organization roles", gin.H{"roles": allowed})
++		return retention.Actor{}, false
++	}
++	return retention.Actor{ID: callerID, Role: modelentitlement.NormalizeRole(role)}, true
++}
++
++func retentionOrgID(c *gin.Context, param string) (string, bool) {
++	orgID := strings.TrimSpace(c.Param(param))
++	if orgID == "" {
++		writeRetentionError(c, http.StatusBadRequest, "validation_error", "organization id is required", nil)
++		return "", false
++	}
++	return orgID, true
++}
++
++// writeRetentionFailure maps a service error to its typed answer.
++func writeRetentionFailure(c *gin.Context, op, orgID string, err error) {
++	var invalid *retention.ValidationError
++	var conflict *retention.RevisionConflictError
++	switch {
++	case errors.As(err, &invalid):
++		writeRetentionError(c, http.StatusBadRequest, "invalid_retention_request", "invalid retention request", gin.H{"errors": invalid.Errors})
++	case errors.As(err, &conflict):
++		writeRetentionError(c, http.StatusConflict, "revision_conflict", "the retention policy changed since it was read", gin.H{"current_revision": conflict.Current})
++	case errors.Is(err, retention.ErrNothingRetained):
++		writeRetentionError(c, http.StatusUnprocessableEntity, retention.CodeNothingRetained,
++			"Nothing is kept for this thread under zero data retention, so there is nothing to hold.",
++			gin.H{"feature": retention.ZDRFeature})
++	case errors.Is(err, retention.ErrHoldNotFound):
++		writeRetentionError(c, http.StatusNotFound, "legal_hold_not_found", "legal hold not found", nil)
++	case errors.Is(err, retention.ErrHoldAlreadyReleased):
++		writeRetentionError(c, http.StatusConflict, "legal_hold_already_released", "the legal hold was already released", nil)
++	case errors.Is(err, retention.ErrOrganizationNotFound):
++		writeRetentionError(c, http.StatusNotFound, "not_found", "organization not found", nil)
++	default:
++		log.Printf("retention: %s failed for org=%s: %v", op, orgID, err)
++		writeRetentionError(c, http.StatusInternalServerError, "internal_error", "failed to "+op, nil)
++	}
++}
++
++// getRetentionPolicy serves GET /api/v1/organizations/:id/retention. Owner or admin.
++func (s *Server) getRetentionPolicy(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	orgID, ok := retentionOrgID(c, "id")
++	if !ok {
++		return
++	}
++	if _, ok := s.authorizeRetention(c, orgID, retentionPolicyRoles); !ok {
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionTimeout)
++	defer cancel()
++	policy, err := s.retention.Policy(ctx, orgID)
++	if err != nil {
++		writeRetentionFailure(c, "read retention policy", orgID, err)
++		return
++	}
++	c.JSON(http.StatusOK, policy)
++}
++
++// putRetentionPolicy serves PUT /api/v1/organizations/:id/retention. The body
++// carries the revision it was edited from: a stale editor gets 409 with the
++// current revision, never a silent overwrite.
++func (s *Server) putRetentionPolicy(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	orgID, ok := retentionOrgID(c, "id")
++	if !ok {
++		return
++	}
++	actor, ok := s.authorizeRetention(c, orgID, retentionPolicyRoles)
++	if !ok {
++		return
++	}
++	var req retention.PutRequest
++	if !decodeRetentionBody(c, &req) {
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionTimeout)
++	defer cancel()
++	saved, err := s.retention.PutPolicy(ctx, orgID, actor, req)
++	if err != nil {
++		writeRetentionFailure(c, "write retention policy", orgID, err)
++		return
++	}
++	log.Printf("retention: org=%s policy revision=%d written by actor=%s", orgID, saved.Revision, actor.ID)
++	c.JSON(http.StatusOK, saved)
++}
++
++// listLegalHolds serves GET /api/v1/organizations/:id/legal-holds.
++func (s *Server) listLegalHolds(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	orgID, ok := retentionOrgID(c, "id")
++	if !ok {
++		return
++	}
++	if _, ok := s.authorizeRetention(c, orgID, legalHoldReadRoles); !ok {
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionTimeout)
++	defer cancel()
++	holds, err := s.retention.Holds(ctx, orgID)
++	if err != nil {
++		writeRetentionFailure(c, "read legal holds", orgID, err)
++		return
++	}
++	c.JSON(http.StatusOK, holds)
++}
++
++// placeLegalHold serves POST /api/v1/organizations/:id/legal-holds. A hold on a
++// target already held answers 200 with the existing hold; a new one 201.
++func (s *Server) placeLegalHold(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	orgID, ok := retentionOrgID(c, "id")
++	if !ok {
++		return
++	}
++	actor, ok := s.authorizeRetention(c, orgID, legalHoldWriteRoles)
++	if !ok {
++		return
++	}
++	var req retention.PlaceHoldRequest
++	if !decodeRetentionBody(c, &req) {
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionTimeout)
++	defer cancel()
++	result, err := s.retention.PlaceHold(ctx, orgID, actor, req)
++	if err != nil {
++		writeRetentionFailure(c, "place legal hold", orgID, err)
++		return
++	}
++	status := http.StatusCreated
++	if result.Existed {
++		status = http.StatusOK
++	} else {
++		log.Printf("retention: org=%s hold=%s scope=%s placed by actor=%s", orgID, result.Hold.ID, result.Hold.Scope, actor.ID)
++	}
++	c.JSON(status, result)
++}
++
++// releaseLegalHold serves POST /api/v1/organizations/:id/legal-holds/:holdId/release.
++func (s *Server) releaseLegalHold(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	orgID, ok := retentionOrgID(c, "id")
++	if !ok {
++		return
++	}
++	actor, ok := s.authorizeRetention(c, orgID, legalHoldWriteRoles)
++	if !ok {
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionTimeout)
++	defer cancel()
++	hold, err := s.retention.ReleaseHold(ctx, orgID, c.Param("holdId"), actor)
++	if err != nil {
++		writeRetentionFailure(c, "release legal hold", orgID, err)
++		return
++	}
++	log.Printf("retention: org=%s hold=%s released by actor=%s", orgID, hold.ID, actor.ID)
++	c.JSON(http.StatusOK, hold)
++}
++
++// checkRetentionInternal serves POST /internal/orgs/:orgId/retention/check, the
++// sweeper's question. Access requires org:retention-policy:read:any, which only
++// session-core holds. The answer is computed on every call and marked no-store. A
++// missing or deleted organisation is a definitive 404; any other failure is a 5xx,
++// which the sweeper treats as "unknown" and sweeps nothing for that org.
++func (s *Server) checkRetentionInternal(c *gin.Context) {
++	c.Header("Cache-Control", "no-store")
++	orgID, ok := retentionOrgID(c, "orgId")
++	if !ok {
++		return
++	}
++	if s.retention == nil {
++		log.Printf("retention: no service configured for org=%s", orgID)
++		writeRetentionError(c, http.StatusServiceUnavailable, "retention_unavailable", "retention policy unavailable", nil)
++		return
++	}
++	var req retention.CheckRequest
++	if !decodeRetentionBody(c, &req) {
++		return
++	}
++	ctx, cancel := context.WithTimeout(c.Request.Context(), retentionCheckTimeout)
++	defer cancel()
++	result, err := s.retention.Check(ctx, orgID, req)
++	if err != nil {
++		writeRetentionFailure(c, "check retention", orgID, err)
++		return
++	}
++	c.JSON(http.StatusOK, result)
++}
++
++// decodeRetentionBody reads one strict JSON body under the size limit. It writes
++// the refusal itself and reports false when the request must stop.
++func decodeRetentionBody(c *gin.Context, into any) bool {
++	decoder := json.NewDecoder(http.MaxBytesReader(c.Writer, c.Request.Body, retention.MaxBodyBytes))
++	decoder.DisallowUnknownFields()
++	err := decoder.Decode(into)
++	if err == nil {
++		err = ensureJSONEOF(decoder)
++	}
++	if err != nil {
++		var tooLarge *http.MaxBytesError
++		if errors.As(err, &tooLarge) {
++			writeRetentionError(c, http.StatusRequestEntityTooLarge, "body_too_large", "request body too large", nil)
++			return false
++		}
++		writeRetentionError(c, http.StatusBadRequest, "invalid_body", "invalid request body", nil)
++		return false
++	}
++	return true
++}
+diff --git a/apps/Control Plane/org-core/internal/http/retention_handlers_test.go b/apps/Control Plane/org-core/internal/http/retention_handlers_test.go
+new file mode 100644
+index 000000000..f43d763e7
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/http/retention_handlers_test.go	
+@@ -0,0 +1,355 @@
++package http
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"sort"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
++	"github.com/gin-gonic/gin"
++)
++
++const (
++	retentionSessionToken = "ssssssssssssssssssssssssssssssssss"
++	retentionV1Path       = "/api/v1/organizations/" + modelPolicyOrg + "/retention"
++	legalHoldsV1Path      = "/api/v1/organizations/" + modelPolicyOrg + "/legal-holds"
++	retentionCheckPath    = "/internal/orgs/" + modelPolicyOrg + "/retention/check"
++)
++
++// retentionRegistry is the org-core credential registry with the gateway holding
++// the reviewed self scopes and session-core holding the one check scope.
++func retentionRegistry() string {
++	return fmt.Sprintf(`[
++  {"principal":"verevon-gateway","audience":"org-core","token":%q,"scopes":["org:read:self","org:settings:write:self"]},
++  {"principal":"session-core","audience":"org-core","token":%q,"scopes":["org:read:any","org:retention-policy:read:any"]}
++]`, modelPolicyGatewayToken, retentionSessionToken)
++}
++
++// memoryRetentionStore is a retention.Store with the repository's revision
++// compare-and-set and one-active-hold rule, so the real service and the real
++// routes run without a database.
++type memoryRetentionStore struct {
++	mu      sync.Mutex
++	policy  retention.Policy
++	holds   []retention.Hold
++	missing bool
++}
++
++func (m *memoryRetentionStore) GetPolicy(_ context.Context, orgID string) (*retention.Policy, error) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	policy := m.policy
++	policy.OrganizationID = orgID
++	return &policy, nil
++}
++
++func (m *memoryRetentionStore) PutPolicy(_ context.Context, orgID string, actor retention.Actor, expected int64, days *int) (*retention.Policy, error) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	if expected != m.policy.Revision {
++		return nil, &retention.RevisionConflictError{Current: m.policy.Revision}
++	}
++	now := time.Now().UTC()
++	m.policy = retention.Policy{OrganizationID: orgID, ThreadDays: days, Revision: expected + 1, UpdatedBy: actor.ID, UpdatedAt: &now}
++	policy := m.policy
++	return &policy, nil
++}
++
++func (m *memoryRetentionStore) ListHolds(context.Context, string) ([]retention.Hold, error) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	return append([]retention.Hold(nil), m.holds...), nil
++}
++
++func (m *memoryRetentionStore) PlaceHold(_ context.Context, _ string, actor retention.Actor, hold retention.Hold) (retention.PlaceResult, error) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	for _, existing := range m.holds {
++		if existing.Active() && existing.Scope == hold.Scope && existing.TargetRef == hold.TargetRef {
++			return retention.PlaceResult{Hold: existing, Existed: true}, nil
++		}
++	}
++	hold.CreatedBy = actor.ID
++	hold.CreatedAt = time.Now().UTC()
++	m.holds = append(m.holds, hold)
++	return retention.PlaceResult{Hold: hold}, nil
++}
++
++func (m *memoryRetentionStore) ReleaseHold(_ context.Context, _, holdID string, actor retention.Actor) (retention.Hold, error) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	for i, hold := range m.holds {
++		if hold.ID != holdID {
++			continue
++		}
++		if !hold.Active() {
++			return retention.Hold{}, retention.ErrHoldAlreadyReleased
++		}
++		now := time.Now().UTC()
++		releasedBy := actor.ID
++		m.holds[i].ReleasedAt, m.holds[i].ReleasedBy = &now, &releasedBy
++		return m.holds[i], nil
++	}
++	return retention.Hold{}, retention.ErrHoldNotFound
++}
++
++func (m *memoryRetentionStore) Check(_ context.Context, orgID string, ids []string) (retention.CheckResult, error) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	if m.missing {
++		return retention.CheckResult{}, retention.ErrOrganizationNotFound
++	}
++	result := retention.CheckResult{OrganizationID: orgID, WindowDays: m.policy.ThreadDays, Revision: m.policy.Revision}
++	asked := map[string]bool{}
++	for _, id := range ids {
++		asked[id] = true
++	}
++	for _, hold := range m.holds {
++		switch {
++		case !hold.Active():
++		case hold.Scope == retention.ScopeOrg:
++			result.OrgHeld = true
++		case asked[hold.TargetRef]:
++			result.HeldThreadIDs = append(result.HeldThreadIDs, hold.TargetRef)
++		}
++	}
++	sort.Strings(result.HeldThreadIDs)
++	return result, nil
++}
++
++func (m *memoryRetentionStore) ClaimAudit(context.Context, int) ([]retention.AuditRow, error) {
++	return nil, nil
++}
++func (m *memoryRetentionStore) MarkAuditPublished(context.Context, string) error { return nil }
++func (m *memoryRetentionStore) MarkAuditFailed(context.Context, string, error) (bool, error) {
++	return false, nil
++}
++
++// zdrThreads says nothing is retained for the threads it lists.
++type zdrThreads map[string]bool
++
++func (z zdrThreads) NothingRetained(_ context.Context, _, threadID string) (bool, error) {
++	return z[threadID], nil
++}
++
++type retentionHarness struct {
++	router *gin.Engine
++	store  *memoryRetentionStore
++}
++
++// newRetentionHarness mounts the retention routes exactly as server.go does with
++// the switch on, behind the REAL service-auth middleware and the REAL membership
++// guard. The route table itself is pinned by TestRetentionRoutesFollowTheSwitch.
++func newRetentionHarness(t *testing.T, roles map[string]string, threads retention.ThreadRetention) *retentionHarness {
++	t.Helper()
++	credentials, err := parseServiceCredentials(retentionRegistry())
++	if err != nil {
++		t.Fatalf("parse registry: %v", err)
++	}
++	store := &memoryRetentionStore{}
++	server := &Server{callerRoles: fakeCallerRoles{roles: roles}, retentionOn: true}
++	server.SetRetention(retention.NewService(store, threads, nil))
++
++	router := gin.New()
++	router.Use(serviceAuthMiddleware(credentials, time.Now))
++	guard := requireActiveMembership(modelPolicyMembers(roles))
++	server.registerRetentionRoutes(router.Group("/api/v1"), router.Group("/internal"), guard)
++	return &retentionHarness{router: router, store: store}
++}
++
++func (h *retentionHarness) do(method, path, userID string, body []byte) *httptest.ResponseRecorder {
++	request := httptest.NewRequest(method, path, bytes.NewReader(body))
++	if len(body) > 0 {
++		request.Header.Set("Content-Type", "application/json")
++	}
++	signModelPolicyDelegation(request, body, userID, modelPolicyOrg, "")
++	response := httptest.NewRecorder()
++	h.router.ServeHTTP(response, request)
++	return response
++}
++
++func (h *retentionHarness) doAsSessionCore(body []byte) *httptest.ResponseRecorder {
++	request := httptest.NewRequest(http.MethodPost, retentionCheckPath, bytes.NewReader(body))
++	request.Header.Set("Content-Type", "application/json")
++	request.Header.Set("X-Service-Id", "session-core")
++	request.Header.Set("X-Service-Token", retentionSessionToken)
++	response := httptest.NewRecorder()
++	h.router.ServeHTTP(response, request)
++	return response
++}
++
++func jsonBody(value any) []byte {
++	encoded, _ := json.Marshal(value)
++	return encoded
++}
++
++func errorCode(t *testing.T, response *httptest.ResponseRecorder) string {
++	t.Helper()
++	envelope, ok := decodeBody(t, response)["error"].(map[string]any)
++	if !ok {
++		t.Fatalf("the refusal must be a typed envelope: %s", response.Body.String())
++	}
++	if _, ok := envelope["details"].(map[string]any); !ok {
++		t.Fatalf("details must be an object: %s", response.Body.String())
++	}
++	code, _ := envelope["code"].(string)
++	return code
++}
++
++func TestRetentionRoutesFollowTheSwitch(t *testing.T) {
++	routes := []string{
++		"GET /api/v1/organizations/:id/retention",
++		"PUT /api/v1/organizations/:id/retention",
++		"GET /api/v1/organizations/:id/legal-holds",
++		"POST /api/v1/organizations/:id/legal-holds",
++		"POST /api/v1/organizations/:id/legal-holds/:holdId/release",
++		"POST /internal/orgs/:orgId/retention/check",
++	}
++	for _, value := range []string{"", "1", "TRUE", "true"} {
++		t.Setenv(retention.EnvEnabled, value)
++		mounted := map[string]bool{}
++		for _, route := range NewServer(0, nil, nil, "", "").router.Routes() {
++			mounted[route.Method+" "+route.Path] = true
++		}
++		for _, route := range routes {
++			if mounted[route] != (value == "true") {
++				t.Errorf("switch=%q: %s mounted=%v", value, route, mounted[route])
++			}
++		}
++	}
++}
++
++func TestOnlyOwnerAndAdminSetTheRetentionWindow(t *testing.T) {
++	harness := newRetentionHarness(t, map[string]string{"u-owner": "owner", "u-admin": "admin", "u-member": "member", "u-comp": "compliance"}, nil)
++
++	for _, user := range []string{"u-member", "u-comp"} {
++		if response := harness.do(http.MethodPut, retentionV1Path, user, jsonBody(map[string]any{"expected_revision": 0, "thread_days": 90})); response.Code != http.StatusForbidden || errorCode(t, response) != "forbidden" {
++			t.Fatalf("%s must not set the window: status=%d body=%s", user, response.Code, response.Body.String())
++		}
++	}
++	saved := harness.do(http.MethodPut, retentionV1Path, "u-admin", jsonBody(map[string]any{"expected_revision": 0, "thread_days": 90}))
++	if saved.Code != http.StatusOK || saved.Header().Get("Cache-Control") != "no-store" || decodeBody(t, saved)["revision"].(float64) != 1 {
++		t.Fatalf("admin write: status=%d body=%s", saved.Code, saved.Body.String())
++	}
++	stale := harness.do(http.MethodPut, retentionV1Path, "u-owner", jsonBody(map[string]any{"expected_revision": 0, "thread_days": nil}))
++	if stale.Code != http.StatusConflict || errorCode(t, stale) != "revision_conflict" {
++		t.Fatalf("a stale write must be 409: status=%d body=%s", stale.Code, stale.Body.String())
++	}
++	short := harness.do(http.MethodPut, retentionV1Path, "u-owner", jsonBody(map[string]any{"expected_revision": 1, "thread_days": 7}))
++	if short.Code != http.StatusBadRequest || errorCode(t, short) != "invalid_retention_request" {
++		t.Fatalf("a window under 30 days must be refused: status=%d body=%s", short.Code, short.Body.String())
++	}
++	unknown := harness.do(http.MethodPut, retentionV1Path, "u-owner", []byte(`{"expected_revision":1,"thread_days":90,"days":1}`))
++	if unknown.Code != http.StatusBadRequest {
++		t.Fatalf("an unknown field must be refused: status=%d", unknown.Code)
++	}
++	if read := harness.do(http.MethodGet, retentionV1Path, "u-member", nil); read.Code != http.StatusForbidden {
++		t.Fatalf("a member must not read the window: status=%d", read.Code)
++	}
++}
++
++func TestHoldsArePlacedAndReleasedByOwnerOrCompliance(t *testing.T) {
++	harness := newRetentionHarness(t, map[string]string{"u-owner": "owner", "u-admin": "admin", "u-member": "member", "u-comp": "compliance"}, nil)
++	threadHold := jsonBody(map[string]any{"scope": "thread", "thread_id": "thr-1", "hold_ref": "Matter 2026-17"})
++
++	for _, user := range []string{"u-admin", "u-member"} {
++		if response := harness.do(http.MethodPost, legalHoldsV1Path, user, threadHold); response.Code != http.StatusForbidden {
++			t.Fatalf("%s must not place a hold: status=%d", user, response.Code)
++		}
++	}
++	placed := harness.do(http.MethodPost, legalHoldsV1Path, "u-comp", threadHold)
++	if placed.Code != http.StatusCreated {
++		t.Fatalf("compliance placement: status=%d body=%s", placed.Code, placed.Body.String())
++	}
++	holdID := decodeBody(t, placed)["hold"].(map[string]any)["id"].(string)
++	again := harness.do(http.MethodPost, legalHoldsV1Path, "u-owner", threadHold)
++	if again.Code != http.StatusOK || decodeBody(t, again)["existed"] != true {
++		t.Fatalf("a second hold on a held thread answers the first: status=%d body=%s", again.Code, again.Body.String())
++	}
++	if list := harness.do(http.MethodGet, legalHoldsV1Path, "u-admin", nil); list.Code != http.StatusOK || len(decodeBody(t, list)["holds"].([]any)) != 1 {
++		t.Fatalf("an admin reads the holds: status=%d body=%s", list.Code, list.Body.String())
++	}
++	if list := harness.do(http.MethodGet, legalHoldsV1Path, "u-member", nil); list.Code != http.StatusForbidden {
++		t.Fatalf("a member must not read the holds: status=%d", list.Code)
++	}
++
++	releasePath := legalHoldsV1Path + "/" + holdID + "/release"
++	if response := harness.do(http.MethodPost, releasePath, "u-admin", nil); response.Code != http.StatusForbidden {
++		t.Fatalf("an admin must not release a hold: status=%d", response.Code)
++	}
++	if response := harness.do(http.MethodPost, releasePath, "u-owner", nil); response.Code != http.StatusOK {
++		t.Fatalf("owner release: status=%d body=%s", response.Code, response.Body.String())
++	}
++	if response := harness.do(http.MethodPost, releasePath, "u-owner", nil); response.Code != http.StatusConflict || errorCode(t, response) != "legal_hold_already_released" {
++		t.Fatalf("a second release must be 409: status=%d body=%s", response.Code, response.Body.String())
++	}
++	if response := harness.do(http.MethodPost, legalHoldsV1Path+"/lh_"+strings.Repeat("0", 32)+"/release", "u-owner", nil); response.Code != http.StatusNotFound {
++		t.Fatalf("an unknown hold must be 404: status=%d", response.Code)
++	}
++}
++
++func TestThreadHoldOnAZDRThreadIsRefusedWithTheTypedCode(t *testing.T) {
++	harness := newRetentionHarness(t, map[string]string{"u-owner": "owner"}, zdrThreads{"thr-zdr": true})
++	response := harness.do(http.MethodPost, legalHoldsV1Path, "u-owner", jsonBody(map[string]any{"scope": "thread", "thread_id": "thr-zdr", "hold_ref": "Matter"}))
++	if response.Code != http.StatusUnprocessableEntity || errorCode(t, response) != retention.CodeNothingRetained {
++		t.Fatalf("a ZDR thread hold must be legal_hold_nothing_retained: status=%d body=%s", response.Code, response.Body.String())
++	}
++	details := decodeBody(t, response)["error"].(map[string]any)["details"].(map[string]any)
++	if details["feature"] != retention.ZDRFeature {
++		t.Fatalf("the refusal names the zdr feature: %v", details)
++	}
++	// An org hold on a ZDR organisation is allowed.
++	if org := harness.do(http.MethodPost, legalHoldsV1Path, "u-owner", jsonBody(map[string]any{"scope": "org", "hold_ref": "Matter"})); org.Code != http.StatusCreated {
++		t.Fatalf("org hold: status=%d body=%s", org.Code, org.Body.String())
++	}
++}
++
++func TestCheckRouteIsSessionCoresAlone(t *testing.T) {
++	harness := newRetentionHarness(t, map[string]string{"u-owner": "owner", "u-comp": "compliance"}, nil)
++	harness.do(http.MethodPut, retentionV1Path, "u-owner", jsonBody(map[string]any{"expected_revision": 0, "thread_days": 365}))
++	harness.do(http.MethodPost, legalHoldsV1Path, "u-comp", jsonBody(map[string]any{"scope": "thread", "thread_id": "thr-1", "hold_ref": "Matter"}))
++
++	response := harness.doAsSessionCore(jsonBody(map[string]any{"thread_ids": []string{"thr-2", "thr-1"}}))
++	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
++		t.Fatalf("session-core check: status=%d body=%s", response.Code, response.Body.String())
++	}
++	body := decodeBody(t, response)
++	held, _ := body["held_thread_ids"].([]any)
++	if body["window_days"].(float64) != 365 || body["revision"].(float64) != 1 || body["org_held"] != false || len(held) != 1 || held[0] != "thr-1" {
++		t.Fatalf("check answer: %v", body)
++	}
++
++	// The gateway, even on behalf of the owner, cannot ask the sweeper's question.
++	if denied := harness.do(http.MethodPost, retentionCheckPath, "u-owner", jsonBody(map[string]any{"thread_ids": []string{"thr-1"}})); denied.Code != http.StatusForbidden && denied.Code != http.StatusUnauthorized {
++		t.Fatalf("the gateway must not reach the check route: status=%d", denied.Code)
++	}
++
++	tooMany := make([]string, retention.MaxCheckThreadIDs+1)
++	for i := range tooMany {
++		tooMany[i] = fmt.Sprintf("thr-%d", i)
++	}
++	if response := harness.doAsSessionCore(jsonBody(map[string]any{"thread_ids": tooMany})); response.Code != http.StatusBadRequest {
++		t.Fatalf("more than %d ids must be refused: status=%d", retention.MaxCheckThreadIDs, response.Code)
++	}
++
++	harness.store.missing = true
++	if response := harness.doAsSessionCore(jsonBody(map[string]any{"thread_ids": []string{}})); response.Code != http.StatusNotFound {
++		t.Fatalf("a missing organisation is a definitive 404: status=%d", response.Code)
++	}
++}
++
++func TestRetentionScopeIsPinnedToSessionCore(t *testing.T) {
++	if _, err := parseServiceCredentials(fmt.Sprintf(`[
++  {"principal":"model-gateway","audience":"org-core","token":%q,"scopes":["org:retention-policy:read:any"]}
++]`, retentionSessionToken)); err == nil {
++		t.Fatal("only session-core may hold org:retention-policy:read:any")
++	}
++}
+diff --git a/apps/Control Plane/org-core/internal/http/server.go b/apps/Control Plane/org-core/internal/http/server.go
+index a74afc02f..16ca99f3d 100644
+--- a/apps/Control Plane/org-core/internal/http/server.go	
++++ b/apps/Control Plane/org-core/internal/http/server.go	
+@@ -13,6 +13,7 @@ import (
+ 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
+ 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/orgkeys"
+ 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
+ 	"github.com/gin-gonic/gin"
+ )
+ 
+@@ -65,6 +66,12 @@ type Server struct {
+ 	// service they answer 503 keys_unavailable.
+ 	keysOn  bool
+ 	orgKeys orgKeyService
++
++	// retentionOn mounts the retention policy and legal hold routes (EP-9 C1,
++	// ORG_RETENTION_POLICY_ENABLED, only "true" turns it on); retention is set by
++	// SetRetention. Off, none of the routes is mounted.
++	retentionOn bool
++	retention   retentionService
+ }
+ 
+ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
+@@ -147,6 +154,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
+ 	// the service (SetOrgKeys) and refuses to boot without usable master keys
+ 	// (ValidateOrgKeysConfig).
+ 	s.keysOn = orgkeys.Enabled(os.Getenv)
++	s.retentionOn = retention.Enabled(os.Getenv)
+ 	s.setupRoutes()
+ 	s.httpServer = &http.Server{
+ 		Addr:              ":" + strconv.Itoa(port),
+@@ -380,4 +388,7 @@ func (s *Server) setupRoutes() {
+ 	// crypto-shred. Registered only when ORG_CORE_KEYS_ENABLED=1; see
+ 	// keys_handlers.go for the scope of each route.
+ 	s.registerOrgKeyRoutes(internal)
++	// Retention policy and legal holds (EP-9 C1). Mounted only when
++	// ORG_RETENTION_POLICY_ENABLED is "true"; see retention_handlers.go.
++	s.registerRetentionRoutes(v1, internal, guard)
+ }
+diff --git a/apps/Control Plane/org-core/internal/retention/repository.go b/apps/Control Plane/org-core/internal/retention/repository.go
+new file mode 100644
+index 000000000..82e207551
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/repository.go	
+@@ -0,0 +1,492 @@
++package retention
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++)
++
++// Repository stores the policy, the holds, their history and the audit intent.
++// Every write and read runs inside WithOrgScope, so the row-level security of
++// migration 031 is a second tenant filter behind the org_id predicates; only the
++// outbox publisher runs on the owner pool, as the other org-core outboxes do.
++type Repository struct {
++	db *database.DB
++}
++
++func NewRepository(db *database.DB) *Repository {
++	return &Repository{db: db}
++}
++
++// postgresForeignKeyViolation is SQLSTATE 23503.
++const postgresForeignKeyViolation = "23503"
++
++func (r *Repository) ready() error {
++	if r == nil || r.db == nil {
++		return errors.New("retention repository not configured")
++	}
++	return nil
++}
++
++// GetPolicy returns the organisation's policy; revision 0 and keep when none was
++// ever written.
++func (r *Repository) GetPolicy(ctx context.Context, orgID string) (*Policy, error) {
++	if err := r.ready(); err != nil {
++		return nil, err
++	}
++	var policy *Policy
++	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
++		loaded, err := loadPolicy(ctx, tx, orgID, false)
++		policy = loaded
++		return err
++	})
++	if err != nil {
++		return nil, err
++	}
++	return policy, nil
++}
++
++// loadPolicy reads the policy row, FOR UPDATE when a writer is about to replace it,
++// so two writers with one expected revision cannot both win.
++func loadPolicy(ctx context.Context, tx pgx.Tx, orgID string, forUpdate bool) (*Policy, error) {
++	query := `SELECT thread_days, revision, updated_by, updated_at FROM org_retention_policies WHERE org_id = $1`
++	if forUpdate {
++		query += ` FOR UPDATE`
++	}
++	policy := &Policy{OrganizationID: orgID}
++	var updatedAt time.Time
++	err := tx.QueryRow(ctx, query, orgID).Scan(&policy.ThreadDays, &policy.Revision, &policy.UpdatedBy, &updatedAt)
++	if errors.Is(err, pgx.ErrNoRows) {
++		return &Policy{OrganizationID: orgID}, nil
++	}
++	if err != nil {
++		return nil, fmt.Errorf("read retention policy: %w", err)
++	}
++	policy.UpdatedAt = &updatedAt
++	return policy, nil
++}
++
++// PutPolicy replaces the window if expectedRevision is still current, and records
++// the history row and the audit intent in the same transaction.
++func (r *Repository) PutPolicy(ctx context.Context, orgID string, actor Actor, expectedRevision int64, threadDays *int) (*Policy, error) {
++	if err := r.ready(); err != nil {
++		return nil, err
++	}
++	var saved *Policy
++	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
++		before, err := loadPolicy(ctx, tx, orgID, true)
++		if err != nil {
++			return err
++		}
++		if before.Revision != expectedRevision {
++			return &RevisionConflictError{Current: before.Revision}
++		}
++		next := before.Revision + 1
++		if before.Revision == 0 {
++			tag, err := tx.Exec(ctx, `
++INSERT INTO org_retention_policies (org_id, thread_days, revision, updated_by)
++VALUES ($1, $2, $3, $4)
++ON CONFLICT (org_id) DO NOTHING`, orgID, threadDays, next, actor.ID)
++			if err != nil {
++				return mapWriteError(err)
++			}
++			if tag.RowsAffected() == 0 {
++				// Another first write committed between the read and this insert.
++				latest, readErr := loadPolicy(ctx, tx, orgID, true)
++				if readErr != nil {
++					return readErr
++				}
++				return &RevisionConflictError{Current: latest.Revision}
++			}
++		} else if _, err := tx.Exec(ctx, `
++UPDATE org_retention_policies
++SET thread_days = $2, revision = $3, updated_by = $4, updated_at = NOW()
++WHERE org_id = $1`, orgID, threadDays, next, actor.ID); err != nil {
++			return mapWriteError(err)
++		}
++
++		after, err := loadPolicy(ctx, tx, orgID, false)
++		if err != nil {
++			return err
++		}
++		if err := insertHistory(ctx, tx, orgID, "policy", &next, nil, actor.ID,
++			map[string]any{"thread_days": before.ThreadDays},
++			map[string]any{"thread_days": after.ThreadDays}); err != nil {
++			return err
++		}
++		eventID := fmt.Sprintf("retention:org-core:policy:%s:%d", orgDigest(orgID), next)
++		if err := enqueueAudit(ctx, tx, eventID, orgID, actor, "retention_policy:"+orgID, orgID, map[string]any{
++			"action": "policy_set", "revision": next,
++			"thread_days_before": before.ThreadDays, "thread_days": after.ThreadDays,
++		}); err != nil {
++			return err
++		}
++		saved = after
++		return nil
++	})
++	if err != nil {
++		return nil, err
++	}
++	return saved, nil
++}
++
++const holdColumns = `id, org_id, scope, target_ref, hold_ref, created_by, created_at, released_by, released_at`
++
++func scanHold(row pgx.Row) (Hold, error) {
++	var hold Hold
++	err := row.Scan(&hold.ID, &hold.OrganizationID, &hold.Scope, &hold.TargetRef, &hold.HoldRef,
++		&hold.CreatedBy, &hold.CreatedAt, &hold.ReleasedBy, &hold.ReleasedAt)
++	return hold, err
++}
++
++// ListHolds returns every active hold, then the most recent released ones, newest
++// first within each, up to MaxListedHolds rows.
++func (r *Repository) ListHolds(ctx context.Context, orgID string) ([]Hold, error) {
++	if err := r.ready(); err != nil {
++		return nil, err
++	}
++	holds := []Hold{}
++	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
++		rows, err := tx.Query(ctx, `
++SELECT `+holdColumns+`
++FROM org_legal_holds
++WHERE org_id = $1
++ORDER BY (released_at IS NULL) DESC, created_at DESC, id
++LIMIT $2`, orgID, MaxListedHolds)
++		if err != nil {
++			return fmt.Errorf("read legal holds: %w", err)
++		}
++		defer rows.Close()
++		for rows.Next() {
++			hold, err := scanHold(rows)
++			if err != nil {
++				return fmt.Errorf("scan legal hold: %w", err)
++			}
++			holds = append(holds, hold)
++		}
++		return rows.Err()
++	})
++	if err != nil {
++		return nil, err
++	}
++	return holds, nil
++}
++
++// PlaceHold inserts hold unless its target is already held, in which case the
++// active hold is returned with Existed set and nothing is written. The partial
++// unique index decides a race between two placers.
++func (r *Repository) PlaceHold(ctx context.Context, orgID string, actor Actor, hold Hold) (PlaceResult, error) {
++	if err := r.ready(); err != nil {
++		return PlaceResult{}, err
++	}
++	var result PlaceResult
++	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
++		placed, err := scanHold(tx.QueryRow(ctx, `
++INSERT INTO org_legal_holds (id, org_id, scope, target_ref, hold_ref, created_by)
++VALUES ($1, $2, $3, $4, $5, $6)
++ON CONFLICT (org_id, scope, target_ref) WHERE released_at IS NULL DO NOTHING
++RETURNING `+holdColumns, hold.ID, orgID, hold.Scope, hold.TargetRef, hold.HoldRef, actor.ID))
++		if errors.Is(err, pgx.ErrNoRows) {
++			existing, readErr := scanHold(tx.QueryRow(ctx, `
++SELECT `+holdColumns+`
++FROM org_legal_holds
++WHERE org_id = $1 AND scope = $2 AND target_ref = $3 AND released_at IS NULL`, orgID, hold.Scope, hold.TargetRef))
++			if readErr != nil {
++				return fmt.Errorf("read active legal hold: %w", readErr)
++			}
++			result = PlaceResult{Hold: existing, Existed: true}
++			return nil
++		}
++		if err != nil {
++			return mapWriteError(err)
++		}
++		if err := insertHistory(ctx, tx, orgID, "hold_placed", nil, &placed.ID, actor.ID,
++			map[string]any{},
++			map[string]any{"scope": placed.Scope, "target_ref": placed.TargetRef, "hold_ref": placed.HoldRef}); err != nil {
++			return err
++		}
++		if err := enqueueAudit(ctx, tx, "retention:org-core:"+placed.ID+":placed", orgID, actor, "legal_hold:"+placed.ID, placed.ID, map[string]any{
++			"action": "hold_placed", "hold_id": placed.ID, "scope": placed.Scope, "target_ref": placed.TargetRef,
++		}); err != nil {
++			return err
++		}
++		result = PlaceResult{Hold: placed}
++		return nil
++	})
++	if err != nil {
++		return PlaceResult{}, err
++	}
++	return result, nil
++}
++
++// ReleaseHold sets the release columns of one active hold. A hold that was already
++// released is ErrHoldAlreadyReleased, an unknown one ErrHoldNotFound.
++func (r *Repository) ReleaseHold(ctx context.Context, orgID, holdID string, actor Actor) (Hold, error) {
++	if err := r.ready(); err != nil {
++		return Hold{}, err
++	}
++	var released Hold
++	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
++		hold, err := scanHold(tx.QueryRow(ctx, `
++UPDATE org_legal_holds
++SET released_by = $3, released_at = NOW()
++WHERE org_id = $1 AND id = $2 AND released_at IS NULL
++RETURNING `+holdColumns, orgID, holdID, actor.ID))
++		if errors.Is(err, pgx.ErrNoRows) {
++			var exists bool
++			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM org_legal_holds WHERE org_id = $1 AND id = $2)`, orgID, holdID).Scan(&exists); err != nil {
++				return fmt.Errorf("read legal hold: %w", err)
++			}
++			if exists {
++				return ErrHoldAlreadyReleased
++			}
++			return ErrHoldNotFound
++		}
++		if err != nil {
++			return fmt.Errorf("release legal hold: %w", err)
++		}
++		if err := insertHistory(ctx, tx, orgID, "hold_released", nil, &hold.ID, actor.ID,
++			map[string]any{"released": false},
++			map[string]any{"released": true, "scope": hold.Scope, "target_ref": hold.TargetRef}); err != nil {
++			return err
++		}
++		if err := enqueueAudit(ctx, tx, "retention:org-core:"+hold.ID+":released", orgID, actor, "legal_hold:"+hold.ID, hold.ID, map[string]any{
++			"action": "hold_released", "hold_id": hold.ID, "scope": hold.Scope, "target_ref": hold.TargetRef,
++		}); err != nil {
++			return err
++		}
++		released = hold
++		return nil
++	})
++	if err != nil {
++		return Hold{}, err
++	}
++	return released, nil
++}
++
++// Check reads the window, the revision and the active holds that touch threadIDs
++// in one transaction, so a hold placed in between cannot be missed against a
++// policy read before it. A missing or soft-deleted organisation is
++// ErrOrganizationNotFound: the sweeper must find no candidates there, never
++// "no hold".
++func (r *Repository) Check(ctx context.Context, orgID string, threadIDs []string) (CheckResult, error) {
++	if err := r.ready(); err != nil {
++		return CheckResult{}, err
++	}
++	result := CheckResult{OrganizationID: orgID, HeldThreadIDs: []string{}}
++	err := r.db.WithOrgScope(ctx, orgID, func(tx pgx.Tx) error {
++		var live bool
++		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1 AND deleted_at IS NULL)`, orgID).Scan(&live); err != nil {
++			return fmt.Errorf("read organization: %w", err)
++		}
++		if !live {
++			return ErrOrganizationNotFound
++		}
++		policy, err := loadPolicy(ctx, tx, orgID, false)
++		if err != nil {
++			return err
++		}
++		result.WindowDays = policy.ThreadDays
++		result.Revision = policy.Revision
++		if threadIDs == nil {
++			threadIDs = []string{}
++		}
++		rows, err := tx.Query(ctx, `
++SELECT scope, target_ref
++FROM org_legal_holds
++WHERE org_id = $1 AND released_at IS NULL
++  AND (scope = 'org' OR (scope = 'thread' AND target_ref = ANY($2)))
++ORDER BY target_ref`, orgID, threadIDs)
++		if err != nil {
++			return fmt.Errorf("read active legal holds: %w", err)
++		}
++		defer rows.Close()
++		for rows.Next() {
++			var scope, target string
++			if err := rows.Scan(&scope, &target); err != nil {
++				return fmt.Errorf("scan active legal hold: %w", err)
++			}
++			if scope == ScopeOrg {
++				result.OrgHeld = true
++				continue
++			}
++			result.HeldThreadIDs = append(result.HeldThreadIDs, target)
++		}
++		return rows.Err()
++	})
++	if err != nil {
++		return CheckResult{}, err
++	}
++	return result, nil
++}
++
++func insertHistory(ctx context.Context, tx pgx.Tx, orgID, kind string, revision *int64, holdID *string, actorID string, before, after map[string]any) error {
++	beforeJSON, err := json.Marshal(before)
++	if err != nil {
++		return fmt.Errorf("encode retention history: %w", err)
++	}
++	afterJSON, err := json.Marshal(after)
++	if err != nil {
++		return fmt.Errorf("encode retention history: %w", err)
++	}
++	if _, err := tx.Exec(ctx, `
++INSERT INTO org_retention_history (org_id, change_kind, revision, hold_id, actor_id, before_state, after_state)
++VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)`, orgID, kind, revision, holdID, actorID, string(beforeJSON), string(afterJSON)); err != nil {
++		return fmt.Errorf("record retention history: %w", err)
++	}
++	return nil
++}
++
++// auditPayload is content-free by construction: the window, revision, hold id,
++// scope and target id. The hold reference has no path into it (migration 031
++// refuses a payload that carries one).
++func auditPayload(eventID, orgID string, actor Actor, subject, resourceID string, details map[string]any, occurredAt time.Time) map[string]any {
++	return map[string]any{
++		"event_id": eventID, "occurred_at": occurredAt.UTC().Format(time.RFC3339Nano),
++		"org_id": orgID, "user_id": actor.ID, "actor_role": actor.Role,
++		"plane": "control", "producer": "org-core", "event": AuditEvent,
++		"subject": subject, "resource_id": resourceID, "outcome": "ok",
++		"details": details,
++	}
++}
++
++func enqueueAudit(ctx context.Context, tx pgx.Tx, eventID, orgID string, actor Actor, subject, resourceID string, details map[string]any) error {
++	body, err := json.Marshal(auditPayload(eventID, orgID, actor, subject, resourceID, details, time.Now()))
++	if err != nil {
++		return fmt.Errorf("encode retention audit payload: %w", err)
++	}
++	if _, err := tx.Exec(ctx, `
++INSERT INTO org_retention_audit_outbox (event_id, org_id, subject, payload)
++VALUES ($1, $2, $3, $4)`, eventID, orgID, AuditSubject, body); err != nil {
++		return fmt.Errorf("record retention audit outbox: %w", err)
++	}
++	return nil
++}
++
++// orgDigest keeps a policy event id inside the outbox's 128-character bound
++// whatever the length of the organisation id.
++func orgDigest(orgID string) string {
++	sum := sha256.Sum256([]byte(orgID))
++	return hex.EncodeToString(sum[:12])
++}
++
++// ClaimAudit claims up to limit due rows on the owner pool, as the SIEM outbox does.
++func (r *Repository) ClaimAudit(ctx context.Context, limit int) ([]AuditRow, error) {
++	if err := r.ready(); err != nil {
++		return nil, err
++	}
++	tx, err := r.db.Pool.Begin(ctx)
++	if err != nil {
++		return nil, fmt.Errorf("begin retention audit outbox claim: %w", err)
++	}
++	defer func() { _ = tx.Rollback(ctx) }()
++	rows, err := tx.Query(ctx, `
++WITH claimed AS (
++  SELECT event_id
++  FROM org_retention_audit_outbox
++  WHERE published_at IS NULL
++    AND dead_lettered_at IS NULL
++    AND attempts < $2
++    AND next_attempt_at <= NOW()
++    AND (processing_at IS NULL OR processing_at < NOW() - INTERVAL '1 minute')
++  ORDER BY next_attempt_at, created_at, event_id
++  LIMIT $1
++  FOR UPDATE SKIP LOCKED
++)
++UPDATE org_retention_audit_outbox o
++SET processing_at = NOW(), updated_at = NOW()
++FROM claimed
++WHERE o.event_id = claimed.event_id
++RETURNING o.event_id, o.subject, o.payload`, limit, AuditMaxAttempts)
++	if err != nil {
++		return nil, fmt.Errorf("claim retention audit outbox: %w", err)
++	}
++	defer rows.Close()
++	claimed := make([]AuditRow, 0)
++	for rows.Next() {
++		var row AuditRow
++		var body []byte
++		if err := rows.Scan(&row.EventID, &row.Subject, &body); err != nil {
++			return nil, fmt.Errorf("scan retention audit outbox: %w", err)
++		}
++		if err := json.Unmarshal(body, &row.Payload); err != nil {
++			return nil, fmt.Errorf("decode retention audit outbox payload: %w", err)
++		}
++		claimed = append(claimed, row)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("iterate retention audit outbox: %w", err)
++	}
++	if err := tx.Commit(ctx); err != nil {
++		return nil, fmt.Errorf("commit retention audit outbox claim: %w", err)
++	}
++	return claimed, nil
++}
++
++func (r *Repository) MarkAuditPublished(ctx context.Context, eventID string) error {
++	if err := r.ready(); err != nil {
++		return err
++	}
++	result, err := r.db.Pool.Exec(ctx, `
++UPDATE org_retention_audit_outbox
++SET published_at = NOW(), processing_at = NULL, attempts = attempts + 1,
++    last_error = NULL, updated_at = NOW()
++WHERE event_id = $1 AND published_at IS NULL AND dead_lettered_at IS NULL`, eventID)
++	if err != nil {
++		return fmt.Errorf("mark retention audit published: %w", err)
++	}
++	if result.RowsAffected() != 1 {
++		return errors.New("retention audit acknowledgement did not match a pending event")
++	}
++	return nil
++}
++
++func (r *Repository) MarkAuditFailed(ctx context.Context, eventID string, publishErr error) (bool, error) {
++	if err := r.ready(); err != nil {
++		return false, err
++	}
++	message := "unknown audit publish failure"
++	if publishErr != nil {
++		message = publishErr.Error()
++	}
++	if len(message) > 2048 {
++		message = message[:2048]
++	}
++	var deadLettered bool
++	err := r.db.Pool.QueryRow(ctx, `
++UPDATE org_retention_audit_outbox
++SET attempts = attempts + 1,
++    processing_at = NULL,
++    next_attempt_at = NOW() + LEAST(
++      INTERVAL '5 minutes',
++      INTERVAL '1 second' * power(2, LEAST(attempts, 8))
++    ),
++    dead_lettered_at = CASE WHEN attempts + 1 >= $2 THEN NOW() ELSE NULL END,
++    last_error = $3,
++    updated_at = NOW()
++WHERE event_id = $1 AND published_at IS NULL AND dead_lettered_at IS NULL
++RETURNING dead_lettered_at IS NOT NULL`, eventID, AuditMaxAttempts, message).Scan(&deadLettered)
++	if err != nil {
++		if errors.Is(err, pgx.ErrNoRows) {
++			return false, errors.New("retention audit failure did not match a pending event")
++		}
++		return false, fmt.Errorf("record retention audit publish failure: %w", err)
++	}
++	return deadLettered, nil
++}
++
++func mapWriteError(err error) error {
++	var pgErr *pgconn.PgError
++	if errors.As(err, &pgErr) && pgErr.Code == postgresForeignKeyViolation {
++		return ErrOrganizationNotFound
++	}
++	return fmt.Errorf("write retention record: %w", err)
++}
+diff --git a/apps/Control Plane/org-core/internal/retention/repository_postgres_test.go b/apps/Control Plane/org-core/internal/retention/repository_postgres_test.go
+new file mode 100644
+index 000000000..23194ce6e
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/repository_postgres_test.go	
+@@ -0,0 +1,284 @@
++package retention
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
++	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/testfixture"
++	"github.com/jackc/pgx/v5"
++)
++
++// openRetentionLifecycleDB connects to the disposable lifecycle Postgres (the
++// fixture the browser site repository test uses) and applies every migration.
++func openRetentionLifecycleDB(t *testing.T) (context.Context, *database.DB) {
++	t.Helper()
++	dsn := os.Getenv("CONTROL_LIFECYCLE_TEST_DATABASE_URL")
++	if dsn == "" {
++		t.Skip("CONTROL_LIFECYCLE_TEST_DATABASE_URL is not set")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
++	t.Cleanup(cancel)
++	db, err := database.Connect(ctx, dsn)
++	if err != nil {
++		t.Fatalf("connect to disposable Postgres: %v", err)
++	}
++	t.Cleanup(db.Close)
++	if err := testfixture.VerifyLifecycleMarker(ctx, db.Pool, dsn, "org_lifecycle", os.Getenv("CONTROL_LIFECYCLE_FIXTURE_ID")); err != nil {
++		t.Fatalf("refusing unsafe lifecycle database: %v", err)
++	}
++	if err := database.RunMigrations(ctx, db, "../../migrations"); err != nil {
++		t.Fatalf("apply org-core migrations: %v", err)
++	}
++	return ctx, db
++}
++
++func seedRetentionOrganization(t *testing.T, ctx context.Context, db *database.DB, orgID string) {
++	t.Helper()
++	// Migration 010's deferred constraint trigger requires every live organization
++	// to have an active owner by COMMIT, so both rows go in one transaction.
++	tx, err := db.Pool.Begin(ctx)
++	if err != nil {
++		t.Fatalf("begin seed tx for %s: %v", orgID, err)
++	}
++	defer func() { _ = tx.Rollback(ctx) }()
++	if _, err := tx.Exec(ctx, `INSERT INTO organizations (id, name) VALUES ($1, $2)`, orgID, "Retention "+orgID); err != nil {
++		t.Fatalf("seed organization %s: %v", orgID, err)
++	}
++	if _, err := tx.Exec(ctx, `INSERT INTO organization_members (org_id, user_id, role, status) VALUES ($1, $2, 'owner', 'active')`, orgID, "owner-"+orgID); err != nil {
++		t.Fatalf("seed owner for %s: %v", orgID, err)
++	}
++	if err := tx.Commit(ctx); err != nil {
++		t.Fatalf("commit seed tx for %s: %v", orgID, err)
++	}
++}
++
++func hold(id, scope, target string) Hold {
++	return Hold{ID: id, Scope: scope, TargetRef: target, HoldRef: "Matter 2026-17"}
++}
++
++// TestControlLifecycleRetentionRepositoryUnderRLS proves what EP-9 C1 requires of
++// the store: the revision compare-and-set, the window bounds at the database, an
++// append-only history, one active hold per target, release, the check answer,
++// tenant isolation under RLS, a content-free audit intent per write, and that
++// hard-deleting the organisation leaves no row behind.
++func TestControlLifecycleRetentionRepositoryUnderRLS(t *testing.T) {
++	ctx, db := openRetentionLifecycleDB(t)
++	suffix := time.Now().UnixNano()
++	orgA := fmt.Sprintf("org-retention-a-%d", suffix)
++	orgB := fmt.Sprintf("org-retention-b-%d", suffix)
++	seedRetentionOrganization(t, ctx, db, orgA)
++	seedRetentionOrganization(t, ctx, db, orgB)
++	repo := NewRepository(db)
++	actor := Actor{ID: "actor-1", Role: "owner"}
++
++	empty, err := repo.GetPolicy(ctx, orgA)
++	if err != nil || empty.Revision != 0 || empty.ThreadDays != nil {
++		t.Fatalf("a new organisation keeps everything: %+v err=%v", empty, err)
++	}
++	days := 90
++	first, err := repo.PutPolicy(ctx, orgA, actor, 0, &days)
++	if err != nil || first.Revision != 1 || first.ThreadDays == nil || *first.ThreadDays != 90 || first.UpdatedBy != "actor-1" {
++		t.Fatalf("first write: %+v err=%v", first, err)
++	}
++	var conflict *RevisionConflictError
++	if _, err := repo.PutPolicy(ctx, orgA, actor, 0, nil); !errors.As(err, &conflict) || conflict.Current != 1 {
++		t.Fatalf("a stale write must conflict at revision 1, got %v", err)
++	}
++	keep, err := repo.PutPolicy(ctx, orgA, actor, 1, nil)
++	if err != nil || keep.Revision != 2 || keep.ThreadDays != nil {
++		t.Fatalf("setting keep: %+v err=%v", keep, err)
++	}
++
++	// The database refuses a window outside 30..3650 even from a writer that is not
++	// the service.
++	for _, bad := range []int{29, 3651} {
++		err := db.WithOrgScope(ctx, orgA, func(tx pgx.Tx) error {
++			_, err := tx.Exec(ctx, `UPDATE org_retention_policies SET thread_days = $2 WHERE org_id = $1`, orgA, bad)
++			return err
++		})
++		if err == nil {
++			t.Fatalf("a window of %d days must be refused by the table", bad)
++		}
++	}
++
++	// Holds: one active hold per target; placing it again answers the existing one.
++	orgHold, err := repo.PlaceHold(ctx, orgA, actor, hold("lh_"+strings.Repeat("a", 32), ScopeOrg, orgA))
++	if err != nil || orgHold.Existed || orgHold.Hold.TargetRef != orgA || orgHold.Hold.ReleasedAt != nil {
++		t.Fatalf("org hold: %+v err=%v", orgHold, err)
++	}
++	threadHold, err := repo.PlaceHold(ctx, orgA, actor, hold("lh_"+strings.Repeat("b", 32), ScopeThread, "thr-1"))
++	if err != nil || threadHold.Existed {
++		t.Fatalf("thread hold: %+v err=%v", threadHold, err)
++	}
++	again, err := repo.PlaceHold(ctx, orgA, actor, hold("lh_"+strings.Repeat("c", 32), ScopeThread, "thr-1"))
++	if err != nil || !again.Existed || again.Hold.ID != threadHold.Hold.ID {
++		t.Fatalf("a second hold on a held thread must answer the first: %+v err=%v", again, err)
++	}
++	if err := db.WithOrgScope(ctx, orgA, func(tx pgx.Tx) error {
++		_, err := tx.Exec(ctx, `INSERT INTO org_legal_holds (id, org_id, scope, target_ref, hold_ref, created_by) VALUES ($1, $2, 'org', 'other-org', 'm', 'x')`, "lh_"+strings.Repeat("d", 32), orgA)
++		return err
++	}); err == nil {
++		t.Fatal("an org hold must target its own organisation")
++	}
++
++	check, err := repo.Check(ctx, orgA, []string{"thr-1", "thr-2"})
++	if err != nil || !check.OrgHeld || check.Revision != 2 || check.WindowDays != nil || len(check.HeldThreadIDs) != 1 || check.HeldThreadIDs[0] != "thr-1" {
++		t.Fatalf("check must report the org hold and the held thread only: %+v err=%v", check, err)
++	}
++
++	released, err := repo.ReleaseHold(ctx, orgA, orgHold.Hold.ID, Actor{ID: "compliance-1", Role: "compliance"})
++	if err != nil || released.ReleasedAt == nil || released.ReleasedBy == nil || *released.ReleasedBy != "compliance-1" {
++		t.Fatalf("release: %+v err=%v", released, err)
++	}
++	if _, err := repo.ReleaseHold(ctx, orgA, orgHold.Hold.ID, actor); !errors.Is(err, ErrHoldAlreadyReleased) {
++		t.Fatalf("a second release must be ErrHoldAlreadyReleased, got %v", err)
++	}
++	if _, err := repo.ReleaseHold(ctx, orgA, "lh_"+strings.Repeat("e", 32), actor); !errors.Is(err, ErrHoldNotFound) {
++		t.Fatalf("an unknown hold must be ErrHoldNotFound, got %v", err)
++	}
++	if check, err := repo.Check(ctx, orgA, nil); err != nil || check.OrgHeld {
++		t.Fatalf("a released org hold no longer holds: %+v err=%v", check, err)
++	}
++	if replaced, err := repo.PlaceHold(ctx, orgA, actor, hold("lh_"+strings.Repeat("f", 32), ScopeOrg, orgA)); err != nil || replaced.Existed {
++		t.Fatalf("a released target can be held again: %+v err=%v", replaced, err)
++	}
++
++	// The runtime role can neither rewrite a hold nor delete one, nor touch the
++	// history.
++	for _, statement := range []string{
++		`UPDATE org_legal_holds SET target_ref = 'thr-9' WHERE org_id = $1`,
++		`UPDATE org_legal_holds SET hold_ref = 'tampered' WHERE org_id = $1`,
++		`DELETE FROM org_legal_holds WHERE org_id = $1`,
++		`DELETE FROM org_retention_policies WHERE org_id = $1`,
++		`UPDATE org_retention_history SET actor_id = 'tampered' WHERE org_id = $1`,
++		`DELETE FROM org_retention_history WHERE org_id = $1`,
++		`UPDATE org_retention_audit_outbox SET payload = '{}'::jsonb WHERE org_id = $1`,
++		`DELETE FROM org_retention_audit_outbox WHERE org_id = $1`,
++	} {
++		err := db.WithOrgScope(ctx, orgA, func(tx pgx.Tx) error {
++			_, err := tx.Exec(ctx, statement, orgA)
++			return err
++		})
++		if err == nil {
++			t.Fatalf("org_core_app must not be able to run %q", statement)
++		}
++	}
++
++	var history int
++	if err := db.Pool.QueryRow(ctx, `
++SELECT count(*) FROM org_retention_history WHERE org_id = $1`, orgA).Scan(&history); err != nil || history != 6 {
++		t.Fatalf("history rows = %d err=%v; want 2 policy writes, 3 placements, 1 release", history, err)
++	}
++	var audits int
++	var leaked int
++	if err := db.Pool.QueryRow(ctx, `
++SELECT count(*), count(*) FILTER (WHERE payload::text LIKE '%Matter 2026-17%')
++FROM org_retention_audit_outbox WHERE org_id = $1 AND subject = $2`, orgA, AuditSubject).Scan(&audits, &leaked); err != nil || audits != 6 || leaked != 0 {
++		t.Fatalf("audit intents = %d (hold reference in %d) err=%v; want 6 with no reference", audits, leaked, err)
++	}
++
++	// Tenant isolation: B's scope reads and writes none of A's rows.
++	if other, err := repo.Check(ctx, orgB, []string{"thr-1"}); err != nil || other.OrgHeld || len(other.HeldThreadIDs) != 0 || other.Revision != 0 {
++		t.Fatalf("organisation B must not see A's holds or policy: %+v err=%v", other, err)
++	}
++	for _, table := range []string{"org_retention_policies", "org_legal_holds", "org_retention_history", "org_retention_audit_outbox"} {
++		var visible int
++		err := db.WithOrgScope(ctx, orgB, func(tx pgx.Tx) error {
++			return tx.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE org_id = $1`, table), orgA).Scan(&visible)
++		})
++		if err != nil || visible != 0 {
++			t.Fatalf("RLS leaked %d %s rows of A into B's scope (err=%v)", visible, table, err)
++		}
++	}
++	if err := db.WithOrgScope(ctx, orgB, func(tx pgx.Tx) error {
++		_, err := tx.Exec(ctx, `INSERT INTO org_legal_holds (id, org_id, scope, target_ref, hold_ref, created_by) VALUES ($1, $2, 'thread', 'thr-x', 'm', 'x')`, "lh_"+strings.Repeat("9", 32), orgA)
++		return err
++	}); err == nil {
++		t.Fatal("a hold for A under B's scope must be refused by RLS")
++	}
++
++	// A write for an organisation that does not exist is a typed error, and the
++	// check route treats a missing organisation as not found, never as "no hold".
++	missing := fmt.Sprintf("org-retention-missing-%d", suffix)
++	if _, err := repo.PutPolicy(ctx, missing, actor, 0, &days); !errors.Is(err, ErrOrganizationNotFound) {
++		t.Fatalf("a write for a missing organisation must be ErrOrganizationNotFound, got %v", err)
++	}
++	if _, err := repo.Check(ctx, missing, nil); !errors.Is(err, ErrOrganizationNotFound) {
++		t.Fatalf("a check for a missing organisation must be ErrOrganizationNotFound, got %v", err)
++	}
++
++	// Erasure: hard-deleting the organisation takes every row with it through the
++	// foreign keys, without gdpr_hard_delete_organization being redefined. The audit
++	// outbox has no foreign key, as the other outboxes, so an erasure's audit trail
++	// is not erased with it.
++	var receipt []byte
++	if err := db.Pool.QueryRow(ctx, `SELECT gdpr_hard_delete_organization($1)::text`, orgA).Scan(&receipt); err != nil {
++		t.Fatalf("hard delete: %v", err)
++	}
++	var outcome struct {
++		Success bool `json:"success"`
++	}
++	if err := json.Unmarshal(receipt, &outcome); err != nil || !outcome.Success {
++		t.Fatalf("hard delete did not succeed: %s (%v)", receipt, err)
++	}
++	for _, table := range []string{"org_retention_policies", "org_legal_holds", "org_retention_history"} {
++		var left int
++		if err := db.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE org_id = $1`, table), orgA).Scan(&left); err != nil || left != 0 {
++			t.Fatalf("%d %s rows survived the hard delete of the organisation (err=%v)", left, table, err)
++		}
++	}
++}
++
++// TestControlLifecycleRetentionGrantsAreLeastPrivilege pins what org_core_app may
++// do on each table migration 031 creates. 009's default privileges would otherwise
++// give it all four on every one of them (D1-751).
++func TestControlLifecycleRetentionGrantsAreLeastPrivilege(t *testing.T) {
++	ctx, db := openRetentionLifecycleDB(t)
++	want := map[string]string{
++		"org_retention_policies":     "SELECT,INSERT",
++		"org_legal_holds":            "SELECT,INSERT",
++		"org_retention_history":      "SELECT,INSERT",
++		"org_retention_audit_outbox": "SELECT,INSERT",
++	}
++	for table, need := range want {
++		var canSelect, canInsert, canUpdate, canDelete bool
++		if err := db.Pool.QueryRow(ctx, `
++SELECT has_table_privilege('org_core_app', $1::text, 'SELECT'),
++       has_table_privilege('org_core_app', $1::text, 'INSERT'),
++       has_table_privilege('org_core_app', $1::text, 'UPDATE'),
++       has_table_privilege('org_core_app', $1::text, 'DELETE')`, table).Scan(&canSelect, &canInsert, &canUpdate, &canDelete); err != nil {
++			t.Fatalf("inspect org_core_app privileges on %s: %v", table, err)
++		}
++		var got []string
++		for name, held := range map[string]bool{"SELECT": canSelect, "INSERT": canInsert, "UPDATE": canUpdate, "DELETE": canDelete} {
++			if held {
++				got = append(got, name)
++			}
++		}
++		if canUpdate || canDelete || !canSelect || !canInsert {
++			t.Errorf("org_core_app holds %v on %s; the code needs %s (and column UPDATE where stated)", got, table, need)
++		}
++	}
++	columnUpdate := map[string]map[string]bool{
++		"org_retention_policies": {"thread_days": true, "revision": true, "updated_by": true, "updated_at": true, "org_id": false},
++		"org_legal_holds":        {"released_by": true, "released_at": true, "scope": false, "target_ref": false, "hold_ref": false, "org_id": false, "created_by": false},
++	}
++	for table, columns := range columnUpdate {
++		for column, need := range columns {
++			var held bool
++			if err := db.Pool.QueryRow(ctx, `SELECT has_column_privilege('org_core_app', $1::text, $2::text, 'UPDATE')`, table, column).Scan(&held); err != nil {
++				t.Fatalf("inspect column privilege %s.%s: %v", table, column, err)
++			}
++			if held != need {
++				t.Errorf("org_core_app UPDATE on %s.%s = %v, want %v", table, column, held, need)
++			}
++		}
++	}
++}
+diff --git a/apps/Control Plane/org-core/internal/retention/service.go b/apps/Control Plane/org-core/internal/retention/service.go
+new file mode 100644
+index 000000000..9162c0293
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/service.go	
+@@ -0,0 +1,251 @@
++package retention
++
++import (
++	"context"
++	"crypto/rand"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"log"
++	"strings"
++)
++
++// ErrOrganizationNotFound is returned for an organisation that does not exist (a
++// write) or is not live (the check route). Reads of a live organisation that never
++// wrote a policy return revision 0 and keep.
++var ErrOrganizationNotFound = errors.New("organization not found")
++
++// ErrHoldNotFound means the organisation has no hold with that id.
++var ErrHoldNotFound = errors.New("legal hold not found")
++
++// ErrHoldAlreadyReleased means the hold was released before; a release is never
++// repeated, so the first releaser stays the one on record.
++var ErrHoldAlreadyReleased = errors.New("legal hold already released")
++
++// ErrNothingRetained refuses a thread hold on a thread whose content was never
++// retained (CodeNothingRetained).
++var ErrNothingRetained = errors.New("nothing is retained for this thread")
++
++// RevisionConflictError means the write named a revision that is no longer the
++// current one. Current is the revision the caller should re-read and retry from.
++type RevisionConflictError struct {
++	Current int64
++}
++
++func (e *RevisionConflictError) Error() string {
++	return fmt.Sprintf("retention policy revision conflict: current revision is %d", e.Current)
++}
++
++// Actor is who made a write, as the audit row records it. Role is the caller's
++// role from org-core's membership table, never a forwarded header.
++type Actor struct {
++	ID   string
++	Role string
++}
++
++// AuditRow is one claimed outbox row.
++type AuditRow struct {
++	EventID string
++	Subject string
++	Payload map[string]any
++}
++
++// FlushResult counts one publisher pass.
++type FlushResult struct {
++	Published    int
++	DeadLettered int
++}
++
++// Store is the persistence the service needs. *Repository satisfies it; the HTTP
++// tests use an in-memory store so the real service and routes run without a
++// database.
++type Store interface {
++	GetPolicy(ctx context.Context, orgID string) (*Policy, error)
++	PutPolicy(ctx context.Context, orgID string, actor Actor, expectedRevision int64, threadDays *int) (*Policy, error)
++	ListHolds(ctx context.Context, orgID string) ([]Hold, error)
++	PlaceHold(ctx context.Context, orgID string, actor Actor, hold Hold) (PlaceResult, error)
++	ReleaseHold(ctx context.Context, orgID, holdID string, actor Actor) (Hold, error)
++	Check(ctx context.Context, orgID string, threadIDs []string) (CheckResult, error)
++	ClaimAudit(ctx context.Context, limit int) ([]AuditRow, error)
++	MarkAuditPublished(ctx context.Context, eventID string) error
++	MarkAuditFailed(ctx context.Context, eventID string, publishErr error) (deadLettered bool, err error)
++}
++
++// ThreadRetention answers whether session-core retained any content for a thread.
++// NothingRetained is true only for a thread whose retention receipt says Zero
++// Data Retention or a waived run (DEC-32). session-core owns that receipt; org-core
++// never reads its database.
++type ThreadRetention interface {
++	NothingRetained(ctx context.Context, orgID, threadID string) (bool, error)
++}
++
++// AuditPublisher is satisfied by org-core's NATS client (PublishAudit), the same
++// seam as org.AuditPublisher; declared here so this package does not import org.
++type AuditPublisher interface {
++	PublishAudit(ctx context.Context, subject, eventID string, payload map[string]any) error
++}
++
++// Service is the one place the retention policy and holds are validated, written
++// and answered.
++type Service struct {
++	store     Store
++	threads   ThreadRetention
++	publisher AuditPublisher
++}
++
++// NewService builds the service. threads may be nil: a thread hold is then placed
++// without asking whether anything is retained, because an unneeded hold deletes
++// nothing while a wrongly refused one could let held content be swept. publisher
++// may be nil until the outbox loop is wired; writes still record their audit
++// intent.
++func NewService(store Store, threads ThreadRetention, publisher AuditPublisher) *Service {
++	return &Service{store: store, threads: threads, publisher: publisher}
++}
++
++// Policy returns the stored policy for the admin read.
++func (s *Service) Policy(ctx context.Context, orgID string) (*Policy, error) {
++	return s.store.GetPolicy(ctx, orgID)
++}
++
++// PutPolicy validates the body and replaces the organisation's window. A body that
++// fails validation is a *ValidationError and writes nothing.
++func (s *Service) PutPolicy(ctx context.Context, orgID string, actor Actor, req PutRequest) (*Policy, error) {
++	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.Role) == "" {
++		return nil, errors.New("an actor id and role are required to write a retention policy")
++	}
++	if err := ValidatePut(req); err != nil {
++		return nil, err
++	}
++	return s.store.PutPolicy(ctx, orgID, actor, *req.ExpectedRevision, req.ThreadDays)
++}
++
++// Holds returns the organisation's holds for the admin read.
++func (s *Service) Holds(ctx context.Context, orgID string) (HoldList, error) {
++	holds, err := s.store.ListHolds(ctx, orgID)
++	if err != nil {
++		return HoldList{}, err
++	}
++	if holds == nil {
++		holds = []Hold{}
++	}
++	return HoldList{OrganizationID: orgID, Holds: holds}, nil
++}
++
++// PlaceHold validates and places a hold. A thread hold on a thread whose content
++// was never retained is refused with ErrNothingRetained. When the retention answer
++// is unavailable the hold is placed: holding too much is recoverable by a release,
++// holding too little is not.
++func (s *Service) PlaceHold(ctx context.Context, orgID string, actor Actor, req PlaceHoldRequest) (PlaceResult, error) {
++	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.Role) == "" {
++		return PlaceResult{}, errors.New("an actor id and role are required to place a legal hold")
++	}
++	scope, target, holdRef, err := NormalizePlace(orgID, req)
++	if err != nil {
++		return PlaceResult{}, err
++	}
++	if scope == ScopeThread && s.threads != nil {
++		nothing, err := s.threads.NothingRetained(ctx, orgID, target)
++		switch {
++		case err != nil:
++			log.Printf("retention: thread retention unknown for org=%s, placing the hold: %v", orgID, err)
++		case nothing:
++			return PlaceResult{}, ErrNothingRetained
++		}
++	}
++	id, err := newHoldID()
++	if err != nil {
++		return PlaceResult{}, err
++	}
++	return s.store.PlaceHold(ctx, orgID, actor, Hold{
++		ID:             id,
++		OrganizationID: orgID,
++		Scope:          scope,
++		TargetRef:      target,
++		HoldRef:        holdRef,
++		CreatedBy:      actor.ID,
++	})
++}
++
++// ReleaseHold releases one active hold.
++func (s *Service) ReleaseHold(ctx context.Context, orgID, holdID string, actor Actor) (Hold, error) {
++	if strings.TrimSpace(actor.ID) == "" || strings.TrimSpace(actor.Role) == "" {
++		return Hold{}, errors.New("an actor id and role are required to release a legal hold")
++	}
++	holdID = strings.TrimSpace(holdID)
++	if !validHoldID(holdID) {
++		return Hold{}, ErrHoldNotFound
++	}
++	return s.store.ReleaseHold(ctx, orgID, holdID, actor)
++}
++
++// Check answers the sweeper: the window, the revision, whether the org is held,
++// and which of the asked threads are held. Computed on every call; never cached.
++func (s *Service) Check(ctx context.Context, orgID string, req CheckRequest) (CheckResult, error) {
++	ids, err := NormalizeCheck(req)
++	if err != nil {
++		return CheckResult{}, err
++	}
++	result, err := s.store.Check(ctx, orgID, ids)
++	if err != nil {
++		return CheckResult{}, err
++	}
++	if result.HeldThreadIDs == nil {
++		result.HeldThreadIDs = []string{}
++	}
++	result.OrganizationID = orgID
++	return result, nil
++}
++
++// FlushAuditOutbox publishes pending retention audit intents, the same loop the
++// SIEM and identity outboxes run.
++func (s *Service) FlushAuditOutbox(ctx context.Context, limit int) (FlushResult, error) {
++	if limit < 1 || limit > 1000 {
++		return FlushResult{}, errors.New("retention audit outbox limit must be between 1 and 1000")
++	}
++	if s.publisher == nil {
++		return FlushResult{}, errors.New("retention audit publisher is unavailable")
++	}
++	rows, err := s.store.ClaimAudit(ctx, limit)
++	if err != nil {
++		return FlushResult{}, err
++	}
++	result := FlushResult{}
++	var publishErrors error
++	for _, row := range rows {
++		if err := s.publisher.PublishAudit(ctx, row.Subject, row.EventID, row.Payload); err != nil {
++			deadLettered, markErr := s.store.MarkAuditFailed(ctx, row.EventID, err)
++			if deadLettered {
++				result.DeadLettered++
++			}
++			publishErrors = errors.Join(publishErrors, err, markErr)
++			continue
++		}
++		if err := s.store.MarkAuditPublished(ctx, row.EventID); err != nil {
++			publishErrors = errors.Join(publishErrors, err)
++			continue
++		}
++		result.Published++
++	}
++	return result, publishErrors
++}
++
++// newHoldID is "lh_" and 32 hex characters, the shape migration 031 checks.
++func newHoldID() (string, error) {
++	var raw [16]byte
++	if _, err := rand.Read(raw[:]); err != nil {
++		return "", fmt.Errorf("generate legal hold id: %w", err)
++	}
++	return "lh_" + hex.EncodeToString(raw[:]), nil
++}
++
++func validHoldID(id string) bool {
++	if len(id) != 35 || !strings.HasPrefix(id, "lh_") {
++		return false
++	}
++	for _, c := range id[3:] {
++		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/apps/Control Plane/org-core/internal/retention/service_test.go b/apps/Control Plane/org-core/internal/retention/service_test.go
+new file mode 100644
+index 000000000..27ef9a545
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/service_test.go	
+@@ -0,0 +1,126 @@
++package retention
++
++import (
++	"context"
++	"errors"
++	"testing"
++)
++
++// recordingStore is a Store that records the hold it was asked to place and
++// serves canned audit rows; the rest answer nothing.
++type recordingStore struct {
++	placed    *Hold
++	audit     []AuditRow
++	published []string
++	failed    []string
++}
++
++func (s *recordingStore) GetPolicy(context.Context, string) (*Policy, error) { return &Policy{}, nil }
++func (s *recordingStore) PutPolicy(_ context.Context, orgID string, actor Actor, _ int64, days *int) (*Policy, error) {
++	return &Policy{OrganizationID: orgID, ThreadDays: days, Revision: 1, UpdatedBy: actor.ID}, nil
++}
++func (s *recordingStore) ListHolds(context.Context, string) ([]Hold, error) { return nil, nil }
++func (s *recordingStore) PlaceHold(_ context.Context, _ string, _ Actor, hold Hold) (PlaceResult, error) {
++	s.placed = &hold
++	return PlaceResult{Hold: hold}, nil
++}
++func (s *recordingStore) ReleaseHold(context.Context, string, string, Actor) (Hold, error) {
++	return Hold{}, ErrHoldNotFound
++}
++func (s *recordingStore) Check(context.Context, string, []string) (CheckResult, error) {
++	return CheckResult{}, nil
++}
++func (s *recordingStore) ClaimAudit(context.Context, int) ([]AuditRow, error) { return s.audit, nil }
++func (s *recordingStore) MarkAuditPublished(_ context.Context, eventID string) error {
++	s.published = append(s.published, eventID)
++	return nil
++}
++func (s *recordingStore) MarkAuditFailed(_ context.Context, eventID string, _ error) (bool, error) {
++	s.failed = append(s.failed, eventID)
++	return false, nil
++}
++
++type fixedThreads struct {
++	nothing bool
++	err     error
++	asked   []string
++}
++
++func (f *fixedThreads) NothingRetained(_ context.Context, _, threadID string) (bool, error) {
++	f.asked = append(f.asked, threadID)
++	return f.nothing, f.err
++}
++
++var owner = Actor{ID: "u-owner", Role: "owner"}
++
++func TestThreadHoldOnANothingRetainedThreadIsRefused(t *testing.T) {
++	store := &recordingStore{}
++	threads := &fixedThreads{nothing: true}
++	service := NewService(store, threads, nil)
++
++	_, err := service.PlaceHold(context.Background(), "org-1", owner, PlaceHoldRequest{Scope: ScopeThread, ThreadID: "thr-zdr", HoldRef: "Matter 1"})
++	if !errors.Is(err, ErrNothingRetained) {
++		t.Fatalf("a ZDR or waived thread has nothing to hold: err=%v", err)
++	}
++	if store.placed != nil {
++		t.Fatal("a refused hold must write nothing")
++	}
++
++	// An org hold on a ZDR organisation is allowed: it holds whatever non-ZDR
++	// content exists, so the thread reader is not asked.
++	threads.asked = nil
++	if _, err := service.PlaceHold(context.Background(), "org-1", owner, PlaceHoldRequest{Scope: ScopeOrg, HoldRef: "Matter 1"}); err != nil {
++		t.Fatalf("org hold: %v", err)
++	}
++	if len(threads.asked) != 0 || store.placed == nil || store.placed.TargetRef != "org-1" {
++		t.Fatalf("an org hold targets the organisation without a thread lookup: asked=%v placed=%+v", threads.asked, store.placed)
++	}
++}
++
++func TestThreadHoldIsPlacedWhenRetentionIsUnknown(t *testing.T) {
++	for name, threads := range map[string]ThreadRetention{
++		"reader error": &fixedThreads{err: errors.New("session-core unreachable")},
++		"no reader":    nil,
++		"retained":     &fixedThreads{nothing: false},
++	} {
++		store := &recordingStore{}
++		result, err := NewService(store, threads, nil).PlaceHold(context.Background(), "org-1", owner, PlaceHoldRequest{Scope: ScopeThread, ThreadID: "thr-1", HoldRef: "Matter 1"})
++		if err != nil || store.placed == nil || store.placed.TargetRef != "thr-1" || !validHoldID(result.Hold.ID) {
++			t.Fatalf("%s: a hold whose retention is not known to be empty must be placed: result=%+v err=%v", name, result, err)
++		}
++	}
++}
++
++func TestWritesNeedAnActorWithARole(t *testing.T) {
++	service := NewService(&recordingStore{}, nil, nil)
++	if _, err := service.PutPolicy(context.Background(), "org-1", Actor{ID: "u"}, PutRequest{ExpectedRevision: revPtr(0)}); err == nil {
++		t.Fatal("a policy write without the actor's role must be refused: the audit row records it")
++	}
++	if _, err := service.PlaceHold(context.Background(), "org-1", Actor{Role: "owner"}, PlaceHoldRequest{Scope: ScopeOrg, HoldRef: "m"}); err == nil {
++		t.Fatal("a hold without an actor must be refused")
++	}
++	if _, err := service.ReleaseHold(context.Background(), "org-1", "not-a-hold-id", owner); !errors.Is(err, ErrHoldNotFound) {
++		t.Fatalf("a malformed hold id is not found, never sent to the store: %v", err)
++	}
++}
++
++type flakyPublisher struct{ fail map[string]bool }
++
++func (p flakyPublisher) PublishAudit(_ context.Context, _, eventID string, _ map[string]any) error {
++	if p.fail[eventID] {
++		return errors.New("nats down")
++	}
++	return nil
++}
++
++func TestFlushPublishesAndRecordsFailures(t *testing.T) {
++	store := &recordingStore{audit: []AuditRow{{EventID: "e1", Subject: AuditSubject}, {EventID: "e2", Subject: AuditSubject}}}
++	service := NewService(store, nil, flakyPublisher{fail: map[string]bool{"e2": true}})
++	result, err := service.FlushAuditOutbox(context.Background(), 10)
++	if err == nil || result.Published != 1 || len(store.published) != 1 || store.published[0] != "e1" || len(store.failed) != 1 || store.failed[0] != "e2" {
++		t.Fatalf("flush: result=%+v published=%v failed=%v err=%v", result, store.published, store.failed, err)
++	}
++	if _, err := NewService(store, nil, nil).FlushAuditOutbox(context.Background(), 10); err == nil {
++		t.Fatal("a flush without a publisher must fail, not drop rows")
++	}
++}
+diff --git a/apps/Control Plane/org-core/internal/retention/types.go b/apps/Control Plane/org-core/internal/retention/types.go
+new file mode 100644
+index 000000000..bb385930d
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/types.go	
+@@ -0,0 +1,139 @@
++// Package retention is org-core's retention policy and legal holds of record
++// (EP-9 C1): how long an organisation keeps personal threads, and which org or
++// thread holds are active.
++//
++// org-core stores, validates and answers. It deletes nothing: session-core asks
++// the internal check route which threads its sweeper may consider and drops every
++// held one (EP-9 C2, C3). The records hold ids, numbers, a hold reference and
++// actor ids, never thread content, so they carry no retention class of their own
++// and go with the organisation.
++package retention
++
++import "time"
++
++const (
++	// MinThreadDays and MaxThreadDays bound the thread window (D-C2). The clock is
++	// the thread's last activity, so a thread in use is never past its window.
++	MinThreadDays = 30
++	MaxThreadDays = 3650
++
++	// ScopeOrg holds everything the organisation retains; ScopeThread holds one
++	// thread. An org hold's target is the organisation id itself.
++	ScopeOrg    = "org"
++	ScopeThread = "thread"
++
++	// MaxCheckThreadIDs is the most thread ids one check call may name, so the
++	// sweeper pages its candidates instead of sending an org's whole history.
++	MaxCheckThreadIDs = 500
++
++	// MaxThreadIDLength bounds a thread id; MaxHoldRefLength bounds the matter or
++	// case reference a placer gives a hold.
++	MaxThreadIDLength = 128
++	MaxHoldRefLength  = 200
++
++	// MaxListedHolds caps the admin list: every active hold plus the most recent
++	// released ones up to this many rows.
++	MaxListedHolds = 500
++
++	// MaxBodyBytes bounds one request body. A check body of 500 ids of 128 bytes
++	// fits well inside it.
++	MaxBodyBytes = 96 << 10
++
++	// AuditEvent and AuditSubject are the durable audit row every write leaves in
++	// org_retention_audit_outbox (migration 031 pins the subject).
++	AuditEvent   = "org_retention_changed"
++	AuditSubject = "verevon.audit.v2.control.org-core." + AuditEvent
++
++	// AuditMaxAttempts bounds publication retries before a row is dead-lettered,
++	// as the other org-core outboxes do.
++	AuditMaxAttempts = 8
++
++	// CodeNothingRetained is the typed refusal of a thread hold on a thread whose
++	// content was never retained (Zero Data Retention or a waived run): there is
++	// nothing to hold, and the placer is told so instead of being given a hold that
++	// protects nothing. ZDRFeature is its feature key in zdr-refusals.json.
++	CodeNothingRetained = "legal_hold_nothing_retained"
++	ZDRFeature          = "legal_hold"
++)
++
++// EnvEnabled is the switch for the whole feature. Off, the routes are not mounted.
++const EnvEnabled = "ORG_RETENTION_POLICY_ENABLED"
++
++// Enabled reads EnvEnabled strictly: only the literal "true" turns it on, so a
++// typo or "1" leaves the routes unmounted.
++func Enabled(getenv func(string) string) bool {
++	return getenv(EnvEnabled) == "true"
++}
++
++// Policy is the organisation's retention record. A zero Revision means nothing
++// was ever written. A nil ThreadDays means keep: no thread is ever past a window.
++type Policy struct {
++	OrganizationID string     `json:"organization_id"`
++	ThreadDays     *int       `json:"thread_days"`
++	Revision       int64      `json:"revision"`
++	UpdatedBy      string     `json:"updated_by"`
++	UpdatedAt      *time.Time `json:"updated_at"`
++}
++
++// PutRequest replaces the policy. ExpectedRevision is a pointer so a body that
++// omits it is refused instead of reading as "first write". ThreadDays null or
++// absent sets keep.
++type PutRequest struct {
++	ExpectedRevision *int64 `json:"expected_revision"`
++	ThreadDays       *int   `json:"thread_days"`
++}
++
++// Hold is one legal hold. ReleasedAt is nil while the hold is active.
++type Hold struct {
++	ID             string     `json:"id"`
++	OrganizationID string     `json:"organization_id"`
++	Scope          string     `json:"scope"`
++	TargetRef      string     `json:"target_ref"`
++	HoldRef        string     `json:"hold_ref"`
++	CreatedBy      string     `json:"created_by"`
++	CreatedAt      time.Time  `json:"created_at"`
++	ReleasedBy     *string    `json:"released_by"`
++	ReleasedAt     *time.Time `json:"released_at"`
++}
++
++// Active reports whether the hold still holds.
++func (h Hold) Active() bool { return h.ReleasedAt == nil }
++
++// HoldList is the admin read: active holds first, then released ones, newest
++// first within each.
++type HoldList struct {
++	OrganizationID string `json:"organization_id"`
++	Holds          []Hold `json:"holds"`
++}
++
++// PlaceHoldRequest places a hold. ThreadID is required for a thread hold and
++// refused for an org hold, whose target is the organisation.
++type PlaceHoldRequest struct {
++	Scope    string `json:"scope"`
++	ThreadID string `json:"thread_id,omitempty"`
++	HoldRef  string `json:"hold_ref"`
++}
++
++// PlaceResult is a placed hold and whether it was already active: placing a hold
++// on a held target answers the existing hold and writes nothing.
++type PlaceResult struct {
++	Hold    Hold `json:"hold"`
++	Existed bool `json:"existed"`
++}
++
++// CheckRequest is the sweeper's question: which of these threads are held.
++type CheckRequest struct {
++	ThreadIDs []string `json:"thread_ids"`
++}
++
++// CheckResult answers it at one policy revision. WindowDays nil means keep.
++// OrgHeld true means every thread is held whatever HeldThreadIDs says.
++// HeldThreadIDs is the subset of the asked ids under an active thread hold, in
++// bytewise order.
++type CheckResult struct {
++	OrganizationID string   `json:"organization_id"`
++	WindowDays     *int     `json:"window_days"`
++	Revision       int64    `json:"revision"`
++	OrgHeld        bool     `json:"org_held"`
++	HeldThreadIDs  []string `json:"held_thread_ids"`
++}
+diff --git a/apps/Control Plane/org-core/internal/retention/validate.go b/apps/Control Plane/org-core/internal/retention/validate.go
+new file mode 100644
+index 000000000..6b4aeecfa
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/validate.go	
+@@ -0,0 +1,151 @@
++package retention
++
++import (
++	"fmt"
++	"sort"
++	"strings"
++	"unicode/utf8"
++)
++
++// Error codes a validation failure can carry. They are stable: the admin view
++// maps them to text.
++const (
++	CodeExpectedRevisionRequired = "expected_revision_required"
++	CodeWindowOutOfRange         = "thread_days_out_of_range"
++	CodeInvalidScope             = "invalid_scope"
++	CodeInvalidThreadID          = "invalid_thread_id"
++	CodeThreadIDNotAllowed       = "thread_id_not_allowed"
++	CodeInvalidHoldRef           = "invalid_hold_ref"
++	CodeTooManyThreadIDs         = "too_many_thread_ids"
++)
++
++// FieldError is one problem with a request. Path is a JSON path such as
++// "thread_ids[3]".
++type FieldError struct {
++	Path    string `json:"path"`
++	Code    string `json:"code"`
++	Message string `json:"message"`
++}
++
++// ValidationError carries every problem found, so an admin sees them all at once.
++type ValidationError struct {
++	Errors []FieldError
++}
++
++func (e *ValidationError) Error() string {
++	if len(e.Errors) == 0 {
++		return "invalid retention request"
++	}
++	return fmt.Sprintf("invalid retention request: %s: %s", e.Errors[0].Path, e.Errors[0].Message)
++}
++
++func (e *ValidationError) add(path, code, message string) {
++	e.Errors = append(e.Errors, FieldError{Path: path, Code: code, Message: message})
++}
++
++func (e *ValidationError) orNil() error {
++	if len(e.Errors) == 0 {
++		return nil
++	}
++	return e
++}
++
++// ValidatePut checks a policy write. A window is either null (keep) or a whole
++// number of days inside MinThreadDays..MaxThreadDays; the bounds stop a typo from
++// emptying an organisation (a window of 1) or reading as "keep" while deleting
++// (a negative number).
++func ValidatePut(req PutRequest) error {
++	invalid := &ValidationError{}
++	if req.ExpectedRevision == nil || *req.ExpectedRevision < 0 {
++		invalid.add("expected_revision", CodeExpectedRevisionRequired, "expected_revision is required and must be zero or greater (0 for the first write)")
++	}
++	if req.ThreadDays != nil && (*req.ThreadDays < MinThreadDays || *req.ThreadDays > MaxThreadDays) {
++		invalid.add("thread_days", CodeWindowOutOfRange, fmt.Sprintf("thread_days must be null (keep) or between %d and %d", MinThreadDays, MaxThreadDays))
++	}
++	return invalid.orNil()
++}
++
++// NormalizePlace checks a hold placement and returns it with the target resolved:
++// an org hold targets orgID, a thread hold its thread id. The hold reference is
++// trimmed; it names a matter, so it must be present and short.
++func NormalizePlace(orgID string, req PlaceHoldRequest) (scope, target, holdRef string, err error) {
++	invalid := &ValidationError{}
++	scope = strings.TrimSpace(req.Scope)
++	threadID := strings.TrimSpace(req.ThreadID)
++	switch scope {
++	case ScopeOrg:
++		if threadID != "" {
++			invalid.add("thread_id", CodeThreadIDNotAllowed, "an org hold covers the whole organisation and takes no thread_id")
++		}
++		target = orgID
++	case ScopeThread:
++		if !ValidThreadID(threadID) {
++			invalid.add("thread_id", CodeInvalidThreadID, threadIDRule())
++		}
++		target = threadID
++	default:
++		invalid.add("scope", CodeInvalidScope, `scope must be "org" or "thread"`)
++	}
++	holdRef = strings.TrimSpace(req.HoldRef)
++	if holdRef == "" || utf8.RuneCountInString(holdRef) > MaxHoldRefLength || strings.ContainsAny(holdRef, "\r\n\t") {
++		invalid.add("hold_ref", CodeInvalidHoldRef, fmt.Sprintf("hold_ref is required: a matter or case reference of at most %d characters on one line", MaxHoldRefLength))
++	}
++	if err := invalid.orNil(); err != nil {
++		return "", "", "", err
++	}
++	return scope, target, holdRef, nil
++}
++
++// NormalizeCheck checks the sweeper's question and returns the ids deduplicated
++// in bytewise order. An empty list is allowed: it asks for the window and the org
++// hold alone. The cap counts raw entries, so a caller cannot pass it by repeating.
++func NormalizeCheck(req CheckRequest) ([]string, error) {
++	invalid := &ValidationError{}
++	if len(req.ThreadIDs) > MaxCheckThreadIDs {
++		invalid.add("thread_ids", CodeTooManyThreadIDs, fmt.Sprintf("at most %d thread ids per call", MaxCheckThreadIDs))
++		return nil, invalid
++	}
++	seen := make(map[string]struct{}, len(req.ThreadIDs))
++	ids := make([]string, 0, len(req.ThreadIDs))
++	for i, id := range req.ThreadIDs {
++		// A check id is compared as given: trimming here would let " t1" match a
++		// hold on "t1" for a caller that never sent "t1".
++		if !ValidThreadID(id) {
++			invalid.add(fmt.Sprintf("thread_ids[%d]", i), CodeInvalidThreadID, threadIDRule())
++			continue
++		}
++		if _, dup := seen[id]; dup {
++			continue
++		}
++		seen[id] = struct{}{}
++		ids = append(ids, id)
++	}
++	if err := invalid.orNil(); err != nil {
++		return nil, err
++	}
++	sort.Strings(ids)
++	return ids, nil
++}
++
++// ValidThreadID accepts the ids session-core issues (UUIDs and prefixed ids):
++// 1..MaxThreadIDLength ASCII letters, digits and "._:-", starting with a letter or
++// digit. Anything else is refused rather than stored as a target nothing matches.
++func ValidThreadID(id string) bool {
++	if len(id) == 0 || len(id) > MaxThreadIDLength {
++		return false
++	}
++	for i := 0; i < len(id); i++ {
++		c := id[i]
++		switch {
++		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
++		case i > 0 && (c == '.' || c == '_' || c == ':' || c == '-'):
++		default:
++			return false
++		}
++	}
++	return true
++}
++
++func threadIDRule() string {
++	return fmt.Sprintf("thread_id must be 1 to %d letters, digits or ._:- starting with a letter or digit", MaxThreadIDLength)
++}
+diff --git a/apps/Control Plane/org-core/internal/retention/validate_test.go b/apps/Control Plane/org-core/internal/retention/validate_test.go
+new file mode 100644
+index 000000000..cb1aff158
+--- /dev/null
++++ b/apps/Control Plane/org-core/internal/retention/validate_test.go	
+@@ -0,0 +1,110 @@
++package retention
++
++import (
++	"errors"
++	"strings"
++	"testing"
++)
++
++func intPtr(v int) *int { return &v }
++func revPtr(v int64) *int64 { return &v }
++
++func codesOf(err error) []string {
++	var invalid *ValidationError
++	if !errors.As(err, &invalid) {
++		return nil
++	}
++	codes := make([]string, 0, len(invalid.Errors))
++	for _, e := range invalid.Errors {
++		codes = append(codes, e.Code)
++	}
++	return codes
++}
++
++func TestValidatePutBoundsTheWindowAndRequiresTheRevision(t *testing.T) {
++	cases := []struct {
++		name string
++		req  PutRequest
++		want []string
++	}{
++		{"keep", PutRequest{ExpectedRevision: revPtr(0)}, nil},
++		{"lower bound", PutRequest{ExpectedRevision: revPtr(3), ThreadDays: intPtr(MinThreadDays)}, nil},
++		{"upper bound", PutRequest{ExpectedRevision: revPtr(3), ThreadDays: intPtr(MaxThreadDays)}, nil},
++		{"below", PutRequest{ExpectedRevision: revPtr(0), ThreadDays: intPtr(29)}, []string{CodeWindowOutOfRange}},
++		{"above", PutRequest{ExpectedRevision: revPtr(0), ThreadDays: intPtr(3651)}, []string{CodeWindowOutOfRange}},
++		{"zero", PutRequest{ExpectedRevision: revPtr(0), ThreadDays: intPtr(0)}, []string{CodeWindowOutOfRange}},
++		{"negative", PutRequest{ExpectedRevision: revPtr(0), ThreadDays: intPtr(-30)}, []string{CodeWindowOutOfRange}},
++		{"no revision", PutRequest{ThreadDays: intPtr(90)}, []string{CodeExpectedRevisionRequired}},
++		{"negative revision", PutRequest{ExpectedRevision: revPtr(-1)}, []string{CodeExpectedRevisionRequired}},
++		{"both", PutRequest{ThreadDays: intPtr(1)}, []string{CodeExpectedRevisionRequired, CodeWindowOutOfRange}},
++	}
++	for _, tc := range cases {
++		got := codesOf(ValidatePut(tc.req))
++		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
++			t.Errorf("%s: codes = %v, want %v", tc.name, got, tc.want)
++		}
++	}
++}
++
++func TestNormalizePlaceResolvesTheTargetFromTheScope(t *testing.T) {
++	scope, target, ref, err := NormalizePlace("org-1", PlaceHoldRequest{Scope: "org", HoldRef: "  Matter 2026-17 "})
++	if err != nil || scope != ScopeOrg || target != "org-1" || ref != "Matter 2026-17" {
++		t.Fatalf("an org hold targets the organisation: scope=%q target=%q ref=%q err=%v", scope, target, ref, err)
++	}
++	scope, target, _, err = NormalizePlace("org-1", PlaceHoldRequest{Scope: "thread", ThreadID: " thr_01H ", HoldRef: "Matter"})
++	if err != nil || scope != ScopeThread || target != "thr_01H" {
++		t.Fatalf("a thread hold targets the thread: scope=%q target=%q err=%v", scope, target, err)
++	}
++
++	refusals := []struct {
++		name string
++		req  PlaceHoldRequest
++		want string
++	}{
++		{"unknown scope", PlaceHoldRequest{Scope: "space", HoldRef: "m"}, CodeInvalidScope},
++		{"org with thread", PlaceHoldRequest{Scope: "org", ThreadID: "t1", HoldRef: "m"}, CodeThreadIDNotAllowed},
++		{"thread without id", PlaceHoldRequest{Scope: "thread", HoldRef: "m"}, CodeInvalidThreadID},
++		{"thread id with slash", PlaceHoldRequest{Scope: "thread", ThreadID: "t/1", HoldRef: "m"}, CodeInvalidThreadID},
++		{"thread id too long", PlaceHoldRequest{Scope: "thread", ThreadID: strings.Repeat("a", MaxThreadIDLength+1), HoldRef: "m"}, CodeInvalidThreadID},
++		{"blank reference", PlaceHoldRequest{Scope: "org", HoldRef: "   "}, CodeInvalidHoldRef},
++		{"long reference", PlaceHoldRequest{Scope: "org", HoldRef: strings.Repeat("r", MaxHoldRefLength+1)}, CodeInvalidHoldRef},
++		{"multi-line reference", PlaceHoldRequest{Scope: "org", HoldRef: "a\nb"}, CodeInvalidHoldRef},
++	}
++	for _, tc := range refusals {
++		_, _, _, err := NormalizePlace("org-1", tc.req)
++		if codes := codesOf(err); len(codes) == 0 || codes[0] != tc.want {
++			t.Errorf("%s: codes = %v, want %s first", tc.name, codes, tc.want)
++		}
++	}
++}
++
++func TestNormalizeCheckCapsRawEntriesAndDeduplicates(t *testing.T) {
++	ids, err := NormalizeCheck(CheckRequest{ThreadIDs: []string{"t2", "t1", "t2"}})
++	if err != nil || strings.Join(ids, ",") != "t1,t2" {
++		t.Fatalf("ids must be deduplicated in bytewise order: %v err=%v", ids, err)
++	}
++	if ids, err := NormalizeCheck(CheckRequest{}); err != nil || len(ids) != 0 {
++		t.Fatalf("an empty list asks for the window alone: %v err=%v", ids, err)
++	}
++
++	same := make([]string, MaxCheckThreadIDs+1)
++	for i := range same {
++		same[i] = "t1"
++	}
++	if codes := codesOf(func() error { _, err := NormalizeCheck(CheckRequest{ThreadIDs: same}); return err }()); len(codes) != 1 || codes[0] != CodeTooManyThreadIDs {
++		t.Fatalf("the cap counts raw entries: %v", codes)
++	}
++	// An id is compared as sent: a padded id is refused, not trimmed into a match.
++	if _, err := NormalizeCheck(CheckRequest{ThreadIDs: []string{" t1"}}); err == nil {
++		t.Fatal("a padded thread id must be refused")
++	}
++}
++
++func TestEnabledIsStrict(t *testing.T) {
++	for value, want := range map[string]bool{"true": true, " true ": false, "": false, "1": false, "TRUE": false, "yes": false, "false": false} {
++		got := Enabled(func(string) string { return value })
++		if got != want {
++			t.Errorf("Enabled(%q) = %v, want %v", value, got, want)
++		}
++	}
++}
+diff --git a/apps/Control Plane/org-core/migrations/031_org_retention_policies.down.sql b/apps/Control Plane/org-core/migrations/031_org_retention_policies.down.sql
+new file mode 100644
+index 000000000..6b6cd92d2
+--- /dev/null
++++ b/apps/Control Plane/org-core/migrations/031_org_retention_policies.down.sql	
+@@ -0,0 +1,10 @@
++-- Reverses 031. Dropping org_legal_holds releases every legal hold at once and
++-- loses the record of what was held, and dropping org_retention_history loses who
++-- set each window and placed or released each hold. Roll back only while no hold
++-- is active (SELECT count(*) FROM org_legal_holds WHERE released_at IS NULL returns
++-- 0) and no retention sweeper reads the policy (SESSION_RETENTION_SWEEP=off), or
++-- after that loss is accepted. Undelivered audit intents are lost too.
++DROP TABLE IF EXISTS org_retention_audit_outbox;
++DROP TABLE IF EXISTS org_retention_history;
++DROP TABLE IF EXISTS org_legal_holds;
++DROP TABLE IF EXISTS org_retention_policies;
+diff --git a/apps/Control Plane/org-core/migrations/031_org_retention_policies.up.sql b/apps/Control Plane/org-core/migrations/031_org_retention_policies.up.sql
+new file mode 100644
+index 000000000..61fa55f32
+--- /dev/null
++++ b/apps/Control Plane/org-core/migrations/031_org_retention_policies.up.sql	
+@@ -0,0 +1,184 @@
++-- EP-9 C1: the organisation's retention policy and legal holds of record.
++--
++-- The design reserved 030; 030 is org_key_encryption_keys (WS17.E2), so this is
++-- 031.
++--
++-- org-core stores how long an organisation keeps personal threads and which org
++-- or thread holds are active. It deletes nothing itself: session-core reads the
++-- answer through POST /internal/orgs/:orgId/retention/check and sweeps (EP-9 C2,
++-- C3), and a hold is never released by anything but an owner or compliance
++-- member. organizations.compliance.data_retention_days (002) is not read: it has
++-- no revision, no audit and an unknown writer (D-C4); this record replaces it.
++--
++-- Everything here is an id, a number, a hold reference and an actor id. No thread
++-- content, title or message is stored, so a Zero Data Retention organisation's
++-- records hold nothing to retain. Every table cascades from organizations(id),
++-- which is how gdpr_hard_delete_organization() (003) removes them without being
++-- redefined.
++--
++-- Every statement is idempotent (IF NOT EXISTS / DROP ... IF EXISTS), so a re-run
++-- on a database that already has the tables changes nothing.
++
++-- One row per organisation: the thread window and the revision every write moves.
++-- A missing row is revision 0 and no window, which means keep (today's behaviour).
++-- A NULL window after a write is an explicit "keep". The clock is the thread's last
++-- activity (D-C2); the bounds are the same 30..3650 days the service checks.
++CREATE TABLE IF NOT EXISTS org_retention_policies (
++  org_id      TEXT        PRIMARY KEY REFERENCES organizations(id) ON DELETE CASCADE,
++  thread_days INTEGER     CHECK (thread_days IS NULL OR thread_days BETWEEN 30 AND 3650),
++  revision    BIGINT      NOT NULL CHECK (revision > 0),
++  updated_by  TEXT        NOT NULL CHECK (btrim(updated_by) <> ''),
++  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
++);
++
++-- A hold on the whole organisation (target_ref is the org id) or on one thread
++-- (target_ref is the thread id). hold_ref is the matter or case reference the
++-- placer gives, never content. A hold is released by setting released_by and
++-- released_at together; it is never deleted, so the record of what was held
++-- survives its release.
++CREATE TABLE IF NOT EXISTS org_legal_holds (
++  id          TEXT        PRIMARY KEY CHECK (id ~ '^lh_[0-9a-f]{32}$'),
++  org_id      TEXT        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
++  scope       TEXT        NOT NULL CHECK (scope IN ('org', 'thread')),
++  target_ref  TEXT        NOT NULL CHECK (length(target_ref) BETWEEN 1 AND 128 AND target_ref = btrim(target_ref)),
++  hold_ref    TEXT        NOT NULL CHECK (btrim(hold_ref) <> '' AND length(hold_ref) <= 200),
++  created_by  TEXT        NOT NULL CHECK (btrim(created_by) <> ''),
++  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  released_by TEXT,
++  released_at TIMESTAMPTZ,
++  CONSTRAINT org_legal_holds_org_target
++    CHECK (scope <> 'org' OR target_ref = org_id),
++  CONSTRAINT org_legal_holds_release_complete
++    CHECK ((released_by IS NULL) = (released_at IS NULL)
++           AND (released_by IS NULL OR btrim(released_by) <> ''))
++);
++
++-- At most one active hold per target: a second hold on a held thread is the same
++-- hold, and the service answers it with the existing one.
++CREATE UNIQUE INDEX IF NOT EXISTS idx_org_legal_holds_one_active
++  ON org_legal_holds (org_id, scope, target_ref) WHERE released_at IS NULL;
++
++CREATE INDEX IF NOT EXISTS idx_org_legal_holds_org_created
++  ON org_legal_holds (org_id, created_at DESC, id);
++
++-- Append-only record of every policy write, hold placement and hold release: who,
++-- at which revision or on which hold, and the state before and after.
++-- org_core_app can insert and read it and nothing else.
++CREATE TABLE IF NOT EXISTS org_retention_history (
++  id           BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
++  org_id       TEXT        NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
++  change_kind  TEXT        NOT NULL CHECK (change_kind IN ('policy', 'hold_placed', 'hold_released')),
++  revision     BIGINT      CHECK (revision IS NULL OR revision >= 0),
++  hold_id      TEXT,
++  actor_id     TEXT        NOT NULL CHECK (btrim(actor_id) <> ''),
++  before_state JSONB       NOT NULL CHECK (jsonb_typeof(before_state) = 'object'),
++  after_state  JSONB       NOT NULL CHECK (jsonb_typeof(after_state) = 'object'),
++  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  CONSTRAINT org_retention_history_subject CHECK (
++    (change_kind = 'policy' AND revision IS NOT NULL AND hold_id IS NULL)
++    OR (change_kind <> 'policy' AND hold_id IS NOT NULL)
++  )
++);
++
++CREATE INDEX IF NOT EXISTS idx_org_retention_history_org
++  ON org_retention_history (org_id, id);
++
++-- Durable audit intent for every write above, in the shape of
++-- organization_siem_audit_outbox (022). The subject is pinned to the retention
++-- event and the scoped write transaction inserts beside the change it records. The
++-- payload is content-free: window, revision, hold id, scope and target id; the
++-- hold reference is not copied into it.
++CREATE TABLE IF NOT EXISTS org_retention_audit_outbox (
++  event_id TEXT PRIMARY KEY,
++  org_id TEXT NOT NULL,
++  subject TEXT NOT NULL,
++  payload JSONB NOT NULL,
++  attempts INTEGER NOT NULL DEFAULT 0,
++  processing_at TIMESTAMPTZ,
++  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  published_at TIMESTAMPTZ,
++  dead_lettered_at TIMESTAMPTZ,
++  last_error TEXT,
++  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  CONSTRAINT org_retention_audit_outbox_event_id_nonempty
++    CHECK (length(event_id) BETWEEN 1 AND 128 AND event_id = btrim(event_id)),
++  CONSTRAINT org_retention_audit_outbox_org_id_nonempty
++    CHECK (btrim(org_id) <> ''),
++  CONSTRAINT org_retention_audit_outbox_subject_authority
++    CHECK (subject = 'verevon.audit.v2.control.org-core.org_retention_changed'),
++  CONSTRAINT org_retention_audit_outbox_payload_object
++    CHECK (jsonb_typeof(payload) = 'object'),
++  CONSTRAINT org_retention_audit_outbox_payload_identity
++    CHECK (payload->>'event_id' = event_id AND payload->>'org_id' = org_id),
++  CONSTRAINT org_retention_audit_outbox_payload_no_reference
++    CHECK (NOT (payload ? 'hold_ref') AND NOT ((payload->'details') ? 'hold_ref')),
++  CONSTRAINT org_retention_audit_outbox_attempts_bounded
++    CHECK (attempts >= 0 AND attempts <= 8),
++  CONSTRAINT org_retention_audit_outbox_terminal_state
++    CHECK (published_at IS NULL OR dead_lettered_at IS NULL),
++  CONSTRAINT org_retention_audit_outbox_dead_letter_complete
++    CHECK (
++      dead_lettered_at IS NULL
++      OR (attempts = 8 AND published_at IS NULL AND last_error IS NOT NULL)
++    )
++);
++
++CREATE INDEX IF NOT EXISTS idx_org_retention_audit_outbox_pending
++  ON org_retention_audit_outbox (next_attempt_at, created_at, event_id)
++  WHERE published_at IS NULL AND dead_lettered_at IS NULL;
++
++-- Least privilege for org_core_app (009's default privileges grant all four on
++-- every new table; see 024). Each table is revoked in full and granted exactly
++-- what the scoped transactions run:
++--
++--   org_retention_policies     SELECT, INSERT, UPDATE of the written columns
++--                              (never deleted: the revision must not reset)
++--   org_legal_holds            SELECT, INSERT, UPDATE of the release columns only
++--                              (a hold's scope, target and reference never change,
++--                              and a hold is never deleted)
++--   org_retention_history      SELECT, INSERT (append-only)
++--   org_retention_audit_outbox SELECT, INSERT (claimed and marked by the publisher
++--                              on the owner pool, never here)
++REVOKE ALL ON org_retention_policies FROM org_core_app;
++GRANT SELECT, INSERT ON org_retention_policies TO org_core_app;
++GRANT UPDATE (thread_days, revision, updated_by, updated_at) ON org_retention_policies TO org_core_app;
++
++REVOKE ALL ON org_legal_holds FROM org_core_app;
++GRANT SELECT, INSERT ON org_legal_holds TO org_core_app;
++GRANT UPDATE (released_by, released_at) ON org_legal_holds TO org_core_app;
++
++REVOKE ALL ON org_retention_history FROM org_core_app;
++GRANT SELECT, INSERT ON org_retention_history TO org_core_app;
++GRANT USAGE, SELECT ON SEQUENCE org_retention_history_id_seq TO org_core_app;
++
++REVOKE ALL ON org_retention_audit_outbox FROM org_core_app;
++GRANT SELECT, INSERT ON org_retention_audit_outbox TO org_core_app;
++
++ALTER TABLE org_retention_policies ENABLE ROW LEVEL SECURITY;
++DROP POLICY IF EXISTS org_retention_policies_rls_isolation ON org_retention_policies;
++CREATE POLICY org_retention_policies_rls_isolation
++  ON org_retention_policies
++  USING (org_id = current_setting('app.current_org', true))
++  WITH CHECK (org_id = current_setting('app.current_org', true));
++
++ALTER TABLE org_legal_holds ENABLE ROW LEVEL SECURITY;
++DROP POLICY IF EXISTS org_legal_holds_rls_isolation ON org_legal_holds;
++CREATE POLICY org_legal_holds_rls_isolation
++  ON org_legal_holds
++  USING (org_id = current_setting('app.current_org', true))
++  WITH CHECK (org_id = current_setting('app.current_org', true));
++
++ALTER TABLE org_retention_history ENABLE ROW LEVEL SECURITY;
++DROP POLICY IF EXISTS org_retention_history_rls_isolation ON org_retention_history;
++CREATE POLICY org_retention_history_rls_isolation
++  ON org_retention_history
++  USING (org_id = current_setting('app.current_org', true))
++  WITH CHECK (org_id = current_setting('app.current_org', true));
++
++ALTER TABLE org_retention_audit_outbox ENABLE ROW LEVEL SECURITY;
++DROP POLICY IF EXISTS org_retention_audit_outbox_rls_isolation ON org_retention_audit_outbox;
++CREATE POLICY org_retention_audit_outbox_rls_isolation
++  ON org_retention_audit_outbox
++  USING (org_id = current_setting('app.current_org', true))
++  WITH CHECK (org_id = current_setting('app.current_org', true));
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs
+index 08bb3f212..fc1cbccd4 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs	
+@@ -4,6 +4,7 @@ pub(crate) mod instructions;
+ pub(crate) mod members;
+ pub(crate) mod model_entitlement;
+ pub(crate) mod quotas;
++mod retention;
+ mod roles;
+ pub(crate) mod settings;
+ mod shared;
+@@ -70,6 +71,21 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
+             "/api/v1/orgs/{id}/model-entitlement/explain",
+             get(model_entitlement::explain_model_entitlement),
+         )
++        // EP-9 C1: the retention window and legal holds. org-core stores them and
++        // has no such route while ORG_RETENTION_POLICY_ENABLED is off, which these
++        // answer as a typed 404.
++        .route(
++            "/api/v1/orgs/{id}/retention",
++            get(retention::get_retention).put(retention::put_retention),
++        )
++        .route(
++            "/api/v1/orgs/{id}/legal-holds",
++            get(retention::list_legal_holds).post(retention::place_legal_hold),
++        )
++        .route(
++            "/api/v1/orgs/{id}/legal-holds/{hold_id}/release",
++            post(retention::release_legal_hold),
++        )
+         // WS03-S4: org-admin Space effect-policy console routes (Control owns the row).
+         // Behind `SpaceFeatureFlags::policy_admin_api`; off answers 404.
+         .route(
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/retention.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/retention.rs
+new file mode 100644
+index 000000000..2b3e3978f
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/retention.rs	
+@@ -0,0 +1,553 @@
++//! EP-9 C1: the org retention window and legal hold routes.
++//!
++//! org-core stores the window and the holds, checks every rule and answers the
++//! retention sweeper; this module is only the Frontend Plane's door to it. An owner
++//! or admin sets the window; an owner or a compliance member places and releases a
++//! hold. It decides nothing about what is kept.
++//!
++//! Two role gates guard every call, on purpose: this gateway's session role and
++//! org-core's own membership table, because the role this gateway forwards is a
++//! hint and never authority. When they disagree the stricter one wins and
++//! org-core's refusal is passed through.
++//!
++//! The feature switch is org-core's `ORG_RETENTION_POLICY_ENABLED`: off, org-core
++//! has no such route and this module answers a typed 404, so the SPA hides the
++//! section without the gateway holding a second switch.
++
++use axum::{
++    extract::{Extension, Path, State},
++    http::StatusCode,
++    Json,
++};
++use reqwest::Method;
++use serde_json::{Map, Value};
++
++use crate::{
++    config::AppState,
++    envelope::error,
++    middleware::{has_authorized_org_role, AuthenticatedUser},
++    upstream::proxy_json,
++};
++
++use super::shared::{actor_for, require_active_org, require_org_admin, GatewayJsonResponse};
++
++/// Limits a body must stay inside before the delegation is signed. They mirror
++/// org-core's `retention` package; org-core stays the owner of every rule.
++const MAX_HOLD_REF_CHARS: usize = 200;
++const MAX_THREAD_ID_CHARS: usize = 128;
++const PUT_FIELDS: [&str; 2] = ["expected_revision", "thread_days"];
++const HOLD_FIELDS: [&str; 3] = ["scope", "thread_id", "hold_ref"];
++
++/// Who may read holds, and who may place or release one. An admin sets the
++/// window but cannot lift a hold that could concern them.
++const HOLD_READ_ROLES: [&str; 3] = ["owner", "admin", "compliance"];
++const HOLD_WRITE_ROLES: [&str; 2] = ["owner", "compliance"];
++
++fn not_enabled() -> GatewayJsonResponse {
++    (
++        StatusCode::NOT_FOUND,
++        Json(error("not_found", "Retention policy is not enabled.")),
++    )
++}
++
++fn bad_request(message: impl Into<String>) -> GatewayJsonResponse {
++    (
++        StatusCode::BAD_REQUEST,
++        Json(error("validation_error", message)),
++    )
++}
++
++fn org_core_url(state: &AppState, org_id: &str, suffix: &str) -> String {
++    format!(
++        "{}/api/v1/organizations/{}{suffix}",
++        state.org_core_url,
++        urlencoding::encode(org_id)
++    )
++}
++
++/// The caller's session role must be one of `allowed` in the requested org.
++fn require_org_role(
++    user: &AuthenticatedUser,
++    org_id: &str,
++    allowed: &[&str],
++) -> Result<(), GatewayJsonResponse> {
++    require_active_org(user, org_id)?;
++    if has_authorized_org_role(user, allowed) {
++        Ok(())
++    } else {
++        Err((
++            StatusCode::FORBIDDEN,
++            Json(error(
++                "forbidden",
++                "Your organization role does not allow this legal hold action.",
++            )),
++        ))
++    }
++}
++
++/// Forward one call on behalf of `user`. A 404 org-core synthesised no envelope
++/// for is the unmounted route of a switched-off feature, so it reads as "not
++/// enabled"; org-core's own typed 404s (an unknown hold) pass through.
++async fn forward(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    method: Method,
++    org_id: &str,
++    suffix: &str,
++    body: Option<Value>,
++) -> GatewayJsonResponse {
++    let (status, Json(answer)) = proxy_json(
++        state,
++        method,
++        &org_core_url(state, org_id, suffix),
++        body,
++        Some(org_id),
++        Some(&actor_for(user)),
++        None,
++    )
++    .await;
++    if status == StatusCode::NOT_FOUND
++        && answer.pointer("/error/code").and_then(Value::as_str) == Some("upstream_error")
++    {
++        return not_enabled();
++    }
++    (status, Json(answer))
++}
++
++/// GET /api/v1/orgs/:id/retention: the stored window, owner or admin.
++pub(crate) async fn get_retention(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    Path(id): Path<String>,
++) -> GatewayJsonResponse {
++    if let Err(response) = require_org_admin(&state, &user, &id).await {
++        return response;
++    }
++    forward(&state, &user, Method::GET, &id, "/retention", None).await
++}
++
++/// PUT /api/v1/orgs/:id/retention: replace the window. The body carries the
++/// revision it was edited from; org-core answers 409 to a stale editor.
++pub(crate) async fn put_retention(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    Path(id): Path<String>,
++    Json(body): Json<Value>,
++) -> GatewayJsonResponse {
++    if let Err(response) = require_org_admin(&state, &user, &id).await {
++        return response;
++    }
++    if let Err(message) = validate_put_body(&body) {
++        return bad_request(message);
++    }
++    forward(&state, &user, Method::PUT, &id, "/retention", Some(body)).await
++}
++
++/// GET /api/v1/orgs/:id/legal-holds: active holds, then released ones.
++pub(crate) async fn list_legal_holds(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    Path(id): Path<String>,
++) -> GatewayJsonResponse {
++    if let Err(response) = require_org_role(&user, &id, &HOLD_READ_ROLES) {
++        return response;
++    }
++    forward(&state, &user, Method::GET, &id, "/legal-holds", None).await
++}
++
++/// POST /api/v1/orgs/:id/legal-holds: place an org or thread hold. A thread whose
++/// content was never retained is refused by org-core with
++/// `legal_hold_nothing_retained`, passed through as it came.
++pub(crate) async fn place_legal_hold(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    Path(id): Path<String>,
++    Json(body): Json<Value>,
++) -> GatewayJsonResponse {
++    if let Err(response) = require_org_role(&user, &id, &HOLD_WRITE_ROLES) {
++        return response;
++    }
++    if let Err(message) = validate_hold_body(&body) {
++        return bad_request(message);
++    }
++    forward(&state, &user, Method::POST, &id, "/legal-holds", Some(body)).await
++}
++
++/// POST /api/v1/orgs/:id/legal-holds/:hold_id/release.
++pub(crate) async fn release_legal_hold(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    Path((id, hold_id)): Path<(String, String)>,
++) -> GatewayJsonResponse {
++    if let Err(response) = require_org_role(&user, &id, &HOLD_WRITE_ROLES) {
++        return response;
++    }
++    if !valid_hold_id(&hold_id) {
++        return (
++            StatusCode::NOT_FOUND,
++            Json(error("legal_hold_not_found", "Legal hold not found.")),
++        );
++    }
++    let suffix = format!("/legal-holds/{hold_id}/release");
++    forward(&state, &user, Method::POST, &id, &suffix, None).await
++}
++
++fn reject_unknown_fields(fields: &Map<String, Value>, allowed: &[&str]) -> Result<(), String> {
++    match fields.keys().find(|key| !allowed.contains(&key.as_str())) {
++        Some(unknown) => Err(format!("Unknown field '{unknown}' in the request body.")),
++        None => Ok(()),
++    }
++}
++
++/// Structural check of a window write: shape, unknown fields, an integer revision
++/// and an integer or null window. org-core checks the 30..3650 bounds.
++fn validate_put_body(body: &Value) -> Result<(), String> {
++    let Some(fields) = body.as_object() else {
++        return Err("The request body must be a JSON object.".to_owned());
++    };
++    reject_unknown_fields(fields, &PUT_FIELDS)?;
++    if !fields
++        .get("expected_revision")
++        .and_then(Value::as_i64)
++        .is_some_and(|revision| revision >= 0)
++    {
++        return Err(
++            "expected_revision is required and must be an integer, zero or greater.".to_owned(),
++        );
++    }
++    match fields.get("thread_days") {
++        None | Some(Value::Null) => Ok(()),
++        Some(days) if days.as_i64().is_some() => Ok(()),
++        Some(_) => Err("thread_days must be a whole number of days or null (keep).".to_owned()),
++    }
++}
++
++/// Structural check of a hold placement. The reference names a matter and must be
++/// short; org-core trims it and checks every other rule.
++fn validate_hold_body(body: &Value) -> Result<(), String> {
++    let Some(fields) = body.as_object() else {
++        return Err("The request body must be a JSON object.".to_owned());
++    };
++    reject_unknown_fields(fields, &HOLD_FIELDS)?;
++    match fields.get("scope").and_then(Value::as_str) {
++        Some("org" | "thread") => {}
++        _ => return Err("scope must be \"org\" or \"thread\".".to_owned()),
++    }
++    match fields.get("thread_id") {
++        None | Some(Value::Null) => {}
++        Some(Value::String(id)) if id.chars().count() <= MAX_THREAD_ID_CHARS => {}
++        Some(_) => {
++            return Err(format!(
++                "thread_id must be a string of at most {MAX_THREAD_ID_CHARS} characters."
++            ))
++        }
++    }
++    match fields.get("hold_ref").and_then(Value::as_str) {
++        Some(reference)
++            if !reference.trim().is_empty() && reference.chars().count() <= MAX_HOLD_REF_CHARS =>
++        {
++            Ok(())
++        }
++        _ => Err(format!(
++            "hold_ref is required: a matter or case reference of at most {MAX_HOLD_REF_CHARS} characters."
++        )),
++    }
++}
++
++/// A hold id is `lh_` and 32 lower-case hex characters, the form org-core issues;
++/// anything else never reaches a URL.
++fn valid_hold_id(id: &str) -> bool {
++    id.len() == 35
++        && id.starts_with("lh_")
++        && id[3..]
++            .bytes()
++            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
++}
++
++#[cfg(test)]
++mod tests {
++    //! The routes are driven through the REAL router: the real session middleware
++    //! decides the caller's org role, and org-core answers only a request that
++    //! carries the gateway's delegated-service identity for this org and the exact
++    //! body. An upstream that must receive nothing is asserted to.
++    use axum::{body::Body, http::Request};
++    use http_body_util::BodyExt;
++    use serde_json::{json, Value};
++    use tower::ServiceExt;
++    use wiremock::matchers::{
++        body_json as wm_body_json, header as wm_header, method as wm_method, path as wm_path,
++    };
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++
++    use crate::config::AppState;
++
++    use super::{valid_hold_id, validate_hold_body, validate_put_body};
++
++    const COOKIE: &str = "better-auth.session_token=session-1";
++    const ORG_CORE_RETENTION: &str = "/api/v1/organizations/org-1/retention";
++    const ORG_CORE_HOLDS: &str = "/api/v1/organizations/org-1/legal-holds";
++    const HOLD_ID: &str = "lh_0123456789abcdef0123456789abcdef";
++
++    struct Upstreams {
++        auth: MockServer,
++        user_core: MockServer,
++        org_core: MockServer,
++    }
++
++    impl Upstreams {
++        /// A signed-in user of org-1 whose session role is `role`.
++        async fn start(role: &str) -> Self {
++            let auth = MockServer::start().await;
++            Mock::given(wm_method("GET"))
++                .and(wm_path("/api/auth/get-session"))
++                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                    "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
++                    "session": {"activeOrganizationId": "org-1"}
++                })))
++                .mount(&auth)
++                .await;
++            let user_core = MockServer::start().await;
++            Mock::given(wm_method("GET"))
++                .and(wm_path("/api/v1/me/session-context"))
++                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
++                    "userId": "user-1", "orgId": "org-1", "role": role,
++                    "onboardingStatus": "COMPLETED"
++                })))
++                .mount(&user_core)
++                .await;
++            Self {
++                auth,
++                user_core,
++                org_core: MockServer::start().await,
++            }
++        }
++
++        fn state(&self) -> AppState {
++            let mut state = crate::tests::test_state(false);
++            state.auth_core_url = self.auth.uri();
++            state.user_core_url = self.user_core.uri();
++            state.org_core_url = self.org_core.uri();
++            state
++        }
++
++        /// org-core answering only the gateway's delegated identity for THIS org and
++        /// user (and the exact body, when given).
++        async fn org_core(
++            &self,
++            method: &str,
++            path: &str,
++            body: Option<Value>,
++            response: ResponseTemplate,
++        ) {
++            let mut mock = Mock::given(wm_method(method))
++                .and(wm_path(path))
++                .and(wm_header("x-service-id", "verevon-gateway"))
++                .and(wm_header("x-delegation-version", "v3"))
++                .and(wm_header("x-org-id", "org-1"))
++                .and(wm_header("x-user-id", "user-1"));
++            if let Some(body) = body {
++                mock = mock.and(wm_body_json(body));
++            }
++            mock.respond_with(response).mount(&self.org_core).await;
++        }
++
++        async fn org_core_requests(&self) -> usize {
++            self.org_core
++                .received_requests()
++                .await
++                .expect("recording")
++                .len()
++        }
++    }
++
++    async fn send(state: AppState, method: &str, uri: &str, body: Option<Value>) -> (u16, Value) {
++        let mut request = Request::builder()
++            .method(method)
++            .uri(uri)
++            .header("cookie", COOKIE);
++        let body = match body {
++            Some(body) => {
++                request = request.header("content-type", "application/json");
++                Body::from(body.to_string())
++            }
++            None => Body::empty(),
++        };
++        let response = crate::build_router(state)
++            .oneshot(request.body(body).unwrap())
++            .await
++            .unwrap();
++        let status = response.status().as_u16();
++        let parsed: Value =
++            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
++                .unwrap_or(Value::Null);
++        (status, parsed)
++    }
++
++    fn thread_hold() -> Value {
++        json!({"scope": "thread", "thread_id": "thr-1", "hold_ref": "Matter 2026-17"})
++    }
++
++    #[tokio::test]
++    async fn an_owner_sets_the_window_through_org_core() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let up = Upstreams::start("owner").await;
++        let put = json!({"expected_revision": 0, "thread_days": 90});
++        up.org_core(
++            "PUT",
++            ORG_CORE_RETENTION,
++            Some(put.clone()),
++            ResponseTemplate::new(200)
++                .set_body_json(json!({"organization_id": "org-1", "thread_days": 90, "revision": 1})),
++        )
++        .await;
++        let (status, body) = send(up.state(), "PUT", "/api/v1/orgs/org-1/retention", Some(put)).await;
++        assert_eq!(status, 200, "{body}");
++        assert_eq!(body["revision"], 1);
++    }
++
++    #[tokio::test]
++    async fn a_member_and_a_compliance_member_cannot_set_the_window() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        for role in ["member", "compliance"] {
++            let up = Upstreams::start(role).await;
++            let (status, body) = send(
++                up.state(),
++                "PUT",
++                "/api/v1/orgs/org-1/retention",
++                Some(json!({"expected_revision": 0, "thread_days": 90})),
++            )
++            .await;
++            assert_eq!(status, 403, "{role}: {body}");
++            assert_eq!(up.org_core_requests().await, 0);
++        }
++    }
++
++    #[tokio::test]
++    async fn with_org_cores_switch_off_the_routes_read_as_not_enabled() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let up = Upstreams::start("owner").await;
++        up.org_core(
++            "GET",
++            ORG_CORE_RETENTION,
++            None,
++            ResponseTemplate::new(404).set_body_string("404 page not found"),
++        )
++        .await;
++        let (status, body) = send(up.state(), "GET", "/api/v1/orgs/org-1/retention", None).await;
++        assert_eq!(status, 404);
++        assert_eq!(body["error"]["code"], "not_found", "{body}");
++    }
++
++    #[tokio::test]
++    async fn compliance_places_a_hold_and_an_admin_cannot() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let admin = Upstreams::start("admin").await;
++        let (status, _) = send(
++            admin.state(),
++            "POST",
++            "/api/v1/orgs/org-1/legal-holds",
++            Some(thread_hold()),
++        )
++        .await;
++        assert_eq!(status, 403);
++        assert_eq!(admin.org_core_requests().await, 0);
++
++        let compliance = Upstreams::start("compliance").await;
++        compliance
++            .org_core(
++                "POST",
++                ORG_CORE_HOLDS,
++                Some(thread_hold()),
++                ResponseTemplate::new(201).set_body_json(json!({
++                    "hold": {"id": HOLD_ID, "scope": "thread", "target_ref": "thr-1"},
++                    "existed": false
++                })),
++            )
++            .await;
++        let (status, body) = send(
++            compliance.state(),
++            "POST",
++            "/api/v1/orgs/org-1/legal-holds",
++            Some(thread_hold()),
++        )
++        .await;
++        assert_eq!(status, 201, "{body}");
++        assert_eq!(body["hold"]["id"], HOLD_ID);
++    }
++
++    #[tokio::test]
++    async fn the_nothing_retained_refusal_reaches_the_caller_as_org_core_typed_it() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let up = Upstreams::start("owner").await;
++        let refusal = json!({"error": {
++            "code": "legal_hold_nothing_retained",
++            "message": "Nothing is kept for this thread under zero data retention, so there is nothing to hold.",
++            "details": {"feature": "legal_hold"}
++        }});
++        up.org_core(
++            "POST",
++            ORG_CORE_HOLDS,
++            None,
++            ResponseTemplate::new(422).set_body_json(refusal.clone()),
++        )
++        .await;
++        let (status, body) = send(
++            up.state(),
++            "POST",
++            "/api/v1/orgs/org-1/legal-holds",
++            Some(thread_hold()),
++        )
++        .await;
++        assert_eq!((status, body), (422, refusal));
++    }
++
++    #[tokio::test]
++    async fn a_release_names_a_well_formed_hold_or_never_leaves_the_gateway() {
++        let _env = crate::config::TEST_ENV_LOCK.lock().await;
++        let up = Upstreams::start("owner").await;
++        up.org_core(
++            "POST",
++            &format!("{ORG_CORE_HOLDS}/{HOLD_ID}/release"),
++            None,
++            ResponseTemplate::new(200).set_body_json(json!({"id": HOLD_ID})),
++        )
++        .await;
++        let (status, _) = send(
++            up.state(),
++            "POST",
++            &format!("/api/v1/orgs/org-1/legal-holds/{HOLD_ID}/release"),
++            None,
++        )
++        .await;
++        assert_eq!(status, 200);
++        let (status, _) = send(
++            up.state(),
++            "POST",
++            "/api/v1/orgs/org-1/legal-holds/not-a-hold/release",
++            None,
++        )
++        .await;
++        assert_eq!(status, 404);
++        assert_eq!(up.org_core_requests().await, 1);
++    }
++
++    #[test]
++    fn bodies_are_checked_for_shape_before_signing() {
++        assert!(validate_put_body(&json!({"expected_revision": 0, "thread_days": null})).is_ok());
++        assert!(validate_put_body(&json!({"expected_revision": 2, "thread_days": 365})).is_ok());
++        assert!(validate_put_body(&json!({"thread_days": 365})).is_err());
++        assert!(validate_put_body(&json!({"expected_revision": 0, "thread_days": "90"})).is_err());
++        assert!(validate_put_body(&json!({"expected_revision": 0, "days": 90})).is_err());
++
++        assert!(validate_hold_body(&json!({"scope": "org", "hold_ref": "M-1"})).is_ok());
++        assert!(validate_hold_body(&thread_hold()).is_ok());
++        assert!(validate_hold_body(&json!({"scope": "space", "hold_ref": "M-1"})).is_err());
++        assert!(validate_hold_body(&json!({"scope": "org", "hold_ref": "  "})).is_err());
++        assert!(validate_hold_body(&json!({"scope": "org", "hold_ref": "r".repeat(201)})).is_err());
++        assert!(validate_hold_body(&json!({"scope": "org", "hold_ref": "M", "note": "x"})).is_err());
++
++        assert!(valid_hold_id(HOLD_ID));
++        assert!(!valid_hold_id("lh_0123456789ABCDEF0123456789abcdef"));
++        assert!(!valid_hold_id("lh_short"));
++    }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/OrgRetentionSection.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/OrgRetentionSection.tsx
+new file mode 100644
+index 000000000..db6ed127b
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/OrgRetentionSection.tsx	
+@@ -0,0 +1,380 @@
++import { Loader2, Lock, ShieldCheck } from '@/shared/icons'
++import { createMemo, createSignal, For, Show } from 'solid-js'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import { requestJson } from '@/shared/api/http'
++import { ApiError } from '@/shared/api/api-error'
++import { translateApiError, useI18n } from '@/shared/i18n'
++import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
++import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
++import { getSession } from '@/shared/session/session-store'
++
++/**
++ * Oppbevaring og rettslig hold (EP-9 C1).
++ *
++ * org-core owns the retention window and the legal holds; session-core's sweep
++ * reads them and deletes personal threads past the window, never a held one. An
++ * owner or admin sets the window; an owner or a compliance member places and
++ * releases a hold. The writes go through the actions `org.set_retention`,
++ * `org.place_legal_hold` and `org.release_legal_hold` (all high risk), whose
++ * schemas mirror the bounds checked here.
++ *
++ * While org-core's ORG_RETENTION_POLICY_ENABLED is off the gateway answers 404
++ * `not_found`, and the section says the feature is not on instead of showing
++ * controls that would all fail.
++ */
++
++interface RetentionPolicy {
++  organization_id: string
++  thread_days: number | null
++  revision: number
++  updated_by: string
++  updated_at: string | null
++}
++
++interface LegalHold {
++  id: string
++  scope: 'org' | 'thread'
++  target_ref: string
++  hold_ref: string
++  created_by: string
++  created_at: string
++  released_by: string | null
++  released_at: string | null
++}
++
++const MIN_DAYS = 30
++const MAX_DAYS = 3650
++const MAX_HOLD_REF = 200
++
++const orgPath = (orgId: string) => `/api/v1/orgs/${encodeURIComponent(orgId)}`
++
++function roleIn(role: string | null | undefined, allowed: readonly string[]): boolean {
++  return (role ?? '')
++    .split(',')
++    .map((value) => value.trim().toLowerCase())
++    .some((value) => allowed.includes(value))
++}
++
++function notEnabled(error: unknown): boolean {
++  return error instanceof ApiError && error.status === 404 && error.code === 'not_found'
++}
++
++function formatWhen(value?: string | null): string {
++  if (!value) return '—'
++  try {
++    return new Date(value).toLocaleString('nb-NO', { dateStyle: 'short', timeStyle: 'short' })
++  } catch {
++    return value
++  }
++}
++
++export function OrgRetentionSection() {
++  const i18n = useI18n()
++  const session = getSession()
++  const orgId = createMemo(() => session.activeOrg?.id ?? '')
++  const canSetWindow = createMemo(() => roleIn(session.activeOrg?.role, ['owner', 'admin']))
++  const canReadHolds = createMemo(() => roleIn(session.activeOrg?.role, ['owner', 'admin', 'compliance']))
++  const canWriteHolds = createMemo(() => roleIn(session.activeOrg?.role, ['owner', 'compliance']))
++
++  const [policy, { refetch: refetchPolicy }] = createResource(
++    () => (canSetWindow() && orgId() ? orgId() : undefined),
++    (id) => requestJson<RetentionPolicy>(`${orgPath(id)}/retention`),
++  )
++  const [holds, { refetch: refetchHolds }] = createResource(
++    () => (canReadHolds() && orgId() ? orgId() : undefined),
++    (id) => requestJson<{ holds: LegalHold[] }>(`${orgPath(id)}/legal-holds`).then((list) => list.holds),
++  )
++  const disabled = createMemo(() => notEnabled(policy.error) || notEnabled(holds.error))
++
++  const [keep, setKeep] = createSignal<boolean | null>(null)
++  const [daysDraft, setDaysDraft] = createSignal<string | null>(null)
++  const [windowError, setWindowError] = createSignal<string | null>(null)
++  const [savingWindow, setSavingWindow] = createSignal(false)
++
++  const keepAll = () => keep() ?? (policy()?.thread_days ?? null) === null
++  const daysValue = () => daysDraft() ?? String(policy()?.thread_days ?? 365)
++
++  const saveWindow = async () => {
++    const current = policy()
++    if (!current || savingWindow()) return
++    let threadDays: number | null = null
++    if (!keepAll()) {
++      const parsed = Number(daysValue().trim())
++      if (!Number.isInteger(parsed) || parsed < MIN_DAYS || parsed > MAX_DAYS) {
++        setWindowError(`Oppgi et helt antall dager mellom ${MIN_DAYS} og ${MAX_DAYS}.`)
++        return
++      }
++      threadDays = parsed
++    }
++    setSavingWindow(true)
++    setWindowError(null)
++    try {
++      await requestJson<RetentionPolicy>(`${orgPath(orgId())}/retention`, {
++        method: 'PUT',
++        body: JSON.stringify({ expected_revision: current.revision, thread_days: threadDays }),
++      })
++      setKeep(null)
++      setDaysDraft(null)
++      await refetchPolicy()
++    } catch (err) {
++      setWindowError(
++        err instanceof ApiError && err.code === 'revision_conflict'
++          ? 'Innstillingen ble endret av noen andre. Last inn på nytt og prøv igjen.'
++          : translateApiError(err, i18n.tr, { no: 'Kunne ikke lagre oppbevaringen.', en: 'Could not save the retention window.' }),
++      )
++    } finally {
++      setSavingWindow(false)
++    }
++  }
++
++  const [scope, setScope] = createSignal<'org' | 'thread'>('thread')
++  const [threadId, setThreadId] = createSignal('')
++  const [holdRef, setHoldRef] = createSignal('')
++  const [holdError, setHoldError] = createSignal<string | null>(null)
++  const [busyHold, setBusyHold] = createSignal<string | null>(null)
++
++  const placeHold = async () => {
++    if (busyHold()) return
++    const reference = holdRef().trim()
++    if (!reference || reference.length > MAX_HOLD_REF) {
++      setHoldError(`Oppgi en saksreferanse på høyst ${MAX_HOLD_REF} tegn.`)
++      return
++    }
++    if (scope() === 'thread' && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(threadId().trim())) {
++      setHoldError('Oppgi ID-en til tråden som skal holdes.')
++      return
++    }
++    setBusyHold('new')
++    setHoldError(null)
++    try {
++      const body = scope() === 'org'
++        ? { scope: 'org', hold_ref: reference }
++        : { scope: 'thread', thread_id: threadId().trim(), hold_ref: reference }
++      await requestJson(`${orgPath(orgId())}/legal-holds`, { method: 'POST', body: JSON.stringify(body) })
++      setThreadId('')
++      setHoldRef('')
++      await refetchHolds()
++    } catch (err) {
++      setHoldError(
++        err instanceof ApiError && err.code === 'legal_hold_nothing_retained'
++          ? 'Denne tråden lagres ikke (null datalagring), så det finnes ingenting å holde.'
++          : translateApiError(err, i18n.tr, { no: 'Kunne ikke plassere holdet.', en: 'Could not place the hold.' }),
++      )
++    } finally {
++      setBusyHold(null)
++    }
++  }
++
++  const releaseHold = async (hold: LegalHold) => {
++    if (busyHold()) return
++    setBusyHold(hold.id)
++    setHoldError(null)
++    try {
++      await requestJson(`${orgPath(orgId())}/legal-holds/${encodeURIComponent(hold.id)}/release`, { method: 'POST' })
++      await refetchHolds()
++    } catch (err) {
++      setHoldError(translateApiError(err, i18n.tr, { no: 'Kunne ikke oppheve holdet.', en: 'Could not release the hold.' }))
++    } finally {
++      setBusyHold(null)
++    }
++  }
++
++  return (
++    <>
++      <SectionHeader
++        title="Oppbevaring og rettslig hold"
++        description="Hvor lenge personlige tråder beholdes etter siste aktivitet, og hva som holdes tilbake fra sletting."
++      />
++
++      <Show
++        when={canReadHolds()}
++        fallback={
++          <p class="verevon-settings-subnote">
++            <ShieldCheck size={14} aria-hidden="true" /> Bare eiere, administratorer og
++            compliance-ansvarlige kan se oppbevaring og rettslig hold.
++          </p>
++        }
++      >
++        <Show
++          when={!disabled()}
++          fallback={
++            <p class="verevon-settings-subnote" role="status">
++              Oppbevaringsregler er ikke slått på for denne organisasjonen ennå.
++            </p>
++          }
++        >
++          <Show when={canSetWindow()}>
++            <Show
++              when={!policy.loading}
++              fallback={<p class="verevon-settings-subnote" role="status" aria-busy="true">Laster oppbevaring…</p>}
++            >
++              <Show when={policy.error && !disabled()}>
++                <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++                  Kunne ikke laste oppbevaringen.
++                </p>
++              </Show>
++              <Show when={policy()}>
++                {(current) => (
++                  <div class="verevon-settings-field-grid verevon-settings-field-grid--spaced">
++                    <label class="verevon-settings-field">
++                      <span class="verevon-settings-label">
++                        <input
++                          type="checkbox"
++                          checked={keepAll()}
++                          onChange={(event) => setKeep(event.currentTarget.checked)}
++                        />{' '}
++                        Behold tråder uten tidsgrense
++                      </span>
++                      <span class="verevon-settings-help">Standard. Ingenting slettes på grunn av alder.</span>
++                    </label>
++                    <Show when={!keepAll()}>
++                      <label for="retention-thread-days" class="verevon-settings-field">
++                        <span class="verevon-settings-label">Dager etter siste aktivitet</span>
++                        <span class="verevon-settings-input-wrap">
++                          <VerevonInput
++                            id="retention-thread-days"
++                            value={daysValue()}
++                            inputmode="numeric"
++                            onInput={(event) => setDaysDraft(event.currentTarget.value)}
++                            class="verevon-settings-input"
++                          />
++                        </span>
++                        <span class="verevon-settings-help">
++                          Mellom {MIN_DAYS} og {MAX_DAYS} dager. Tråder som holdes, slettes aldri.
++                        </span>
++                      </label>
++                    </Show>
++                    <Show when={windowError()}>
++                      {(message) => (
++                        <span class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++                          {message()}
++                        </span>
++                      )}
++                    </Show>
++                    <span>
++                      <SettingsButton
++                        type="button"
++                        variant="primary"
++                        settingsSize="sm"
++                        disabled={savingWindow()}
++                        onClick={() => void saveWindow()}
++                      >
++                        <Show when={savingWindow()} fallback={<>Lagre oppbevaring</>}>
++                          <Loader2 size={14} aria-hidden="true" /> Lagrer…
++                        </Show>
++                      </SettingsButton>{' '}
++                      <span class="verevon-settings-help">
++                        Versjon {current().revision} · sist endret {formatWhen(current().updated_at)}
++                      </span>
++                    </span>
++                  </div>
++                )}
++              </Show>
++            </Show>
++          </Show>
++
++          <h3 class="verevon-settings-label">Rettslig hold</h3>
++          <Show when={holds.error && !disabled()}>
++            <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++              Kunne ikke laste rettslige hold.
++            </p>
++          </Show>
++          <Show when={(holds() ?? []).length > 0} fallback={<p class="verevon-settings-subnote">Ingen hold.</p>}>
++            <ul class="verevon-settings-list">
++              <For each={holds() ?? []}>
++                {(hold) => (
++                  <li>
++                    <Lock size={14} aria-hidden="true" />{' '}
++                    {hold.scope === 'org' ? 'Hele organisasjonen' : <>Tråd <code>{hold.target_ref}</code></>}
++                    {' '}· {hold.hold_ref} · plassert {formatWhen(hold.created_at)}
++                    <Show
++                      when={hold.released_at === null}
++                      fallback={<> · opphevet {formatWhen(hold.released_at)}</>}
++                    >
++                      <Show when={canWriteHolds()}>
++                        {' '}
++                        <SettingsButton
++                          type="button"
++                          settingsSize="sm"
++                          disabled={busyHold() !== null}
++                          onClick={() => void releaseHold(hold)}
++                        >
++                          Opphev
++                        </SettingsButton>
++                      </Show>
++                    </Show>
++                  </li>
++                )}
++              </For>
++            </ul>
++          </Show>
++
++          <Show when={canWriteHolds()}>
++            <div class="verevon-settings-field-grid verevon-settings-field-grid--spaced">
++              <label class="verevon-settings-field">
++                <span class="verevon-settings-label">Omfang</span>
++                <span class="verevon-settings-input-wrap">
++                  <select
++                    aria-label="Omfang for holdet"
++                    value={scope()}
++                    onChange={(event) => setScope(event.currentTarget.value as 'org' | 'thread')}
++                    class="verevon-settings-input verevon-settings-select"
++                  >
++                    <option value="thread">Én tråd</option>
++                    <option value="org">Hele organisasjonen</option>
++                  </select>
++                </span>
++              </label>
++              <Show when={scope() === 'thread'}>
++                <label for="legal-hold-thread" class="verevon-settings-field">
++                  <span class="verevon-settings-label">Tråd-ID</span>
++                  <span class="verevon-settings-input-wrap">
++                    <VerevonInput
++                      id="legal-hold-thread"
++                      value={threadId()}
++                      onInput={(event) => setThreadId(event.currentTarget.value)}
++                      class="verevon-settings-input"
++                    />
++                  </span>
++                </label>
++              </Show>
++              <label for="legal-hold-ref" class="verevon-settings-field">
++                <span class="verevon-settings-label">Saksreferanse</span>
++                <span class="verevon-settings-input-wrap">
++                  <VerevonInput
++                    id="legal-hold-ref"
++                    value={holdRef()}
++                    maxLength={MAX_HOLD_REF}
++                    onInput={(event) => setHoldRef(event.currentTarget.value)}
++                    class="verevon-settings-input"
++                  />
++                </span>
++                <span class="verevon-settings-help">Et saksnummer eller en referanse til saken, aldri innhold.</span>
++              </label>
++              <Show when={holdError()}>
++                {(message) => (
++                  <span class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++                    {message()}
++                  </span>
++                )}
++              </Show>
++              <span>
++                <SettingsButton
++                  type="button"
++                  variant="primary"
++                  settingsSize="sm"
++                  disabled={busyHold() !== null}
++                  onClick={() => void placeHold()}
++                >
++                  <Show when={busyHold() === 'new'} fallback={<>Plasser hold</>}>
++                    <Loader2 size={14} aria-hidden="true" /> Plasserer…
++                  </Show>
++                </SettingsButton>
++              </span>
++            </div>
++          </Show>
++        </Show>
++      </Show>
++    </>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 3b856958c..fecd9c9dd 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -497,6 +497,44 @@ describe('action registry', () => {
+     }).success).toBe(false)
+   })
+ 
++  it('keeps the retention window and legal holds approval-gated, high risk and out of reach of the model', () => {
++    for (const id of ['org.set_retention', 'org.place_legal_hold', 'org.release_legal_hold'] as const) {
++      const action = getActionDescriptor(id)
++      expect(action?.ownerPlane).toBe('control')
++      expect(action?.risk).toBe('high')
++      expect(action?.requiresApproval).toBe(true)
++      // A model must not shorten what its org keeps, nor lift a hold on evidence.
++      expect(isModelExecutableAction(id)).toBe(false)
++    }
++    expect(getActionDescriptor('org.release_legal_hold')?.reversible).toBe(false)
++
++    const setRetention = getActionDescriptor('org.set_retention')
++    const base = { orgId: 'org_1', expected_revision: 0, thread_days: 90 }
++    expect(setRetention?.inputSchema.safeParse(base).success).toBe(true)
++    // Null is keep; the bounds are org-core's 30..3650 days.
++    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: null }).success).toBe(true)
++    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 29 }).success).toBe(false)
++    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 3651 }).success).toBe(false)
++    expect(setRetention?.inputSchema.safeParse({ ...base, thread_days: 90.5 }).success).toBe(false)
++    expect(setRetention?.inputSchema.safeParse({ orgId: 'org_1', thread_days: 90 }).success).toBe(false)
++    expect(setRetention?.inputSchema.safeParse({ ...base, days: 90 }).success).toBe(false)
++
++    const place = getActionDescriptor('org.place_legal_hold')
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: 'Matter 17' }).success).toBe(true)
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'thread', thread_id: 'thr_1', hold_ref: 'Matter 17' }).success).toBe(true)
++    // An org hold names no thread; a thread hold must name one; the reference is required.
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', thread_id: 'thr_1', hold_ref: 'M' }).success).toBe(false)
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'thread', hold_ref: 'M' }).success).toBe(false)
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: '  ' }).success).toBe(false)
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'org', hold_ref: 'r'.repeat(201) }).success).toBe(false)
++    expect(place?.inputSchema.safeParse({ orgId: 'org_1', scope: 'space', hold_ref: 'M' }).success).toBe(false)
++
++    const release = getActionDescriptor('org.release_legal_hold')
++    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: `lh_${'a'.repeat(32)}` }).success).toBe(true)
++    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: 'lh_short' }).success).toBe(false)
++    expect(release?.inputSchema.safeParse({ orgId: 'org_1', holdId: `lh_${'A'.repeat(32)}` }).success).toBe(false)
++  })
++
+   it('takes the whole router policy, the ladder and the role table included, so a save through the action resets neither', () => {
+     const action = getActionDescriptor('router_policy.update')
+     const row = { simple: 'gpt-4o-mini', moderate: 'gpt-4o-mini', complex: 'claude-sonnet-5-5' }
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index a557d67fe..41d17b1be 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1387,6 +1387,33 @@ const orgSetModelEntitlementInput = z.object({
+   roles: z.record(z.string().min(1), modelPolicyLayer).optional(),
+ }).strict()
+ 
++// Retention window and legal holds (EP-9 C1). org-core owns every rule; these mirror its bounds so a
++// draft is refused before it is sent. A null window means keep, the default.
++const orgSetRetentionInput = z.object({
++  orgId: z.string().min(1),
++  expected_revision: z.number().int().nonnegative(),
++  thread_days: z.number().int().min(30).max(3650).nullable(),
++}).strict()
++
++const orgPlaceLegalHoldInput = z.discriminatedUnion('scope', [
++  z.object({
++    orgId: z.string().min(1),
++    scope: z.literal('org'),
++    hold_ref: z.string().trim().min(1).max(200),
++  }).strict(),
++  z.object({
++    orgId: z.string().min(1),
++    scope: z.literal('thread'),
++    thread_id: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
++    hold_ref: z.string().trim().min(1).max(200),
++  }).strict(),
++])
++
++const orgReleaseLegalHoldInput = z.object({
++  orgId: z.string().min(1),
++  holdId: z.string().regex(/^lh_[0-9a-f]{32}$/),
++}).strict()
++
+ // Domain verification (WS05-S6). The domain is a hostname; org-core normalizes it, refuses IP
+ // literals, public suffixes and free-mail providers, and owns every other rule.
+ const orgDomainInput = z.object({
+@@ -3945,6 +3972,39 @@ export const actionRegistry = [
+     inputSchema: orgSetModelEntitlementInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'org.set_retention',
++    label: 'Set organization retention window',
++    description: 'Set how many days of inactivity a personal thread is kept before the retention sweep may delete it (30 to 3650), or keep threads indefinitely. Held threads are never deleted. Owner or admin only.',
++    ownerPlane: 'control',
++    risk: 'high',
++    requiresApproval: true,
++    reversible: true,
++    inputSchema: orgSetRetentionInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'org.place_legal_hold',
++    label: 'Place legal hold',
++    description: 'Hold the whole organization or one thread so the retention sweep deletes nothing it covers until the hold is released. A thread kept under zero data retention has nothing to hold and is refused. Owner or compliance only.',
++    ownerPlane: 'control',
++    risk: 'high',
++    requiresApproval: true,
++    reversible: true,
++    inputSchema: orgPlaceLegalHoldInput,
++    outputSchema: envelopeStatusOutput,
++  },
++  {
++    id: 'org.release_legal_hold',
++    label: 'Release legal hold',
++    description: 'Release a legal hold, after which the held content follows the retention window again. Owner or compliance only.',
++    ownerPlane: 'control',
++    risk: 'high',
++    requiresApproval: true,
++    reversible: false,
++    inputSchema: orgReleaseLegalHoldInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'org.add_domain',
+     label: 'Add organization domain',
+diff --git a/apps/Model Plane/api/contracts/zdr-refusals.json b/apps/Model Plane/api/contracts/zdr-refusals.json
+index f6195c68d..e1b6e031a 100644
+--- a/apps/Model Plane/api/contracts/zdr-refusals.json	
++++ b/apps/Model Plane/api/contracts/zdr-refusals.json	
+@@ -244,6 +244,10 @@
+     {
+       "key": "thread_goal",
+       "label_en": "persistent goals"
++    },
++    {
++      "key": "legal_hold",
++      "label_en": "a legal hold on a thread"
+     }
+   ],
+   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

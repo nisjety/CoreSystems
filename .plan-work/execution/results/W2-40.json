@@ -1,0 +1,685 @@
+{
+ "batchId": "W2-40",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS25-S10",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_policy.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- every_durable_mutation_refuses (in apps/Model Plane/rust)",
+     "outcome": "1 passed, 0 failed, exit 0. The inventory test that failed in review now passes. No edit to zdr_posture.rs was needed."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib (full, same directory)",
+     "outcome": "2628 passed, 1 failed, 4 ignored, exit 101. The one failure is sse_events::payload_contract::sse_event_payload_golden in sse_events.rs, which this slice does not touch. The committed golden apps/Model Plane/api/contracts/sse-event-payloads.json is unchanged in git, while sse_events.rs has 39 uncommitted changed lines from another batch, including a hunk inside impl ChatEvent, so that edit is the likely cause. Not verified against HEAD: no copy was built."
+    },
+    {
+     "command": "rustfmt --edition 2021 --check --config newline_style=Windows on http_routes.rs (check only, nothing written; workspace edition confirmed 2021)",
+     "outcome": "exit 1 from 91 hunks elsewhere in the file. None starts between lines 5960 and 6040, so the edited region is clean."
+    },
+    {
+     "command": "git diff --numstat -- http_routes.rs (read-only)",
+     "outcome": "450 insertions, 0 deletions against HEAD: 446 from the slice plus 4 from this fix."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs: after line 124 `        .merge(domains::mcp::router(state.clone()))`, add `        .merge(domains::agent_policy::router(state.clone()))`. Until this is merged the /api/v1/org routes are not served and agent_policy::router is dead code (a compile warning).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after line 211 `  'tools.set_policy': exempt('no_owner_executor', 'external_write'),`, add these five lines: `  'org.set_agent_policy': exempt('human_identity_or_security', 'external_write'),`, `  'org.preview_effective_policy': exempt('ui_state_only', 'read'),`, `  'org.create_hook': exempt('human_identity_or_security', 'external_write'),`, `  'org.update_hook': exempt('human_identity_or_security', 'external_write'),`, `  'org.delete_hook': exempt('human_identity_or_security', 'external_write'),`. Without them tsc reports TS2739 at model-access.ts(90) and 11 tests in admission-contract.test.ts and catalog-manifest.test.ts fail.",
+    "After item 2, regenerate and re-vendor the admission golden: from apps/Frontend Plane/verevonv3 run `VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run src/shared/actions/admission-contract.test.ts`; copy src/shared/api/contracts/agent-action-admission.json to apps/Model Plane/api/contracts/agent-action-admission.json; refresh its .sha256 and the pin at scripts/tests/zdr-contract-sync.test.sh line 204; re-vendor the copies at lines 344, 347 and 350; run `bash scripts/tests/zdr-contract-sync.test.sh`. Do not use pnpm exec (it triggers a dependency install that fails on a missing Quarry-v2 SDK path).",
+    "Optional coverage, shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs: after line 832 add (\"http_routes.rs\", \"set_org_agent_policy_proxy\"), (\"http_routes.rs\", \"create_org_hook_proxy\"), (\"http_routes.rs\", \"update_org_hook_proxy\") and (\"http_routes.rs\", \"delete_org_hook_proxy\"). Each already calls require_non_zdr_durable_mutation at the top. The inventory test passes without this edit (run in round 2).",
+    "Decide the action-surface gate (depth P1): add `org.*` dispatch arms to apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs that call into agent_policy.rs, or accept registry-only status as tools.set_policy has today.",
+    "Live proof, not run: rebuild model-gateway and the verevonv3 gateway with ORG_AGENT_POLICY_API=true on the proof stack only. Run the admin flow (GET; PUT with revision in the body; a stale revision gets 409), the member flow (GET 200; PUT 403), the ZDR-org flow (PUT and POST 412 with zdr_durable_mutation_forbidden), hook create, update and retire, and the effective read. Capture the capability-core rows and the content-free registry_audit_log rows.",
+    "Route the sse golden failure: sse_events::payload_contract::sse_event_payload_golden fails in this shared worktree because sse_events.rs carries another batch's uncommitted edits. It is not part of WS25-S10. The owning batch regenerates the golden with MP_UPDATE_GOLDEN=1 and re-pins it, as the panic text says.",
+    "Commit only this slice's hunks. http_routes.rs is 450 insertions and 0 deletions against HEAD (446 from the slice, 4 from this fix). agent_policy.rs is new and untracked. The other uncommitted files in this worktree belong to other slices."
+   ],
+   "deviations": [
+    "Revision travels in the JSON body as `revision` on PUT /api/v1/org/agent-policy (gateway: /v1/org/agent-policy). model-gateway strips it and sends it as the If-Match header capability-core requires. A request carrying only If-Match is refused 428 by capability-core.",
+    "Hook paths are /api/v1/org/hooks/{hook_id} at the BFF and /v1/org/hooks/:hook_id at the gateway. The row named only the collection.",
+    "proxy_to_capability_core is now a wrapper over proxy_to_capability_core_with_precondition, which takes an If-Match argument. Existing callers are unchanged.",
+    "Non-GET calls are checked twice on purpose: the four write handlers call require_non_zdr_durable_mutation at the top, the public entry point checks before it delegates (round 2), and the precondition variant checks too, so a direct caller of either function is still refused.",
+    "Registry inputs are camelCase (toolMatcher, hookId). REST bodies and registry outputs are capability-core's snake_case wire form, and no mapper exists in this slice.",
+    "The typed ZDR refusal carries retryable and action in model-gateway's refusal JSON shape. The BFF's other refusals are plain {error:{code,message}} with no details.",
+    "org.preview_effective_policy is risk low (a read). The four writes are risk high, requiresApproval false, reversible true.",
+    "No dispatch arms or dispatcher functions were added for the five action ids. The row lists contracts and REST routes only.",
+    "The routes carry no switch of their own. capability-core's ORG_AGENT_POLICY_API gates them (the row's flag field is blank), so they answer 404 while it is off."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs (build_router merge; lead_todo 1)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (five MODEL_ACCESS rows; lead_todo 2)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json, C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/agent-action-admission.json and its .sha256, C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh (pin and vendored copies; lead_todo 3)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs (durable-mutation names; optional coverage, lead_todo 4)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs (only if dispatch arms are chosen; lead_todo 5)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (lead shared-edit): add MODEL_ACCESS rows for the five new ids org.set_agent_policy, org.preview_effective_policy, org.create_hook, org.update_hook and org.delete_hook, as in implementer lead_todo 2. Without them catalog-manifest.test.ts fails 6 tests ('Action catalog has no model access row for: org.set_agent_policy'), and I re-ran that test.",
+     "After that, regenerate the admission golden (VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run src/shared/actions/admission-contract.test.ts) and re-vendor it to apps/Model Plane/api/contracts/agent-action-admission.json with its .sha256. Then refresh the pin and the vendored copies in scripts/tests/zdr-contract-sync.test.sh (implementer lead_todo 3). Until this is done admission-contract.test.ts fails 5 tests with 'Cannot read properties of undefined (reading access)'.",
+     "src/shared/i18n/gateway-error-codes.test.ts fails because the json! body in the new apps/gateway/src/domains/agent_policy.rs zdr_refusal() emits 'zdr_durable_mutation_forbidden', and that code has no copy in src/shared/i18n/errors.ts and no exemption. Fix it in one of two ways. (a) Lead shared-edit: add an ERROR_COPY entry in errors.ts for zdr_durable_mutation_forbidden (no/en copy); zdr-refusals.ts already has its catalogue entry. (b) Add a reasoned exemption in the test. This item is missing from the implementer's lead_todo.",
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs (lead shared-edit): merge domains::agent_policy::router(state.clone()) into build_router after the mcp router (implementer lead_todo 1). Until then the BFF routes are not served, and the build warns 'function get_agent_policy is never used' plus the same warning for every other handler (dead code). The row's deliverable, the routes served through the BFF, is not met."
+    ],
+    "dod_gaps": [
+     "Live proof not run: rebuild model-gateway and the verevonv3 gateway on the proof stack with ORG_AGENT_POLICY_API=true. Use session-cookie curl as admin (GET, PUT with revision, a stale revision answers 409), as a member (GET 200, PUT 403) and as a ZDR org (writes answer 412 zdr_durable_mutation_forbidden). Run hook create, update and retire and the effective read, and capture the capability-core rows and the registry_audit_log rows.",
+     "Commit only this slice's hunks: http_routes.rs has +450/-0 against HEAD, agent_policy.rs is untracked, and mod.rs, action-registry.ts and action-registry.test.ts belong to the slice. The other uncommitted files in the worktree belong to other batches.",
+     "Decide whether org.* gets dispatch arms in apps/gateway/src/domains/actions/handlers.rs, or whether it stays registry-only (action-surface-contract test, from 15 to 20 registry-only ids).",
+     "C: has 8.3 GB free, at 100% use. Check free space after the next build batch."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "action-surface-contract.test.mjs already fails at HEAD with 15 registry-only ids. This slice makes it 20, and passing needs dispatch arms (lead_todo 5)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing has been rebuilt or run against a stack. The admin, member, ZDR-org and audit-row evidence is owed before ORG_AGENT_POLICY_API is switched on anywhere."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The revision is carried in the body because the BFF proxy forwards no client headers. S11 must send the body field."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A transport failure in proxy_to_capability_core answers 502 with reqwest's error text, which names the internal capability-core URL. The BFF relays model-gateway bodies unchanged, so the new routes can expose it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Upstream refusals reach the SPA in capability-core's bare error-code form, so the {error:{code,message,details}} envelope is not produced for upstream failures."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The camelCase registry inputs need a mapper before dispatch or S11 (toolMatcher to tool_matcher, hookId into the path)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins the forwarded body keys or the If-Match mapping against capability-core's real handler. The Rust tests use a recorder and the BFF tests a wiremock stand-in."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF tests call handlers directly, so the router, require_session, the rate limiter and the build_router merge are not exercised."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR clause's matrix rows (org_agent_policy_write_under_zdr_refused, org_hook_write_under_zdr_refused) are absent from api/contracts/zdr-posture-matrix.json. Adding them needs a matrix change and a golden with its .sha256 pin."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The model-gateway --lib run has one failing test, sse_events::payload_contract::sse_event_payload_golden, in a file this slice does not touch. Route it to the batch that owns the sse_events.rs edits (lead_todo 7)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The BFF's org-posture check treats an unreachable org-core as ZDR, so an outage gets zdr_durable_mutation_forbidden, which misstates the cause. The posture is cached for 60 s (zdr.rs ORG_ZDR_CACHE_SECS)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "With ORG_AGENT_POLICY_API off, capability-core's 404 is relayed as an empty object, because a non-JSON body becomes an empty object."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "org.delete_hook is reversible: true per the row, but a retired rule cannot be restored. It can only be added again as a new row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "zod counts reason length in UTF-16 units and capability-core counts runes. Allow-list ids are not checked against capability-core's identifier pattern."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The registry output schemas are documentation only. Nothing parses responses with them."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "BFF domains/orgs/settings.rs already names the org-core agentLearningPolicy 'org agent policy' in test names. S11 copy and tests must keep the two stores apart (DEC-14)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "C: had 5.7 GB free before and after the build. Check free space again after the next build batch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway's /v1/org/* proxies apply no admin check of their own and rely on capability-core re-deriving org admin from the signed scopes. Before ORG_AGENT_POLICY_API goes on, the live proof must show a member bearer that calls model-gateway directly, bypassing the BFF, gets 403 from capability-core."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF tests call the handlers directly, so require_session, the rate limiter and the build_router merge are not exercised. No router-level test proves that /api/v1/org/* answers 401 without a session."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins the forwarded paths (/api/v1/org-agent-policy, /api/v1/org-hooks/{id}), the body keys or the If-Match mapping against capability-core's real S7/S8 handlers. Only a recorder and a wiremock stand-in are used."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Upstream refusals from capability-core reach the SPA in its bare error form, not in the {error:{code,message,details}} envelope the row asks for. take_policy_revision's 400 is also a bare {error:string}, not a typed envelope."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "proxy_to_capability_core's transport-error 502 carries reqwest error text that can name the internal capability-core URL, and the BFF relays it unchanged."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR matrix rows org_agent_policy_write_under_zdr_refused and org_hook_write_under_zdr_refused are absent from api/contracts/zdr-posture-matrix.json. Optional zdr_posture.rs inventory entries for the four write handlers are not added either."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The BFF treats an unreachable org-core as ZDR, so an outage answers zdr_durable_mutation_forbidden, which misstates the cause. This fails closed, which is acceptable."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The registry inputs are camelCase (toolMatcher, hookId) and the REST/capability-core wire form is snake_case. A mapper is needed before dispatch or S11 wiring."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "org.delete_hook is marked reversible: true per the row, but a retired rule can only be re-created as a new row."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The full model-gateway --lib suite reportedly has 1 failure, sse_events::payload_contract::sse_event_payload_golden, caused by another batch's uncommitted sse_events.rs. It is not this slice: the slice's 6 targeted tests pass."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test --all-targets (apps/Frontend Plane/verevonv3/apps/gateway, CARGO_INCREMENTAL=0)",
+      "passed": true,
+      "outcome": "Passed. 1073 passed, 0 failed, 1 ignored in the lib, plus 1, 7, 13, 3 and 1 passed in the other test binaries. Exit 0. Only unused-import warnings."
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "passed": false,
+      "outcome": "Failed. 2628 passed, 1 failed, 4 ignored, exit 101. The failure is sse_events::payload_contract::sse_event_payload_golden (sse_events.rs:3850): the committed SSE payload golden differs from what ChatEvent::payload produces. sse_events.rs is uncommitted work from another batch and this slice does not own it. The slice's own http_routes.rs tests pass, including every_durable_mutation_refuses."
+     },
+     {
+      "command": "pnpm test (apps/Frontend Plane/verevonv3)",
+      "passed": false,
+      "outcome": "Could not run. pnpm's dependency check tried a pnpm install and died with ENOENT on apps/Frontend Plane/Ingestion Plane/Quarry-v2/sdks/typescript, so no tests ran."
+     },
+     {
+      "command": "node_modules/.bin/vitest run --pool=threads (apps/Frontend Plane/verevonv3, full suite, instead of pnpm test)",
+      "passed": false,
+      "outcome": "Failed. 16 tests failed and 6248 passed, in 6 failed files out of 569. The action-registry.test.ts file the slice owns passes. Failures that follow from this slice: catalog-manifest.test.ts, 6 tests, 'Action catalog has no model access row for: org.set_agent_policy' (the five new ids have no MODEL_ACCESS rows in model-access.ts, lead_todo 2). admission-contract.test.ts, 5 tests, 'Cannot read properties of undefined (reading access)', the same missing rows and the vendored admission contract and pin (lead_todo 3). gateway-error-codes.test.ts, 1 test: the gateway emits 'zdr_durable_mutation_forbidden' with no copy in errors.ts and no exemption entry. Failures that look unrelated: quarry-client.test.ts (cannot resolve @quarry/client, a missing workspace package); chat-event-contract.test.ts, 3 tests, which follows the sse_events.rs golden mismatch; browser-blocked.test.ts, 1 test, which I did not trace."
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "zdr"
+   ],
+   "notes": "Round 2, the required fix: proxy_to_capability_core (http_routes.rs lines 5984-5987) now refuses a non-GET call for a ZDR principal before it delegates, using require_non_zdr_durable_mutation(claims). The guard in proxy_to_capability_core_with_precondition (lines 6005-6007) is unchanged, because the policy PUT handler calls that variant directly. The duplicate is one claims check per non-GET call through the entry point. No signature changed and behaviour is unchanged for every existing caller. The inventory test now passes with no zdr_posture.rs edit. The rest of the slice is as in the previous report: the BFF routes and the five org action contracts are built, the lead items below are still owed, and the slice stays partial until they and the live proof are done. The TypeScript and BFF results from the previous round were not re-run here, since this fix does not touch those files. No DB tests, migrations, protos, docker, commits or staging. The worktree holds other batches' uncommitted edits (ChatMessages.tsx, chat-client.ts, sse.rs, sse_events.rs, lib.rs and others)."
+  },
+  {
+   "id": "WS18-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\knowledge_receipt.rs (new: pure knowledge_receipt fn, KnowledgeMode, KnowledgeReceipt, unit tests)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\lib.rs (pub mod knowledge_receipt)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs (receipt computed before the task spawn; emission when scope != auto or a receipt exists)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse_events.rs (optional knowledge field on SourceScopeApplied; payload adds the block only when present; samples)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts (ChatKnowledgeReceipt; sourceScopeAppliedEvent parser shared by both arms)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\derive.ts (knowledge carried on the source-scope node)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.tsx (SourceScopeNotice knowledge chip)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPanels.tsx (scopeApplied type; auto receipt shows no filter note)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-types.ts (scopeApplied type)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.ts (stores the event as scopeApplied)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.test.ts (tests beside chat-client.ts)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\derive.test.ts (test beside derive.ts)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPanels.test.tsx (test beside ChatPanels.tsx)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.retrieval-scope.test.ts (test beside the controller)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\SourceScopeNotice.test.tsx (new test for the chip)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-event-contract.test.ts (sourceScopeAppliedEvent added to READING_HELPERS; the test sits beside chat-client.ts)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib knowledge_receipt (run on the final rustfmt'd file)",
+     "outcome": "PASS: test result ok, 5 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse (sse_events and sse modules)",
+     "outcome": "387 passed, 1 failed: sse_events::payload_contract::sse_event_payload_golden. Expected: the committed golden lacks the new knowledge key on source_scope_applied; the owner regeneration in lead_todo clears it. No other sse test changed outcome."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib payload_contract",
+     "outcome": "3 passed, 1 failed (the same golden test); the other three payload-contract tests pass, including every_variant_has_a_minimal_and_a_full_sample and the never-sample-content check"
+    },
+    {
+     "command": "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+     "outcome": "PASS: sse taxonomy up to date (30 events), exit 0; the taxonomy doc is unchanged because the generator does not render payload keys"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run on chat-client.test.ts, chat-client.replay.test.ts, derive.test.ts, ChatPanels.test.tsx, use-chat-controller.retrieval-scope.test.ts, SourceScopeNotice.test.tsx (verevonv3)",
+     "outcome": "PASS: 6 files, 287 tests passed (run before the chat-event-contract whitelist edit, which touches no other test); a verbose re-run confirmed the new tests by name"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat src/shared/chat-nodes src/shared/api (wide)",
+     "outcome": "2576 passed, 3 failed, 1 suite did not load. The 3 failures are all in chat-event-contract.test.ts and are the golden dependency in lead_todo. The suite that did not load is quarry-client.test.ts: it cannot resolve the generated @quarry/client package, which is not built in this worktree; the file is unmodified, so this predates the slice."
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/shared/api/chat-event-contract.test.ts (after the READING_HELPERS entry)",
+     "outcome": "4 passed, 3 failed; the only finding is \"source_scope_applied reads 'knowledge', which the golden does not list\". Before the whitelist entry it also reported three findings about the unfollowed helper (scope, excluded_tools, passes the payload), which are now resolved."
+    },
+    {
+     "command": "node scripts/gen-chat-event-types.mjs --check (verevonv3)",
+     "outcome": "PASS: the generated types match the vendored golden (unchanged in this worktree)"
+    },
+    {
+     "command": "node_modules/.bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+     "outcome": "25 errors. Two are in my files and come from the chat-nodes/types.ts shared edit not yet applied: derive.ts(180) and ChatMessages.tsx(279). The other 23 are in files I did not touch (quarry-client.ts 21, schedule-contract.test.ts 1, model-access.ts 1); not compared against HEAD, which I may not build."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on the 11 touched frontend source and test files",
+     "outcome": "0 errors, 22 warnings, all pre-existing solid/reactivity warnings in ChatMessages.tsx and use-chat-controller.ts; none on a line I changed"
+    },
+    {
+     "command": "rustfmt --check services/model-gateway/src/knowledge_receipt.rs (applied to this new file only; CRLF restored)",
+     "outcome": "PASS, exit 0"
+    },
+    {
+     "command": "grep anchors for the proposed ZDR ordering test",
+     "outcome": "return zdr_direct_stream( occurs once in src/sse.rs; knowledge_receipt::knowledge_receipt( occurs once, so the proposed ordering assertion is well-defined"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts (worktree root C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b): replace line 121 `  | { kind: 'source-scope'; scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }` with `  | { kind: 'source-scope'; scope: 'knowledge_only' | 'web_only' | 'auto'; excludedTools: string[]; knowledge?: import('@/shared/api/chat-client').ChatKnowledgeReceipt }`, and in the doc comment above it (lines 115-118) say that an `auto` node exists only as a Space's knowledge receipt (WS18-S3). This clears the derive.ts(180) and ChatMessages.tsx(279) errors; not verified until applied.",
+    "Regenerate the SSE payload golden (owner step, not done in this worktree): copy C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\ws18s3\\sse-event-payloads.regenerated.json to apps/Model Plane/api/contracts/sse-event-payloads.json. Equivalent: MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 cargo test -p model-gateway --lib sse_event_payload_golden. The only change is one key: source_scope_applied keys.knowledge = {\"types\": [\"object\"], \"presence\": \"optional\"}.",
+    "shared-edit apps/Model Plane/api/contracts/sse-event-payloads.json.sha256: replace the digest with da88c5f05d3906a63fed21bfdace1054c4c7336b2416fe939b4f83bca8f783ce, keeping the existing ' *sse-event-payloads.json' suffix.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh line 198: in the GOLDENS row for apps/Model Plane/api/contracts/sse-event-payloads.json, replace a07810a0926c56ff926d8fbe1b14bd627df51bda20270b2cf4777672fe0b7a1b with da88c5f05d3906a63fed21bfdace1054c4c7336b2416fe939b4f83bca8f783ce.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json: the same regenerated bytes as the owner golden; and apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256: the same digest and suffix.",
+    "In apps/Frontend Plane/verevonv3: run `node scripts/gen-chat-event-types.mjs` (writes src/shared/api/chat-event-payloads.generated.ts), then `node scripts/gen-chat-event-types.mjs --check`.",
+    "Verify green: `bash scripts/tests/zdr-contract-sync.test.sh`; `CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p model-gateway --lib sse_event_payload_golden`; `node node_modules/vitest/vitest.mjs run src/shared/api/chat-event-contract.test.ts` (expect 7 passed).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (append; the plan names one ZDR assertion there and the file is not mine to edit): `/// The knowledge receipt (WS18-S3) is built on the ordinary path only: the persistence-free ZDR branch` / `/// returns before any Space knowledge is read, so a ZDR turn cannot carry a receipt.` / `#[test]` / `fn the_knowledge_receipt_is_built_after_the_zdr_branch_returns() {` / `    let sse = include_str!(\"../src/sse.rs\");` / `    let zdr_return = sse.find(\"return zdr_direct_stream(\").expect(\"the ZDR branch returns its direct stream\");` / `    let receipt = sse.find(\"knowledge_receipt::knowledge_receipt(\").expect(\"the ordinary path builds the receipt\");` / `    assert!(zdr_return < receipt, \"the knowledge receipt must not be built before the ZDR branch returns\");` / `}`. Both anchors occur once in src/sse.rs.",
+    "Plan correction: the WS18-S3 row's file list omits the payload golden, its vendored copy and pins, the generated SPA types, scripts/tests/zdr-contract-sync.test.sh, chat-nodes/types.ts and the reading-helper list in chat-event-contract.test.ts. Add them to the row so the next wave does not rediscover them.",
+    "Live proof and rebuild were not run (wave mode). Lead steps: rebuild model-gateway; then Space turns covering an entitled retrieval (mode retrieval with a count), a Space whose org lacks retrieval_read_entitled (not_entitled), a web-only turn (not_searched), and a follow-up with MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL on. Capture the raw source_scope_applied frames and the chip screenshots.",
+    "docs/sse-event-taxonomy.md needs no change (the generator --check passes). The build-ledger entry for WS18-S3 and any MODEL_PLANE_STATUS.md line are the lead's.",
+    "quarry-client.test.ts does not load in this worktree because the generated @quarry/client package is not built (pre-existing; the file is unmodified). The verevonv3 typecheck script builds it first (`pnpm run build:quarry-client`), which I did not run."
+   ],
+   "deviations": [
+    "Shared files were not edited, per the ownership rule: chat-nodes/types.ts, the payload golden, its vendored copy and pins, the generated SPA types, scripts/tests/zdr-contract-sync.test.sh and zdr_feature_table.rs. The lead applies the lines in lead_todo.",
+    "chat-event-contract.test.ts is a test beside chat-client.ts, which I changed. I added sourceScopeAppliedEvent to its READING_HELPERS list, which the checker documents as the list of helpers in chat-client.ts that read the payload they are handed. Without that entry the checker reported the helper as an unfollowed callee and the case's reads as missing.",
+    "The plan names one ZDR assertion in zdr_feature_table.rs, which is not owned, so it is handed to the lead. knowledge_receipt.rs carries a unit test that the receipt serialises only a mode and a count.",
+    "Mode precedence: a web-only or conversation-only turn reports not_searched even when its decision is empty. The plan's signature allows either order; the tests cover both inputs.",
+    "No InContext variant: the plan reserves in_context and says it is never emitted, so it appears only in doc comments.",
+    "sources is Grounding.source_count (distinct sources among the retrieved facts, capped by SOURCE_LIMIT), not the number of numbered citations. The plan did not say which count; this is a choice to confirm (depth finding).",
+    "The receipt is computed once in invoke_stream_sse, before tokio::spawn, from the same decision the retrieval used; the frame is still emitted inside the task where it was before.",
+    "The sse-event-taxonomy doc is unchanged: the generator does not render payload keys, and --check passes."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\types.ts (shared-edit: the source-scope member at line 121 and its doc comment; needed for derive.ts and ChatMessages.tsx to typecheck)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\sse-event-payloads.json (regenerated golden; the only change is the knowledge key)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\sse-event-payloads.json.sha256 (new digest)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\tests\\zdr-contract-sync.test.sh (pin on line 198 for the golden)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\contracts\\sse-event-payloads.json (vendored copy, same bytes as the golden)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\contracts\\sse-event-payloads.json.sha256 (vendored pin)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-event-payloads.generated.ts (generated by scripts/gen-chat-event-types.mjs; regenerate, do not hand-edit)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\zdr_feature_table.rs (the ZDR ordering assertion the plan names; text in lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared edit: apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts line 121. Widen the source-scope node to scope 'knowledge_only' | 'web_only' | 'auto' and add an optional knowledge?: ChatKnowledgeReceipt, as written in the implementer's lead_todo. Until this lands, tsc6 -p tsconfig.app.json reports TS errors in derive.ts(180) and ChatMessages.tsx(279).",
+     "Lead regeneration of the SSE payload golden. I checked the regenerated file in the implementer's scratchpad: it differs from the committed golden only by source_scope_applied keys.knowledge = {types:[object], presence:optional}, it is LF like the committed file (eol=lf attribute), and its sha256 is da88c5f05d3906a63fed21bfdace1054c4c7336b2416fe939b4f83bca8f783ce. Apply it to apps/Model Plane/api/contracts/sse-event-payloads.json and its .sha256 pin, to the vendored SPA copy and its pin, and to the digest at scripts/tests/zdr-contract-sync.test.sh line 198. Then run node scripts/gen-chat-event-types.mjs. Until then sse_event_payload_golden fails (1 test), and chat-event-contract.test.ts fails 3 tests, all with the single finding 'source_scope_applied reads knowledge'.",
+     "Lead shared edit: add the ZDR ordering assertion the plan names to apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs, using the text in the implementer's lead_todo. I confirmed both anchors in src/sse.rs: return zdr_direct_stream( at about line 1794 and knowledge_receipt::knowledge_receipt( at about line 3115, both inside invoke_stream_sse.",
+     "Live proof not run (wave mode). It needs a model-gateway and frontend rebuild, then raw source_scope_applied frames and chip screenshots for: an entitled Space turn (retrieval, N), an org without retrieval_read_entitled (not_entitled), a web-only turn (not_searched), and a follow-up turn with the append-retrieval switch on."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Shipping the chip before MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL is on leaves Space follow-ups searching organisation-wide with no receipt (an absent block means today's behaviour), so the badge cannot tell a reader that an answer used organisation knowledge; the badge is honest only where WS18-S2's switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "space_retrieval_decision fails open on absence: a Space-scoped request carrying neither space_context nor space_append_context retrieves organisation-wide and gets no receipt. The BFF attaching both fields on every Space turn is the only guard; the Space owner must confirm it on first and follow-up turns."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "When assembly_supplied_grounding is true and grounding was not requested, no search runs, yet the receipt says mode retrieval ('searched') with no count. in_context is reserved but never emitted, and whether the context assembly can carry Data Plane evidence outside the Space decision is unverified."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The WS18-S3 row omits the payload golden, its vendored copy and pins, the generated SPA types, zdr-contract-sync.test.sh, chat-nodes/types.ts and the checker's reading-helper list. The Rust golden test and the SPA contract checker stay red until the owner regenerates, and derive.ts and ChatMessages.tsx do not typecheck until types.ts is applied."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "sources counts distinct sources among retrieved facts, not the numbered citations the Sources panel lists; confirm on a live turn that the two agree before the number is trusted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the inline emission for a Space-scoped turn end to end: the batch command covers the pure function, while frame order inside the task and the SPA rendering of a real stream are covered only by the live proof, which was not run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The golden records top-level key names and types, not enum values, so renaming a knowledge mode on the Rust side fails no contract gate; the mode strings are matched only by literals in the Rust and SPA unit tests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The receipt is session-only: a reopened thread shows no knowledge chip. A durable copy needs a message-metadata write with its own zero-retention inventory row (plan N7)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The agentic (Do) path emits no receipt until WS18-S5 does, so a Do run inside a Space shows no chip until then."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The persistence-free ZDR path emits no receipt, which is correct today because Spaces need threads. Only the ordering assertion handed to the lead guards against a future ZDR Space turn silently omitting the chip."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Two choices to confirm with the owner: sources counts distinct sources, and a web-only or conversation-only Space turn reports not_searched even when its decision is empty. Each is a one-line change in knowledge_receipt.rs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The chip copy for the zero-source case ('Prosjektkunnskap: 0 kilder') and the three non-plan strings (searched, not available, not used) are my wording; only the two plan strings were given, so the copy needs a review."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "When assembly_supplied_grounding is true, or data_plane_bearer is None, no search runs, yet the receipt still says mode retrieval (shown as 'Project knowledge: searched'). The chip then claims a Space search that never happened."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL off, space_retrieval_decision ignores space_append_context. A Space follow-up turn then gets no receipt and shows no chip, so S3's DoD (chip on first and follow-up turn) holds only when S2's switch is on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The WS18-S3 plan row's file list omits the files the slice needs: the SSE payload golden, its vendored copy and pins, zdr-contract-sync.test.sh, the generated chat-event-payloads.generated.ts, chat-nodes/types.ts, and the READING_HELPERS list in chat-event-contract.test.ts. Add them to the row."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "'sources' is Grounding.source_count (distinct retrieved sources, capped by SOURCE_LIMIT), not the number of citations the Sources panel lists, and a web-only or conversation-only Space turn reports not_searched even when its decision token is empty. The owner should confirm both choices."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives invoke_stream_sse for a Space-scoped Auto turn to prove the frame is emitted with scope 'auto' and a knowledge block. Only the pure function and the payload samples are covered."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The payload golden records key names and types, not enum values, so renaming a KnowledgeMode variant would pass every contract gate. Only literal-matching unit tests in Rust and the SPA would catch it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The receipt lives only in the session: a reopened thread shows no knowledge chip. The agentic (Do) path emits no receipt until WS18-S5."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Three chip strings ('searched' with no count, 'not available', 'not used') and the zero-source wording are the implementer's own; the plan gave only the 'N kilder' / 'N sources' copy. They need a copy review."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib knowledge_receipt (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "PASS: 5 passed, 0 failed (compiles; only pre-existing unused-result warning in a test)",
+      "passed": true
+     },
+     {
+      "command": "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+      "outcome": "PASS: sse taxonomy up to date (30 events), exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib sse",
+      "outcome": "FAIL: 387 passed, 1 failed: sse_events::payload_contract::sse_event_payload_golden (committed golden differs from ChatEvent::payload; needs MP_UPDATE_GOLDEN=1 regeneration, .sha256 pin refresh, SPA vendored copy, and the digest pin in scripts/tests/zdr-contract-sync.test.sh)",
+      "passed": false
+     },
+     {
+      "command": "vitest run chat-client, derive, ChatPanels, use-chat-controller.retrieval-scope, SourceScopeNotice, chat-event-contract (--pool=threads)",
+      "outcome": "FAIL: 5 files passed, 1 failed; 287 passed, 3 failed. All 3 failures in chat-event-contract.test.ts, e.g. \"source_scope_applied reads 'knowledge', which the golden does not list\" (same golden dependency)",
+      "passed": false
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (filtered to slice files)",
+      "outcome": "FAIL: 2 errors in slice files: ChatMessages.tsx(279,96) TS2339 'knowledge' does not exist on type source-scope node; derive.ts(180,9) TS2322 'auto' not assignable to 'knowledge_only'|'web_only'. Both come from the shared chat-nodes/types.ts edit not yet applied.",
+      "passed": false
+     },
+     {
+      "command": "cargo compile check of model-gateway",
+      "outcome": "Covered by the test builds above (lib compiles, tests ran); separate cargo check not run because of a cd path error.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "WS18-S3 is built to the plan row. There is no switch (the row says none; an absent knowledge block is today's behaviour), so there are no defaults to set. The Rust receipt function is pure and sits in a new module; the frame carries a mode and an optional count and nothing else, and nothing persists it. Status is partial, not done, because two shared steps are outside my ownership: the frontend node type in chat-nodes/types.ts (until applied, derive.ts and ChatMessages.tsx do not typecheck), and the regeneration of the SSE payload golden, its vendored copy and pins (until applied, the Rust golden test and the SPA contract checker are red). The regenerated golden is written to C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\ws18s3\\sse-event-payloads.regenerated.json and differs from the committed golden only by the added knowledge key; I expect the gates to go green after the lead applies the steps, but I have not verified that post-regeneration state. Other slices of this batch are editing the same worktree (action-registry.ts and its test, among others); they are not in my file list. No live proof, rebuild or deploy was run (wave mode)."
+  },
+  {
+   "id": "WS21-S10",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/browser_do_contract.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --test browser_do_contract (cwd apps/Model Plane/rust; CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0), final file",
+     "outcome": "ok: 11 passed, 0 failed, exit 0. The built binary's --list shows the same 11 names. An earlier 10-test version also passed. Warnings are pre-existing, in capability_policy.rs, approval_delivery_worker.rs, runtime_loop/mod.rs and resume.rs; none is in the new test."
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "exit 1: 123 passed, 4 failed, identical before and after this slice. The four failures are outside this slice: Quarry zdr-feature-matrix.json digest pin; Data Plane usage-envelopes.v2.json.sha256 pin; auth-core cross-plane-token-requests.json.sha256 copy; model-gateway quarry-token-claims.golden.sha256 copy."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 services/execution-core/tests/browser_do_contract.rs (applied to this new LF file only)",
+     "outcome": "clean, exit 0"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: GOLDENS, insert before the line `)` that closes GOLDENS (line 205): `  # WS21-S0 and WS21-S3: the browser policy goldens, authored (not generated). org-core's validate and resolve tests read vendored copies (VENDORED); the other consumers are pending until each copy lands (CONSUMERS).` then `  \"apps/Model Plane/api/contracts/browser-domain-canonical.json|ef6bfb8e63f3a1c34b90a0d26d0f27fb5ef224f138a652bf851dc179573ac45d\"` then `  \"apps/Model Plane/api/contracts/browser-site-policy-matrix.json|4432a92bbdb5c114c19f8eb770cd1a6b71a4fadfe25a795e767141c49ff6fc22\"`.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: VENDORED, insert before the line `)` that closes VENDORED (line 351): `  # WS21-S3: org-core's copies of the browser goldens (internal/browsersites/testdata), read by validate_test.go and resolve_test.go.` then `  \"apps/Control Plane/org-core/internal/browsersites/testdata/browser-domain-canonical.json|apps/Model Plane/api/contracts/browser-domain-canonical.json\"` then `  \"apps/Control Plane/org-core/internal/browsersites/testdata/browser-site-policy-matrix.json|apps/Model Plane/api/contracts/browser-site-policy-matrix.json\"`. Both copies are byte-identical today.",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: CONSUMERS, insert before the line `)` that closes CONSUMERS (line 411): `  # WS21-S10: the browser policy goldens and the trees that must vendor them (pending until each copy lands).` then `  \"apps/Model Plane/api/contracts/browser-domain-canonical.json|org-core|apps/Control Plane/org-core/|WS21-S3 (validate: host canonicaliser)\"`, `  \"apps/Model Plane/api/contracts/browser-domain-canonical.json|browser-broker|apps/Model Plane/go/services/browser-broker/|WS21-S4 (NormalizeAllowedDomains)\"`, `  \"apps/Model Plane/api/contracts/browser-domain-canonical.json|execution-core|apps/Model Plane/rust/services/execution-core/|WS21-S10 (canonicalize_allowed_domains)\"`, `  \"apps/Model Plane/api/contracts/browser-domain-canonical.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|WS21-S10 (domain canonicaliser)\"`, `  \"apps/Model Plane/api/contracts/browser-domain-canonical.json|bff-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|WS21-S10 (domain canonicaliser)\"`, `  \"apps/Model Plane/api/contracts/browser-site-policy-matrix.json|org-core|apps/Control Plane/org-core/|WS21-S3 (resolve decisions)\"`, `  \"apps/Model Plane/api/contracts/browser-site-policy-matrix.json|browser-broker|apps/Model Plane/go/services/browser-broker/|WS21-S4 (site-policy client)\"`.",
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: insert before the line `## Do browser and generated-file checks (2026-10-31): source-verified, switches off`: `## Browser ZDR contract, WS21-S10 (2026-11-01): source-verified, switches off` then `execution-core/tests/browser_do_contract.rs (11 tests) passes on 2026-11-01 in the epic-shaw worktree. It pins the Do browser tools' names, offer and dispatch, their capability ids and seeded class rows, the fields the model is shown, the zero-retention refusal, and a golden over every enforcement row of the vendored ZDR matrix. The matrix's Do browser row is e_browser_do_tools_refused_under_zdr; no bearer or login row exists. Not live-verified: no rebuilt stack, no browser flow and no switch flip. The ZDR sync gate fails the same four checks it failed before this slice.`",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add a 2026-11-01 entry above the topmost heading (currently `## 2026-10-27 - WS04-S9: ...`): `## 2026-11-01 - The Do browser zero-retention rule is a golden over the enforcement rows, not a matrix row (WS21-S10)`, body: the browser bearer and Do-tool rules follow from the enforcement decision as the MCP rules do (api/contracts/README.md, MCP goldens); the matrix loader requires e_ ids, rejects two rows with the same inputs, and has no browser-bearer input, so the plan's bearer row cannot be a distinct row; execution-core/tests/browser_do_contract.rs drives every enforcement row through the real resolver and execute_step; the login row waits for WS21-S9, which is deferred. Reopen if the owner wants a browser-bearer input in the matrix shape. Then run `node --test scripts/tests/ownership-docs-contract.test.mjs` to confirm the top-heading assertion.",
+    "copy and test (lead, or the owner of src/browser_agent.rs): copy apps/Model Plane/api/contracts/browser-domain-canonical.json to apps/Model Plane/rust/services/execution-core/tests/fixtures/browser-domain-canonical.json (LF bytes, sha256 ef6bfb8e...), add its VENDORED row, and add to the test module of src/browser_agent.rs: `#[test] fn the_canonicaliser_meets_the_browser_domain_golden() { let golden: serde_json::Value = serde_json::from_str(include_str!(\"../tests/fixtures/browser-domain-canonical.json\")).expect(\"the golden is JSON\"); for vector in golden[\"vectors\"].as_array().expect(\"vectors\") { let input: Vec<String> = serde_json::from_value(vector[\"input\"].clone()).expect(\"input\"); let expected: Option<Vec<String>> = (vector[\"expect\"] == \"accept\").then(|| serde_json::from_value(vector[\"output\"].clone()).expect(\"output\")); assert_eq!(canonicalize_allowed_domains(&input).ok(), expected, \"{}\", vector[\"id\"]); } }` then run `cargo test -q -p execution-core --lib the_canonicaliser_meets_the_browser_domain_golden` (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0).",
+    "live (lead, docker, rebuilt stack): prove the eight rows from the WS21-S10 row (allowed read; blocked site with no card and a typed refusal; ask then allow this run then observe; remember then second run with no card; risky click pauses; ZDR run refused; broker restart mid-run gives browser_session_lost then reopen; admin block while a grant is live refuses the next open). Then flip in the stated order: site policy shadow then enforce, execution-core flag for one internal org, then the default. Nothing here has been run.",
+    "owners: clear the four pre-existing sync-gate failures before the gate can certify the ZDR matrix: the Quarry zdr-feature-matrix.json digest pin in scripts/tests/zdr-contract-sync.test.sh; the Data Plane usage-envelopes.v2.json.sha256 pin; the auth-core copy of cross-plane-token-requests.json.sha256 that differs from the Quarry golden; the model-gateway copy of quarry-token-claims.golden.sha256 that differs from the auth-core golden.",
+    "decide (owner): (a) accept the golden-plus-note precedent for the browser bearer rule, or extend the enforcement input shape with a browser-bearer field; (b) whether the browser_tool feature refusal should come before the grant alias for browser.observe and browser.act under ZDR (runtime_loop/mod.rs routing; tool_bridge/mod.rs execute_quarry_browser_mcp check order)."
+   ],
+   "deviations": [
+    "Matrix rows not added: the Do browser row exists as e_browser_do_tools_refused_under_zdr (WS21-S5a). The loader (scripts/tests/zdr-contract-schema.mjs) requires e_ ids and rejects a row whose inputs equal another row's; the enforcement inputs have no browser-bearer field, so a bearer row cannot be distinct. The bearer rule is held by the golden in browser_do_contract.rs and the row's note, following api/contracts/README.md:97.",
+    "browser_login_refused_under_zdr not added: WS21-S9 is dropped, and no browser_login key exists in api/contracts/zdr-refusals.json or mp-contracts. A row for a refusal no code gives would be a false claim.",
+    "Wire goldens not wired: the two browser goldens are not in the sync script's GOLDENS, VENDORED or CONSUMERS (shared file). The execution-core golden test cannot be an integration test, because canonicalize_allowed_domains is pub(crate) in src/browser_agent.rs:575.",
+    "MODEL_PLANE_STATUS.md dates not written (shared file); exact text is in lead_todo.",
+    "Flip order (site policy shadow then enforce; execution-core flag for an internal organisation; then default) not performed: operational, lead-run with docker."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/zdr-contract-sync.test.sh (GOLDENS, VENDORED and CONSUMERS rows for the two browser goldens; exact lines in lead_todo)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/MODEL_PLANE_STATUS.md (WS21-S10 dates; exact text in lead_todo)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md (decision entry above the topmost heading)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/browser_agent.rs (in-crate canonicaliser golden test; canonicalize_allowed_domains is pub(crate))",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/fixtures/browser-domain-canonical.json (new vendored copy of the golden, needed by that test)",
+    "Consumer copies and golden tests for browser-domain-canonical.json and browser-site-policy-matrix.json in apps/Model Plane/go/services/browser-broker/ (the WS21-S4 consumer, D2-052), apps/Model Plane/rust/services/model-gateway/ and apps/Frontend Plane/verevonv3/apps/gateway/ (the WS21-S10 consumers named in the row)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The live proof of the eight browser rows has not been run. It needs a rebuilt stack: allowed read; blocked site refused with no card; ask, allow this run, observe; remember, then a second run with no card; risky click pauses; ZDR run refused; broker restart gives browser_session_lost, then reopen; admin block while a grant is live.",
+     "The flips have not been done. The order is: site policy shadow, then enforce; then the execution-core switch for one internal organisation; then the default.",
+     "The wire goldens are not registered in GOLDENS, VENDORED or CONSUMERS of scripts/tests/zdr-contract-sync.test.sh. That file is shared, so this is a lead_todo.",
+     "The source-verified and live-verified dates are not written in MODEL_PLANE_STATUS.md. That file is shared, so this is a lead_todo.",
+     "The four zdr-contract-sync failures were already there before this slice and must be cleared before the gate can certify the matrix."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The bearer rule has no matrix row; the owner should accept the golden-plus-note precedent or extend the enforcement input shape (loader, schema test, matrix and every copy) with a browser-bearer field."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Under zero retention, browser.observe and browser.act with no Do session answer 'browser MCP requires a broker-validated grant' instead of the browser_tool feature refusal, because runtime_loop/mod.rs routes the grant-backed MCP aliases (same names) before the Do refusal and execute_quarry_browser_mcp checks the grant before verified_zdr. It fails closed, since the BFF mints no browser bearer under ZDR (domains/chat/shared.rs browser_do_offered requires !zdr), but the matrix note promises the feature refusal."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core golden for browser-domain-canonical.json is unwired: canonicalize_allowed_domains is pub(crate) at src/browser_agent.rs:575 and needs an in-crate test with a vendored copy. A Python simulation of the Rust rules agrees with all 41 vectors, so that test should pass."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The sync gate does not register browser-domain-canonical.json or browser-site-policy-matrix.json. org-core's two testdata copies are already byte-identical to the goldens (sha256 ef6bfb8e... and 4432a92b...); the broker, model-gateway, gateway and execution-core copies do not exist yet (D2-052, D2-053)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The canonicaliser folds ASCII only (browser_agent.rs to_ascii_lowercase), while the golden folds ASCII and Unicode letters, so KELVIN SIGN U+212A is refused where the golden would accept it. No vector pins it, and the direction is fail-closed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The zdr-contract-sync gate was already red before this slice (123 passed, 4 failed); its owners must clear the four pins or copies before the gate can certify the ZDR matrix."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing is live-verified: the eight-step browser evidence, the shadow-then-enforce site-policy flip and the execution-core internal flag need a rebuilt stack, and Quarry-side grant issuance and identity are on quarryv2, not on this branch."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "browser_login_refused_under_zdr waits for WS21-S9 and needs its own loader input shape; adding it before then would describe a refusal no code gives."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "browser_do_contract.rs is mostly source-text checks (as zdr_mcp_golden.rs and tool_class_registry_parity.rs are), so a rename or reformat of a checked fragment fails it even when behaviour holds; a crate-visible test seam would replace them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "EXECUTION_DO_BROWSER_ENABLED accepts only the value 1 (runtime_loop/agent.rs parse_do_browser_enabled), while the batch's global rule says only the literal true enables; the test pins the code, and depth-register D2-098 and D2-658 already record the conflict."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Any future enforcement row changes the counts pinned in zdr_mcp_golden.rs (ENFORCEMENT_ROWS 28; ZDR 5, PERSISTENT 3, WAIVED 2, REFUSE 18) and loop_fold_zdr_matrix.rs, so a row change must update them in the same change."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The plan's browser_bearer_zdr_not_forwarded row has no matrix row of its own. The loader rejects a second row with the same inputs and has no browser-bearer input, so the rule is held by the golden in browser_do_contract.rs. The owner should either accept that precedent or add a browser-bearer field to the input shape."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "browser_login_refused_under_zdr is not added because WS21-S9 is dropped and no browser_login refusal exists. This is correct for now, but it must land with WS21-S9."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Under ZDR, browser.observe and browser.act answer 'browser MCP requires a broker-validated grant' instead of the browser_tool feature refusal, because runtime_loop routes the grant-backed MCP aliases first. The run still fails closed, but the matrix row note promises the feature refusal for browser.observe."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "execution-core has no test that runs canonicalize_allowed_domains against browser-domain-canonical.json. The function is pub(crate) in src/browser_agent.rs, so the test has to live inside the crate and needs a vendored copy of the golden. The model-gateway, BFF gateway and browser-broker copies of the golden do not exist either."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Most of browser_do_contract.rs matches source text with whitespace removed. A rename or reformat of a checked fragment breaks it even when behaviour is unchanged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The test pins parse_do_browser_enabled to accept only the value \"1\", while browser.act accepts only \"true\". The two switch parsers stay inconsistent (already recorded as D2-098 and D2-658)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The canonicaliser lowercases ASCII only, while the golden also folds Unicode letters, so a host such as one with KELVIN SIGN is refused where the golden would accept it. This fails closed and no vector pins it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Any future enforcement row also changes the counts pinned in zdr_mcp_golden.rs and loop_fold_zdr_matrix.rs. A row change must update them in the same change."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd apps/Model Plane/rust && cargo test -q -p execution-core --test browser_do_contract (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "ok: 11 passed, 0 failed, 0 ignored. Compiles (warnings only, none in the new test).",
+      "passed": true
+     },
+     {
+      "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+      "outcome": "exit nonzero: 123 passed, 4 failed. Matches the implementer's report that the same 4 fail before and after the slice (Quarry zdr-feature-matrix digest pin, Data Plane usage-envelopes sha256 pin, auth-core cross-plane-token-requests sha256 copy, model-gateway quarry-token-claims.golden sha256 copy). I did not re-verify the pre-slice baseline, and the individual failure names were not printed in my filtered output.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "The row's three matrix rows do not map cleanly onto the matrix. (1) e_browser_do_tools_refused_under_zdr already exists from WS21-S5a, and the loader requires the e_ prefix that the plan's ids lack. (2) A browser-bearer row cannot be a distinct row: the loader rejects two rows with the same inputs, and the enforcement input shape has no browser-bearer field. The rule is held instead by a golden that drives every enforcement row through the real resolver and execute_step, following the MCP-goldens precedent in api/contracts/README.md:97. (3) browser_login_refused_under_zdr waits for WS21-S9, which is dropped, and no browser_login refusal key exists. The matrix and its sha256 are unchanged. The contract test covers tool names, offer and dispatch arms, capability ids and seeded class rows, the model-visible struct fields and deny_unknown_fields, the zero-retention answers, and the golden. The wire-golden registration and the status dates need shared files, so they are lead_todo items. Operational: my build waited about 15 minutes behind other agents' model-gateway cargo builds on the shared C:/dev/mp-target-w2 directory. I stopped only my own duplicate queued runs; no other process was touched. A Python simulation of execution-core's canonicaliser rules, not a repo test, agrees with all 41 vectors of browser-domain-canonical.json (0 mismatches). Nothing is live-verified and no docker was run."
+  }
+ ]
+}

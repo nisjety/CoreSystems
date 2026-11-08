@@ -1,0 +1,1263 @@
+diff --git a/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback.go b/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback.go
+index 4a600423b..cb6fb85f1 100644
+--- a/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback.go	
++++ b/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback.go	
+@@ -147,12 +147,33 @@ type QuarantineCandidate struct {
+ 	Score quality.Score
+ }
+ 
++// SplitSkillRef reads a skill reference as model-gateway records it: `id@version`
++// for a skill the turn pinned at a numbered version (EP-11 S3,
++// MODEL_GATEWAY_SKILL_PINS), the bare id otherwise. Only a numeric suffix is a
++// version, so an id that happens to hold `@` stays whole and reads as version 0.
++// Ratings stay keyed by the bare id, so a pinned rating counts toward, and
++// quarantines, the same skill an unpinned one does.
++func SplitSkillRef(ref string) (id string, version int) {
++	at := strings.LastIndexByte(ref, '@')
++	if at <= 0 || at == len(ref)-1 {
++		return ref, 0
++	}
++	n := 0
++	for _, c := range ref[at+1:] {
++		if c < '0' || c > '9' || n > (1<<31-1)/10 {
++			return ref, 0
++		}
++		n = n*10 + int(c-'0')
++	}
++	return ref[:at], n
++}
++
+ // Normalize validates and fills in a rating, returning the value to persist.
+ func Normalize(r Rating) (Rating, error) {
+ 	r.OrgID = strings.TrimSpace(r.OrgID)
+ 	r.UserID = strings.TrimSpace(r.UserID)
+ 	r.RunID = strings.TrimSpace(r.RunID)
+-	r.SkillID = strings.TrimSpace(r.SkillID)
++	r.SkillID, _ = SplitSkillRef(strings.TrimSpace(r.SkillID))
+ 	r.FromScope = strings.TrimSpace(r.FromScope)
+ 	r.ToScope = strings.TrimSpace(r.ToScope)
+ 	r.Rating = strings.ToLower(strings.TrimSpace(r.Rating))
+diff --git a/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback_test.go b/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback_test.go
+index 75e1d1f30..7451a0da1 100644
+--- a/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback_test.go	
++++ b/apps/Model Plane/go/services/orchestrator-core/internal/feedback/feedback_test.go	
+@@ -229,6 +229,46 @@ func mustRecord(t *testing.T, s Store, r Rating) {
+ 	}
+ }
+ 
++// EP-11 S3: a gateway with skill pins on names the version (`id@version`); the
++// reference splits, and only a numeric suffix is a version.
++func TestSplitSkillRef(t *testing.T) {
++	cases := []struct {
++		ref     string
++		id      string
++		version int
++	}{
++		{"skill.x@4", "skill.x", 4},
++		{"skill.x", "skill.x", 0},
++		{"team@home", "team@home", 0},
++		{"@4", "@4", 0},
++		{"skill.x@", "skill.x@", 0},
++		{"builtin:office/pdf", "builtin:office/pdf", 0},
++	}
++	for _, c := range cases {
++		id, version := SplitSkillRef(c.ref)
++		if id != c.id || version != c.version {
++			t.Fatalf("SplitSkillRef(%q) = (%q, %d), want (%q, %d)", c.ref, id, version, c.id, c.version)
++		}
++	}
++}
++
++// A pinned rating attaches to the same skill as an unpinned one, so quarantine
++// and promotion keep keying on the skill id whichever gateway sent it.
++func TestPinnedRatingCountsTowardTheSkill(t *testing.T) {
++	ctx := context.Background()
++	s := NewMemoryStore()
++	mustRecord(t, s, rating("org-1", "run-1", "user-1", "skill.x@3", RatingGood))
++	mustRecord(t, s, rating("org-1", "run-2", "user-2", "skill.x", RatingGood))
++
++	got, err := s.Candidates(ctx, 1, 0.0)
++	if err != nil {
++		t.Fatalf("candidates: %v", err)
++	}
++	if len(got) != 1 || got[0].SkillID != "skill.x" || got[0].Total != 2 {
++		t.Fatalf("a pinned rating must count toward the bare skill id: %+v", got)
++	}
++}
++
+ func itoa(i int) string {
+ 	if i == 0 {
+ 		return "0"
+diff --git a/apps/Model Plane/proto/model_plane/v1/gateway.proto b/apps/Model Plane/proto/model_plane/v1/gateway.proto
+index c0d81b7e7..df5c4a061 100644
+--- a/apps/Model Plane/proto/model_plane/v1/gateway.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/gateway.proto	
+@@ -1116,6 +1116,14 @@ message Skill {
+   string source_path = 5;
+   // Relevance threshold (0.0-1.0) for auto-injection.
+   float min_score = 6;
++  // EP-11 S3: the immutable version of an authored skill this body is
++  // (session-core `agent_skills.version`); 0 for a proposal or a builtin skill.
++  // A run pins it so recovery inside the run reads the same text.
++  int32 version = 7;
++  // EP-11 S3: sha256 hex digest of the skill version (session-core
++  // `agent_skills.digest`), or of the embedded SKILL.md for a builtin skill.
++  // Empty when the row predates versions.
++  string digest = 8;
+ }
+ 
+ message ListSkillsRequest {
+diff --git a/apps/Model Plane/proto/model_plane/v1/runs.proto b/apps/Model Plane/proto/model_plane/v1/runs.proto
+index 459258cba..390b7563e 100644
+--- a/apps/Model Plane/proto/model_plane/v1/runs.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/runs.proto	
+@@ -513,4 +513,20 @@ message RunContextStatus {
+   RunContextPart history = 2;
+   // The prefetched memory block.
+   RunContextPart memory = 3;
++  // EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
++  // numbers and hashes only, so the pin is allowed wherever the run record is.
++  repeated SkillPin skills = 4;
++}
++
++// EP-11 S3: one skill version a run used. Recovery inside the run reads this
++// version even when the skill changed mid-run; feedback names it.
++message SkillPin {
++  // The skill id (session-core `agent_skills.id`, or the builtin skill's id).
++  string skill_id = 1;
++  // The immutable version number; 0 for a builtin skill.
++  int32 version = 2;
++  // sha256 hex digest of the version (of the embedded SKILL.md for a builtin).
++  string digest = 3;
++  // How the skill reached the run: "matched" | "requested" | "builtin".
++  string source = 4;
+ }
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs b/apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs
+index f18d8fea2..5c04e1550 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs	
+@@ -168,21 +168,96 @@ fn part_json(part: Option<&RunContextPart>) -> Value {
+     )
+ }
+ 
++/// Most skill pins stamped on one run record (EP-11 S3). Injection caps a turn at
++/// a handful of skills; this bounds what a composer bug could write.
++pub const MAX_SKILL_PINS: usize = 16;
++
++/// Keep only an id-shaped value: skill ids are ULIDs or `builtin:office/<dir>`.
++fn pin_id(raw: &str) -> String {
++    raw.chars()
++        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '/' | '.'))
++        .take(128)
++        .collect()
++}
++
++/// Keep only a lowercase-hex sha256; anything else reads as no digest.
++fn pin_digest(raw: &str) -> String {
++    if raw.len() == 64 && raw.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
++        raw.to_owned()
++    } else {
++        String::new()
++    }
++}
++
++/// The pin source is a closed token by contract.
++fn pin_source(raw: &str) -> &'static str {
++    match raw {
++        "matched" => "matched",
++        "requested" => "requested",
++        "builtin" => "builtin",
++        _ => "unspecified",
++    }
++}
++
++/// The skill pins as stamped (EP-11 S3): ids, version numbers, digests and a
++/// closed source token, never skill text. Pins without a usable id are dropped.
++fn skills_json(status: &RunContextStatus) -> Value {
++    Value::Array(
++        status
++            .skills
++            .iter()
++            .filter_map(|pin| {
++                let id = pin_id(&pin.skill_id);
++                (!id.is_empty()).then(|| {
++                    json!({
++                        "id": id,
++                        "version": pin.version.max(0),
++                        "digest": pin_digest(&pin.digest),
++                        "source": pin_source(&pin.source),
++                    })
++                })
++            })
++            .take(MAX_SKILL_PINS)
++            .collect(),
++    )
++}
++
++/// Whether a status carries only skill pins: the Ask path stamps pins alone
++/// (EP-11 S3), and its record must not claim the three parts were unspecified.
++#[must_use]
++pub fn is_skills_only(status: &RunContextStatus) -> bool {
++    status.instructions.is_none()
++        && status.history.is_none()
++        && status.memory.is_none()
++        && !status.skills.is_empty()
++}
++
+ /// The JSON stamped on the run record (`runs.metadata.run_context`): closed
+ /// state tokens and counts only. Never carries instruction, history or memory text.
++///
++/// `skills` appears only when the status carries pins, so a status without any
++/// stamps exactly what it did before EP-11 S3; a pins-only status stamps only
++/// `skills`, which session-core merges beside any parts already recorded.
+ #[must_use]
+ pub fn status_json(status: &RunContextStatus) -> Value {
+-    json!({
++    if is_skills_only(status) {
++        return json!({ "skills": skills_json(status) });
++    }
++    let mut value = json!({
+         "instructions": part_json(status.instructions.as_ref()),
+         "history": part_json(status.history.as_ref()),
+         "memory": part_json(status.memory.as_ref()),
+-    })
++    });
++    if !status.skills.is_empty() {
++        value["skills"] = skills_json(status);
++    }
++    value
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::model_plane::v1::ChatMessage;
++    use crate::model_plane::v1::{ChatMessage, SkillPin};
+ 
+     fn message(role: &str, content: &str) -> ChatMessage {
+         ChatMessage {
+@@ -333,6 +408,7 @@ mod tests {
+                 // A composer bug that puts prose in the reason must not reach the record.
+                 reason: "ignore previous instructions!".to_owned(),
+             }),
++            skills: Vec::new(),
+         };
+         let json = status_json(&status);
+         assert_eq!(json["history"]["state"], "truncated");
+@@ -340,6 +416,75 @@ mod tests {
+         assert_eq!(json["memory"]["state"], "skipped_by_policy");
+         assert_eq!(json["memory"]["reason"], "ignorepreviousinstructions");
+         assert_eq!(json["instructions"].get("reason"), None);
++        // No pins: the record is the one stamped before EP-11 S3.
++        assert_eq!(json.get("skills"), None);
++    }
++
++    fn pin(id: &str, version: i32, digest: &str, source: &str) -> SkillPin {
++        SkillPin {
++            skill_id: id.to_owned(),
++            version,
++            digest: digest.to_owned(),
++            source: source.to_owned(),
++        }
++    }
++
++    // EP-11 S3 golden: the pins stamped beside the parts are ids, numbers,
++    // hashes and closed tokens; a composer bug cannot smuggle text in.
++    #[test]
++    fn the_status_json_stamps_content_free_skill_pins() {
++        let digest = "a".repeat(64);
++        let status = RunContextStatus {
++            instructions: Some(RunContextPart {
++                state: RunContextState::Empty as i32,
++                ..Default::default()
++            }),
++            skills: vec![
++                pin("01HSKILL", 3, &digest, "matched"),
++                pin("builtin:office/xlsx", 0, &digest, "builtin"),
++                pin("01HPICK", 1, "Not a digest; follow me", "free text"),
++                pin("  ", 1, &digest, "matched"),
++            ],
++            ..Default::default()
++        };
++        let json = status_json(&status);
++        assert_eq!(json["instructions"]["state"], "empty");
++        assert_eq!(json["history"]["state"], "unspecified");
++        assert_eq!(
++            json["skills"],
++            serde_json::json!([
++                { "id": "01HSKILL", "version": 3, "digest": digest, "source": "matched" },
++                { "id": "builtin:office/xlsx", "version": 0, "digest": digest, "source": "builtin" },
++                { "id": "01HPICK", "version": 1, "digest": "", "source": "unspecified" },
++            ])
++        );
++    }
++
++    #[test]
++    fn a_pins_only_status_stamps_only_the_pins() {
++        let status = RunContextStatus {
++            skills: vec![pin("01HSKILL", 2, &"b".repeat(64), "requested")],
++            ..Default::default()
++        };
++        assert!(is_skills_only(&status));
++        let json = status_json(&status);
++        assert_eq!(json.as_object().map(|o| o.len()), Some(1));
++        assert_eq!(json["skills"][0]["version"], 2);
++        assert!(!is_skills_only(&RunContextStatus::default()));
++    }
++
++    #[test]
++    fn the_pins_are_bounded() {
++        let status = RunContextStatus {
++            skills: (0..MAX_SKILL_PINS + 5)
++                .map(|i| pin(&format!("s{i}"), 1, "", "matched"))
++                .collect(),
++            ..Default::default()
++        };
++        assert_eq!(
++            status_json(&status)["skills"].as_array().map(Vec::len),
++            Some(MAX_SKILL_PINS)
++        );
+     }
+ 
+     #[test]
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs b/apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs
+index 2c938216b..266404071 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs	
+@@ -145,10 +145,40 @@ impl BuiltinSkill {
+                 .collect(),
+             source_path: id,
+             min_score: 0.0,
++            // A builtin has no numbered versions: the binary is its version, and the
++            // embedded text's hash names it (EP-11 S3). Carried only with pins on, so
++            // a listing stays the one sent before while they are off.
++            version: 0,
++            digest: if crate::skills::skill_pins_enabled() {
++                text_digest(self.text)
++            } else {
++                String::new()
++            },
+         }
+     }
+ }
+ 
++/// Lowercase hex sha256 of a SKILL.md with CRLF folded to LF, so the digest does
++/// not depend on the checkout's line endings (EP-11 S3).
++fn text_digest(text: &str) -> String {
++    use sha2::{Digest, Sha256};
++    Sha256::digest(text.replace("\r\n", "\n").as_bytes())
++        .iter()
++        .map(|byte| format!("{byte:02x}"))
++        .collect()
++}
++
++/// The digest a run pins for the first-party skill with this catalogue id: the
++/// hash of its embedded SKILL.md. `None` for any other id.
++#[must_use]
++pub fn digest_of(id: &str) -> Option<String> {
++    let dir = id.strip_prefix(SOURCE_PREFIX)?;
++    OFFICE_SKILLS
++        .iter()
++        .find(|skill| skill.dir == dir)
++        .map(|skill| text_digest(skill.text))
++}
++
+ /// The instruction the model reads: the file without its front matter, which is for
+ /// people and the skill format. CRLF is folded to LF, so the prompt does not depend
+ /// on the checkout's line endings.
+@@ -333,6 +363,8 @@ mod tests {
+                 tags: Vec::new(),
+                 source_path: String::new(),
+                 min_score: 0.0,
++                version: 0,
++                digest: String::new(),
+             },
+         );
+         assert_eq!(
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs b/apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs
+index 2f9812a7b..d64a76a03 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs	
+@@ -327,6 +327,12 @@ pub fn global() -> &'static ChatTurnRegistry {
+ /// just ran (same store, same query, same limit) and retains the ids of the
+ /// blocks that were actually injected. Advisory and infallible: a failure here
+ /// costs skill attribution on a later rating, never the turn.
++///
++/// `pins` are the versions the turn injected (EP-11 S3, empty while the switch is
++/// off). A pinned skill is retained as `id@version`, so a rating names the version
++/// that steered the answer; every reader that needs the bare id takes it with
++/// [`skill_id_of_ref`].
++#[allow(clippy::too_many_arguments)] // one turn's ids: each argument is request context
+ pub fn record_chat_turn(
+     state: &crate::state::AppState,
+     request_id: &str,
+@@ -336,21 +342,120 @@ pub fn record_chat_turn(
+     turn_query: &str,
+     requested_skill_ids: &[String],
+     injected_limit: i32,
++    pins: &[mp_contracts::model_plane::v1::SkillPin],
+ ) {
+-    global().record(
+-        request_id,
++    let ids = injected_skill_ids(
++        state,
+         org_id,
+         user_id,
+-        run_id,
+-        injected_skill_ids(
+-            state,
+-            org_id,
+-            user_id,
+-            turn_query,
+-            requested_skill_ids,
+-            injected_limit,
+-        ),
++        turn_query,
++        requested_skill_ids,
++        injected_limit,
+     );
++    global().record(request_id, org_id, user_id, run_id, skill_refs(ids, pins));
++    run_pins().record(org_id, run_id, pins);
++}
++
++/// The ids as references: `id@version` for a skill the turn pinned at a numbered
++/// version, the bare id otherwise (a builtin, a row from before versions, or pins
++/// off), so with the switch off the record holds exactly what it did before.
++#[must_use]
++pub fn skill_refs(ids: Vec<String>, pins: &[mp_contracts::model_plane::v1::SkillPin]) -> Vec<String> {
++    ids.into_iter()
++        .map(|id| {
++            match pins
++                .iter()
++                .find(|pin| pin.skill_id == id && pin.version > 0)
++            {
++                Some(pin) => format!("{id}@{}", pin.version),
++                None => id,
++            }
++        })
++        .collect()
++}
++
++/// The skill id inside a reference [`skill_refs`] made. Only a numeric suffix is
++/// a version, so an id that happens to hold `@` is left whole.
++#[must_use]
++pub fn skill_id_of_ref(reference: &str) -> &str {
++    match reference.rsplit_once('@') {
++        Some((id, version))
++            if !id.is_empty()
++                && !version.is_empty()
++                && version.bytes().all(|b| b.is_ascii_digit()) =>
++        {
++            id
++        }
++        _ => reference,
++    }
++}
++
++/// How long a run's pins stay readable for recovery inside the run. A run that
++/// outlives it recovers from the current row, as with the switch off.
++const RUN_PIN_TTL: Duration = Duration::from_secs(6 * 60 * 60);
++
++/// The skill versions each live run injected (EP-11 S3), keyed by
++/// `(org, run_id)`. In-process like the turn record: the durable copy is the
++/// run record's `run_context.skills`, and recovery inside a run happens on the
++/// replica streaming it. Ids, numbers and hashes only.
++#[derive(Clone, Default)]
++pub struct RunPinRegistry {
++    inner: Arc<DashMap<String, (Vec<mp_contracts::model_plane::v1::SkillPin>, Instant)>>,
++}
++
++impl RunPinRegistry {
++    fn key(org_id: &str, run_id: &str) -> Option<String> {
++        let (org, run) = (org_id.trim(), run_id.trim());
++        if org.is_empty() || run.is_empty() || org.contains('\u{1f}') {
++            return None;
++        }
++        Some(format!("{org}\u{1f}{run}"))
++    }
++
++    /// Keep a run's pins. No pins (the switch off) records nothing; a full map
++    /// drops the new run's pins rather than a live run's, like [`ChatTurnRegistry`].
++    pub fn record(
++        &self,
++        org_id: &str,
++        run_id: &str,
++        pins: &[mp_contracts::model_plane::v1::SkillPin],
++    ) {
++        if pins.is_empty() {
++            return;
++        }
++        let Some(key) = Self::key(org_id, run_id) else {
++            return;
++        };
++        let now = Instant::now();
++        self.inner
++            .retain(|_, (_, at)| now.duration_since(*at) < RUN_PIN_TTL);
++        if self.inner.len() >= MAX_ENTRIES && !self.inner.contains_key(&key) {
++            return;
++        }
++        self.inner.insert(key, (pins.to_vec(), now));
++    }
++
++    /// The pin this run holds for one skill, if any.
++    #[must_use]
++    pub fn pin(
++        &self,
++        org_id: &str,
++        run_id: &str,
++        skill_id: &str,
++    ) -> Option<mp_contracts::model_plane::v1::SkillPin> {
++        let entry = self.inner.get(&Self::key(org_id, run_id)?)?;
++        let (pins, at) = entry.value();
++        if Instant::now().duration_since(*at) >= RUN_PIN_TTL {
++            return None;
++        }
++        pins.iter().find(|pin| pin.skill_id == skill_id).cloned()
++    }
++}
++
++/// Process-wide run pin registry.
++pub fn run_pins() -> &'static RunPinRegistry {
++    static GLOBAL: OnceLock<RunPinRegistry> = OnceLock::new();
++    GLOBAL.get_or_init(RunPinRegistry::default)
+ }
+ 
+ /// The hook `sse.rs` calls right after [`record_chat_turn`]: mirror what that call
+@@ -844,3 +949,63 @@ mod tests {
+             .is_none());
+     }
+ }
++
++// EP-11 S3: the turn record names the version a rating attaches to, and a run's
++// pins are readable for recovery inside that run only.
++#[cfg(test)]
++mod skill_pin_tests {
++    use super::*;
++    use mp_contracts::model_plane::v1::SkillPin;
++
++    fn pin(id: &str, version: i32) -> SkillPin {
++        SkillPin {
++            skill_id: id.into(),
++            version,
++            digest: "e".repeat(64),
++            source: "matched".into(),
++        }
++    }
++
++    #[test]
++    fn a_pinned_skill_is_recorded_as_id_at_version() {
++        let refs = skill_refs(
++            vec!["s1".into(), "builtin:office/pdf".into(), "s3".into()],
++            &[pin("s1", 4), pin("builtin:office/pdf", 0)],
++        );
++        assert_eq!(refs, vec!["s1@4", "builtin:office/pdf", "s3"]);
++    }
++
++    #[test]
++    fn switch_off_records_bare_ids() {
++        let ids = vec!["s1".to_owned(), "s2".to_owned()];
++        assert_eq!(skill_refs(ids.clone(), &[]), ids);
++    }
++
++    #[test]
++    fn a_reference_gives_back_its_id() {
++        assert_eq!(skill_id_of_ref("s1@4"), "s1");
++        assert_eq!(skill_id_of_ref("s1"), "s1");
++        // Only a numeric suffix is a version.
++        assert_eq!(skill_id_of_ref("team@home"), "team@home");
++        assert_eq!(skill_id_of_ref("@4"), "@4");
++        assert_eq!(skill_id_of_ref("s1@"), "s1@");
++    }
++
++    #[test]
++    fn a_run_reads_only_its_own_pins() {
++        let pins = RunPinRegistry::default();
++        pins.record("org-1", "run-1", &[pin("s1", 2)]);
++        assert_eq!(pins.pin("org-1", "run-1", "s1").map(|p| p.version), Some(2));
++        assert!(pins.pin("org-1", "run-1", "s2").is_none());
++        assert!(pins.pin("org-1", "run-2", "s1").is_none());
++        assert!(pins.pin("org-2", "run-1", "s1").is_none());
++    }
++
++    #[test]
++    fn no_pins_record_nothing() {
++        let pins = RunPinRegistry::default();
++        pins.record("org-1", "run-1", &[]);
++        pins.record("", "run-1", &[pin("s1", 2)]);
++        assert!(pins.inner.is_empty());
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/run_context.rs b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs
+index ad45fda05..94ada733c 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/run_context.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs	
+@@ -930,14 +930,14 @@ async fn load_memory(
+ 
+ /// Stamp how the context was assembled on the run record. Best-effort by
+ /// contract: a run must not fail because its record could not be annotated, so a
+-/// failure is logged and the run goes on.
++/// failure is logged and the run goes on. Returns whether the stamp landed.
+ pub async fn record_status(
+     state: &AppState,
+     org_id: &str,
+     run_id: &str,
+     bearer: &VerifiedSessionBearer,
+     status: &RunContextStatus,
+-) {
++) -> bool {
+     let Ok(request) = crate::sse::authenticated_session_request(
+         RecordRunContextRequest {
+             run_id: run_id.to_owned(),
+@@ -947,7 +947,7 @@ pub async fn record_status(
+         bearer,
+     ) else {
+         tracing::warn!(%run_id, "run context: session credential is not forwardable; status not recorded");
+-        return;
++        return false;
+     };
+     match tokio::time::timeout(
+         RECORD_TIMEOUT,
+@@ -955,16 +955,47 @@ pub async fn record_status(
+     )
+     .await
+     {
+-        Ok(Ok(_)) => {}
++        Ok(Ok(_)) => true,
+         Ok(Err(error)) => {
+             tracing::warn!(%error, %run_id, "run context: status not recorded (best-effort)");
++            false
+         }
+         Err(_elapsed) => {
+             tracing::warn!(%run_id, "run context: recording the status timed out (best-effort)");
++            false
+         }
+     }
+ }
+ 
++/// The status an Ask turn stamps for its skill pins (EP-11 S3): only `skills`,
++/// so the record does not claim the three parts were unspecified; session-core
++/// merges it beside any parts already stamped.
++#[must_use]
++pub fn skill_pins_status(pins: Vec<mp_contracts::model_plane::v1::SkillPin>) -> RunContextStatus {
++    RunContextStatus {
++        skills: pins,
++        ..Default::default()
++    }
++}
++
++/// Stamp the skill versions an Ask turn injected on its run record (EP-11 S3).
++/// Best-effort like [`record_status`]: a lost pin costs the durable record of
++/// which version steered the turn, never the turn, and is counted.
++pub async fn record_skill_pins(
++    state: &AppState,
++    org_id: &str,
++    run_id: &str,
++    bearer: &VerifiedSessionBearer,
++    pins: Vec<mp_contracts::model_plane::v1::SkillPin>,
++) {
++    if pins.is_empty() {
++        return;
++    }
++    if !record_status(state, org_id, run_id, bearer, &skill_pins_status(pins)).await {
++        metrics::counter!("skill_pin_record_failed_total").increment(1);
++    }
++}
++
+ /// Read what the mode asks for, compose it and stamp the status.
+ ///
+ /// The reads run together: the thread's persona toggle (only when persona
+@@ -1091,7 +1122,8 @@ pub async fn prepare(
+         "run context composed"
+     );
+     if facts.records_status() {
+-        record_status(state, org_id, &run.run_id, bearer, &status).await;
++        // Best-effort: a status that did not land is already logged.
++        let _recorded = record_status(state, org_id, &run.run_id, bearer, &status).await;
+     }
+     composed
+ }
+@@ -1984,4 +2016,33 @@ mod tests {
+         // Field 7, wire type 2 (length-delimited): tag byte (7 << 3) | 2.
+         assert_eq!(wire.first(), Some(&0x3a));
+     }
++
++    // EP-11 S3 golden: the Ask path's pins-only stamp is ids, numbers and hashes.
++    #[test]
++    fn the_ask_pin_stamp_carries_only_content_free_skills() {
++        use mp_contracts::model_plane::v1::SkillPin;
++
++        let digest = "f".repeat(64);
++        let status = skill_pins_status(vec![SkillPin {
++            skill_id: "01HSKILL".to_owned(),
++            version: 2,
++            digest: digest.clone(),
++            source: "matched".to_owned(),
++        }]);
++        assert!(status.instructions.is_none() && status.history.is_none() && status.memory.is_none());
++        assert_eq!(
++            mp_contracts::run_context::status_json(&status),
++            serde_json::json!({
++                "skills": [{ "id": "01HSKILL", "version": 2, "digest": digest, "source": "matched" }]
++            })
++        );
++    }
++
++    #[test]
++    fn a_composed_do_status_stamps_no_skills() {
++        // The Do launch composes no skills here (execution-core injects its own), so
++        // its stamp is the one recorded before EP-11 S3.
++        let status = RunContextStatus::default();
++        assert!(mp_contracts::run_context::status_json(&status).get("skills").is_none());
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/skills.rs b/apps/Model Plane/rust/services/model-gateway/src/skills.rs
+index 6f9f8badc..bc33dd68e 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/skills.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/skills.rs	
+@@ -340,6 +340,20 @@ pub fn handle_get_skill(
+ /// holds the substance used for matching).
+ #[must_use]
+ pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
++    agent_skill_to_skill_with(a, skill_pins_enabled())
++}
++
++/// [`agent_skill_to_skill`] with the pin switch passed in. With pins on the
++/// cached skill carries the row's immutable `version` and `digest` (EP-11 S3), so
++/// a turn can pin what it injected; off, both stay empty and every response that
++/// carries a cached skill is the one sent before.
++#[must_use]
++pub fn agent_skill_to_skill_with(a: AgentSkill, pins: bool) -> Skill {
++    let (version, digest) = if pins {
++        (a.version, a.digest)
++    } else {
++        (0, String::new())
++    };
+     let source_path = match crate::ownership::Scope::from_wire(&a.scope) {
+         crate::ownership::Scope::Org => format!("{LEARNED_SOURCE_PREFIX}org:{}", a.origin),
+         crate::ownership::Scope::User => {
+@@ -356,9 +370,78 @@ pub fn agent_skill_to_skill(a: AgentSkill) -> Skill {
+         tags: a.trigger_keywords,
+         source_path,
+         min_score: 0.0,
++        version,
++        digest,
++    }
++}
++
++/// Environment switch for skill pins (EP-11 S3): a run records the skill versions
++/// it injected, and recovery inside the run reads the pinned version.
++pub const SKILL_PINS_ENV: &str = "MODEL_GATEWAY_SKILL_PINS";
++
++/// Whether skill pins are on: only the literal `true` enables them, so an unset,
++/// empty or mistyped value records nothing and recovery reads the current row.
++#[must_use]
++pub fn skill_pins_from(raw: Option<&str>) -> bool {
++    raw == Some("true")
++}
++
++/// [`skill_pins_from`] for this process.
++#[must_use]
++pub fn skill_pins_enabled() -> bool {
++    skill_pins_from(std::env::var(SKILL_PINS_ENV).ok().as_deref())
++}
++
++/// The pin of one injected skill: ids, numbers and a hash, never its text. A
++/// first-party skill is pinned by the hash of its embedded SKILL.md, whatever the
++/// cache holds, because that text is what the binary injects.
++#[must_use]
++pub fn skill_pin(skill: &Skill, requested: bool) -> mp_contracts::model_plane::v1::SkillPin {
++    let (source, version, digest) = if builtin_skills::is_builtin(skill) {
++        (
++            "builtin",
++            0,
++            builtin_skills::digest_of(&skill.id).unwrap_or_default(),
++        )
++    } else if requested {
++        ("requested", skill.version, skill.digest.clone())
++    } else {
++        ("matched", skill.version, skill.digest.clone())
++    };
++    mp_contracts::model_plane::v1::SkillPin {
++        skill_id: skill.id.clone(),
++        version,
++        digest,
++        source: source.to_owned(),
+     }
+ }
+ 
++/// Whether recovery must read the pinned version instead of the current row:
++/// the run pinned a numbered version and the row's text has moved since. A pin
++/// without a version (a builtin, or a row from before versions) has nothing to
++/// read back, so the current row stands.
++#[must_use]
++pub fn pin_needs_version_read(
++    pin: &mp_contracts::model_plane::v1::SkillPin,
++    current: &AgentSkill,
++) -> bool {
++    pin.version > 0 && pin.skill_id == current.id && pin.digest != current.digest
++}
++
++/// What `reattach_skill` says when the version this run pinned no longer exists
++/// (the skill was deleted or erased). The model must not follow the current text
++/// as if it were the one the run started with.
++#[must_use]
++pub fn render_pinned_skill_gone(name: &str) -> String {
++    serde_json::json!({
++        "status": "not_available",
++        "name": name,
++        "detail": "the version of this skill this run used is no longer available; do not \
++                   follow it, and do not guess at the missing instruction",
++    })
++    .to_string()
++}
++
+ /// Whether a session-core skill may reach a matcher: its owner has accepted it.
+ /// A row from a session-core that predates review carries no state and is an
+ /// ordinary accepted skill.
+@@ -592,6 +675,8 @@ mod tests {
+             tags: tags.iter().map(std::string::ToString::to_string).collect(),
+             source_path: String::new(),
+             min_score: 0.0,
++            version: 0,
++            digest: String::new(),
+         }
+     }
+ 
+@@ -1404,6 +1489,8 @@ mod skill_budget_tests {
+             tags: Vec::new(),
+             source_path: String::new(),
+             min_score: 0.0,
++            version: 0,
++            digest: String::new(),
+         }
+     }
+ 
+@@ -1509,6 +1596,8 @@ mod skill_file_tests {
+             tags: Vec::new(),
+             source_path: String::new(),
+             min_score: 0.0,
++            version: 0,
++            digest: String::new(),
+         }
+     }
+ 
+@@ -1609,3 +1698,87 @@ mod skill_file_tests {
+         assert_eq!(listing["files"].as_array().map(Vec::len), Some(2));
+     }
+ }
++
++// EP-11 S3: what a turn pins, and when recovery must read the pinned version.
++#[cfg(test)]
++mod skill_pin_tests {
++    use super::*;
++
++    fn row(id: &str, version: i32, digest: &str) -> AgentSkill {
++        AgentSkill {
++            id: id.into(),
++            name: "House style".into(),
++            content: "Write short answers.".into(),
++            enabled: true,
++            scope: "org".into(),
++            review_state: "accepted".into(),
++            version,
++            digest: digest.into(),
++            ..Default::default()
++        }
++    }
++
++    #[test]
++    fn the_switch_reads_only_the_literal_true() {
++        assert!(skill_pins_from(Some("true")));
++        for off in [None, Some(""), Some("TRUE"), Some(" true"), Some("1"), Some("false")] {
++            assert!(!skill_pins_from(off), "{off:?} must leave pins off");
++        }
++    }
++
++    #[test]
++    fn switch_off_records_nothing() {
++        // Off, the cached skill carries no version or digest, so nothing can be pinned
++        // and every response carrying a cached skill is the one sent before.
++        let skill = agent_skill_to_skill_with(row("s1", 3, &"d".repeat(64)), false);
++        assert_eq!(skill.version, 0);
++        assert!(skill.digest.is_empty());
++    }
++
++    #[test]
++    fn pins_recorded_for_matched_and_requested_skills() {
++        let digest = "d".repeat(64);
++        let skill = agent_skill_to_skill_with(row("s1", 3, &digest), true);
++        let matched = skill_pin(&skill, false);
++        assert_eq!(matched.skill_id, "s1");
++        assert_eq!(matched.version, 3);
++        assert_eq!(matched.digest, digest);
++        assert_eq!(matched.source, "matched");
++        assert_eq!(skill_pin(&skill, true).source, "requested");
++    }
++
++    #[test]
++    fn builtin_skill_pin_uses_embedded_hash() {
++        let skill = builtin_skills::skill("builtin:office/xlsx").expect("builtin xlsx");
++        let pin = skill_pin(&skill, true);
++        assert_eq!(pin.source, "builtin");
++        assert_eq!(pin.version, 0);
++        let expected = builtin_skills::digest_of("builtin:office/xlsx").expect("embedded digest");
++        assert_eq!(pin.digest, expected);
++        assert_eq!(pin.digest.len(), 64);
++    }
++
++    #[test]
++    fn recovery_reads_the_pinned_version_only_after_the_text_moved() {
++        let pinned = skill_pin(
++            &agent_skill_to_skill_with(row("s1", 2, &"a".repeat(64)), true),
++            false,
++        );
++        assert!(!pin_needs_version_read(&pinned, &row("s1", 2, &"a".repeat(64))));
++        assert!(pin_needs_version_read(&pinned, &row("s1", 3, &"b".repeat(64))));
++        // Another skill's row is never read through this pin.
++        assert!(!pin_needs_version_read(&pinned, &row("s2", 3, &"b".repeat(64))));
++        // A pin without a version (a builtin, a row from before versions) has nothing to read.
++        let unversioned = skill_pin(&agent_skill_to_skill_with(row("s1", 0, ""), true), false);
++        assert!(!pin_needs_version_read(&unversioned, &row("s1", 3, &"b".repeat(64))));
++    }
++
++    #[test]
++    fn a_gone_version_is_reported_not_guessed() {
++        let rendered: serde_json::Value =
++            serde_json::from_str(&render_pinned_skill_gone("House style")).expect("valid JSON");
++        assert_eq!(rendered["status"], "not_available");
++        assert_eq!(rendered["name"], "House style");
++        assert!(rendered.get("instruction").is_none());
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index 9d206c1ea..f594356f3 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -3761,6 +3761,7 @@ pub async fn invoke_stream_sse(
+         skills_truncated,
+         skills_dropped,
+         skill_file_offered,
++        pins: skill_pins,
+     } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
+         &state,
+         &model_bearer,
+@@ -3786,7 +3787,21 @@ pub async fn invoke_stream_sse(
+         &req.content,
+         &requested_skill_ids,
+         MAX_INJECTED_SKILLS,
++        &skill_pins,
+     );
++    // EP-11 S3: stamp the versions this turn injected on its run record, spawned so
++    // the turn never waits on it. Never for a ZDR or waived turn: session-core
++    // refuses both, and their run record keeps nothing durable about the turn.
++    if !skill_pins.is_empty() && !turn_posture.zdr() && !turn_posture.is_waived() {
++        let pin_state = state.clone();
++        let pin_bearer = model_bearer.clone();
++        let (pin_org, pin_run) = (org_id.clone(), session_run.run_id.clone());
++        let pins = skill_pins.clone();
++        tokio::spawn(async move {
++            crate::run_context::record_skill_pins(&pin_state, &pin_org, &pin_run, &pin_bearer, pins)
++                .await;
++        });
++    }
+     // Shared turn record (off by default): lets a rating on another replica
+     // resolve this turn. A waived turn stays in this process, as it does for
+     // every other shared store.
+@@ -6961,6 +6976,9 @@ struct SkillContext {
+     skills_dropped: usize,
+     /// A skill this turn injected has a bundle, so `skill_file` is worth offering (WS19-S7).
+     skill_file_offered: bool,
++    /// The versions this turn injected, one per skill (EP-11 S3). Empty while
++    /// `MODEL_GATEWAY_SKILL_PINS` is off.
++    pins: Vec<mp_contracts::model_plane::v1::SkillPin>,
+ }
+ const DEFAULT_CONTEXT_ASSEMBLY_TOKENS: u32 = 4096;
+ const MIN_CONTEXT_ASSEMBLY_TOKENS: u32 = 512;
+@@ -8288,6 +8306,17 @@ async fn fetch_skill_context(
+     }
+     // A skill with a bundle says so in its block; the bundle's files are read on demand (WS19-S7).
+     let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
++    // EP-11 S3: pin every skill the turn set out to inject, a block the budget cut
++    // or dropped included: `reattach_skill` recovers exactly those, at this version.
++    let pins = if crate::skills::skill_pins_enabled() {
++        chosen
++            .iter()
++            .filter(|s| !s.body.trim().is_empty())
++            .map(|s| crate::skills::skill_pin(s, requested_ids.contains(&s.id)))
++            .collect()
++    } else {
++        Vec::new()
++    };
+     let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
+     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
+     let fitted = crate::skills::fit_skill_blocks_with_footers(
+@@ -8321,6 +8350,7 @@ async fn fetch_skill_context(
+         skills_truncated: fitted.truncated,
+         skills_dropped: fitted.dropped,
+         skill_file_offered: !bundles.is_empty(),
++        pins,
+     }
+ }
+ 
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 38acf1ddb..7f7cf979f 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -3200,6 +3200,72 @@ fn sha256_hex(bytes: &[u8]) -> String {
+         })
+ }
+ 
++/// `reattach_skill` at the version this run pinned (EP-11 S3). `None` leaves the
++/// recovery to the current row: pins off, no pin for this skill in this run, the
++/// row absent or disabled (recovery says so itself), or the row's text unchanged
++/// since the run pinned it. A version that no longer exists is reported, never
++/// replaced by the current text; a failed read is an error, for the same reason.
++async fn pinned_skill_recovery(
++    state: &AppState,
++    org_id: &str,
++    run_id: &str,
++    session_bearer: &str,
++    skills: &[mp_contracts::model_plane::v1::AgentSkill],
++    name: &str,
++) -> Option<Result<String, &'static str>> {
++    use mp_contracts::model_plane::v1::{AgentSkill, GetAgentSkillVersionRequest};
++
++    if !crate::skills::skill_pins_enabled() {
++        return None;
++    }
++    let wanted = name.trim().to_lowercase();
++    let current = skills
++        .iter()
++        .find(|skill| skill.enabled && skill.name.trim().to_lowercase() == wanted)?;
++    let pin = crate::chat_turn_registry::run_pins().pin(org_id, run_id, &current.id)?;
++    if !crate::skills::pin_needs_version_read(&pin, current) {
++        return None;
++    }
++    let request = with_authorization(
++        GetAgentSkillVersionRequest {
++            org_id: org_id.to_owned(),
++            skill_id: pin.skill_id.clone(),
++            version: pin.version,
++            for_user_id: String::new(),
++        },
++        session_bearer,
++    );
++    let response = match state
++        .skill_version_client
++        .clone()
++        .get_agent_skill_version(request)
++        .await
++    {
++        Ok(response) => response.into_inner(),
++        Err(error) => {
++            tracing::warn!(%error, %org_id, skill_id = %pin.skill_id, version = pin.version, "reattach_skill: pinned version read failed");
++            return Some(Err(
++                "reattach_skill could not read the version of this skill this run used right now",
++            ));
++        }
++    };
++    let Some(version) = response.version.filter(|_| !response.gone) else {
++        return Some(Ok(crate::skills::render_pinned_skill_gone(&current.name)));
++    };
++    // The pinned body through the same bounded rendering as the current row.
++    let pinned = AgentSkill {
++        id: version.skill_id,
++        name: version.name,
++        description: version.description,
++        content: version.content,
++        enabled: true,
++        ..Default::default()
++    };
++    Some(Ok(crate::skills::render_recovered_skill(
++        &mp_contracts::skill_recovery::recover_skill(std::slice::from_ref(&pinned), &pinned.name),
++    )))
++}
++
+ /// `skill_file`: one bounded read of one file of a skill's bundle (WS19-S7).
+ ///
+ /// Every refusal that needs no I/O comes first (the switch, the name, the path,
+@@ -3464,11 +3530,12 @@ async fn skill_mounts_for_turn(
+         return Vec::new();
+     }
+     let mut matched: Vec<(String, String)> = Vec::new();
+-    for skill_id in &record.skill_ids {
++    for skill_ref in &record.skill_ids {
+         let request = GetSkillRequest {
+             request_id: String::new(),
+             org_id: org_id.to_owned(),
+-            skill_id: skill_id.clone(),
++            // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the id.
++            skill_id: crate::chat_turn_registry::skill_id_of_ref(skill_ref).to_owned(),
+         };
+         let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
+             .ok()
+@@ -4673,9 +4740,24 @@ async fn dispatch_tool_with_cost(
+                     );
+                 }
+             };
+-            let output = crate::skills::render_recovered_skill(
+-                &mp_contracts::skill_recovery::recover_skill(&skills, &name),
+-            );
++            // EP-11 S3: a skill this run pinned is recovered at the pinned version, so an
++            // edit made mid-run does not change what the run reads back.
++            let output = match pinned_skill_recovery(
++                state,
++                org_id,
++                run_id,
++                session_bearer,
++                &skills,
++                &name,
++            )
++            .await
++            {
++                Some(Ok(output)) => output,
++                Some(Err(message)) => return err_outcome(call, message),
++                None => crate::skills::render_recovered_skill(
++                    &mp_contracts::skill_recovery::recover_skill(&skills, &name),
++                ),
++            };
+             ToolOutcome {
+                 call_id: call.id.clone(),
+                 name: call.name.clone(),
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs
+index 0e3a07490..daa56855e 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs	
+@@ -673,3 +673,35 @@ fn the_web_reader_is_offered_only_where_a_fetched_page_can_be_parked() {
+         "{offer}"
+     );
+ }
++
++/// EP-11 S3 (`zdr_turn_records_no_pins`, closes D2-557): a ZDR turn pins no skill version and
++/// offers no skill bundle file. It returns before skill injection, so it has no pins to stamp, and
++/// the stamp itself is guarded on the turn's posture. Read from the source, as the other
++/// turn-ordering checks in this file are.
++#[test]
++fn zdr_turn_records_no_pins() {
++    let sse = include_str!("../src/sse.rs");
++    let zdr_return = sse
++        .find("return zdr_direct_stream(")
++        .expect("the ZDR branch hands the turn to zdr_direct_stream");
++    let injection = sse
++        .find("pins: skill_pins,")
++        .expect("the ordinary path takes the pins from skill injection");
++    let stamp = sse
++        .find("crate::run_context::record_skill_pins(")
++        .expect("the ordinary path stamps the pins");
++    assert!(
++        zdr_return < injection && zdr_return < stamp,
++        "a ZDR turn returns before skill injection can pin a version"
++    );
++    assert!(
++        sse.contains("!skill_pins.is_empty() && !turn_posture.zdr() && !turn_posture.is_waived()"),
++        "the pin stamp is guarded on the turn's posture"
++    );
++    for signature in ["async fn zdr_direct_stream(", "fn zdr_answer_stream(", "async fn direct_infer_turn("] {
++        let body = function_body(sse, signature);
++        assert!(!body.contains("fetch_skill_context("), "{signature} injects no skill");
++        assert!(!body.contains("record_skill_pins("), "{signature} stamps no pin");
++        assert!(!body.contains("skill_file"), "{signature} offers no skill bundle file");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index 6f97798e9..e40d0a69a 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -9920,12 +9920,19 @@ impl SessionCore for SessionService {
+             };
+             caller.authorize_org(&req.org_id)?;
+             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+-            let patch = serde_json::json!({
+-                "run_context": mp_contracts::run_context::status_json(status),
+-            });
++            // Merged one level deeper than the other metadata keys (EP-11 S3): the
++            // Ask path stamps skill pins alone, after or before the parts, and
++            // neither stamp may erase the other. A status with the three parts
++            // writes the same keys it always did.
++            let patch = mp_contracts::run_context::status_json(status);
+             let updated = sqlx::query(
+                 "UPDATE runs
+-                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
++                    SET metadata = COALESCE(metadata, '{}'::jsonb)
++                          || jsonb_build_object(
++                               'run_context',
++                               CASE WHEN jsonb_typeof(metadata -> 'run_context') = 'object'
++                                    THEN metadata -> 'run_context'
++                                    ELSE '{}'::jsonb END || $3::jsonb),
+                         updated_at = now()
+                   WHERE id = $1 AND org_id = $2",
+             )
+@@ -16642,6 +16649,7 @@ mod tests {
+             instructions: Some(pb::RunContextPart { state: pb::RunContextState::Included as i32, included: 1, omitted: 0, reason: String::new() }),
+             history: Some(pb::RunContextPart { state: pb::RunContextState::Truncated as i32, included: 24, omitted: 6, reason: "cap".into() }),
+             memory: Some(pb::RunContextPart { state: pb::RunContextState::SkippedByPolicy as i32, included: 0, omitted: 0, reason: "memory_off".into() }),
++            skills: Vec::new(),
+         };
+         let request = |org: &str| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.to_owned(), status: Some(status.clone()) };
+ 
+@@ -16677,6 +16685,65 @@ mod tests {
+         assert!(foreign.is_err(), "a foreign org must not stamp this run");
+     }
+ 
++    // EP-11 S3: a pins-only stamp (the Ask path) lands beside the parts already
++    // recorded, and a later parts stamp keeps the pins; no other key is dropped.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
++    async fn record_run_context_merges_skills_without_dropping_other_keys() {
++        use super::SessionService;
++
++        let Ok(url) = std::env::var("DATABASE_URL") else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return;
++        };
++        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
++        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
++        let sfx = std::process::id();
++        let (thread_id, run_id, org) = (format!("rcs-t-{sfx}"), format!("rcs-r-{sfx}"), format!("rcs-org-{sfx}"));
++        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
++            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
++        sqlx::query(
++            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,metadata) VALUES ($1,$2,'g',$3,'u1','{\"autonomy_rung\":\"workspace_write\"}'::jsonb)",
++        )
++        .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
++        let svc = SessionService {
++            pool: pool.clone(),
++            retrieval_client: None,
++            graph_client: None,
++            knowledge_client: None,
++            letta_memory: None,
++            audit_publisher: None,
++            auth: None,
++            grant_columns: crate::grpc::ThreadGrantColumns::present(),
++        };
++        let digest = "c".repeat(64);
++        let pins = pb::RunContextStatus {
++            skills: vec![pb::SkillPin { skill_id: "01HSKILL".into(), version: 2, digest: digest.clone(), source: "matched".into() }],
++            ..Default::default()
++        };
++        let parts = pb::RunContextStatus {
++            memory: Some(pb::RunContextPart { state: pb::RunContextState::Empty as i32, included: 0, omitted: 0, reason: String::new() }),
++            ..Default::default()
++        };
++        let stamp = |status: &pb::RunContextStatus| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.clone(), status: Some(status.clone()) };
++
++        svc.record_run_context(as_user(&org, "u1", stamp(&pins))).await.expect("record pins");
++        let (metadata,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
++            .bind(&run_id).fetch_one(&pool).await.expect("read metadata");
++        assert_eq!(metadata["autonomy_rung"], "workspace_write", "an unrelated key must survive the merge");
++        assert_eq!(metadata["run_context"]["skills"][0]["id"], "01HSKILL");
++        assert_eq!(metadata["run_context"]["skills"][0]["version"], 2);
++        assert_eq!(metadata["run_context"]["skills"][0]["digest"], digest.as_str());
++        assert_eq!(metadata["run_context"].get("memory"), None, "a pins-only stamp claims no part");
++
++        svc.record_run_context(as_user(&org, "u1", stamp(&parts))).await.expect("record parts");
++        let (after,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
++            .bind(&run_id).fetch_one(&pool).await.expect("re-read metadata");
++        assert_eq!(after["run_context"]["memory"]["state"], "empty");
++        assert_eq!(after["run_context"]["skills"], metadata["run_context"]["skills"], "the parts stamp keeps the pins");
++        assert_eq!(after["autonomy_rung"], "workspace_write");
++    }
++
+     fn as_user<T>(org_id: &str, user_id: &str, message: T) -> Request<T> {
+         let mut request = Request::new(message);
+         request

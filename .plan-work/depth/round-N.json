@@ -1,0 +1,41 @@
+{
+  "packets": [
+    {
+      "key": "leads-org-less-sync-audit",
+      "rows": ["D1-802"],
+      "title": "leads-core: the scheduled all-org provider sync no longer publishes an org-less audit event that audit-core can only refuse",
+      "severity": "medium",
+      "cwd": "apps/Application Plane/leads-core",
+      "files": [
+        "apps/Application Plane/leads-core/internal/providerleads/sync.go",
+        "apps/Application Plane/leads-core/internal/audit/publisher.go"
+      ],
+      "new_files": [],
+      "tests": [
+        "go vet ./...",
+        "go test ./internal/providerleads/ ./internal/audit/ -count=1",
+        "go build ./..."
+      ],
+      "brief": "Measured live by the lead 2026-10-27 (register D1-802): once the Application Plane audit stream existed, leads-core's audit outbox held 24 `provider_lead_sync` events (published 2026-10-23 into a stream nobody consumed). Replayed into the new stream, audit-core refused all 24 as malformed: \"missing required field: org_id\" (audit-core internal/events/events.go AuditEvent.Validate requires org_id; every audit chain is per org). They come from apps/Application Plane/leads-core/internal/providerleads/sync.go `Sync` (~:55-70): when the gateway's connection listing fails for the scheduled all-org run (`orgID == \"\"`), it publishes one whole-run failure audit with `OrgID: strings.TrimSpace(orgID)`, which is empty. That event can never be stored, so the failure the comment wants visible is in fact dead-lettered.\n\nDo (CRLF or LF: measure each file and keep it):\n(1) In `Sync`, a whole-run failure with an empty org scope is not an org's audit event: do not publish it. Make the failure visible where it belongs instead: a log line at the existing log style (`log.Printf`) naming the provider and the error, and, if the package already has a metric or counter for sync outcomes, increment it (do not add a new metrics dependency). A whole-run failure for a NAMED org (orgID != \"\") keeps publishing as today. Update the comment above it so it no longer claims an audit trail for the all-org case.\n(2) In internal/audit/publisher.go, make the publisher refuse to enqueue any audit event whose org_id is empty (both PublishProviderLeadSync and PublishLeadExport, or the shared enqueue path if that is where the payload is known): log once with the event type and skip, so no other caller can put an undeliverable event into the outbox. Keep every other field and the outbox semantics unchanged.\n(3) Tests: a Sync test where ListConnections fails with orgID \"\" asserts no audit event is published (use the package's existing test doubles for the gateway and the audit sink; find them in *_test.go); the same failure with a named org still publishes one with that org. A publisher test asserts an empty org_id is not enqueued (if the publisher's enqueue needs a DB, test the guard at the smallest seam: a pure function that decides, called by the publisher).\nDo not touch audit-core or any other service. Keep the final report short and call the structured output before you stop."
+    },
+    {
+      "key": "app-provisioner-one-owner",
+      "rows": ["D1-803"],
+      "title": "Application Plane provisioning scripts converge the runtime streams and consumers to the values audit-core's provisioner owns, so the Control audit-extra provisioner stops refusing them",
+      "severity": "medium",
+      "cwd": "apps/Application Plane",
+      "files": [
+        "apps/Application Plane/scripts/jetstream-provision-entrypoint.sh",
+        "apps/Application Plane/scripts/provision-jetstream.sh",
+        "apps/Application Plane/scripts/tests/audit-stream-contract-test.sh"
+      ],
+      "new_files": [],
+      "tests": [
+        "bash \"apps/Application Plane/scripts/tests/audit-stream-contract-test.sh\"   (from the repository root)",
+        "sh -n \"apps/Application Plane/scripts/jetstream-provision-entrypoint.sh\"",
+        "bash -n \"apps/Application Plane/scripts/provision-jetstream.sh\""
+      ],
+      "brief": "Measured live by the lead 2026-10-27 (register D1-803). With the application bus no longer optional in the Control Plane's audit-extra-nats-provisioner (D1-115), that provisioner ran for the first time on the dev stack and failed: \"consumer conversation-core-ai-action-executor exists with incompatible configuration; refusing destructive replacement\". Two owners provision the same Application Plane resources with different values:\n- Control: apps/Control Plane/audit-core/internal/provisioner/provisioner.go (~:325-380): runtime streams VEREVON_APPLICATION (verevon.application.>), VEREVON_MODEL (verevon.model.>), VEREVON_INGESTION (verevon.ingestion.>) via `ensureRuntimeStream(js, name, subjects, 14*24*time.Hour, 0)`: MaxAge 336 h, MaxMsgs 1,000,000, MaxBytes unlimited, limits retention, discard old; and push consumers via `applicationPushConsumer` (~:372): DeliverAll, AckExplicit, AckWait 30 s, MaxDeliver 5, ReplayInstant, DeliverGroup = durable, for conversation-core-ai-action-executor, conversation-core-model-action-proposed, conversation-core-webhook-received, insight-core-metric-subscriber and notification-core-conversation-followed-message (constants ~:68-77 give the delivery subjects and filters; read them there). `ensureFixedConsumer` (~:413) refuses an existing consumer whose DeliverSubject, DeliverGroup, FilterSubject, DeliverPolicy, AckPolicy, AckWait, ReplayPolicy or (when wanted) MaxDeliver differ.\n- Application: apps/Application Plane/scripts/jetstream-provision-entrypoint.sh (and the host twin scripts/provision-jetstream.sh) create the same three streams with --max-age=72h --max-msgs=-1 and the consumers with no --wait/--max-deliver (so max_deliver -1), and skip anything that exists (so they never converge). Live after the Control provisioner's partial run: the three streams already carry 336 h / 1,000,000 (VEREVON_APPLICATION has 145 messages, nothing lost); the four shared consumers still have max_deliver -1.\nThe Control Plane rollout doc (apps/Control Plane/docs/control-shared-nats-credential-rollout-2026-07-15.md ~:28-31) names `audit-extra-nats-provisioner` the owner of Model/Application topology, and the audit stream in the same script is already pinned to audit-core's values. So the Application Plane scripts follow audit-core's values:\n(1) Runtime streams: create with --max-age=336h --max-msgs=1000000 (keep every other flag), and when the stream exists with different max_age/max_msgs, converge it in place with `stream edit` (non-destructive; the entrypoint already uses `stream edit ... --force` for VEREVON_AUDIT, so follow that style).\n(2) The consumers both sides create (the four above): create with --wait=30s --max-deliver=5, and when one exists with a different max_deliver or ack_wait, converge it in place with `nats consumer edit STREAM NAME --max-deliver=5 --wait=30s --force` (a non-destructive edit; never delete and re-add a durable, which would lose its position). Read the consumer's current values with `consumer info --json` and compare; keep the existing `= (exists)` line when nothing differs and print a `~` line when it converges, matching the audit stream's style.\n(3) Consumers only one side creates stay as they are (insight-core-ingestion-subscriber exists only here; notification-core-conversation-followed-message only in the Go provisioner): do not add or remove any; say in a comment which owner creates which.\n(4) Extend scripts/tests/audit-stream-contract-test.sh (it already parses provisioner.go with python3 -I to pin the audit stream) to also pin the three runtime streams' max_age/max_msgs and the shared consumers' ack_wait/max_deliver/filter/delivery subject against provisioner.go, in BOTH scripts, so the drift cannot come back. Prove the test fails against the current HEAD versions of the two scripts (temporary copies outside the repo, deleted after) and passes after your change; report both.\nAgents cannot run docker or NATS: the lead runs the scripts on the dev stack. Keep `set -eu` behaviour (a failure exits non-zero). Never print or log the password (it is embedded in the server URL). Keep the final report short and call the structured output before you stop."
+    }
+  ]
+}

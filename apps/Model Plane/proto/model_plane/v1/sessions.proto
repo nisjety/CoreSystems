@@ -292,7 +292,8 @@ service MessageTreeService {
   // Make a branch of the thread the active one. A target on the active path is a
   // rewind: the leaf becomes the target and nothing is deleted. Any other target is
   // a version switch: the leaf becomes the newest turn beneath it, so the chosen
-  // branch shows its own continuation. Owner only, with `session:write`. Refused
+  // branch shows its own continuation. With `exact` set, the leaf is the target
+  // itself (an undo of a rewind). Owner only, with `session:write`. Refused
   // for a Space thread, a thread that holds a waived run and a thread with a queued
   // or running run. Refused with unavailable `message_versions_disabled` while
   // SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
@@ -2330,6 +2331,10 @@ message SetActiveLeafRequest {
   // leaf, and is otherwise refused with aborted `active_leaf_stale`. Empty names a
   // thread with no turns.
   string expected_leaf_message_id = 4;
+  // Land on the target itself, whatever continues it. An undo of a rewind sets this,
+  // so the leaf returns to the turn the rewind left even when a later branch continues
+  // from that turn. Unset, the target keeps the meaning above.
+  bool exact = 5;
 }
 
 // Where the active leaf landed, and the active path up to it.

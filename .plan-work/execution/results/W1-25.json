@@ -1,0 +1,523 @@
+{
+ "batchId": "W1-25",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS09-S8",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/transcript-paging-proof.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --lib",
+     "outcome": "exit 101: 4 x E0063 (missing limit and before_message_id) at run_context.rs:516, tool_loop.rs:3402, sse.rs:5997 and sse.rs:8379. The non-test lib build fails, so these four literals are production code. No other error."
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib --no-run",
+     "outcome": "exit 101: the same four E0063 and no other error. The owned http_routes.rs code and its mod thread_messages_page_tests type-check. No test binary was built and no model-gateway test ran."
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p session-core --all-targets",
+     "outcome": "exit 0: bin 637 passed, 232 ignored; integration targets 4, 9 and 4 passed"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core conversation_page",
+     "outcome": "exit 0: 3 passed, 3 ignored (the DB tests, not run)"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core list_conversation_pages -- --list",
+     "outcome": "exit 0: the three grpc::conversation_page_db_tests tests are listed; not run"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets thread_messages_url",
+     "outcome": "exit 0: 3 passed"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets canonical_messages",
+     "outcome": "exit 0: 5 passed"
+    },
+    {
+     "command": "cd apps/Model Plane/go/gen && unset GOFLAGS && go vet ./... && go test ./... ; go test -count=1 ./model_plane/v1/",
+     "outcome": "all exit 0; model_plane/v1 ok, uncached rerun ok (16.1s)"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/capability-core && unset GOFLAGS && go build ./... && go test -count=1 ./internal/sessionreview/... && go vet ./internal/sessionreview/...",
+     "outcome": "all exit 0; sessionreview ok, uncached"
+    },
+    {
+     "command": "bash -n apps/Model Plane/scripts/tests/transcript-paging-proof.sh",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "read-only: git ls-files --eol; git diff --numstat HEAD with and without --ignore-cr-at-eol on the owned files; CR and LF counts of the shared-edit files",
+     "outcome": "owned files are LF in the index. numstat is identical with and without --ignore-cr-at-eol, so there is no whole-file diff. run_context.rs and sse.rs are LF in the worktree; tool_loop.rs and the e2e test are CRLF."
+    }
+   ],
+   "db_tests_written": [
+    "list_conversation_pages (3 ignored DB tests in C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs, module grpc::conversation_page_db_tests: list_conversation_pages_tail_first_against_real_pg, list_conversation_pages_refuses_a_cursor_outside_the_thread_against_real_pg, list_conversation_pages_keep_the_audience_ceiling_against_real_pg)"
+   ],
+   "lead_todo": [
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs (LF file): insert a line `            ..Default::default(),` (12 spaces) after line 522 (`            space_read_decision_token: String::new(),`), before the `        },` at line 523 that closes the literal opened at line 516.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (CRLF file, keep CRLF): insert `                    ..Default::default(),` (20 spaces) after line 3410 (`                    space_read_decision_token: String::new(),`), before the `                },` at line 3411 that closes the literal opened at line 3402.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs (LF file): insert `            ..Default::default(),` (12 spaces) after line 8387 and after line 6005 (both are `space_read_decision_token: String::new(),`), before the `        },` lines that close the literals at 8379 and 5997. Do the 8387 insert first: the 6005 line number holds only if the lower insert goes first.",
+    "shared-edit C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (CRLF file, keep CRLF): line 1456, `        Ok(Response::new(ListConversationResponse { messages }))` becomes `        Ok(Response::new(ListConversationResponse { messages, ..Default::default() }))`.",
+    "After the four edits, from apps/Model Plane/rust run `CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib thread_messages_page_tests` (the four new tests), then the full `cargo test -q -p model-gateway --lib` to confirm the unpaged production callers are unchanged. The plan's --all-targets form may hit pre-existing non-lib failures on Windows.",
+    "Lead only: DB harness on a disposable Postgres, `scripts/tests/session-core-db-tests.sh` with filter list_conversation_pages (3 tests in grpc::conversation_page_db_tests). I did not run them.",
+    "Lead only: live proof. Rebuild session-core, model-gateway and the BFF gateway image, then run apps/Model Plane/scripts/tests/transcript-paging-proof.sh with its PROOF_* variables against a disposable database. Keep its output, including the EXPLAIN for the tail query, as S8 evidence.",
+    "Integrator (DEC-39): confirm sessions.proto tags 6 and 7 on ListConversationRequest and 2 on ListConversationResponse in the section 4.3 ledger before the train merges.",
+    "Commit scope: S8 is the seven owned files plus the four shared-edit files once edited. Keep the concurrent WS09-S9 frontend files and the capability-core edits out of this commit.",
+    "Optional follow-up: regenerate the Python and TypeScript sessions.proto bindings through the full buf.gen.yaml; they lack the new fields."
+   ],
+   "deviations": [
+    "No owned-file change this round. Both required fixes are edits to files this slice does not own, so they are handed back in lead_todo and not applied.",
+    "The shared edits use ..Default::default(), the reviewer's first option. The explicit form (limit: 0, before_message_id: String::new()) is equivalent and also keeps the unpaged path.",
+    "Carried over: no boolean switch. MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT is a strictly parsed numeric ceiling, and limit absent or 0 is the byte-identical unpaged read. zdr_posture_matrix.rs was not edited. The /transcript route adds hasMore only when paged. Validation is split between the BFF (400) and the gateway and session-core (clamp). The plan's BFF test command passes two positional filters, which cargo rejects, so the filters were run as two commands."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs: add ..Default::default() to the ListConversationRequest literal at line 516 (after line 522)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: add ..Default::default() to the ListConversationRequest literal at line 3402 (after line 3410)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs: add ..Default::default() to the ListConversationRequest literals at lines 5997 (after line 6005) and 8379 (after line 8387)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs: add ..Default::default() to the ListConversationResponse literal at line 1456"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/run_context.rs:516, src/tool_loop.rs:3402, src/sse.rs:5997 and src/sse.rs:8379 (not owned by the slice, so the lead applies these as shared edits): add `..Default::default()` to each ListConversationRequest literal. Why: the add-only proto fields limit=6 and before_message_id=7 cause 4 x E0063, so the model-gateway lib (production code) does not compile. I reproduced this with `cargo check -q -p model-gateway --lib`. Until it compiles, the plan's `cargo test -q -p model-gateway --all-targets thread_messages` cannot run and the 4 thread_messages_page_tests have never run. Keep LF in run_context.rs and sse.rs and CRLF in tool_loop.rs.",
+     "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs:1456 (not owned, lead shared edit, keep CRLF): change to `ListConversationResponse { messages, ..Default::default() }` (it lacks has_more=2). Why: without it the --all-targets build of the integration target fails once the lib compiles. Then run `cargo test -q -p model-gateway --lib thread_messages_page_tests` and the full model-gateway lib suite to confirm the unpaged callers are unchanged."
+    ],
+    "dod_gaps": [
+     "The 3 session-core DB tests (grpc::conversation_page_db_tests, filter list_conversation_pages) have not run against a disposable Postgres. The lead runs them through scripts/tests/session-core-db-tests.sh.",
+     "Live proof: rebuild the session-core, model-gateway and BFF images, then run apps/Model Plane/scripts/tests/transcript-paging-proof.sh against a disposable DB and keep its EXPLAIN of the tail query as evidence.",
+     "Plan gate D5 (WS09-S1 long-thread measurement) is not evidenced. The owner ordered the build on 2026-10-26, so it stays an open item.",
+     "DEC-39: the integrator confirms sessions.proto tags 6 and 7 (ListConversationRequest) and 2 (ListConversationResponse) in the section 4.3 ledger.",
+     "Commit scope: the 7 owned files plus the 4 shared-edit files. Exclude the concurrent WS09-S9 frontend files (ChatPage.tsx, chat-normalizers*, use-chat-controller*, chat-client*) and apps/Control Plane/audit-core/audit-verify.exe."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The four tests in mod thread_messages_page_tests (http_routes.rs:15182) have not run. Once the four production edits and the e2e edit are in, the module-path filter thread_messages_page_tests selects them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The e2e_invoke_chain_test.rs literal (line 1456) is checked by grep only. The non-test lib fails, so the integration target cannot build yet."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The three list_conversation_pages DB tests compile and are listed but have not run against Postgres. The lead runs them through the harness."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "transcript-paging-proof.sh has not run. It needs rebuilt session-core, model-gateway and BFF images and a disposable database; its EXPLAIN output is the tail-query evidence."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Plan gate D5 (WS09-S1 long-thread measurement) is not evidenced. The owner ordered the build on 2026-10-26, so the gate stays open and is recorded here, not resolved."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-29 (the cursor is the message id, resolved inside the thread under the audience ceiling) and DEC-39 (tags 6, 7 and 2) are plan defaults that still need owner and integrator sign-off."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No ZDR golden row for paged thread reads. zdr_posture_matrix.rs was not edited because the row needs a read-route entry in the canonical matrix. Parity holds by construction, but no test pins it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Concurrent WS09-S9 frontend edits and capability-core edits sit in this worktree. Keep them out of the S8 commit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Flag deviation: MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT is a strictly parsed numeric ceiling with no boolean off switch. The owner should confirm this against the literal-true switch rule."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "BFF /messages passes has_more through in snake_case, while /transcript adds hasMore. WS09-S9 must read the key each route uses."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The BFF answers 400 for limit 0 or above 200, while the gateway and session-core clamp. A direct gateway caller therefore gets a clamped page."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A cursor must match [A-Za-z0-9_-]{1,128}. A legacy messages.id outside that shape gets 400 and has not been checked against live data."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway query extractor answers a non-numeric or negative limit with axum's plain-text 400, not the JSON error envelope."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No BFF test proves has_more survives the /messages passthrough. Only URL building and page validation are unit-tested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The Python (apps/Model Plane/python/mp-events-py) and TypeScript (apps/Frontend Plane/verevon) sessions.proto bindings are not regenerated, because they are not owned here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The buf lint ratchet is already red at HEAD with 71 findings outside this slice's files. Its owner refreshes the baseline."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "After the shared edits, the three production callers (run_context.rs, tool_loop.rs, sse.rs) send limit 0 and an empty cursor, which is the unpaged path. Confirm in review that they stay byte-identical."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The gateway reads the ceiling env var on each request. Moving it into AppState needs state.rs, which this slice does not own."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Space audience predicate appears in three SQL texts (unpaged rows, page rows, cursor lookup). One shared constant would remove the drift risk."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "git (core.autocrlf=true) warns that LF will be replaced by CRLF for http_routes.rs and sessions.pb.go, which are LF in the worktree. The index is LF and the diff is clean, so no action is needed before the commit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No ZDR golden row pins paged thread reads (zdr_posture_matrix.rs is owned but unedited). Parity holds only by construction: the page SQL repeats the unpaged org join and audience-ceiling predicate."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The slice's switch MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT is a numeric ceiling, not a literal-true boolean defaulting off. Paging is caller opt-in (limit absent or 0 is byte-identical, has_more is omitted), so the owner should confirm this meets the default-off switch rule."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway reads MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT via std::env::var on every request, the pattern the gateway AppState memory warns races under parallel tests. Move it to AppState when state.rs is in scope."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The BFF /messages route passes has_more through in snake_case, while /transcript adds camelCase hasMore only when paged. WS09-S9 must read the right key on each route."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The BFF refuses limit 0 or above 200 with 400, while the gateway and session-core clamp, and the gateway's Query<u32> extractor answers a non-numeric limit with axum's plain-text 400 instead of the JSON error envelope."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The cursor shape [A-Za-z0-9_-]{1,128} is enforced at both the BFF and the gateway. It has not been checked against live messages.id values; a legacy id outside that shape could never be paged past."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No BFF test shows that has_more survives the /messages passthrough or that /transcript emits hasMore only on a paged read. Only URL building and page validation are unit-tested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The Python (mp-events-py) and TypeScript sessions.proto bindings are not regenerated and lack limit, before_message_id and has_more."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The audience-ceiling predicate is now duplicated across three SQL strings in session-core grpc.rs (unpaged, page rows, cursor lookup). A shared constant would prevent drift."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p session-core --all-targets (apps/Model Plane/rust)",
+      "outcome": "exit 0: bin 637 passed, 0 failed, 232 ignored; integration targets 4, 9 and 4 passed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core list_conversation_pages -- --ignored --test-threads=1",
+      "outcome": "Could not run: no DATABASE_URL (a disposable database is needed, docker is off limits). The 3 DB tests ran and failed 0 passed / 3 failed, all at grpc.rs:19319 on the connect() expect 'disposable database required'. The test logic was not exercised.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --all-targets thread_messages (apps/Model Plane/rust)",
+      "outcome": "Compile failure, no test ran. The lib and lib test targets fail with 4 x E0063 (missing fields `before_message_id` and `limit` in ListConversationRequest) at services/model-gateway/src/run_context.rs:516, tool_loop.rs:3402, sse.rs:5997 and sse.rs:8379. These four files are not owned by the slice. The implementer lists run_context.rs, tool_loop.rs, sse.rs and tests/e2e_invoke_chain_test.rs:1456 as shared edits for the lead.",
+      "passed": false
+     },
+     {
+      "command": "cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets canonical_messages",
+      "outcome": "exit 0: 5 passed, 0 failed (742 filtered out)",
+      "passed": true
+     },
+     {
+      "command": "cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets thread_messages_url",
+      "outcome": "exit 0: 3 passed, 0 failed (744 filtered out)",
+      "passed": true
+     },
+     {
+      "command": "buf lint (run in apps/Model Plane/proto; from the repo root it fails to resolve imports)",
+      "outcome": "Reports 1656 lines of existing style findings. Every sessions.proto finding I checked is one of the existing kinds: missing comments, service name suffix, shared response types, enum zero value naming. None names limit, before_message_id or has_more. It exited 0 in this pipeline, but the exit status was taken after a tail pipe.",
+      "passed": true
+     },
+     {
+      "command": "buf breaking . --against baseline.binpb (in apps/Model Plane/proto)",
+      "outcome": "No output, exit 0: no breaking change vs baseline",
+      "passed": true
+     },
+     {
+      "command": "git diff HEAD -- apps/Model Plane/proto/model_plane/v1/sessions.proto",
+      "outcome": "14 insertions, 0 deletions, add-only. ListConversationRequest gains limit=6 (uint32) and before_message_id=7 (string). ListConversationResponse gains has_more=2 (bool). Matches the slice summary.",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go build ./... && go test -count=1 ./internal/sessionreview/...",
+      "outcome": "exit 0: build ok; sessionreview ok (9.2s, uncached)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "auth",
+    "authority"
+   ],
+   "notes": "Fix round. Both required fixes are edits to model-gateway files this slice does not own: run_context.rs, tool_loop.rs, sse.rs, and tests/e2e_invoke_chain_test.rs. I did not edit them, so no owned file changed this round and files_changed is the slice's full set of seven files. The exact lines and line endings are in lead_todo; the shared edits are not compiled here. Re-verified with grep: 12 ListConversation struct-literal sites in apps/*.rs. Seven are complete (six in session-core grpc.rs and http_routes.rs:10018). Five lack the new fields (run_context.rs:516, tool_loop.rs:3402, sse.rs:5997 and 8379, and e2e_invoke_chain_test.rs:1456). The cargo check and test builds of model-gateway fail with exactly the four E0063 errors and nothing else. session-core, the BFF filters and the Go checks pass. Not re-run this round, because no proto, generated or owned Rust source changed: buf lint and breaking, go-gen-drift, rustfmt --check, and the full BFF suite. Status stays partial: the four model-gateway thread_messages_page_tests and the three DB tests cannot run until the lead applies the edits and runs them."
+  },
+  {
+   "id": "WS09-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-normalizers.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-normalizers.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-normalizers.reconcile.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.paged-transcript.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPage.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run --pool=threads src/features/chat/components/use-chat-controller.paged-transcript.test.ts src/features/chat/components/chat-normalizers.test.ts (the slice test_commands; --pool=threads because the default fork pool timed out starting its worker here)",
+     "outcome": "2 files, 47 passed, 0 failed (paged-transcript 9, normalizers 38)"
+    },
+    {
+     "command": "pnpm exec vitest run --pool=threads src/features/chat/components/use-chat-controller src/features/chat/components/chat-normalizers src/features/chat/components/ChatPage src/shared/api/chat-client",
+     "outcome": "31 files, 451 passed, 0 failed; includes the WS09-S6 cold-open suite in use-chat-controller.recovery.test.ts, chat-normalizers.reconcile.test.ts, chat-client.test.ts and ChatPage.voice-first-turn.test.tsx"
+    },
+    {
+     "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+     "outcome": "34 errors, all in files this slice did not touch (quarry-client.ts 21, RemoteSupportPage.tsx 12, schedule-contract.test.ts 1); none in the changed files"
+    },
+    {
+     "command": "pnpm exec eslint on the 8 changed or new files",
+     "outcome": "no finding on lines this slice added; 43 pre-existing no-restricted-syntax errors in chat-normalizers.ts (Norwegian text outside i18n.tr) and 10 pre-existing solid/reactivity warnings in use-chat-controller.ts; ChatPage.tsx clean"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit only the eight frontend files in files_changed. Leave apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs and json_handlers.rs to WS09-S8, which is editing them in this worktree now, and leave the execution-core hunks alone.",
+    "Keep VITE_CHAT_PAGED_TRANSCRIPT unset in every build until the S8 backend is deployed and the live proof passes. The S8 BFF must forward limit and before and return has_more, and model-gateway must page with oldest-first messages. Against a backend that ignores limit, has_more is absent, so the reader stays on the whole-thread path.",
+    "Live proof, lead-run and not run here: rebuild session-core, model-gateway and the BFF with S8. On a roughly 400-message synthetic thread (S8's transcript-paging-proof.sh), start a second dev server (pnpm dev --port 5174 --strictPort) with VITE_CHAT_PAGED_TRANSCRIPT=true. In DevTools, confirm one GET of messages?limit=100 on open, one request with before= on Load earlier, no scroll jump, and the saved-answer tail after a stopped stream. Confirm a zero-retention org writes nothing to localStorage or sessionStorage.",
+    "Re-run the two slice files and the 31-file chat set with pnpm exec vitest run --pool=threads (the default fork pool timed out starting its worker in this environment).",
+    "No shared-edit lines are needed for this slice. No docker, DB harness, proto or migration change was made, so db_tests_written is empty."
+   ],
+   "deviations": [
+    "getThreadMessages keeps its name and gains an overload: the row's {messages, hasMore} return applies only when a page request is passed, so unpaged callers and test mocks are unchanged.",
+    "Local turns older than the server window are kept at the head of the list, although the row says only that the snapshot is unchanged; loadEarlier replaces only the local turns a page covers, and drops local turns older than the thread start, as an unpaged read would.",
+    "A paged open skips the transcript read when the snapshot has turns, extending the S6 parallel-path rule to the sequential path.",
+    "The saved-answer tail read goes through getThreadMessages with partial matching, per the row's 4-message tail; its fidelity limit is recorded as a P1 finding rather than hidden.",
+    "hasMore is false when the oldest message has no server id, because a legacy row cannot anchor the next page.",
+    "The scroll anchor lives in ChatPage (handleLoadEarlier) and follows the row after the control, not the scroll height, so content streamed at the bottom does not shift the reader.",
+    "The Sources note is added in ChatPage around SourcesPanel rather than inside ChatPanels.tsx, which is outside the owned list; 'load all' is not built."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs, history.rs (BFF) and apps/Model Plane/rust/services/model-gateway/src/http_routes.rs with the S8 proto are WS09-S8 owned; the flag does nothing until they forward limit and before and return has_more. The S8 slice is editing the BFF files in this worktree right now, and I did not touch them."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof on a rebuilt stack with WS09-S8 (session-core, model-gateway, BFF) and the ~400 or 1,000-message synthetic thread: DevTools request list showing one messages?limit=100 on open and one before= request per Load earlier, no scroll jump, the Sources notice, and the saved-answer tail after a stopped stream.",
+     "The Playwright extension with a 1,000-message mocked thread (chat-transcript-performance.spec.ts) is not written, and the before/after S1 JSON evidence is not captured.",
+     "The 'load all' action from the row is not built.",
+     "The plan's gate (WS09-S1 long-thread measurement against the D5 trigger, owner sign-off on Q1/Q7) is still open. The switch must stay unset until S8 is deployed and the proof passes."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The plan gates S8 and S9 on the WS09-S1 long-thread measurement (D5) and the owner's sign-off on Q1 and Q7; the owner ordered the build on 2026-10-26, so the switch is built default-off and the measured trigger remains open."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The paged readSavedAnswer branch reads the messages tail, which carries no citations, artifacts or grounding, so an adopted saved answer keeps only what the stream delivered; carry those fields in the tail read or keep the transcript for adoption before the flag goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A cold open with no local snapshot still reads the whole /transcript route (the S6 path reads it too), so the row's 'reads <= 1 page' holds only for warm opens; the transcript route needs paging in the S8 BFF scope, or its metadata dependency removed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Local-only turns older than the server window (the snapshot's leading turns) are actionable: edit, branch, regenerate, rerun and continue. The row's rule that actions outside the window are disabled until loaded is not implemented, and an edit on a leading turn truncates the list and sends an id the server may not know."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Older pages carry only what the messages read returns, so turns older than the local snapshot show no citations, grounding or artifacts in the Sources tab."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing here is live-proven: the cold-open request shape, the has_more round trip with S8, the scroll anchor on a rebuilt stack, and saved-answer adoption need the lead's live run before the flag is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The row's 'load all' action is not built; it needs a controller loop with a progress guard so that a server repeating a cursor cannot loop forever."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Playwright extension with a 1,000-message mocked thread (tests/e2e/chat-transcript-performance.spec.ts) is not written; wave mode defers it and the slice test_commands do not run it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No controller test drives the paged readSavedAnswer branch end to end; savedAnswerForTrailingTurn with partial is unit-tested only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No ChatPage render test covers the Load earlier control or the Sources note with the flag on and off; the controller tests cover the state only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A failed older-page request is silent: the control stays and nothing says why, so a typed notice is needed before flag-on use."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Local snapshot turns carry local ids, so a boundary turn whose stored assistant text differs from the saved text can appear twice; check it on a streamed-then-reloaded thread."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The scroll anchor measures the row after the control and does not account for the virtualised transcript path (S10), where that row can be a gap spacer."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The S8 contract was checked only against the concurrent BFF diff: the SPA reads has_more at the top level of the messages response and sends limit and before; the model-gateway side that emits has_more is not yet visible in this worktree."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "THREAD_PAGE_SIZE is a constant of 100, to be revisited against the S1 numbers and the server clamp of 200."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The control uses VerevonTextButton with the class verevon-chat-load-earlier, which has no CSS rule; style it with the evidence-panel work."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ESLint reports 43 pre-existing errors in chat-normalizers.ts (Norwegian text outside i18n.tr) and 10 pre-existing solid/reactivity warnings in use-chat-controller.ts; none sit on lines this slice added."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The S8/S9 gate (the S1 measurement against the D5 trigger, plus Q1/Q7) is still open: the slice is built default-off on the owner's 2026-10-26 order."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Turns that exist only locally, older than the server window, stay actionable (edit, branch, regenerate). The edit, rewind and branch paths (s.turns slices near use-chat-controller.ts:3996/4081/4193/4228/4256) replace or truncate s.turns but do not reset leadingTurnCount or earlierCursor, so a later loadEarlier can treat window turns as head turns. The row asks for these actions to be disabled outside the window until loaded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With the flag on, the readSavedAnswer tail read uses the messages route, which carries no citations, artifacts or grounding. An adopted saved answer therefore loses those fields."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A cold open with no local snapshot still reads the whole /transcript route, so 'reads <= 1 page' holds only for warm opens until the S8 BFF pages the transcript route as well."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In getThreadMessages the cursor is history[0].id, normalized as item.id ?? item.message_id, while hasMore is gated on raw message_id. A backend that returns both fields with different values would send the wrong before= cursor."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A failed older-page request is swallowed with no notice to the reader; the control stays up with no explanation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No controller test drives the paged readSavedAnswer branch end to end, and no ChatPage render test covers the Load earlier control, the scroll anchor or the Sources note."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The scroll anchor uses the next sibling of the control, which on the virtualised transcript path may be a spacer rather than a turn row."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The .verevon-chat-load-earlier and .verevon-chat-sources-partial classes have no CSS rules."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "pnpm exec vitest run --pool=threads use-chat-controller.paged-transcript.test.ts chat-normalizers.test.ts",
+      "outcome": "2 files passed, 47 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+      "outcome": "Errors only in untouched files (quarry-client.ts 21, RemoteSupportPage.tsx 12, schedule-contract.test.ts 1); none in slice files",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "WS09-S9 is built behind VITE_CHAT_PAGED_TRANSCRIPT, read with the strict literal parser (only 'true' enables) and default off; with it off, every read is the same call as before and no paging control renders. getThreadMessages keeps its name and gains an overload: with {limit, beforeMessageId} it returns {messages, hasMore} from the wire fields 'limit', 'before' and 'has_more'; without a page request it returns the array as before. loadThread opens on a 100-message page and skips the transcript read when the local snapshot has turns; loadEarlier prepends an older page, anchored on the oldest server id, and keeps the local turns the page does not cover, so the 120-turn snapshot stays whole; ChatPage shows a Load earlier control and an 'older turns are not loaded' note on the Sources tab, and anchors the scroll on the row after the control. readSavedAnswer reads a 4-message tail with partial matching when paging is on. Status is partial: 'load all' is not built, the Playwright 1,000-message extension is not written, and nothing is live-proven. A concurrent WS09-S8 slice is writing BFF history.rs and json_handlers.rs in this same worktree; its wire names (limit, before) match what this SPA sends, and I did not touch those files. No docker, proto, migration or commit was done."
+  }
+ ]
+}

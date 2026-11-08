@@ -1,0 +1,474 @@
+{
+ "batchId": "W2-18",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS13-S3",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs",
+    "apps/Model Plane/rust/services/session-core/tests/fixtures/audit-core-wire/approval_decided.json",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Control Plane/audit-core/internal/testdata/session-core-wire/approval_decided.json",
+    "apps/Control Plane/audit-core/internal/testdata/session-core-wire/approval_decided.json.sha256",
+    "apps/Control Plane/audit-core/internal/subscriber/session_core_wire_fixtures_test.go",
+    "apps/Model Plane/docs/CONTRACTS.md",
+    "apps/Model Plane/docs/sse-event-taxonomy.md"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check (after restoring the generated approval_state_changed row, CRLF kept)",
+     "outcome": "PASS: 'sse taxonomy up to date (27 events)', exit 0. Before the fix it exited 1."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p mp-orchestration --lib",
+     "outcome": "FAILED, still reproduces: E0063 missing fields cause_code, decision_source, rule_id and 2 other fields in the PbApprovalStateChanged initializer in mp-orchestration/src/proto_shim.rs. This is the blocker for every session-core, execution-core and model-gateway test."
+    },
+    {
+     "command": "session-core, execution-core and model-gateway cargo tests (approval unit tests, the_auto_posture_record_is_labelled_posture_auto, decide_ignores_client_supplied_decision_source, approval_decided_wire_fixture_matches_the_builder, DB-gated approval_decision_db)",
+     "outcome": "NOT RUN. They cannot compile until the three shared edits below are applied by the lead."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs: in the ProtoEvent::ApprovalStateChanged(PbApprovalStateChanged { ... }) literal (lines 294-300) add `..Default::default(),` on a new line after `decided_by,` (line 299). Required before any session-core, execution-core or model-gateway test can compile.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/browser_events.rs: in the DecideApprovalRequest literal with decided_by \"system:user-cancelled\" (line 355), add `decision_source: pb::ApprovalDecisionSource::System as i32,` and `..Default::default(),` after `org_id`. In the literal with decided_by \"system:approval-timeout\" (line 436), add `decision_source: pb::ApprovalDecisionSource::Timeout as i32,` and `..Default::default(),` after `org_id`. The pb alias is already imported as `self as pb`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/approvals.rs: in to_decide_approval_request (line 135), add `decision_source: ApprovalDecisionSource::User as i32,` and `..Default::default(),` after `org_id`, and add `ApprovalDecisionSource` to the mp_contracts::model_plane::v1 use block (lines 29-34).",
+    "After the three shared edits, run from apps/Model Plane/rust with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: `cargo test -q -p session-core --bin session-core approval`; `cargo test -q -p execution-core --lib the_auto_posture_record_is_labelled_posture_auto`; `cargo test -q -p model-gateway --lib decide_ignores_client_supplied_decision_source`. Then the fixture regen check: `UPDATE_AUDIT_CORE_FIXTURES=1 cargo test -q -p session-core --bin session-core approval_decided_wire_fixture`, and confirm git diff shows no change to tests/fixtures/audit-core-wire/approval_decided.json.",
+    "Regenerate apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go with the native protoc-gen-go and check the diff holds only the new enums and fields. Run go vet and go test in the Go services that import model_plane/v1.",
+    "DB-gated tests (lead only, scratch Postgres): `DATABASE_URL=... cargo test -p session-core --bin session-core approval_decision_db -- --ignored --test-threads=1`.",
+    "Add to apps/Model Plane/deploy/docker-compose.yml (session-core env): APPROVAL_AUDIT_EVENTS_ENABLED=${APPROVAL_AUDIT_EVENTS_ENABLED:-false}. Keep OFF in code and compose.",
+    "Evidence for the DoD (lead): rebuild session-core, execution-core, model-gateway and audit-core; check psql metadata->'decision', one session_audit_outbox row, and SSE cause_code on a click-approve; replay decide adds no second audit row. Run zdr-contract-sync and the cargo gates once the tree compiles."
+   ],
+   "deviations": [
+    "Fixes 1 to 3 were not applied by this subagent. They sit in files this slice does not own, and the slice rules say to hand such lines back to the lead as shared-edit entries. The reviewer's required fixes asked for them, so the lead must apply them before the test re-run can happen.",
+    "Approval.decision (tag 17) is still not added; this carries over from the previous report.",
+    "The run-log envelope (WS13-D10) is still not built; this carries over from the previous report."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs: PbApprovalStateChanged literal at line 294-300 needs `..Default::default(),` after `decided_by,` (line 299). Blocks session-core, execution-core and model-gateway compile (E0063, reproduced).",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs: two DecideApprovalRequest literals, at line 355 (decided_by \"system:user-cancelled\") and line 436 (decided_by \"system:approval-timeout\"), need decision_source and ..Default::default().",
+    "apps/Model Plane/rust/services/model-gateway/src/approvals.rs: DecideApprovalRequest literal at line 135 needs decision_source and ..Default::default(); the use block at lines 29-34 needs ApprovalDecisionSource.",
+    "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go: regenerate from the proto with native protoc-gen-go.",
+    "apps/Model Plane/deploy/docker-compose.yml: session-core env gets APPROVAL_AUDIT_EVENTS_ENABLED=${APPROVAL_AUDIT_EVENTS_ENABLED:-false}."
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs lines 294-300 (shared file, lead applies the shared edit): add `..Default::default(),` after `decided_by,` in the PbApprovalStateChanged literal. Why: E0063 reproduced by `cargo check -p mp-orchestration --lib`; session-core (`--bin session-core --tests`) depends on it and cannot compile, so none of the S3 session-core tests can run.",
+     "apps/Model Plane/rust/services/execution-core/src/browser_events.rs lines 355-362 (cancel) and 436-443 (approval timeout), outside the owned list: replace the `..Default::default()` placeholders with explicit `decision_source: pb::ApprovalDecisionSource::System as i32` (cancel, decided_by system:user-cancelled) and `decision_source: pb::ApprovalDecisionSource::Timeout as i32` (timeout), keeping `..Default::default()` for the rest. Why: the row requires browser timeout/cancel to send TIMEOUT/SYSTEM; as written both record `unattributed`. Add the file to the ownership set or hand it as a shared edit.",
+     "apps/Model Plane/rust/services/model-gateway/src/sse.rs fn event_payload_value, the Event::ApprovalStateChanged branch (about line 12012-12021), outside the owned list: project allowlisted `cause_code`, `rule_id`, `scope`, `decision_source`, `step_up_verified` next to `decided_by`. Why: the row's DoD requires the SSE event to carry cause_code (click-approve evidence) and the summary promises an enriched state event; the browser payload today has only approval_id, run_id, approval_kind, to and decided_by. Refresh the sse payload golden if it covers this branch (MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden).",
+     "apps/Model Plane/proto/model_plane/v1/orchestration.proto (owned) and session-core orchestration_grpc.rs approval_from_row: the row names `ApprovalDecisionRecord{source,scope,rule_id,grant_id,step_up_verified}` on `Approval` at tag 17 (next free after cause=16). It is not added (the implementer's deviation). Either add the message and `Approval.decision = 17`, populated from metadata.decision and metadata.cause.rule_id (grant_id empty until S6), or get the owner to amend the row so S3 no longer carries it, then re-run this verdict."
+    ],
+    "dod_gaps": [
+     "Lead: apply the three shared edits (proto_shim.rs, browser_events.rs with explicit TIMEOUT/SYSTEM, sse.rs projection) and add Approval.decision, or amend the row; then run cargo check -p session-core --bin session-core --tests and the session-core approval unit tests, approval_decided_wire_fixture_matches_the_builder without UPDATE_AUDIT_CORE_FIXTURES set (the update variant writes into the tree, so I did not run it), and the DB-gated tests: DATABASE_URL=<scratch test db> cargo test -p session-core --bin session-core approval_decision_db -- --ignored --test-threads=1.",
+     "Lead: regenerate apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go with native protoc-gen-go and buf (not runnable by me); then go vet and go test in services that import model_plane/v1.",
+     "Lead, docker only: bash apps/Model Plane/scripts/verify-durable-layer.sh was not run.",
+     "Lead, live: rebuild the four services, then check psql metadata->'decision' = USER on a click-approve, one session_audit_outbox row, SSE cause_code present, and that replay adds no row (the evidence in the row's DoD).",
+     "zdr-contract-sync shows 22 failures outside S3's artefacts; the HEAD baseline was not verified, so the lead should diff the failing set against HEAD before treating them as pre-existing."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The slice cannot be proven until the shared edits land: session-core, execution-core and model-gateway do not compile because mp-orchestration's proto_shim.rs literal is missing the new fields (E0063, reproduced this round)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core stores THREAD/RUN as a scope with no grant store behind it (S6). It must refuse THREAD/RUN with a typed error until the grant store exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "decide_approval_recorded trusts decision_source from any internal gRPC caller; approval_delivery.rs and run_service_grpc.rs record 'unattributed'. Decide which callers should name a source."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No check that a ZDR principal can never reach decide_approval_recorded with audit on. A regression test on the gRPC decide path would pin it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core accepts scope THREAD or RUN in decide_approval (orchestration_grpc.rs handler, approval_scope_to_str) and records it in metadata.decision.scope and the audit row with no grant store behind it (S6 not built); refuse THREAD/RUN with a typed error until S6. The gateway pins ONCE today, so only internal callers reach it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The row's ApprovalDecisionRecord on Approval is not implemented, so clients cannot read decision provenance except through metadata; this is also a required fix above, so the lead must either add it or amend the row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No gRPC-level test that a retry with a different scope returns failed_precondition; a_retry_with_a_different_scope_conflicts only exercises is_idempotent_approval_retry. The row's unattributed test is a mapping test, not the metadata.decision.source='unattributed' path."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The row lists apps/Control Plane/audit-core/internal/store/session_core_replay_test.go as a fixture-test file; it is untouched, so only the subscriber fixture test exists."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No regression pin that a ZDR principal cannot reach decide_approval with audit on (the plan's ZDR guard test). refuse_zdr_continuation exists at the top of the gRPC handler but is untested for this path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The model-gateway gRPC ApproveApproval/DenyApproval path (grpc.rs about 1707 and 1777 via approvals::to_decide_approval_request) records user decisions as unattributed. No in-repo Rust or Go caller was found outside generated clients, so confirm before relying on it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The mp-orchestration domain type OrchestrationEvent::ApprovalStateChanged (run_event.rs:106) and proto_shim have no fields for cause_code, rule_id, scope, decision_source or step_up_verified; after the required shim fix they are dropped on the domain round trip (orchestration_nats). Decide whether that is intended and document it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "APPROVAL_AUDIT_EVENTS_ENABLED is not added to apps/Model Plane/deploy/docker-compose.yml session-core env; DEC-10 says OFF in code and compose. Default-off in code is satisfied."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go is not regenerated (ApprovalDecisionSource count 0), though S1 regenerated it for ApprovalCause. No CI drift gate catches this; regenerate with the native protoc-gen-go."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The run-log envelope (RUN_APPROVAL_DECIDED, WS13-D10) is not built. The batch summary says it waits on D10, so this is an accepted deferral, but the row's behind-the-flag run-event envelope stays open."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "orchestration_store.rs (around line 759): the old decide_approval doc block (# Errors, Returns an error if the update fails.) now sits on the DecisionRecord struct, and the decide_approval wrapper has no doc. The wrapper is called only from test modules, so it is likely dead in the production bin build."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The /*TMP-WS08S6*/ markers on the lines added to browser_events.rs (361, 443) and model-gateway approvals.rs (145) are not in HEAD. Replace them with explicit fields and drop the markers when the required shared edits land."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Model Plane/rust/services/session-core/tests/fixtures/audit-core-wire/approval_decided.json is untracked and outside the owned list. It is byte-identical to the audit-core copy and sits beside audit_publisher.rs tests, so it can stay if the ownership record names it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The S3 test line `assert_eq!(approval_decision_source_to_str(99), None, \"a number outside the enum is refused\");` in orchestration_grpc.rs exceeds rustfmt width. Repo-wide fmt drift is pre-existing."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof is still owed: rebuild session-core, execution-core, model-gateway and audit-core; check psql metadata->'decision', exactly one session_audit_outbox row, and SSE cause_code on click-approve; replay adds no second row; audit-core must accept the row on the proof stack before APPROVAL_AUDIT_EVENTS_ENABLED is flipped on."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "authority"
+   ],
+   "notes": "Round 2 of WS13-S3 fixes. Done in this round: fix 4 only. The restored row in apps/Model Plane/docs/sse-event-taxonomy.md is the generated one, `| \\`approval_state_changed\\` | 12 | ✅ |`. The file is all CRLF (101 of 101 lines) and stays that way. The generator --check passes. Fixes 1 to 3 are in files this slice does not own (mp-orchestration/src/proto_shim.rs, execution-core/src/browser_events.rs, model-gateway/src/approvals.rs). Per the ownership rule I did not edit them. They are handed back as lead_todo shared-edit lines with exact line numbers. Until the lead applies them, the slice's Rust tests cannot run; the re-run of the tests is therefore still open. The enum variant names used in the shared edits were checked against the proto: APPROVAL_DECISION_SOURCE_USER/SYSTEM/TIMEOUT map to prost User/System/Timeout, matching how session-core already matches on proto::ApprovalDecisionSource."
+  },
+  {
+   "id": "WS17-S4",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSearchResults.tsx (new)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSearchResults.test.tsx (new)",
+    "apps/Frontend Plane/verevonv3/tests/e2e/chat-history.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm vitest run --pool=threads src/features/core/components/sidebar/ChatSearchResults.test.tsx src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx src/shared/api/chat-client.test.ts src/shared/actions/chat-history.test.ts",
+     "outcome": "4 files, 149 tests passed. The default forks pool failed to start a worker on this machine (worker timeout) before any test ran, so the run used --pool=threads."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm typecheck",
+     "outcome": "exit 1 with 34 errors, all in files this slice does not touch (RemoteSupportPage.tsx 12, quarry-client.ts 21, schedule-contract.test.ts 1). None in the slice's files; pre-existing."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm eslint <the 9 slice files>",
+     "outcome": "exit 0, no findings."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm test:e2e -- chat-history",
+     "outcome": "NOT RUN. The e2e project depends on the auth setup project and a live stack at localhost:5199 (tests/e2e/.auth/state.json does not exist). Needs the lead."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx: on the <ChatSidebarOrganizer ... /> element (about line 845-852, next to renderRow/hasMore/onLoadMore) add the prop onOpenSearchHit={openThread}. Without it server hits render but clicking or Enter on a hit does nothing.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/chat-sidebar-organizer.css: append these rules (the results block is unstyled until then): .chat-search-results { margin: 0 4px 8px; } .chat-search-results__status { margin: 0 8px 4px; color: var(--verevon-text-muted); font-size: 11px; line-height: 1.5; } .chat-search-results__list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; } .chat-search-results__option { display: grid; gap: 2px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; } .chat-search-results__option[aria-selected='true'] { background: var(--verevon-surface-soft); } .chat-search-results__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; } .chat-search-results__title small { color: var(--verevon-text-muted); font-weight: 400; } .chat-search-results__snippet { color: var(--verevon-text-muted); font-size: 12px; line-height: 1.5; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; } .chat-search-results__snippet mark { background: transparent; color: var(--verevon-accent-ink); font-weight: 700; }",
+    "Live e2e (not run here): cd 'apps/Frontend Plane/verevonv3' && pnpm test:e2e -- chat-history. It needs the auth setup project and a live stack at localhost:5199 (tests/e2e/.auth/state.json is absent). Lead runs it with the credentials the setup uses; I did not handle credentials.",
+    "DoD evidence (lead-run, after the shared edits above): rebuild the gateway with docker compose -f \"apps/Frontend Plane/verevonv3/docker-compose.yml\" up -d --no-deps --build gateway (restarts the frontend container). Keep WS17-S3 flag SESSION_CORE_MESSAGE_SEARCH_ENABLED on in the proof stack, and run a second Vite dev server on this worktree (:5173 is the main checkout). Seed a thread older than page 1 with a distinctive body word, then capture: the search request and its response, a screenshot of the results above the list in no and en, and the time from typing to the option appearing (target <= 1 s). Then click the hit and confirm the thread opens. Also run the flag-off case and confirm the local filter stands with the unavailable message.",
+    "The lead commits. Only the nine owned files listed in files_changed belong in the commit. apps/Frontend Plane/verevonv3/src/shared/chat-nodes/index.ts was already modified before this slice and is not part of it."
+   ],
+   "deviations": [
+    "Search runs inside ChatSidebarOrganizer (it calls searchChatThreads itself), so CoreSidebar only needs the one new prop; no search state lives in CoreSidebar.",
+    "The search input's role is combobox (ARIA 1.2 combobox with listbox, focus stays in the input, aria-activedescendant), not searchbox. No existing test queries the searchbox role.",
+    "searchChatThreads rejects every failure except the two typed 503 answers, so the organizer treats a rejection as unavailable as well. The S4 row said 'maps history_search_disabled'; a timeout is mapped the same way because the server sends it as a retryable 503.",
+    "Only the first page of hits is requested (default 20). The BFF search route puts next_cursor only in meta, and requestJson returns data only, so the client cannot page hits yet. This is a depth follow-up, not a DoD gap."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (one prop, see lead_todo)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/chat-sidebar-organizer.css (results-block rules, see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live Playwright run: cd 'apps/Frontend Plane/verevonv3' && pnpm test:e2e -- chat-history (needs the auth setup and the stack at localhost:5199; lead runs it).",
+     "Browser proof on the rebuilt stack: seed a thread older than page 1 with a distinctive body word, capture the search request and response, screenshots in no and en, and typing-to-option time (target <= 1 s), then click the hit and confirm the thread opens.",
+     "Flag-off case: confirm the local filter still works and the unavailable message shows.",
+     "Apply the lead_todo shared edits (CoreSidebar.tsx prop and the chat-sidebar-organizer.css rules) before the proof; neither is in this slice's ownership set.",
+     "Rebuild the gateway (docker compose ... up -d --no-deps --build gateway) and keep SESSION_CORE_MESSAGE_SEARCH_ENABLED on in the proof stack; the lead owns Docker."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The BFF search route (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/search.rs) puts next_cursor only in the envelope meta, and requestJson returns only data, so the sidebar cannot fetch hits beyond the first 20; a 'more results' control needs the cursor repeated in data, as the threads list does."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The live Playwright case in tests/e2e/chat-history.spec.ts has not been run (it needs the auth setup and a live stack), so the route-mocked search flow is unproven in a browser."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Opening a hit whose thread is not in the loaded sidebar page goes through CoreSidebar's openThread (selectChatThread); that path for a thread beyond page 1 and for an archived thread is not verified in this slice and needs the browser proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers the stale-answer guard (an older query's response arriving after a newer query has started); the generation check is implemented but only indirectly exercised."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The thread.search action declares an optional threadId that the UI never sends; either wire it for a within-thread search later or drop it from the contract to avoid an unused path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Owner search includes waived (zdr_waived) threads per DEC-32, so those snippets now appear in the sidebar; this is the decided owner behaviour, but the UI does not mark waived threads in the results."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "CoreSidebar.tsx does not yet pass onOpenSearchHit={openThread} to ChatSidebarOrganizer (shared edit in lead_todo), so clicking or pressing Enter on a server hit does nothing; apply the one-line prop before the behaviour is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "chat-sidebar-organizer.css has zero .chat-search-results rules, so the results block renders unstyled; the lead_todo CSS block must be appended before the browser proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ChatSidebarOrganizer setSearchText does not clear serverHits or activeHit when a new query starts, so while status is 'loading' Enter opens a hit from the previous query that is no longer rendered, and aria-activedescendant points to an unrendered option; clear the hits and index on a new query, or gate Enter on serverStatus() === 'ready'."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers the stale-answer generation guard (an older query's response arriving after a newer one) or Enter during the loading state, so the guard and the risk above are untested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The BFF search route puts next_cursor only in envelope meta and requestJson returns data only, so hits beyond the first 20 cannot be fetched by the sidebar; a 'more results' control needs the cursor repeated in data, as the threads list does."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The e2e case in tests/e2e/chat-history.spec.ts is not run (needs the auth setup and a live stack at localhost:5199); the route-mocked flow is unproven in a real browser."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Opening a hit whose thread is beyond the loaded page or archived goes through CoreSidebar openThread, which this slice does not verify; the browser proof must cover it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With SESSION_CORE_MESSAGE_SEARCH_ENABLED off (the default), every debounced query now calls the endpoint and shows the 'Search is unavailable' notice, a visible change from before the slice; the plan accepts this, but the flag-off proof should confirm it reads as intended."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The thread.search contract declares an optional threadId that the UI never sends; wire it for within-thread search or drop it to avoid an unused path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The aria-live status paragraph is mounted together with its content inside a conditional block, so some screen readers may not announce the first result count; check it in the browser proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Any rejection (for example a 502) is mapped to the same 'Search is unavailable' notice as a disabled search, so a broken request and a disabled deployment look the same to the user."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "WS17-S4 is FE-only: no proto, no migration, no switch (the slice's flag is empty). Dependencies are satisfied: WS17-S2 (077ef5b69) and WS17-S3 (3edb6166d, eed681a2f) are on the branch. Changes:\n- chat-client.ts: searchChatThreads(query, {limit}) returns {status:'ok', hits} or {status:'unavailable', reason:'disabled'|'timeout'} for a 503 with history_search_disabled or history_search_timeout. Other failures reject. Hits are normalised (ChatSearchHit: threadId, messageId, role, snippet, createdAt, threadTitle, archived); hits without a thread or message id are dropped. The query goes through parseChatHistoryAction first.\n- chat-history.ts: header comment updated (thread.search is wired and only reads). The union already declared thread.search, so no schema change.\n- ChatSearchResults.tsx (new): listbox of hits with snippetRuns (splits on U+E000/U+E001 into text nodes, never innerHTML), nextSearchIndex (arrow/Home/End), aria-live status announcements (searching, n matches, none, unavailable).\n- ChatSidebarOrganizer.tsx: 250 ms debounce, 2-char minimum, generation guard so a stale answer cannot replace a newer one, combobox input (aria-activedescendant, ArrowUp/Down, Enter opens the active hit), results above the local-filter nav, local filter unchanged and running on every keystroke, fallback message when unavailable. New optional prop onOpenSearchHit(threadId). Input maxlength 200.\n- Tests written in the repo's existing style. The e2e spec has a new case: a hit beyond the loaded page is found by a body word (route-mocked, no model).\nNot done here (lead-run or other owners): wiring the prop in CoreSidebar and the CSS for the results block (see lead_todo and needs_other_files), the live browser proof, and the e2e run."
+  },
+  {
+   "id": "WS24-S7",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/user-core/internal/spaces/run_action_targets.go (new)",
+    "apps/Control Plane/user-core/internal/spaces/run_action_targets_test.go (new)",
+    "apps/Control Plane/user-core/internal/spaces/run_action_decision.go",
+    "apps/Control Plane/user-core/internal/spaces/model_action_view.go",
+    "apps/Control Plane/user-core/internal/spaces/model_action_view_test.go",
+    "apps/Model Plane/rust/services/execution-core/src/ticket_tools.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/user-core\" && go vet ./internal/spaces/ ./internal/http/",
+     "outcome": "pass (no output)"
+    },
+    {
+     "command": "cd \"apps/Control Plane/user-core\" && go test ./internal/spaces/... ./internal/http/... -count=1",
+     "outcome": "ok spaces, ok http"
+    },
+    {
+     "command": "go test ./internal/spaces/ -run 'RunActionTarget|ModelActionView|RunActionDecision|VerifyRunActionDecision|IssueRunAction|ValidateCurrentRunAction' -v",
+     "outcome": "PASS: TestRunActionTargetTableSeedsTicketsCreateOnly, TestRunActionTargetsModeIsStrict, TestRunActionDecisionRejectsActionOutsideTable, TestIssueModelActionViewIntersectsEntitlement, TestIssueModelActionViewRefusesZDR, and the pre-existing run-action and model-view tests"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib ticket_tools (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "did NOT compile: errors only in grpc.rs, runtime_loop/agent.rs, runtime_loop/mod.rs and browser_events.rs (RunAgentRequest.attachments and DecideApprovalRequest.decision_source/scope mismatch between the working-tree protos and source). None in ticket_tools.rs. The new test model_action_view_request_names_pinned_actions_only_with_the_table is unrun."
+    },
+    {
+     "command": "rustfmt --check --edition 2021 src/ticket_tools.rs",
+     "outcome": "pass (exit 0)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/user-core/internal/http/model_action_decision.go: add `ActionIDs []string `json:\"action_ids,omitempty\"`` to modelActionViewRequest. In issueModelActionView, after the existing validation: if len(request.ActionIDs) == 0 keep the existing IssueModelActionView + SignModelActionView path unchanged. Otherwise call spaces.IssueModelActionViewV2(evidence, authority, spaces.ModelActionViewRequest{DecisionRef: decisionRef, Nonce: nonce, ActionIDs: request.ActionIDs, Targets: spaces.RunActionTargetsModeFromLookup(os.Getenv)}, time.Now().UTC()), then spaces.SignModelActionViewV2(key, view). Without this edit DisallowUnknownFields rejects action_ids with 400, so do not enable the Rust table flag before it lands.",
+    "Deploy order: user-core (Control) with the shared edit first, then execution-core with MODEL_ACTION_ADMISSION=table. Control env RUN_ACTION_TARGETS defaults to tickets_only and stays off until the proof. Rebuild user-core via scripts/run-control-plane.sh; a bare compose build is a no-op.",
+    "Before running `cargo test -q -p execution-core --lib ticket_tools` the lead must resolve the working-tree proto vs source mismatch (RunAgentRequest.attachments, DecideApprovalRequest.decision_source/scope) that blocks the lib test build. The new ticket_tools test is unrun.",
+    "Migration 031_space_effect_policy_read_actions was intentionally not created. Integrator: the number stays reserved and unused; add it only when the read-class row (WS24-S8) needs a non-write entitlement validator."
+   ],
+   "deviations": [],
+   "needs_other_files": [
+    "apps/Control Plane/user-core/internal/http/model_action_decision.go"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared edit in apps/Control Plane/user-core/internal/http/model_action_decision.go (outside this slice's ownership): add ActionIDs []string `json:\"action_ids,omitempty\"` to modelActionViewRequest; when non-empty call spaces.IssueModelActionViewV2 with Targets from spaces.RunActionTargetsModeFromLookup(os.Getenv), then spaces.SignModelActionViewV2; keep the v1 path unchanged when empty. Add an HTTP test for action_ids. Do not enable MODEL_ACTION_ADMISSION=table in execution-core before this lands.",
+     "Reconcile execution-core browser_events.rs:355 and :436 (missing decision_source and scope in DecideApprovalRequest initializers) owned by another slice, then run cargo test -q -p execution-core --lib ticket_tools to execute the new unit test.",
+     "Live proof (lead only, docker): rebuild user-core via scripts/run-control-plane.sh (a bare compose build is a no-op), rebuild capability-core and execution-core, and run tickets-create-proof.sh with the v2 view; capture the decoded v2 claims and offered tool list without secrets. RUN_ACTION_TARGETS stays tickets_only until the proof.",
+     "Owner decision to confirm: the v2 wire is action_schema_hashes (matching the S6 verifier), not the action_ids list named in the plan row; amend the plan row to match.",
+     "Integrator: keep migration number 031 reserved and unused; WS24-S8 adds the read-class validator and migration only if a read row is seeded.",
+     "Deploy order from the implementer stands: user-core (with the shared edit) first, then execution-core with MODEL_ACTION_ADMISSION=table."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ValidateForAgentAction still requires agent_action entitlement for every row, so a read-class row cannot be offered without it; WS24-S8 must add a read-class validator before any read row is seeded."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core lib test target does not compile at this worktree state (RunAgentRequest.attachments and DecideApprovalRequest decision_source/scope), so ticket_tools' new unit test has not been run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No HTTP-level test yet covers action_ids acceptance, because the handler edit sits in a file this slice does not own."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No cross-plane wire fixture ties the user-core v2 signer to the capability-core v2 verifier; a shared fixture would catch envelope drift."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The v2 payload uses the action_schema_hashes map that capability-core S6 already verifies, not the plan's action_ids list; the owner should confirm the map is the frozen wire."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "RUN_ACTION_TARGETS narrows only view issuance, while the decision lane always uses the full table; confirm this split is intended before a second row is seeded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The decision lane ignores RUN_ACTION_TARGETS: RunActionDecisionRequest.Validate and IssueRunActionDecision use the full table via runActionTarget/runActionTargetFor, and ValidateCurrentRunActionDecision dropped its tickets.create pin, so under tickets_only a decision for any seeded row is issued and validated; this must be mode-gated before a second row is seeded (no current effect, since only tickets.create is seeded)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "RunActionDecisionRequest.Validate and the decision path never compare ActionSchemaHash to the admitted table row's SchemaHash (pre-existing at HEAD), so a decision can commit to a schema hash other than the one the view offered; bind it to target.SchemaHash with a test before the table is widened."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The read-class branch from the row (class read needs no agent_action entitlement) is not implemented: ValidateForAgentAction requires AgentActionEntitled for every row, which is safe for the single write row but must be reworked by WS24-S8 before any read row is seeded."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core lib test target does not compile in this worktree because of browser_events.rs:355/:436 (another slice's proto/source mismatch), so the new ticket_tools test model_action_view_request_names_pinned_actions_only_with_the_table has not been run; non-test lib check passes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The plan row says the v2 payload gains action_ids, but the implementation (and the already-committed S6 capability-core verifier) uses an action_schema_hashes map; the wire matches the verifier (field names checked), so the plan row should be amended to the map."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No HTTP-level test covers action_ids acceptance because the handler edit in internal/http/model_action_decision.go is not made; with the current handler DisallowUnknownFields returns 400, which fails closed in execution-core but must land before MODEL_ACTION_ADMISSION=table is set."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No cross-plane wire fixture ties the user-core ModelActionViewV2 signer to the capability-core controlModelActionViewV2 verifier; the field tags were compared by hand and match, but a shared golden would catch drift."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The Rust strict parse of MODEL_ACTION_ADMISSION (== Some(\"table\")) has no unit test for near-miss values such as \"TABLE\" or \" table\", unlike the Go parser."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Migration 031 was intentionally not created (the row allows skip when reads are deferred); the number is unused and the directory goes 030 then 032, so the integrator must keep it reserved and add it only with the read-class row."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "policy",
+    "zdr"
+   ],
+   "notes": "Built: (1) user-core run-action target table as a Go slice (runActionTargetRow: action_id, service_audience, permission, class, hash_basis, schema_hash) seeded with tickets.create only; runActionTargetFor and runActionTargetForMode; runActionTarget kept as a wrapper because owner_effect_reservation.go calls it. (2) RUN_ACTION_TARGETS parsed strictly by RunActionTargetsModeFromLookup; zero value is tickets_only. (3) RunActionDecision.Validate, IssueRunActionDecision and ValidateCurrentRunActionDecision now read the row's audience and permission instead of the hard-coded tickets.create values. (4) ModelActionViewRequest gains ActionIDs and Targets. IssueModelActionViewV2 intersects the ids with the table in the mode, refuses a view that admits nothing, and keeps the ZDR refusal. ModelActionViewV2 and SignModelActionViewV2 use the model-action-view-v2 envelope with an action_schema_hashes map, matching the capability-core v2 verifier from WS24-S6. The v1 path and its bytes are unchanged. (5) execution-core: ControlModelActionViewRequest sends action_ids (the OWNER_ACTION_PINS names) only when MODEL_ACTION_ADMISSION is exactly \"table\"; with it off the body is byte-identical. capability-core needed no change because S6 already verifies v2. Migration 031 was NOT added: the read-class entitlement column has no read row to serve in S7, and ValidateForAgentAction already requires agent-action entitlement for every row. Line endings: all edited files are restored to CRLF. Other uncommitted capability-core files (mcp_auth_test.go, registry_apis.go, skills_revision_test.go) belong to other sessions and were not touched."
+  }
+ ]
+}

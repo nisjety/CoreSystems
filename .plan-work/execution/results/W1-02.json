@@ -1,0 +1,810 @@
+{
+ "batchId": "W1-02",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS04-S1",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib run_control (CARGO_INCREMENTAL=0)",
+     "outcome": "21 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test run_control_nats_acl_contract",
+     "outcome": "5 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test run_control_nats_live (no --ignored)",
+     "outcome": "compiles; 5 ignored, 0 run (need a broker, lead runs them)"
+    },
+    {
+     "command": "cargo test -q -p mp-events --all-targets",
+     "outcome": "all pass (24, 11, 11)"
+    },
+    {
+     "command": "cargo test -q -p mp-contracts --all-targets --no-fail-fast",
+     "outcome": "lib: 159 passed, 1 FAILED (zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces); other targets pass. The failure is in mp-contracts (modified lib.rs, new office_verification.rs from other slices), which this slice does not touch"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: make /readyz include a run_control field set to state.run_control.status().as_str() (off|ok|degraded). It stays HTTP 200 while degraded, because the bus behaves as off. Add it in the slice that next edits http_routes.rs (WS04-S2 invoke_cancel). The handler currently returns plain text 'ok', so decide between JSON and a header or body suffix; the plan's evidence reads run_control: ok.",
+    "Recreate model-nats with the new deploy/nats.conf, then run: cd 'apps/Model Plane/rust' && NATS_URL=<broker> NATS_USER/NATS_PASSWORD (gateway's own, do not print) cargo test -q -p model-gateway --test run_control_nats_live -- --ignored. This settles whether async-nats 0.49.1 against nats 2.12.12 maps no-responders to an immediate NoOwner.",
+    "Rebuild the model-gateway image, then run MODEL_PLANE_REPLICAS=1 ./scripts/compose.sh up -d. Check that both replicas (:8080 and :28080) are healthy and that the NATS log has no 'Permissions Violation' for mp.v1.runctl. Deploy order is ACL, then gateway, then MODEL_GATEWAY_RUN_CONTROL_BUS=true.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment add MODEL_GATEWAY_RUN_CONTROL_BUS: ${MODEL_GATEWAY_RUN_CONTROL_BUS:-off} and MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS: ${MODEL_GATEWAY_RUN_CONTROL_TIMEOUT_MS:-750} if not already applied. The slice notes forbid me from editing that file, and I did not check whether it is applied. Whether docker-compose.production.yml and docker-compose.release.yml inherit it is still undetermined.",
+    "Ledger (apps/Model Plane/docs/decisions/ledger.md, shared): the plan wants entries for 'run control routed to owning replica over NATS' and the correction 'queue persists after enqueue today'. Check whether the commit's K2-5 port correction entry covers both."
+   ],
+   "deviations": [
+    "Replica B is on 127.0.0.1:28080 and :29090, not the plan's K2-5 18080 and 19090: those are org-core host ports in the Control Plane stack. The correction was already made in the committed slice and recorded in the ledger. Evidence URLs for later slices should use :28080."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (the readyz handler at ~line 571 must report run_control via state.run_control.status().as_str(): needs the handler to reach AppState, e.g. an Extension carrying a RunControlStatus or the state, and the readyz tests at ~10871-10893 updated)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof: run the 5 #[ignore] tests in tests/run_control_nats_live.rs against a model-nats recreated with the new deploy/nats.conf. This settles whether async-nats 0.49.1 against nats 2.12.12 maps no-responders to an immediate NoOwner. S2's 404-versus-503 split depends on it.",
+     "Rebuild the model-gateway image, then run MODEL_PLANE_REPLICAS=1 ./scripts/compose.sh up -d. Check that replicas :8080 and :28080 are both healthy and that the NATS log shows no Permissions Violation for mp.v1.runctl. Deploy order is ACL, then gateway, then MODEL_GATEWAY_RUN_CONTROL_BUS=true.",
+     "/readyz run_control (off|ok|degraded) is not reported, because the handler lives in http_routes.rs, which S1 does not own. The lead must apply it in the next slice that edits http_routes.rs (WS04-S2): shared-edit apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: make /readyz expose state.run_control.status().as_str(), HTTP 200 while degraded.",
+     "docker compose config on the replicas overlay (two-replica render, and no `ports` duplication under !override) could not be re-checked here: no docker. The implementer reports it rendered correctly."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The five ignored live NATS tests in run_control_nats_live.rs have never run against a broker, so the no-responders to NoOwner mapping on async-nats 0.49.1 and nats 2.12.12 is unverified. S2's 404-versus-503 split depends on it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "/readyz does not report run_control yet. It must land before the flag can be switched on, because the plan's evidence and ops rollout rely on seeing degraded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "mp-contracts lib test zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces fails in the working tree, with other slices' uncommitted mp-contracts edits (lib.rs, office_verification.rs) present. It is not caused by WS04-S1, but the plan's third test command will report red until that fixture is regenerated."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Deploy ordering: nats.conf ships in the release artifact. If the flag goes on before the ACL is deployed, the boot self-test degrades the bus to off. The ACL-contract test guards the file, not the deployed broker."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "/readyz does not yet report run_control, so a degraded bus (flag on, ACL missing) is invisible to ops; this must land in S2 and before MODEL_GATEWAY_RUN_CONTROL_BUS is switched on anywhere."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The five ignored live NATS tests have never run against a broker; the no-responders to NoOwner mapping on async-nats 0.49.1 and nats 2.12.12 is unverified and S2 depends on it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "mp-contracts zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces fails in the live tree because of other slices' uncommitted mp-contracts edits (lib.rs, office_verification.rs), so the plan's third test command will be red until that fixture is regenerated; it is not caused by S1."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "MAX_PAYLOAD_BYTES is 8 KiB while a queued message of 2000 characters can reach 8000 bytes in UTF-8 before JSON escaping and the envelope. A legitimate multibyte or control-heavy message could hit PayloadTooLarge and surface as a retryable 503 in S3; S3 should size the cap against the worst case or validate it before the bus."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test exercises RemoteListener over the Nats transport or the serve() loop (messages without a reply subject, a malformed payload, a handler panic ending the task silently); all of that is covered only by the ignored live tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The owner silently drops an unsupported-version request (no reply), so a rolling upgrade that bumps PROTOCOL_VERSION shows the requester a Timeout (503), not a distinct version error."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ACL contract test guards the nats.conf file in the repo, not the deployed broker; if the flag goes on before the ACL is deployed, the boot self-test degrades the bus to off, which is only visible once /readyz reports it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "go/services/nats-provisioner/publishers_registry_test.go was edited (13 lines) outside the owned-files list; it is a test that tracks nats.conf publishers, so the lead should accept it as in scope."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "RunControlOutcome::Local is defined but nothing emits it until S2 and S3 wire the handlers; keep it, but check that S2 emits it."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "The slice was already built and committed as b0cb039a, and the working tree held nothing partial for the owned files. The code is complete except for the /readyz report. RunControl (Off/Loopback/Nats, timeout-bounded request/reply, RemoteListener, boot self-test, RunControlStatus with a status() accessor), the mp.v1.runctl subjects in mp-events, the nats.conf ACL, the metrics, the state.rs field, docker-compose.replicas.yml and MODEL_PLANE_REPLICAS are all in place. The five #[ignore] live tests exist and compile. MODEL_GATEWAY_RUN_CONTROL_BUS is off by default and only the literal true enables it. I edited no files this session. The remaining item, /readyz reporting run_control, cannot be done in an owned file. The readyz handler is in http_routes.rs, and its signature only takes GrpcReadiness."
+  },
+  {
+   "id": "WS01-S8",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/scripts/release-artifact.sh",
+    "apps/Model Plane/deploy/docker-compose.release.yml",
+    "apps/Model Plane/scripts/tests/release-contract-test.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "release-artifact.sh dry-run (SOURCE_REVISION/BUILD_DATE set)",
+     "outcome": "passed: 12 'docker build' lines, including nats-provisioner with the go context and its Dockerfile"
+    },
+    {
+     "command": "new overlay assertion extracted from release-contract-test.sh and run standalone",
+     "outcome": "passed: every base-compose service with build: has a 'build: !reset null' overlay entry, and the assertion reports exactly 'nats-provisioner' on an overlay with that entry seeded out"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/nats-provisioner && GOFLAGS= go test ./...",
+     "outcome": "ok (cached)"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/{release-contract-test,release-runtime-partition-test,release-input-security-test}.sh",
+     "outcome": "all three exit 1 on this Windows host with 'secure release input rejected: this platform does not support O_NOFOLLOW' during fixture/snapshot validation, before reaching the new assertion; not a regression I can attribute to the edit, but they could not be run to completion here"
+    },
+    {
+     "command": "bash -n on release-artifact.sh and release-contract-test.sh",
+     "outcome": "syntax ok"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the three release-*.sh tests on a platform with O_NOFOLLOW (Linux/WSL/CI) and confirm they pass end to end, especially release-contract-test.sh (count 22, new assertion, fixture lock/manifests with 12 app images)."
+   ],
+   "deviations": [
+    "release-runtime-partition-test.sh not edited: it has no per-service fixture to extend."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the three release-*.sh tests end to end on a platform with O_NOFOLLOW (Linux, WSL or CI). release-contract-test.sh matters most: pull_policy count of 22, the new overlay assertion and the 12-app-image lock.",
+     "A release-mode `release-artifact.sh build` is needed to confirm the provisioner image builds from the go context and that `NATS_PROVISIONER_RELEASE_IMAGE` is accepted by restore and `compose config`. WS01-S12 covers this.",
+     "The plan's dry-run test command was not run by me. The implementer reports it showed 12 `docker build` lines, including nats-provisioner."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The three release-*.sh tests cannot run on the Windows dev host (O_NOFOLLOW); no CI runs them until WS01-S11, so the new assertion is only proven standalone."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "go/services/nats-provisioner/Dockerfile lacks ARG SOURCE_REVISION/BUILD_DATE and the revision/created LABELs that sibling Go Dockerfiles carry; release builds pass --label so it works, but docker build warns on unused build-args."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "A release-mode artifact build must be run by the lead to confirm the provisioner image builds from the go context and that restore/compose config accept NATS_PROVISIONER_RELEASE_IMAGE (done in WS01-S12)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "All three release-*.sh tests fail on the Windows host at O_NOFOLLOW validation, so the new assertion has only been proven standalone; no CI runs these tests until WS01-S11."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "go/services/nats-provisioner/Dockerfile has no ARG SOURCE_REVISION/BUILD_DATE and no revision/created LABELs that sibling Go Dockerfiles carry; release builds pass --label, so labels are still set, but docker build warns about unused build-args."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Before the provisioner can ship in a signed release, one release-mode artifact build must confirm the nats-provisioner image builds and restores with NATS_PROVISIONER_RELEASE_IMAGE; WS01-S12 covers this."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Added nats-provisioner as the 12th entry of SERVICES, CONTEXTS ($ROOT_DIR/go) and DOCKERFILES in release-artifact.sh, and an overlay entry (build: !reset null, image NATS_PROVISIONER_RELEASE_IMAGE with :? guard, pull_policy: never) in docker-compose.release.yml (CRLF preserved). release-contract-test.sh: APPLICATION_IMAGES gets nats-provisioner, the pull_policy count moves 21 to 22, and a new name-based assertion (compose_services_with / overlay_build_omissions) fails when a base-compose build: service has no reset entry, with a seeded-omission self-check. ARTIFACT_FORMAT_VERSION stays 3; validate_lock derives its image list from the arrays so no change was needed there. release-runtime-partition-test.sh needed no edit: it does not enumerate application services. The nats-provisioner Dockerfile does not declare SOURCE_REVISION/BUILD_DATE ARGs (the build passes them plus --label, so the labels are still set); the Dockerfile is outside my ownership."
+  },
+  {
+   "id": "WS12-S10",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/gates/log-content.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/gates/baselines/log-content.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/test_log_content.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/repo-gates.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "python3 -m unittest scripts/tests/test_log_content.py (from the worktree root)",
+     "outcome": "Ran 29 tests, OK"
+    },
+    {
+     "command": "python3 scripts/gates/log-content.py --check (working tree)",
+     "outcome": "exit 1, by design of the review rule: 2 findings not reviewed in the baseline, both log turn text in model-gateway tool_loop.rs (worktree lines 6410 and 7470; committed HEAD fff193e61 lines 6341 and 7401). The other 10 findings match reviewed entries; the dirty worktree adds no new findings."
+    },
+    {
+     "command": "scan of committed HEAD blobs via git ls-tree and git show (no workspace copy)",
+     "outcome": "249 .rs files, 12 findings: 10 reviewed (length, count or boolean reads), 2 turn text left out of the baseline"
+    },
+    {
+     "command": "lexer coverage probe over the four services",
+     "outcome": "1,040 macro openers detected, equal to the grep count, no mismatched file"
+    },
+    {
+     "command": "scan timing on the working tree",
+     "outcome": "250 files in about 7.3 s"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Owner decision on the two turn-text sites in apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (not owned by this slice): committed lines 6341 and 7401. Fix the log lines (drop the text, log a count) or accept each with a written review in a reviewed change (run --update, then write the review string for each new entry). Do not accept them silently.",
+    "DEC-39 D2: decide whether to widen the denylist to question, turn_question and query; that also catches committed line 6356. Then rerun --check and review the new false positives.",
+    "CI evidence (Appendix B N1: CI-only slices state a CI run URL): push a throwaway branch, record the repo-gates run URL with the log-content job, and a red proof run from a throwaway commit that adds tracing::info!(prompt = %p) to a scope file.",
+    "DEC-39 D2 gate ownership: add the ownership matrix row and a CODEOWNERS entry for scripts/gates/**, scripts/tests/test_log_content.py and .github/workflows/repo-gates.yml, with one named maintainer. Not edited here; integrator owns it.",
+    "After the two sites are resolved or accepted and three green runs: remove continue-on-error from the log-content gate step in .github/workflows/repo-gates.yml.",
+    "Commit the four files (not done here); the new script will commit as 100644 unless it is set to 100755 at commit time, which the CI call through python3 does not need. Use the session's Co-Authored-By trailer.",
+    "After the commit, check a clean checkout of the commit with python3 scripts/gates/log-content.py --check: it should report exactly the two findings above and no more."
+   ],
+   "deviations": [
+    "Baseline key is path plus the sha256 of each finding's normalised macro text, not a file sha256 as the row parenthetical reads: file hashes would churn the shared baseline on every edit to the hot files.",
+    "Each baseline entry carries a review reason; a finding without one fails the check, and --update keeps existing reviews. Not in the row; it makes the reviewed hash baseline checkable.",
+    "The row's denylist is implemented exactly (user_message, not the summary's bare message). messages is covered only by the sigil and {:?} rules.",
+    "A req/request/body/messages name counts only as the last segment of a field chain and never as a field name, so %req.org_id is not flagged. The row's of-req|request|body|messages is read as the value, not a field of it.",
+    "Layout is normalised: comments, whitespace and a trailing comma do not change the key.",
+    "The gate step is continue-on-error per the rollout convention, and the row's green DoD is not met on the committed tree (see notes).",
+    "No Go pass: D9 says Rust first and the row lists the Go pass as phase 2."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (fix or accept the two turn-text log lines at committed 6341 and 7401; not owned by WS12-S10)",
+    "CODEOWNERS and the master ownership matrix (DEC-39 D2 row for the repo-root gates; integrator)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The row's 'green with reviewed baseline' is not met on the tree: --check exits 1 on 2 turn-text log sites in model-gateway tool_loop.rs (not owned by this slice). The lead or owner must fix the log lines or accept them with a written review via --update.",
+     "CI evidence (Appendix B N1): no repo-gates run URL and no red-proof run from a throwaway commit yet; the gate step is continue-on-error for the first 3 runs per the rollout convention.",
+     "DEC-39 D2: CODEOWNERS and ownership-matrix row with a named maintainer for scripts/gates/**, scripts/tests/test_log_content.py and repo-gates.yml.",
+     "Nothing is committed: the three new files are untracked and repo-gates.yml is modified, so the lead must commit them (stage only these four files)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "tool_loop.rs committed line 7401 (info!) logs the latest user message verbatim as question = %turn_question on the get_statistics instant-answer path, and the call is not gated on zdr; the gate flags it only through the answer name."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "tool_loop.rs committed line 6341 (info!) logs question = %question, the model's web_search query argument (turn-derived completion content), not gated on zdr; flagged only through the answer name."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "tool_loop.rs committed line 6356 (debug!) logs query = %question with the same value and is not flagged at all, because question and query are outside the row's denylist."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Denylist breadth is a DEC-39 D2 owner call: an extra-name probe on the committed tree gives response 23 sites, message 15, raw 3, question 3, query 1, turn_question 1, and one site each for chunk, title, summary, draft and user; unreviewed, most likely non-content."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "println! (15) and eprintln! (56) in the four services are outside the row's macro list and not scanned; no #[instrument] attribute is in scope (the only hit is a comment at inference-core/src/provider/mod.rs:1165)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Error values logged with %error can carry an upstream body that echoes the prompt; no syntactic check sees that, so the runtime test the row cites is the only guard on that path."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Go services are not scanned; the row's Go pass is phase 2 under D9 (Rust first)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The gate step is continue-on-error per the rollout convention; flipping it waits on the two turn-text sites and on DEC-39 D2 gate ownership."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "URL fields (for example quarry.rs %url) can carry user-supplied query strings, and URLs are outside the denylist."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The lexer matches grep's count of 1,040 macro openers across the four services but has no fuzz or property test, and concat! or format_args! in format position are not special-cased."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "tool_loop.rs info! at worktree lines 6410 and 7470 logs question = %question and question = %turn_question (turn text, not gated on zdr); the gate flags them only incidentally through the name answer, so they need a fix or a written review."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The denylist omits question, query and turn_question, so the sibling debug! at tool_loop.rs about line 6425 (query = %question) is not flagged; widening the denylist is a DEC-39 D2 owner call."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Baseline keys are path plus sha256 of the normalised macro text rather than a file hash as the row says, and each entry carries a review string; this is a sound deviation that avoids churn, the lead should accept it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "println!, eprintln!, format_args! and #[instrument] are outside the row's macro list and are not scanned; Go services are not scanned (D9 phase 2)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Values such as %error or URL fields can carry prompt text from an upstream body; the check is syntactic only and cannot see this, so the cited runtime test remains the only guard on that path."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The lexer has no fuzz or property test; macro-opener counts matched grep (1,040), and the 29 unit tests cover raw strings, nested comments, lifetimes, field chains, the allow comment and baseline stale/unreviewed handling."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Built the S10 gate. scripts/gates/log-content.py tokenises Rust (comments, nested block comments, raw and byte strings, char literals vs lifetimes) and checks balanced trace/debug/info/warn/error/event invocations against the row's denylist, with the sigil and {:?} rules on req/request/body/messages (field-chain aware) and the allow comment. Baseline keys are path plus sha256 of the normalised macro text; each entry carries a review reason, and a finding without one fails. scripts/gates/baselines/log-content.json holds the 10 reviewed committed findings (generated from HEAD blobs). scripts/tests/test_log_content.py has 29 tests. repo-gates.yml gets a log-content job (self-test blocking, gate step continue-on-error per the rollout convention). Status is done by the wave definition (code, tests, deliverable, no switch), but the committed tree is red on two turn-text sites in tool_loop.rs, which this slice does not own: the row's green DoD waits on the owner fixing or accepting them. No commit, push, docker or CI run; the workflow YAML was checked by reading only (no YAML parser here)."
+  },
+  {
+   "id": "WS12-S8",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/package.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/scripts/gen-chat-event-types.mjs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-event-contract.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run src/shared/api/chat-event-contract.test.ts src/shared/api/chat-client.test.ts",
+     "outcome": "2 files, 109 passed, 0 failed: 7 new contract tests plus the 102 existing chat-client tests (unchanged count)"
+    },
+    {
+     "command": "pnpm typecheck (tsc -b), before and after the change",
+     "outcome": "exit 1 with 33 errors, byte-identical to the pre-change run; all pre-existing (RemoteSupportPage.tsx: @verevon/remote-core not built; quarry-client.ts: @quarry/client not generated). None in the S8 files; the generated file and the test are in the program (tsc --listFilesOnly)."
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api",
+     "outcome": "42 of 43 files pass, 420 tests pass. quarry-client.test.ts fails to load @quarry/client (pre-existing, same cause as the typecheck errors)."
+    },
+    {
+     "command": "pnpm exec eslint scripts/gen-chat-event-types.mjs src/shared/api/chat-event-contract.test.ts src/shared/api/chat-event-payloads.generated.ts src/shared/api/chat-client.ts",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "node scripts/gen-chat-event-types.mjs --check (and pnpm gen:chat-events --check)",
+     "outcome": "exit 0, 'matches the golden'"
+    },
+    {
+     "command": "mutation outputs, in-memory inside chat-event-contract.test.ts (both pass as tests)",
+     "outcome": "Renaming payload.delta to payload.text in the reasoning_delta case reports \"reasoning_delta reads 'text', which the golden does not list\" and \"reasoning_delta does not read the always-present key 'delta'\". Renaming the golden key delta to text while the SPA still reads delta reports \"reasoning_delta reads 'delta', which the golden does not list\" and \"reasoning_delta does not read the always-present key 'text'\"."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the five files listed in files_changed; this worker did not stage or commit. Suggested subject: feat(spa): chat event read checker and generated payload types (WS12-S8), ending with the Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com> line from the attribution reminder.",
+    "Live evidence, not run here (needs the stack): with the stack up, drive one chat turn through the BFF that covers reasoning, citations and usage, save the curl -N output to a transcript, then run node scripts/verify-sse-frames.mjs <transcript> from apps/Frontend Plane/verevonv3 and confirm the SPA renders the same turn.",
+    "Do not expect pnpm typecheck or the full pnpm test to be green in this worktree: both fail for pre-existing reasons (@verevon/remote-core and @quarry/client are not built). The S8 test itself passes."
+   ],
+   "deviations": [
+    "The checker also follows parseTurnTiming, failureFeature and servedByField, while the row named only emitCitation and failureTiming. parseTurnTiming is needed because the turn_timing always-present keys are read there.",
+    "The usage case is re-indented into a braced block to scope `const usage`. That changes lines in a hot file rather than only adding them.",
+    "The check also fails when a golden event has no dispatchEvent case, which the row does not state. Without it a checker that finds no reads would pass vacuously.",
+    "The row names no parsing approach. The test uses the TypeScript compiler API (devDependency typescript6) rather than regular expressions."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live evidence: re-run the S7 transcript (reasoning, citations, usage turn plus a ZDR turn) through verify-sse-frames.mjs against the final SPA; needs the stack.",
+     "Lead must commit the five owned files; nothing is staged.",
+     "pnpm typecheck cannot be green in this worktree until @quarry/client and @verevon/remote-core are built (pre-existing)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The checker follows only the helpers named in READING_HELPERS; keys read in normalizeAnswerServedBy (privacy-tier.ts: provider_used, residency, privacy_tier) and in the grounding normaliser are not checked against the golden."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Destructuring reads such as `const { key } = payload` are invisible to the AST scan; none exist in chat-client.ts today, so a future one would pass unchecked."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "awaiting_approval, run_parked, citations and search_results have no golden payload, so they sit in TRANSPORT_EVENTS and their keys are never checked; the WS12-S6 orchestration extension or a golden row should bring them under the check."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "attachment.mime is a legacy alias the golden does not carry (the wire key is type); retire the 31 LEGACY_READ_ALIASES only after a live transcript shows which spellings the gateway actually sends."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner to confirm the strictness: a new golden event with no dispatchEvent case fails this test with no exception table, so WS02 and WS15 must add the case in the same change as the golden, or the test needs a reviewed exception."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The row's live evidence (S7 transcript re-run against the final SPA) is not run; it needs the stack, and the lead-run steps are in lead_todo."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "pnpm typecheck exits 1 with 33 errors and quarry-client.test.ts cannot load @quarry/client. All are pre-existing and identical before and after this slice, so typecheck cannot be a green gate until the WS12-S1 CI baseline generates those packages."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "emitCitation and the usage case intersect the golden type with Record<string, unknown> so legacy spellings stay unknown; drop the intersection when the aliases are retired."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Environment: vitest forks workers timed out with 'Timeout waiting for worker to respond' on the first two cold runs and passed on a plain re-run; pnpm exec also installed one package into node_modules without changing pnpm-lock.yaml."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The checker follows only the named READING_HELPERS; keys read in normalizeAnswerServedBy and the grounding normaliser are not checked against the golden, and destructuring reads of payload are invisible to the AST scan."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "awaiting_approval, run_parked, citations and search_results have no golden payload and sit in TRANSPORT_EVENTS, so their keys are unchecked."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A new golden event without a dispatchEvent case fails the test with no exception path, so WS02/WS15 must add the case in the same change."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Row evidence (S7 live transcript re-run against the final SPA) is not run."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The Record<string, unknown> intersections in emitCitation and the usage case, and the 31 LEGACY_READ_ALIASES, should be dropped once legacy spellings are retired; the usage case re-indent touches lines in a hot file."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "WS12-S8 is built as the row specifies, with no flag, no proto and no migration. The generator scripts/gen-chat-event-types.mjs writes src/shared/api/chat-event-payloads.generated.ts from the vendored golden src/shared/api/contracts/sse-event-payloads.json, whose sha256 is 213d7304af12091c83baa95fcee372f66ab5ce5e6da22723ecf34a2970c6da47 and is byte-identical to apps/Model Plane/api/contracts/sse-event-payloads.json. Always-present keys become required, optional keys become '?', and null sorts last in unions. The checker parses chat-client.ts with the TypeScript compiler API. It reads the native switch on event.event in dispatchEvent, follows the payload into the helpers that read it and into local aliases such as `const usage = payload as ...`, and reports unlisted reads, always-present keys not read and not in UNUSED_KEYS, stale or mis-pinned aliases, golden events dispatchEvent does not handle, and payloads passed to unfollowed helpers. Tables: TRANSPORT_EVENTS (7 non-golden labels), LEGACY_READ_ALIASES (31 entries, pinned by LEGACY_READ_ALIAS_COUNT), UNUSED_KEYS (request_id on four frames, plus the seven grounding keys the grounding normaliser reads). chat-client.ts changes: a type-only import, a cast in emitCitation to Partial of the golden citation type intersected with Record<string, unknown>, and the usage case in a braced block with a usage alias. Runtime behaviour is unchanged (the 102 chat-client tests pass). No ZDR surface, nothing persisted, owned files only; no shared-file edits were needed because the row's notes are empty. Nothing was staged or committed."
+  },
+  {
+   "id": "WS01-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Application Plane/scripts/jetstream-provision-entrypoint.sh",
+    "apps/Application Plane/scripts/provision-jetstream.sh",
+    "apps/Application Plane/scripts/tests/audit-stream-contract-test.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "bash \"apps/Application Plane/scripts/tests/audit-stream-contract-test.sh\"",
+     "outcome": "pass (5 subjects, 2 durables, 2 publishers)"
+    },
+    {
+     "command": "same test against HEAD versions of the two provisioning scripts (temp copy, deleted)",
+     "outcome": "fails as intended (no audit stream, VEREVON_AUDIT overlap, missing durables)"
+    },
+    {
+     "command": "scratch Go test (embedded nats-server v2.10.25, JetStream, outside the repo, deleted): add VEREVON_AUDIT verevon.audit.> then the audit-core stream, then narrow and re-add",
+     "outcome": "pass: 'subjects overlap with an existing stream' reproduced, stream created after narrowing"
+    },
+    {
+     "command": "sh -n / bash -n on both provisioning scripts",
+     "outcome": "syntax ok"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/docker-compose.yml: in audit-extra-nats-provisioner, AUDIT_NATS_PROVISION_BUSES (line ~802), delete `,\"optional\":true` from the `\"name\":\"application\"` entry only (leave the model entry as it is). Then `docker logs audit-extra-nats-provisioner` shows either success or a restart loop, no longer a silent skip. Also update the comment above the service (lines ~787-790), which says Control startup is not gated and failures are tolerated.",
+    "Run order on the live stack: run scripts/jetstream-provision-entrypoint.sh (via the jetstream-provisioner container) BEFORE audit-extra-nats-provisioner, because the CP provisioner's UpdateStream on VEREVON_CONTROL_OBSERVABILITY cannot succeed while VEREVON_AUDIT still holds verevon.audit.>.",
+    "Live proof: leads-core CSV export or a conversation-core ticket_created, then confirm `audit_events` has rows with plane=application, the durables show 0 pending, `curl audit-core /readyz` shows the application bus healthy.",
+    "Check the nats CLI flags in the pinned natsio/nats-box image: `nats stream edit VEREVON_AUDIT --subjects=... --force`, comma-separated `--subjects` on `stream add`, `--wait`, `--max-deliver` on `consumer add`. Not run here (no docker, no nats binary). Also check that the app broker's `stream info` text contains 'verevon.audit.>' (the narrowing detection greps for it)."
+   ],
+   "deviations": [
+    "No scratch-broker test is committed. The overlap was reproduced with a throwaway Go program using the nats-provisioner module cache and deleted afterwards, because no nats-server binary is on PATH and the plan did not name a location.",
+    "The contract test is a bash wrapper around python3 -I, because the audit-core Go source needs regex parsing. It sits in a new apps/Application Plane/scripts/tests/ directory.",
+    "Narrowed VEREVON_AUDIT to the invented subject verevon.audit.retired.> rather than deleting it: the plan says 'narrow' and deleting would drop retained messages."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/docker-compose.yml (shared; exact edit in lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead applies the shared edit to apps/Control Plane/docker-compose.yml: remove ,\"optional\":true from the application entry in AUDIT_NATS_PROVISION_BUSES and update the comment above audit-extra-nats-provisioner.",
+     "Lead runs the Application Plane jetstream-provisioner, then audit-extra-nats-provisioner, on the live stack. Then confirm the VEREVON_AUDIT narrowing, the new stream and durables, and docker logs of the CP provisioner.",
+     "Live proof: a leads-core CSV export or a conversation-core ticket_created event produces audit_events rows with plane=application, the durables show 0 pending, and audit-core /readyz shows the application bus healthy.",
+     "Verify the nats-box CLI flags (stream edit --force, comma-separated --subjects, --max-deliver, --wait) against the pinned image."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Narrowing and the new stream were never run against the real app-nats with the real nats-box CLI and the audit-core-application principal: the lead must run the provisioner and confirm the stream, the two durables and that audit-core's ensureConsumer accepts them (it refuses a durable that differs from its own config)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Existing VEREVON_AUDIT messages (up to 72 h) stay in the narrowed stream and are never delivered to audit-core, because the new durables use DeliverAll on a different stream. Events published before the cutover only reach audit-core if replayed by hand."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner should confirm or replace the retired subject verevon.audit.retired.> that VEREVON_AUDIT is narrowed to, or decide to delete the stream once its 72 h of retained messages have aged out."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The CP audit-core provisioner's ProvisionApplicationRuntime converges VEREVON_APPLICATION, VEREVON_MODEL and VEREVON_INGESTION to 14 d max-age and 1M msgs, while the Application scripts create them at 72 h and unlimited msgs. Each side rewrites the other once the application bus stops being optional; this is the same drift problem this slice fixes for the audit stream, and the contract test does not cover it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing in CI runs scripts/tests/audit-stream-contract-test.sh; it needs a workflow entry (the Application Plane has no test workflow for scripts)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "provision-jetstream.sh older stream and consumer loops use `cmd >/dev/null && echo`, which hides failures under set -e; only the new audit block fails loudly."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing has run against the real app-nats with the pinned nats-box CLI. The edit --force, comma-separated --subjects and consumer add flags are unverified, and so is audit-core's ensureConsumer accepting the two durables. The lead must run the entrypoint provisioner before audit-extra-nats-provisioner, then confirm one leads-core event reaches audit_events with plane=application."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Until the lead applies the CP compose edit (drop optional:true on the application bus entry), the audit-extra provisioner still skips a failure silently and the row-268 closure is not provable."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Messages already in the old VEREVON_AUDIT (up to 72 h) are never delivered to audit-core, because the new durables sit on a different stream. Events published before the cutover are lost to audit unless replayed by hand."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner should confirm the invented subject verevon.audit.retired.> as the narrowing target, or decide to delete VEREVON_AUDIT once its retained messages age out."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The CP provisioner converges VEREVON_APPLICATION, VEREVON_MODEL and VEREVON_INGESTION to 14 d and 1M msgs, while these scripts create them at 72 h and unlimited msgs. Each side will rewrite the other once the application bus stops being optional, and the contract test does not cover it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No CI workflow runs scripts/tests/audit-stream-contract-test.sh, and no committed scratch-broker test reproduces the VEREVON_AUDIT overlap. The plan lists that as the second test command, and it was done only as a throwaway."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The older stream and consumer loops in provision-jetstream.sh (`cmd >/dev/null && echo`) and in add_consumer still ignore failures, so only the new audit block fails loudly."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The contract test reads provisioner.go with regexes that include exact whitespace (`MaxAge:    30 * 24 * time.Hour`). A gofmt realignment would break it, though loudly rather than silently."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit"
+   ],
+   "notes": "Both Application Plane provisioners now narrow an existing VEREVON_AUDIT, stop creating it, and create VEREVON_CONTROL_OBSERVABILITY (5 subjects in audit-core's order, 720h, 2M msgs) plus the two durables audit-core-application-v3-audit and -usage. Failures abort: set -e in the entrypoint, explicit exit 1 in the host script (the host script's older stream and consumer loops still ignore failures; I left them). The new contract test pins the scripts against audit-core's provisioner.go and nats.conf, and checks that no provisioned streams overlap. Consumer inventory for VEREVON_AUDIT: no durable in either script, no reference in nats.conf, no permission for any principal to bind it. The only audit publishers on this broker publish under verevon.audit.v2.application.*, so I narrowed it to verevon.audit.retired.> (an invented subject, see decisions) instead of deleting it; this keeps its 72 h of retained messages. Status is partial because the CLI behaviour of the scripts (stream edit --force, comma-separated --subjects, --wait, --max-deliver) was not run against a real nats-box, and the Control Plane compose edit is the lead's. nats.conf needed no change: the audit-core-application principal already has the bind/ack/DLQ rights and the provisioner principal has $JS.API.STREAM.> and $JS.API.CONSUMER.>."
+  },
+  {
+   "id": "WS10-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Control Plane/org-core/migrations/021_org_model_entitlements.up.sql",
+    "apps/Control Plane/org-core/migrations/021_org_model_entitlements.down.sql",
+    "apps/Control Plane/org-core/internal/modelentitlement/types.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/validate.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/resolve.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/repository.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/service.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/resolve_test.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/validate_test.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/repository_postgres_test.go",
+    "apps/Control Plane/org-core/internal/modelentitlement/testdata/model-entitlement-matrix.json",
+    "apps/Control Plane/org-core/internal/http/model_entitlement_handlers.go",
+    "apps/Control Plane/org-core/internal/http/model_entitlement_handlers_test.go",
+    "apps/Control Plane/org-core/internal/http/model_entitlement_contract_test.go",
+    "apps/Control Plane/org-core/internal/http/testdata/inference-core-org-core-model-entitlement.contract.json",
+    "apps/Control Plane/org-core/internal/http/server.go",
+    "apps/Control Plane/org-core/internal/http/service_auth.go",
+    "apps/Control Plane/org-core/internal/http/service_auth_test.go",
+    "apps/Control Plane/org-core/cmd/server/main.go",
+    "apps/Control Plane/scripts/run-control-plane.sh",
+    "apps/Model Plane/api/contracts/model-entitlement-matrix.json"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && ORG_CORE_CONTRACT_COMPOSE_FILE=<scratch copy of docker-compose.yml with the proposed lines> REQUIRE_CONTRACT=1 go test -count=1 -p 1 ./...",
+     "outcome": "all packages ok (config, database, grpc, http, metrics, modelentitlement, nats, org, rbac, testfixture). The Postgres test skips: no database here."
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go test -count=1 -p 1 ./internal/http/ (real docker-compose.yml, no override)",
+     "outcome": "5 compose-reading tests fail on purpose: the real compose registry has no inference-core principal yet. They pass once the lead applies the shared-edit lines. All other tests pass."
+    },
+    {
+     "command": "cd \"apps/Control Plane/org-core\" && go vet ./... ; go build ./... ; gofmt -l on every new or edited Go file (CRLF stripped for the check)",
+     "outcome": "clean"
+    },
+    {
+     "command": "go test -v ./internal/modelentitlement/ (matrix byte-for-byte check against apps/Model Plane/api/contracts/model-entitlement-matrix.json and the effort ladder pin against inference-core effort.rs)",
+     "outcome": "both ran, neither skipped, both pass; 27 subtests pass"
+    }
+   ],
+   "db_tests_written": [
+    "cd \"apps/Control Plane/org-core\" && go test ./internal/modelentitlement -run TestControlLifecycleModelEntitlementRepositoryUnderRLS -count=1 (needs CONTROL_LIFECYCLE_TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID from the lifecycle harness; covers migration 021 applying, RLS cross-org read and write refusal on all three tables, revision conflict, history row in the same transaction with before and after, history append-only for org_core_app, missing-org error, four racing writers with exactly one winner, and gdpr_hard_delete_organization leaving no rows)"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/docker-compose.yml (org-core service, the single line under ORG_CORE_SERVICE_CREDENTIALS: >-): (a) replace the model-gateway entry `\"scopes\":[\"org:read:any\"]` (the one whose principal is model-gateway) with `\"scopes\":[\"org:read:any\",\"org:model-entitlement:read:any\"]`; (b) append directly after the model-gateway entry and before the application-space-lifecycle entry: `{\"principal\":\"inference-core\",\"audience\":\"org-core\",\"token\":\"${INFERENCE_ORG_CORE_SERVICE_TOKEN:?INFERENCE_ORG_CORE_SERVICE_TOKEN is required}\",\"scopes\":[\"org:model-entitlement:read:any\"]}`. A tested copy of the full result is at C:\\Users\\IMAFER~1\\AppData\\Local\\Temp\\claude\\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\\0c471def-955a-414e-8256-870b2ff081a7\\scratchpad\\compose-proposed.yml (the org-core line can be copied from it). Optionally add a comment above the block naming the new principal.",
+    "Ship the compose edit and the new org-core image together: an org-core image from before this slice refuses a registry that holds the new scope, and without the edit 5 compose-reading Go tests in internal/http fail. After the edit, rerun cd \"apps/Control Plane/org-core\" && go test -p 1 ./... with no override.",
+    "shared-edit apps/Control Plane/scripts/run-isolated-control-lifecycle-e2e.sh: add a step running the Postgres test above (go test ./internal/modelentitlement -run TestControlLifecycleModelEntitlementRepositoryUnderRLS -count=1) beside the existing ./internal/org and ./internal/http steps (lines ~202-234), or run it by hand through the disposable-Postgres harness.",
+    "Run the DB test through the harness (db_tests_written) before relying on migration 021: it is the first time the migration, the RLS policies, the FOR UPDATE compare-and-set and the hard-delete cascade meet a real Postgres.",
+    "Evidence run for the slice DoD, not done here: bash \"apps/Control Plane/scripts/run-control-plane.sh\" up -d --no-deps --build org-core; with the new inference-core token curl GET /internal/orgs/<org>/model-entitlement (expect state none, revision 0, Cache-Control no-store), then PUT through org-core with a signed delegation (the contract test shows the v3 signing), then GET again per role; capture bodies and the org_model_policy_history row. Remember INFERENCE_ORG_CORE_SERVICE_TOKEN is minted by run-control-plane.sh into the secrets store; recreate org-core with the live env chain.",
+    "Add to apps/Model Plane/api/contracts/README.md a row for model-entitlement-matrix.json and its .sha256 pin, and the path in .github/workflows/contract-goldens.yml (S1 owns model-entitlement-contract-sync.test.sh; the org-core test already pins the vendored copy byte for byte)."
+   ],
+   "deviations": [
+    "config/plane-service-principals.json not edited: nothing in this slice belongs in it (it is the plane-token principal registry, not the org-core credential registry).",
+    "Compose-reading contract tests fail until docker-compose.yml has the principal. I added the env override ORG_CORE_CONTRACT_COMPOSE_FILE (my test file only) so the proposed compose lines could be tested before they are applied.",
+    "History table columns are before_set and after_set instead of before and after.",
+    "GET of the full policy set is owner or admin only (plan names only the scope).",
+    "A non-member resolves to member_not_found only when the organisation has at least one policy layer; otherwise state none.",
+    "No .sha256 pin or README row was added for the new golden: those belong to S1's sync script and README, which I do not own."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Control Plane/docker-compose.yml: add the org:model-entitlement:read:any scope to the model-gateway principal and append the inference-core principal, exactly as in the implementer's lead_todo. I verified these lines make all 5 compose-reading tests pass. Ship with the new org-core image, because an old image refuses a registry that holds the new scope. Rerun go test -p 1 ./... with no override afterwards.",
+     "Run TestControlLifecycleModelEntitlementRepositoryUnderRLS through the disposable-Postgres harness. Migration 021, the RLS policies, the FOR UPDATE compare-and-set, the append-only history and the gdpr_hard_delete cascade have never met a real database. I read the SQL and Go paths and found no defect, but it is unproven. Add a step to apps/Control Plane/scripts/run-isolated-control-lifecycle-e2e.sh (shared edit).",
+     "Evidence run required by the plan: rebuild org-core with run-control-plane.sh up -d --no-deps --build org-core. Curl the internal route for a no-policy org (state none, revision 0, no-store), PUT with a signed delegation, GET per role, and capture the org_model_policy_history row.",
+     "Add the README row and .sha256 pin for model-entitlement-matrix.json in apps/Model Plane/api/contracts, and the path in .github/workflows/contract-goldens.yml. S1 owns the sync script."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Migration 021 and the Postgres repository test have never run against a real database; run the disposable-Postgres harness before S3, and check that gdpr_hard_delete_organization still reports success with the new cascading tables."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner to confirm: a named user who is not an active member resolves to nothing only when the organisation has a policy; with no policy the answer is state none. The plan row says non-member = nothing, which with enforce would also block members whose auth-core projection lags in organisations nobody restricted. S3 must read both cases from the golden rows r_non_member_gets_nothing and r_non_member_without_any_policy_is_unrestricted."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "GET of the whole policy set is owner or admin only and explain for another user is owner or admin only; the plan names only the scope, so S5 and S6 should confirm that members read just their own explain."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Role resolution uses Service.CallerRole, which lists every member of the organisation on each internal pull. Acceptable behind inference-core's 30 s cache, but add a point query (like IsActiveMember) before enforce is switched on for large organisations."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Policy writes leave only the history table; no audit event is published to the control audit stream. WS06 consumes the history rows, but a published event would be needed for tamper-evident audit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The rows evaluated by mp-contracts (availability and refusal kinds, plus the permit and route rows) have no Rust evaluator yet; S3 must add tests/model_entitlement_matrix.rs and vendor the golden to mp-contracts/tests/fixtures. The refusal and availability rows are specification only until then."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "explain does not return projection_revision or any signal that the member role may lag auth-core, and custom role names beyond owner, admin, member and viewer are only matched by exact lower-cased name."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "A default model can be checked at write time only against exact entries; when the allow list holds provider selectors the default is accepted and only inference-core can refuse it later (comment in validate.go). Also the 64 KB body limit is tested at the handler, not against the delegation 1 MB cap interplay."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The compose-reading helper in model_entitlement_contract_test.go duplicates composeOrgCoreRegistry from retention_posture_contract_test.go only to allow a path override; fold the override into the shared helper when that file is next touched."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "scripts/validate-release-credentials.sh lists the org-core service tokens (it names SESSION_ORG_CORE_SERVICE_TOKEN but not MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN); check whether INFERENCE_ORG_CORE_SERVICE_TOKEN belongs there for release builds. Not in this slice's owned files."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A non-member resolves to nothing only when the org has a policy; with no policy the state is none (unrestricted). The plan says non-member = nothing, so the owner should confirm this before enforce is switched on. S3 must read both golden rows (r_non_member_gets_nothing and r_non_member_without_any_policy_is_unrestricted)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The Postgres repository test is skipped here, so migration 021 and the FOR UPDATE and ON CONFLICT race logic are verified by reading only; run it through the lifecycle harness before S3 relies on the store."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Role matching is by exact lower-cased string from CallerRole, but migration 010 treats organization_members.role as potentially comma-separated. A multi-role member (for example member,viewer) would match no role override and fall to the org default, and would not count as owner or admin. Roles are single values in practice today, but split the role string, or document the single-role assumption, before enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Service.CallerRole lists every org member on each internal pull. This is acceptable behind inference-core's 30 s cache, but add a point query like IsActiveMember before enforce for large orgs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Admin GET of the whole policy set and explain for another user are owner or admin only; the plan names only the scope. Confirm in S5/S6 that members read just their own explain."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Policy writes leave only the history table and publish no event to the control audit stream. WS06 will need one for tamper-evident audit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The availability, refusal and some permit and route rows of the golden are specification only until S3 adds the Rust evaluator (mp-contracts tests/model_entitlement_matrix.rs) and vendors the golden into mp-contracts fixtures."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "scripts/validate-release-credentials.sh may need INFERENCE_ORG_CORE_SERVICE_TOKEN beside MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN for release builds. It is not in this slice's owned files."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "A default model is checked at write time only against exact entries. When the allow list holds only provider selectors it is accepted, and only inference-core can refuse it later. explain also returns no projection-lag signal."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The compose-reading helper in model_entitlement_contract_test.go duplicates composeOrgCoreRegistry from the retention-posture contract test only to allow ORG_CORE_CONTRACT_COMPOSE_FILE; fold the override into the shared helper when that file is next touched."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "auth",
+    "audit",
+    "policy"
+   ],
+   "notes": "What is built (org-core, no caller until S3, no switch needed):\n- Migration 021 (up and down): org_model_policies, org_model_policy_revisions, append-only org_model_policy_history (runtime role can only select and insert), RLS per table in the 019 template, all cascading from organizations(id), so gdpr_hard_delete_organization removes them without being redefined.\n- Package internal/modelentitlement: types, ValidatePut (exact ids or provider:<id>, no globs, 500 entries, 128 chars, 20 roles, 16 surfaces, 64 KB body, max_effort must be one of the six WS11 rungs, min_privacy_tier closed set, default model must pass its own policy, default effort at or below max_effort, every problem reported at once), pure Resolve and Policy.Permits (role override replaces the org default, deny wins, a call with no user gets the org default only), a Repository (compare-and-set on the revision row taken FOR UPDATE, policy rows and history written in one transaction, revision and rows read in one statement), and a Service.\n- Routes: GET and PUT /api/v1/organizations/:id/model-entitlement and its /orgs/:id form, GET .../explain[?user_id=], GET /internal/orgs/:orgId/model-entitlement?user_id= (scope org:model-entitlement:read:any, Cache-Control no-store). The PUT guard is the membership guard plus owner or admin from the membership table, never the forwarded role header. Stale revision gives 409 with current_revision. SetModelEntitlements is wired in main.go. The service-auth scope tables are updated.\n- run-control-plane.sh mints INFERENCE_ORG_CORE_SERVICE_TOKEN.\n- Golden apps/Model Plane/api/contracts/model-entitlement-matrix.json with 32 rows, vendored byte for byte into org-core testdata. The six required rows are present. The Go side evaluates the resolve, permit, route and shape rows. The availability and refusal rows are marked for mp-contracts (S3).\n- The status is partial because the docker-compose.yml lines are not mine to apply and the Postgres test could not run here.\n\nDecisions taken (flag any you disagree with):\n- A named user who is not an active member gets nothing only when the organisation has a policy. An organisation with no policy stays state none, so a lagging membership projection cannot lock anyone out of an organisation nobody restricted. The plan row says \"non-member = nothing\" without that qualifier.\n- GET of the whole policy set is owner or admin only; the plan names only the scope. Explain for oneself is open to any active member; explain for another user is owner or admin.\n- A blank user_id on the internal route is a 400, not a service call, so a caller bug cannot widen a person to the org default.\n- history columns are named before_set and after_set, not before and after, to avoid keyword risk.\n- config/plane-service-principals.json is unchanged: it is the plane-token registry for auth-core, and the inference-core org-core credential is a service token in the compose registry."
+  }
+ ]
+}

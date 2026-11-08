@@ -1,0 +1,901 @@
+[
+  {
+    "id": "EP-12-S1",
+    "title": "Origin on every run: inherit and project",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "WS20-S2"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+      "apps/Model Plane/rust/services/session-core/src/main.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/deploy/docker-compose.yml",
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "SESSION_RUN_ORIGIN_INHERIT, MODEL_GATEWAY_RUN_ORIGIN_FIELD",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib run_origin_stamp",
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib run_detail_value"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D1"
+    ],
+    "decision_defaults_applied": {
+      "D1": "DEC-17 four tokens, derived from the verified caller, child runs inherit the parent's token; never a request field; no proto change"
+    },
+    "risk": [
+      "hot files SC/grpc.rs and MG/http_routes.rs (CRLF, additive only)"
+    ],
+    "importance": "sonnet",
+    "importance_reason": "Small, bounded change to an existing stamp; origin is never an authorization input.",
+    "effort_days_low": 2,
+    "effort_days_high": 3,
+    "summary": "New session-core module run_origin_stamp.rs moves today's run_origin_at_birth rule there and, behind SESSION_RUN_ORIGIN_INHERIT, stamps a child run with its parent's origin token (read in the same transaction, org-scoped; an unknown token is never copied). model-gateway run_detail_value adds a top-level origin field behind MODEL_GATEWAY_RUN_ORIGIN_FIELD (null for an unknown stamp). With both switches off the stamp and projection are byte-identical.",
+    "plan_external_notes": "Live proof: a Do run with a subagent shows the parent's origin on the child via GET /v1/runs/:id with both switches on.",
+    "order": 21201,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S2",
+    "title": "API-key exchange route in auth-core",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [],
+    "files": [
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.ts",
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.controller.ts",
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.spec.ts",
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.controller.spec.ts",
+      "apps/Control Plane/auth-core/src/auth/convex-token.service.ts",
+      "apps/Control Plane/auth-core/src/auth/convex-token.service.spec.ts",
+      "apps/Control Plane/auth-core/src/auth/plane-service-principal.ts",
+      "apps/Control Plane/auth-core/src/auth/plane-service-principal.spec.ts",
+      "apps/Control Plane/auth-core/src/app.module.ts"
+    ],
+    "new_files": [
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.ts",
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.controller.ts",
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.spec.ts",
+      "apps/Control Plane/auth-core/src/auth/api-key-exchange.controller.spec.ts"
+    ],
+    "lead_shared_files": [
+      "apps/Control Plane/config/plane-service-principals.json",
+      "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "API_KEY_AGENT_EXCHANGE_ENABLED",
+    "test_commands": [
+      "cd \"apps/Control Plane/auth-core\" && pnpm exec jest src/auth/api-key-exchange src/auth/convex-token.service src/auth/plane-service-principal"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D2",
+      "D3",
+      "OD-1",
+      "OD-2"
+    ],
+    "decision_defaults_applied": {
+      "D2": "API runs are owned by the key principal apikey:<key_id>; acting_user_id is attribution only (INNH-10 OD-1)",
+      "D3": "One route POST /api/:audience/api-key-exchange shared with INNH-10 CP-1; Verevon gateway service credential only via registry apiKeyExchange; user-keys only; audience scopes closed (model-gateway/session-core/inference-core -> agent:runs, quarry/browser-broker -> browser:agent); TTL <= 120 s, jti, zdr raise-only, fail-closed durable audit"
+    },
+    "risk": [
+      "security-sensitive token minting",
+      "15 pre-existing auth-core jest failures: diff failing sets against HEAD",
+      "Better Auth verifyApiKey signature to confirm at slice start"
+    ],
+    "importance": "opus",
+    "importance_reason": "Mints a new principal type; authority, audit and ZDR raise-only rules must be exact.",
+    "effort_days_low": 4,
+    "effort_days_high": 6,
+    "summary": "New auth-core controller POST /api/:audience/api-key-exchange (switch API_KEY_AGENT_EXCHANGE_ENABLED, on top of API_KEY_ENABLED) plus a pure policy module: verifies the registered caller's apiKeyExchange registry list, verifies a user-keys API key with Better Auth, checks org binding, membership and key permission against a closed audience-scope table, raises zdr from org posture or key flag, and mints an api_key principal token (sub apikey:<key_id>, key_id, acting_user_id, no user_id, TTL <= 120 s, jti) through issuePlaneToken, which learns principalType api_key. Durable audit api_key_token_exchanged/_denied, 503 with no token if the audit fails; the key is never logged. Typed {error:{code,message,details:{reason}}} refusals.",
+    "plan_external_notes": "lead_todo: add the verevon-gateway registry entry apiKeyExchange [model-gateway, session-core, inference-core] to apps/Control Plane/config/plane-service-principals.json only at flip time (S16). Live proof needs a user-keys key with agent:runs permission; enabling needs OD-1 and OD-2.",
+    "order": 21202,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S3",
+    "title": "Agent API v1 contract, SDK target and refusal keys",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [],
+    "files": [
+      "apps/Model Plane/api/agent-api.v1.yaml",
+      "apps/Model Plane/api/contracts/agent-api-v1.json",
+      "apps/Model Plane/api/generate-sdk.sh",
+      "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+      "apps/Model Plane/rust/services/model-gateway/tests/agent_api_contract.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/api/agent-api.v1.yaml",
+      "apps/Model Plane/api/contracts/agent-api-v1.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/agent_api_contract.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-refusals.json",
+      "apps/Model Plane/api/contracts/zdr-refusals.json.sha256",
+      "apps/Model Plane/api/contracts/agent-api-v1.json.sha256"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --test agent_api_contract",
+      "cd \"apps/Model Plane/rust\" && MP_UPDATE_GOLDEN=1 cargo test -q -p mp-contracts zdr_refusal",
+      "bash scripts/tests/zdr-contract-sync.test.sh"
+    ],
+    "needs_live_stack": false,
+    "needs_external": "",
+    "decisions": [
+      "D4",
+      "D5",
+      "D6"
+    ],
+    "decision_defaults_applied": {
+      "D4": "Separate public spec MP/api/agent-api.v1.yaml (info.version 1.0.0, prefix /api/agent/v1), its own golden and SDK target; breaking change = new v2 prefix",
+      "D5": "v1 request fields: input <= 32,000 chars, optional thread_id, model, metadata (<= 16 string pairs); no tools",
+      "D6": "ZDR key refused with zdr_feature_not_supported: agent_api"
+    },
+    "risk": [
+      "refusal golden regeneration and SPA copy step handled by the guard"
+    ],
+    "importance": "sonnet",
+    "importance_reason": "Contract documents and a parity test; decisions already fixed in the design.",
+    "effort_days_low": 3,
+    "effort_days_high": 4,
+    "summary": "Writes the public Agent API v1 OpenAPI 3.1 spec (runs start/get/events/cancel, thread runs and messages, x-api-key security, typed envelopes with object details), a route/field/error-code golden, a model-gateway test pinning golden <-> spec parity, an optional spec argument in generate-sdk.sh (agent-api -> @verevon/agent-api and verevon_agent_api into api/sdk/agent-api, default call unchanged), and four ZDR refusal feature keys (agent_api, conversation_export, conversation_share, conversation_import) in mp-contracts zdr_refusal.rs.",
+    "plan_external_notes": "lead_todo: guard regenerates zdr-refusals.json and its .sha256 with MP_UPDATE_GOLDEN=1, writes agent-api-v1.json.sha256, and runs the ZDR contract sync copy. SDK generation itself (npx) runs in S16.",
+    "order": 21203,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S4",
+    "title": "session-core api_key principal and api origin stamp",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S1"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/session-core/src/auth.rs",
+      "apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs"
+    ],
+    "new_files": [],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+      "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "SESSION_CORE_API_KEY_PRINCIPAL",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib auth::tests",
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib run_origin_stamp"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D1",
+      "D2",
+      "D6",
+      "OD-1"
+    ],
+    "decision_defaults_applied": {
+      "D2": "Key-owned threads and runs (threads.user_id = apikey:<key_id>); acting_user_id attribution in runs.metadata.api_key_owner",
+      "D6": "A zdr api_key token is refused on every write method"
+    },
+    "risk": [
+      "handlers that test caller.user_id() loosely must be checked before the allow-list is final",
+      "SC/auth.rs and SC/grpc.rs are CRLF hot files"
+    ],
+    "importance": "opus",
+    "importance_reason": "Adds a principal type to session-core's authority boundary; a method allow-list must fail closed.",
+    "effort_days_low": 5,
+    "effort_days_high": 6,
+    "summary": "Behind SESSION_CORE_API_KEY_PRINCIPAL, validate_identity accepts an api_key token with the gateway's exact shape rules (sub apikey:<key_id>, acting_user_id, no user_id/service_id, no waiver) as PrincipalKind::ApiKey, and the interceptor admits it only on a closed method list (thread create/append, run start/get/list/cancel/terminal, conversation read); every other RPC is permission_denied. Its runs are stamped origin api with api_key_id and api_key_owner attribution. Off: the token is unauthenticated exactly as today.",
+    "plan_external_notes": "lead_todo: add posture row e_zdr_api_key_token_session_write_refused to zdr-posture-matrix.json and its test count. Enabling needs OD-1.",
+    "order": 21207,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S5",
+    "title": "Agent API read and control routes in model-gateway",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S3",
+      "EP-12-S4"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/lib.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+      "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "MODEL_GATEWAY_AGENT_API",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib agent_api_routes",
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib auth::tests"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D2",
+      "D4",
+      "D6",
+      "D12",
+      "OD-4"
+    ],
+    "decision_defaults_applied": {
+      "D12": "Runs listed per key-owned thread through the unchanged ListRuns RPC",
+      "D6": "ZDR key refused before any upstream call",
+      "D4": "/v1/agent/* reachable only by api_key principals with scope agent:runs; people use the chat routes"
+    },
+    "risk": [
+      "MG/auth.rs allow-list is security-critical",
+      "SSE delegation must not widen run events for other principals"
+    ],
+    "importance": "opus",
+    "importance_reason": "Extends the api_key route allow-list and adds a delegated session bearer binding.",
+    "effort_days_low": 5,
+    "effort_days_high": 6,
+    "summary": "New agent_api_routes.rs: GET /v1/agent/runs/:run_id, GET /v1/agent/runs/:run_id/events (delegates to the run events SSE), POST /v1/agent/runs/:run_id/cancel, GET /v1/agent/threads/:thread_id/runs and /messages, all typed envelopes with the S3 codes. MG/auth.rs admits an api_key principal on these routes only while MODEL_GATEWAY_AGENT_API is on and only with scope agent:runs, and accepts exactly one x-session-authorization api_key bearer bound to the same key_id, org and zdr (new VerifiedApiKeySessionBearer). Off: the INNH-10 key-grant pair is the whole allow-list, responses byte-identical.",
+    "plan_external_notes": "lead_todo: posture row e_zdr_api_key_agent_route_refused. Live proof needs S2 and S4 on; enabling needs OD-1 and OD-4.",
+    "order": 21210,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S6",
+    "title": "inference-core api_key principal",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S2"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/inference-core/src/auth.rs"
+    ],
+    "new_files": [],
+    "lead_shared_files": [
+      "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "INFERENCE_API_KEY_PRINCIPAL",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p inference-core --lib auth"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D2",
+      "D6",
+      "OD-1"
+    ],
+    "decision_defaults_applied": {
+      "D2": "Entitlement subject is acting_user_id; key_id for attribution; only the infer RPCs are reachable"
+    },
+    "risk": [
+      "cost-core metering may need a bearer the key cannot hold: verify at slice start and record a depth row"
+    ],
+    "importance": "opus",
+    "importance_reason": "Adds a principal type to inference admission and entitlement.",
+    "effort_days_low": 3,
+    "effort_days_high": 4,
+    "summary": "Behind INFERENCE_API_KEY_PRINCIPAL, inference-core's auth accepts an api_key token with the shared shape rules, exposes acting_user_id as the WS10 entitlement subject and key_id for attribution, and admits it only on the infer RPCs; admin and routing-policy RPCs are refused. A zdr token takes the ZDR route or is refused, never downgraded. Off: unchanged.",
+    "plan_external_notes": "Enabling needs OD-1.",
+    "order": 21208,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S7",
+    "title": "Start an API run (Ask, no tools)",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S5",
+      "EP-12-S6"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/model-gateway/src/agent_api_run.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/lib.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/rust/services/model-gateway/src/agent_api_run.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "MODEL_GATEWAY_AGENT_API",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib agent_api_run",
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib agent_api_routes"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D5",
+      "D6",
+      "OD-3",
+      "OD-4"
+    ],
+    "decision_defaults_applied": {
+      "D5": "Ask only: no tools, no retrieval, no skills, no attachments; tool-shaped fields refused with agent_api_feature_not_supported details {feature}; 2 live runs per key per replica",
+      "D6": "ZDR key refused"
+    },
+    "risk": [
+      "the user-shaped Ask path in sse.rs is not reused; some turn bookkeeping is duplicated in small helpers"
+    ],
+    "importance": "opus",
+    "importance_reason": "Composes session and inference calls for a non-human principal; authority and ZDR boundaries.",
+    "effort_days_low": 7,
+    "effort_days_high": 9,
+    "summary": "POST /v1/agent/runs: body parsed against the S3 allow-list, a key-owned thread opened or continued via session_flow::prepare_run_with_bearer with the key session bearer, one Ask turn run in a detached task with no tools offered and the key's aud=inference-core bearer, completed through the managed terminal path; returns 202 {data:{run_id, thread_id, status}}. Accepts one x-inference-authorization api_key bearer on that route only. Per-key cap of 2 live runs per replica.",
+    "plan_external_notes": "lead_todo: posture row e_zdr_api_key_start_run_refused. Enabling needs OD-3 and OD-4.",
+    "order": 21214,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S8",
+    "title": "Public Agent API ingress in the Verevon gateway",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S2",
+      "EP-12-S3"
+    ],
+    "files": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_api.rs",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs"
+    ],
+    "new_files": [
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_api.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Frontend Plane/verevonv3/docker-compose.yml"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "GATEWAY_AGENT_API_ENABLED",
+    "test_commands": [
+      "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets agent_api"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D3",
+      "D4",
+      "OD-7"
+    ],
+    "decision_defaults_applied": {
+      "D4": "Public prefix /api/agent/v1; key exchanged per audience at auth-core with the gateway's service credential; tokens cached by hash of the key until exp - 10 s",
+      "D3": "The gateway is the only exchange caller"
+    },
+    "risk": [
+      "exchange client is shared with INNH-10 GW-1: the second lander reuses the first helper",
+      "must not leak upstream secrets or forward caller scoping headers"
+    ],
+    "importance": "opus",
+    "importance_reason": "Public ingress handling raw API keys and minted bearers.",
+    "effort_days_low": 4,
+    "effort_days_high": 5,
+    "summary": "New BFF domain agent_api.rs mirrors the S3 spec at /api/agent/v1/*: strips caller Authorization, x-*-authorization and scoping headers, exchanges x-api-key at auth-core for model-gateway, session-core and (start route) inference-core tokens with the gateway's own service credential, caches tokens by key hash until expiry, forwards to model-gateway /v1/agent/*, maps errors to the S3 codes, per-key rate limit. The key goes only to auth-core and is never logged. Off: router not merged.",
+    "plan_external_notes": "Path of the FE compose file to confirm at slice start; the switch line is lead-shared.",
+    "order": 21213,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S9",
+    "title": "session-core ExportThread and the exportability rule",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "WS17-S1"
+    ],
+    "files": [
+      "apps/Model Plane/proto/model_plane/v1/thread_export.proto",
+      "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+      "apps/Model Plane/rust/services/session-core/src/thread_export.rs",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+      "apps/Model Plane/rust/services/session-core/src/main.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/proto/model_plane/v1/thread_export.proto",
+      "apps/Model Plane/rust/services/session-core/src/thread_export.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+      "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "proto_change": true,
+    "migration": false,
+    "flag": "SESSION_THREAD_EXPORT_ENABLED",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib thread_export",
+      "cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against baseline.binpb"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D7",
+      "D8",
+      "OD-6"
+    ],
+    "decision_defaults_applied": {
+      "D7": "Owner-only, active branch, text turns plus run summaries and persisted artifact text, no binaries; profiles full and redacted; caps 2,000 messages and 8 MiB",
+      "D8": "Refuse ZDR/waived caller, any run with retention_class <> persistent, Space threads, non-owner; decided in the same REPEATABLE READ transaction as the read"
+    },
+    "risk": [
+      "SC/grpc.rs registration line in a hot CRLF file"
+    ],
+    "importance": "opus",
+    "importance_reason": "Owns the ZDR refusal for export, share and replay (DEC-40).",
+    "effort_days_low": 5,
+    "effort_days_high": 6,
+    "summary": "New proto file thread_export.proto (ThreadExportService.ExportThread, ExportProfile, ExportedMessage, ExportedRun, every field commented; added to mp-contracts build.rs) and session-core thread_export.rs: owner check, refusals thread_not_exportable {reason: non_persistent_run|space_thread} and zdr_feature_not_supported: conversation_export, one transaction reading the active branch and run summaries with caps and a truncated flag; the redacted profile drops tool arguments/results and connector payloads and renames attachments. Registered in grpc.rs behind SESSION_THREAD_EXPORT_ENABLED.",
+    "plan_external_notes": "lead_todo: posture rows e_zdr_caller_export_refused and e_waived_run_thread_export_refused.",
+    "order": 21204,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S10",
+    "title": "Export route with JSON and Markdown renderers",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S9"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/model-gateway/src/thread_export_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+      "apps/Model Plane/api/openapi.yaml"
+    ],
+    "new_files": [
+      "apps/Model Plane/rust/services/model-gateway/src/thread_export_routes.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/deploy/docker-compose.yml"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "MODEL_GATEWAY_THREAD_EXPORT",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib thread_export_routes"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D7",
+      "D9"
+    ],
+    "decision_defaults_applied": {
+      "D7": "Format verevon.thread-export.v1 with stable key order and a Markdown rendering with a 'Not included' footer",
+      "D9": "Replay is a read-only viewer over the redacted export; no re-execution"
+    },
+    "risk": [
+      "MG/http_routes.rs hot (one merge line)"
+    ],
+    "importance": "sonnet",
+    "importance_reason": "Rendering over a refusal decided in session-core.",
+    "effort_days_low": 3,
+    "effort_days_high": 4,
+    "summary": "GET /v1/threads/:thread_id/export?format=json|markdown&profile=full|redacted in a new thread_export_routes.rs: calls ExportThread with the user's session bearer, renders verevon.thread-export.v1 JSON (stable key order) or escaped Markdown with a run table and a 'Not included' footer, Content-Disposition attachment, typed refusals with object details; api_key principals refused. One merge line in http_routes.rs and a path block in openapi.yaml. Off: route absent.",
+    "plan_external_notes": "",
+    "order": 21206,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S11",
+    "title": "BFF export proxy and thread.export action contract",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S10"
+    ],
+    "files": [
+      "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/chat-history.test.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+      "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs"
+    ],
+    "new_files": [],
+    "lead_shared_files": [],
+    "proto_change": false,
+    "migration": false,
+    "flag": "",
+    "test_commands": [
+      "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/shared/actions/chat-history.test.ts src/shared/actions/action-registry.test.ts",
+      "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets history"
+    ],
+    "needs_live_stack": false,
+    "needs_external": "",
+    "decisions": [
+      "D7"
+    ],
+    "decision_defaults_applied": {
+      "D7": "thread.export {threadId, format json|markdown, profile full|redacted} proxied with the owner's own bearer, headers preserved"
+    },
+    "risk": [
+      "action-registry count assertions collide with other batches (rebase)"
+    ],
+    "importance": "sonnet",
+    "importance_reason": "Contract entry and a pass-through proxy.",
+    "effort_days_low": 2,
+    "effort_days_high": 3,
+    "summary": "Adds thread.export to the chat-history action union and the action registry (with tests), and a BFF handler GET /api/v1/chat/threads/{id}/export that streams the model-gateway export through with the owner's own bearer and its Content-Disposition, no body rewrite. Behaviour follows MODEL_GATEWAY_THREAD_EXPORT upstream (404 when off).",
+    "plan_external_notes": "",
+    "order": 21211,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S12",
+    "title": "Export menu and redacted replay viewer",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S11"
+    ],
+    "files": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.test.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.test.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.ts",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.test.ts",
+      "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+    ],
+    "new_files": [
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.test.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.test.tsx",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.ts",
+      "apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.test.ts"
+    ],
+    "lead_shared_files": [],
+    "proto_change": false,
+    "migration": false,
+    "flag": "VITE_THREAD_EXPORT",
+    "test_commands": [
+      "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/features/chat/components/ExportConversationAction.test.tsx src/features/chat/replay"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D9"
+    ],
+    "decision_defaults_applied": {
+      "D9": "Read-only stepper over the redacted export; unknown export version refused, never rendered"
+    },
+    "risk": [
+      "chat-client.ts hot",
+      "the file that mounts ForkAction must be located at slice start and added to this slice"
+    ],
+    "importance": "sonnet",
+    "importance_reason": "UI over an existing contract.",
+    "effort_days_low": 4,
+    "effort_days_high": 5,
+    "summary": "Export menu entry beside fork (format and profile, hidden for Space threads and ZDR callers, shows the server's refusal), a zod schema for verevon.thread-export.v1, a lazy-loaded read-only ThreadReplayView stepping through the redacted export with run summary chips, and exportThread in chat-client.ts. Norwegian-first copy. Behind VITE_THREAD_EXPORT.",
+    "plan_external_notes": "Live proof on a second FE dev server (the :5173 container serves the main checkout).",
+    "order": 21215,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S13",
+    "title": "Share-model ADR and conversation_snapshot taxonomy type",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [],
+    "files": [
+      "apps/Model Plane/docs/decisions/conversation-share-model.md",
+      "apps/Control Plane/user-core/internal/authztaxonomy/resource_taxonomy.json",
+      "apps/Control Plane/user-core/internal/authztaxonomy/taxonomy_test.go",
+      "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/taxonomy.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/docs/decisions/conversation-share-model.md"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/docs/decisions/ledger.md"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "",
+    "test_commands": [
+      "bash scripts/lint-resource-taxonomy.sh",
+      "cd \"apps/Control Plane/user-core\" && go test ./internal/authztaxonomy/...",
+      "cd \"apps/Data Plane v2/services/retrieval-engine-rs\" && cargo test -q --lib authz::taxonomy"
+    ],
+    "needs_live_stack": false,
+    "needs_external": "",
+    "decisions": [
+      "D10",
+      "OD-5"
+    ],
+    "decision_defaults_applied": {
+      "D10": "Immutable org-only snapshot in session-core, granted through Control resource_grants on new ownable type conversation_snapshot; viewer sees static text only; revocation deletes the body; refused for non-exportable threads"
+    },
+    "risk": [
+      "one-line Data Plane mirror edit mandated by the parity lint",
+      "ADR stays proposed until the owner accepts it"
+    ],
+    "importance": "opus",
+    "importance_reason": "Writes the DEC-40 share model and changes Control's resource taxonomy.",
+    "effort_days_low": 2,
+    "effort_days_high": 2,
+    "summary": "Writes the share model as a proposed ADR document (snapshot not live link, org-only, Control resource_grants on conversation_snapshot, static text, revocation, ZDR/non-persistent refusal, retention with the source thread) and adds conversation_snapshot to the ownable set of the Control resource taxonomy with its retrieval-engine parity mirror and a Go test that it is ownable and not team-shared. Inert until a grant writer exists.",
+    "plan_external_notes": "lead_todo: ledger entry for the proposed ADR (number assigned by the integrator). Check taxonomy_test.go exists at slice start; else add the test beside taxonomy.go in a new file.",
+    "order": 21205,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S14",
+    "title": "Share snapshots: store, RPCs and routes (dark)",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S9",
+      "EP-12-S13"
+    ],
+    "files": [
+      "apps/Model Plane/rust/services/session-core/migrations/0106_thread_share_snapshots.sql",
+      "apps/Model Plane/rust/services/session-core/migrations/revert/0106_thread_share_snapshots.down.sql",
+      "apps/Model Plane/proto/model_plane/v1/thread_shares.proto",
+      "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+      "apps/Model Plane/rust/services/session-core/src/thread_shares.rs",
+      "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+      "apps/Model Plane/rust/services/session-core/src/main.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/thread_share_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/lib.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/rust/services/session-core/migrations/0106_thread_share_snapshots.sql",
+      "apps/Model Plane/rust/services/session-core/migrations/revert/0106_thread_share_snapshots.down.sql",
+      "apps/Model Plane/proto/model_plane/v1/thread_shares.proto",
+      "apps/Model Plane/rust/services/session-core/src/thread_shares.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/thread_share_routes.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+      "apps/Model Plane/deploy/docker-compose.yml",
+      "apps/Model Plane/docs/ZDR.md"
+    ],
+    "proto_change": true,
+    "migration": true,
+    "flag": "SESSION_THREAD_SHARES_ENABLED, MODEL_GATEWAY_THREAD_SHARES",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib thread_shares",
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib thread_share_routes",
+      "cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against baseline.binpb"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D8",
+      "D10",
+      "OD-5"
+    ],
+    "decision_defaults_applied": {
+      "D10": "Snapshot body = redacted export; get requires owner or a Control grant decision for conversation_snapshot:<id>; grant written by Control after the owning plane proves ownership; ON DELETE CASCADE with the thread"
+    },
+    "risk": [
+      "the Control grant-check path for a Model-Plane-owned type may not exist: ship owner-only and record a depth row if so",
+      "hot SC/grpc.rs and MG/http_routes.rs"
+    ],
+    "importance": "opus",
+    "importance_reason": "New content store with sharing authority and ZDR refusal.",
+    "effort_days_low": 7,
+    "effort_days_high": 8,
+    "summary": "Migration 0106_thread_share_snapshots (+ revert) adds an org-scoped immutable snapshot table cascading from threads; new proto thread_shares.proto (Create/List/Get/Revoke, commented); session-core thread_shares.rs builds the body from the S9 redacted export with the same refusals, serves owner reads and grant-decision reads, revoke deletes the body; model-gateway thread_share_routes.rs exposes /v1/threads/:id/snapshots and /v1/snapshots/:id. Both switches default off; enabling waits on the ADR (OD-5).",
+    "plan_external_notes": "lead_todo: posture rows e_zdr_caller_share_refused, e_waived_thread_snapshot_refused, e_snapshot_erased_with_thread; ZDR.md row for the snapshot store. Flip blocked on OD-5.",
+    "order": 21216,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S15",
+    "title": "Import a thread export (untrusted input)",
+    "tag": "BUILD",
+    "status": "todo",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S9",
+      "EP-12-S10"
+    ],
+    "files": [
+      "apps/Model Plane/proto/model_plane/v1/thread_export.proto",
+      "apps/Model Plane/rust/services/session-core/src/thread_import.rs",
+      "apps/Model Plane/rust/services/session-core/src/main.rs",
+      "apps/Model Plane/rust/services/model-gateway/src/thread_export_routes.rs"
+    ],
+    "new_files": [
+      "apps/Model Plane/rust/services/session-core/src/thread_import.rs"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+      "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+      "apps/Model Plane/deploy/docker-compose.yml",
+      "apps/Model Plane/docs/ZDR.md"
+    ],
+    "proto_change": true,
+    "migration": false,
+    "flag": "SESSION_THREAD_IMPORT_ENABLED",
+    "test_commands": [
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p session-core --lib thread_import",
+      "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib thread_export_routes",
+      "cd \"apps/Model Plane/proto\" && buf lint && buf breaking --against baseline.binpb"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "",
+    "decisions": [
+      "D11",
+      "OD-6"
+    ],
+    "decision_defaults_applied": {
+      "D11": "Only verevon.thread-export.v1; user/assistant text only, tool/system/metadata dropped and counted; new caller-owned thread; messages marked metadata.imported; imported assistant text enters context only as untrusted quoted context (role downgrade if no fence exists); caps 2 MiB, 400 messages, 64 KiB per message"
+    },
+    "risk": [
+      "prompt injection carried in imported text",
+      "context assembler fence behaviour to verify at slice start"
+    ],
+    "importance": "opus",
+    "importance_reason": "New untrusted-input boundary into model context.",
+    "effort_days_low": 5,
+    "effort_days_high": 6,
+    "summary": "Appends ImportThread to thread_export.proto; session-core thread_import.rs strictly parses a verevon.thread-export.v1 file, keeps only user/assistant text within caps, creates a new caller-owned thread with each message marked metadata.imported{digest, exported_at, source_org_match}, refuses ZDR/waived callers (conversation_import); model-gateway POST /v1/threads/import (2 MiB body limit). Imported assistant turns never reach the model as its own prior output.",
+    "plan_external_notes": "lead_todo: posture row e_zdr_caller_import_refused; ZDR.md row for imported messages.",
+    "order": 21212,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  },
+  {
+    "id": "EP-12-S16",
+    "title": "Flip, SDKs, document, prove",
+    "tag": "FINISH",
+    "status": "blocked-external",
+    "remaining": "",
+    "depends_on": [
+      "EP-12-S1",
+      "EP-12-S2",
+      "EP-12-S3",
+      "EP-12-S4",
+      "EP-12-S5",
+      "EP-12-S6",
+      "EP-12-S7",
+      "EP-12-S8",
+      "EP-12-S9",
+      "EP-12-S10",
+      "EP-12-S11",
+      "EP-12-S12",
+      "EP-12-S13",
+      "EP-12-S14",
+      "EP-12-S15"
+    ],
+    "files": [
+      "apps/Model Plane/api/sdk/agent-api",
+      "apps/Model Plane/docs/ZDR.md",
+      "apps/Model Plane/docs/capability-ownership-matrix.md",
+      "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md"
+    ],
+    "new_files": [
+      "apps/Model Plane/api/sdk/agent-api"
+    ],
+    "lead_shared_files": [
+      "apps/Model Plane/deploy/docker-compose.yml",
+      "apps/Model Plane/docs/decisions/ledger.md",
+      "apps/Control Plane/config/plane-service-principals.json",
+      "apps/Model Plane/docs/capability-ownership-matrix.md"
+    ],
+    "proto_change": false,
+    "migration": false,
+    "flag": "all EP-12 switches, in the design's S16 order",
+    "test_commands": [
+      "bash \"apps/Model Plane/api/generate-sdk.sh\" agent-api"
+    ],
+    "needs_live_stack": true,
+    "needs_external": "Owner decisions OD-1..OD-5 before the Agent API and share flips; owner's model key from the env file outside the repos for live turns",
+    "decisions": [
+      "OD-1",
+      "OD-2",
+      "OD-3",
+      "OD-4",
+      "OD-5",
+      "OD-7"
+    ],
+    "decision_defaults_applied": {},
+    "risk": [
+      "flip order matters: exchange and principals before routes, ingress last"
+    ],
+    "importance": "sonnet",
+    "importance_reason": "Flips, docs and evidence collection.",
+    "effort_days_low": 3,
+    "effort_days_high": 4,
+    "summary": "Turns the switches on for the proof org in order (origin, export, import, then after OD-1..OD-4 the exchange, principals, routes and ingress, then after OD-5 shares), generates the Agent API SDKs, adds ledger, ZDR.md, capability-ownership and Control ownership rows, and collects live evidence F1-F6 into the depth register.",
+    "plan_external_notes": "Live flows F1-F6 of the design section 6; stop at the weekly usage line and summarise.",
+    "order": 21217,
+    "train": "W3",
+    "lane": null,
+    "batch": null
+  }
+]

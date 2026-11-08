@@ -1,0 +1,1445 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs
+index ca299ed90..b41ed14d6 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs	
+@@ -45,6 +45,7 @@ pub mod org_identity;
+ pub mod orgs;
+ pub mod ownership;
+ pub mod persona;
++pub mod policy_effective;
+ pub mod privacy;
+ pub mod remote_support;
+ pub mod router_policy;
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/policy_effective.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/policy_effective.rs
+new file mode 100644
+index 000000000..f88a1c944
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/policy_effective.rs	
+@@ -0,0 +1,675 @@
++//! `GET /api/v1/policy/effective?thread_id=`: the effective policy of one thread, each value with the layer that set it
++//! (Wave 3 EP-9 T2).
++//!
++//! The browser's view of what governs a conversation. Each owner answers for its own layers and this route only
++//! aggregates them: model-gateway for the approval posture, the run budget and the organization's agent switches as it
++//! enforces them; org-core for the model access that applies to the caller and, for an admin, the browser-site mode;
++//! and the organization's Zero Data Retention posture. Every owner has a two second budget, and an owner that does not
++//! answer is `unavailable` for its keys, never a guessed value.
++//!
++//! A member reads values and origin labels. Revisions are admin detail, and so are the lists behind a count: a member
++//! reads how many models the policy lists, an admin reads the list. The organization comes from the session only, and
++//! the query may name nothing but the thread, so another organization's identifier is refused before anything is
++//! forwarded. The route is switched on by `POLICY_EFFECTIVE_VIEW_ENABLED` (exactly `true` enables it); off, it is not
++//! mounted at all, so it answers as any unknown route does.
++
++use std::collections::HashMap;
++use std::future::Future;
++use std::time::Duration;
++
++use axum::{
++    extract::{Extension, Query, State},
++    http::{HeaderMap, StatusCode},
++    response::{IntoResponse, Response},
++    routing::get,
++    Json, Router,
++};
++use reqwest::Method;
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Value};
++
++use crate::{
++    config::AppState,
++    contracts::ActionActor,
++    domains::browser_sites,
++    domains::chat::shared::{
++        model_token, proxy_model_json_with_capability, required_capability_token,
++    },
++    envelope::error_with_details,
++    middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
++    rate_limit::rate_limit_middleware,
++    upstream::{proxy_json, scope_org_id},
++    zdr::{org_posture, request_zdr, OrgPosture},
++};
++
++/// The longest thread id the view forwards. A session thread id is a short opaque string.
++const MAX_THREAD_ID_LEN: usize = 200;
++
++/// How long one owner may take. The page waits on every owner together, so one slow owner would otherwise hold the
++/// whole answer; an owner past this is `unavailable`.
++const OWNER_TIMEOUT: Duration = Duration::from_secs(2);
++
++/// The route, or no route at all while `POLICY_EFFECTIVE_VIEW_ENABLED` is off.
++pub(crate) fn router(state: AppState) -> Router<AppState> {
++    if !switch_enabled(std::env::var("POLICY_EFFECTIVE_VIEW_ENABLED").ok().as_deref()) {
++        return Router::new();
++    }
++    Router::new()
++        .route("/api/v1/policy/effective", get(get_effective_policy))
++        // Per-org/user rate limiting, ordered as in `agent_policy.rs`: `require_session` runs first and inserts
++        // `AuthenticatedUser`, so the limiter keys by the validated organization and user.
++        .route_layer(axum::middleware::from_fn(rate_limit_middleware))
++        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
++}
++
++/// Exact, like the other switches: only the word `true` enables it.
++fn switch_enabled(value: Option<&str>) -> bool {
++    value == Some("true")
++}
++
++/// One value of the view, as the owners and this route shape it. `value` is `null` only when `unavailable` is set.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++struct Item {
++    key: String,
++    value: Value,
++    origin: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    revision: Option<i64>,
++    locked: bool,
++    #[serde(default, skip_serializing_if = "is_false")]
++    unavailable: bool,
++}
++
++fn is_false(value: &bool) -> bool {
++    !*value
++}
++
++impl Item {
++    fn set(key: &str, value: Value, origin: &str, revision: Option<i64>, locked: bool) -> Self {
++        Self {
++            key: key.to_owned(),
++            value,
++            origin: Some(origin.to_owned()),
++            revision,
++            locked,
++            unavailable: false,
++        }
++    }
++
++    fn unavailable(key: &str) -> Self {
++        Self {
++            key: key.to_owned(),
++            value: Value::Null,
++            origin: None,
++            revision: None,
++            locked: false,
++            unavailable: true,
++        }
++    }
++}
++
++/// Why an owner gave no answer. `ThreadNotFound` is model-gateway's refusal of a thread the caller does not own, and it
++/// ends the whole view, since nothing about the thread may be shown.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Failure {
++    ThreadNotFound,
++    Unavailable,
++}
++
++/// `GET /api/v1/policy/effective?thread_id=` — the effective policy of the thread, for any member of the active
++/// organization.
++async fn get_effective_policy(
++    State(state): State<AppState>,
++    Extension(user): Extension<AuthenticatedUser>,
++    headers: HeaderMap,
++    Query(query): Query<HashMap<String, String>>,
++) -> Response {
++    let thread_id = match thread_id_from(&query) {
++        Ok(thread_id) => thread_id,
++        Err(response) => return response,
++    };
++    let Some(org_id) = active_org_id(&user) else {
++        return refusal(
++            StatusCode::FORBIDDEN,
++            "forbidden",
++            "The requested organization is not authorized for this session.",
++        );
++    };
++    let admin = has_authorized_org_role(&user, &["owner", "admin"]);
++    let model_access_on = state.model_entitlement_admin_enabled;
++    // Org-core reads the browser-site policy for an owner or admin alone, so a member is not asked for it.
++    let browser_sites_on = admin && browser_sites::enabled_from_env();
++
++    let (model_plane, model_access, browser, zdr) = tokio::join!(
++        within_budget(model_plane_items(&state, &user, &headers, &thread_id)),
++        async {
++            if model_access_on {
++                Some(within_budget(model_access_items(&state, &user, &org_id, admin)).await)
++            } else {
++                None
++            }
++        },
++        async {
++            if browser_sites_on {
++                Some(within_budget(browser_site_items(&state, &user, &org_id)).await)
++            } else {
++                None
++            }
++        },
++        within_budget(zdr_item(&state, &user, &headers)),
++    );
++
++    let mut items = match model_plane {
++        Ok(items) => items,
++        Err(Failure::ThreadNotFound) => {
++            return refusal(
++                StatusCode::NOT_FOUND,
++                "thread_not_found",
++                "No thread with that id is visible to the caller.",
++            )
++        }
++        Err(Failure::Unavailable) => vec![Item::unavailable("model_plane")],
++    };
++    if let Some(result) = model_access {
++        items.extend(result.unwrap_or_else(|_| vec![Item::unavailable("model_access")]));
++    }
++    if let Some(result) = browser {
++        items.extend(result.unwrap_or_else(|_| vec![Item::unavailable("browser_sites")]));
++    }
++    items.push(zdr.unwrap_or_else(|_| Item::unavailable("zdr")));
++    (
++        StatusCode::OK,
++        Json(json!({ "data": { "items": for_viewer(items, admin) } })),
++    )
++        .into_response()
++}
++
++/// The thread the view is about. The query may name only the thread: the organization comes from the session, and a
++/// space or any other identifier is refused before anything is forwarded.
++fn thread_id_from(query: &HashMap<String, String>) -> Result<String, Response> {
++    if query.contains_key("space_id") {
++        return Err(refusal(
++            StatusCode::BAD_REQUEST,
++            "space_scope_unsupported",
++            "The effective policy of a Space is not readable yet; name a thread.",
++        ));
++    }
++    if query.keys().any(|key| key.as_str() != "thread_id") {
++        return Err(refusal(
++            StatusCode::BAD_REQUEST,
++            "invalid_query",
++            "The query may name only thread_id; the organization comes from the session.",
++        ));
++    }
++    match query.get("thread_id").map(|id| id.trim()) {
++        Some(id) if !id.is_empty() && id.len() <= MAX_THREAD_ID_LEN => Ok(id.to_owned()),
++        _ => Err(refusal(
++            StatusCode::BAD_REQUEST,
++            "thread_id_required",
++            "A thread_id of 1 to 200 characters is required.",
++        )),
++    }
++}
++
++/// The active organization, when the session holds a live membership in it. The organization is never read from the
++/// request.
++fn active_org_id(user: &AuthenticatedUser) -> Option<String> {
++    let org_id = scope_org_id(user)?;
++    let member = user
++        .authorized_membership
++        .as_ref()
++        .is_some_and(|membership| membership.organization_id.trim() == org_id);
++    member.then(|| org_id.to_owned())
++}
++
++fn refusal(status: StatusCode, code: &'static str, message: &'static str) -> Response {
++    (status, Json(error_with_details(code, message, json!({})))).into_response()
++}
++
++/// An owner that answers within [`OWNER_TIMEOUT`], or one that does not.
++async fn within_budget<T>(
++    owner: impl Future<Output = Result<T, Failure>>,
++) -> Result<T, Failure> {
++    tokio::time::timeout(OWNER_TIMEOUT, owner)
++        .await
++        .unwrap_or(Err(Failure::Unavailable))
++}
++
++/// What a viewer may read: the revision is admin detail, so a member's view carries none.
++fn for_viewer(mut items: Vec<Item>, admin: bool) -> Vec<Item> {
++    if !admin {
++        for item in &mut items {
++            item.revision = None;
++        }
++    }
++    items
++}
++
++/// One GET to org-core on the caller's behalf. Anything but a 200 is an owner that did not answer.
++async fn org_core_json(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    org_id: &str,
++    url: &str,
++) -> Result<Value, Failure> {
++    let actor = actor_for(user);
++    match proxy_json(state, Method::GET, url, None, Some(org_id), Some(&actor), None).await {
++        (StatusCode::OK, Json(body)) => Ok(body),
++        _ => Err(Failure::Unavailable),
++    }
++}
++
++fn actor_for(user: &AuthenticatedUser) -> ActionActor {
++    ActionActor {
++        user_id: user.user_id.clone(),
++        user_email: user.user_email.clone(),
++        user_name: user.user_name.clone(),
++        user_role: user.auth_role.clone().unwrap_or_default(),
++    }
++}
++
++/// model-gateway's view of the thread, with the two credentials the gateway checks: the session and the capability
++/// bearer its organization policy is read with.
++async fn model_plane_items(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    headers: &HeaderMap,
++    thread_id: &str,
++) -> Result<Vec<Item>, Failure> {
++    let token = model_token(state, user, headers).await;
++    let capability = required_capability_token(state, user, headers)
++        .await
++        .map_err(|_| Failure::Unavailable)?;
++    let url = format!(
++        "{}/v1/policy/effective?thread_id={}",
++        state.model_gateway_url,
++        urlencoding::encode(thread_id)
++    );
++    let (status, Json(body)) = proxy_model_json_with_capability(
++        state,
++        Method::GET,
++        &url,
++        None,
++        token.as_deref(),
++        Some(capability.as_str()),
++        user,
++    )
++    .await;
++    model_plane_answer(status, &body)
++}
++
++#[derive(Deserialize)]
++struct ModelPlaneBody {
++    data: ItemsBody,
++}
++
++#[derive(Deserialize)]
++struct ItemsBody {
++    items: Vec<Item>,
++}
++
++/// The model-gateway answer read into items. A thread it refuses is named as such; any other answer it does not give
++/// is unavailable.
++fn model_plane_answer(status: StatusCode, body: &Value) -> Result<Vec<Item>, Failure> {
++    match status {
++        StatusCode::OK => serde_json::from_value::<ModelPlaneBody>(body.clone())
++            .map(|answer| answer.data.items)
++            .map_err(|_| Failure::Unavailable),
++        StatusCode::NOT_FOUND if body["error"]["code"].as_str() == Some("thread_not_found") => {
++            Err(Failure::ThreadNotFound)
++        }
++        _ => Err(Failure::Unavailable),
++    }
++}
++
++/// The model access that applies to the caller in this organization, from org-core's explanation of their own
++/// entitlement.
++async fn model_access_items(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    org_id: &str,
++    admin: bool,
++) -> Result<Vec<Item>, Failure> {
++    let url = format!(
++        "{}/api/v1/organizations/{}/model-entitlement/explain",
++        state.org_core_url,
++        urlencoding::encode(org_id)
++    );
++    let body = org_core_json(state, user, org_id, &url).await?;
++    Ok(model_access_from(&body, admin))
++}
++
++/// The model-access items from org-core's explanation: the mode, the privacy-tier floor and the effort ceiling, and the
++/// allow and deny lists. A layer the organization did not set reads as the platform's own value.
++fn model_access_from(body: &Value, admin: bool) -> Vec<Item> {
++    let set = body
++        .get("state")
++        .and_then(Value::as_str)
++        .is_some_and(|layer| layer != "none");
++    let revision = body.get("revision").and_then(Value::as_i64).unwrap_or(0);
++    let policy = body.get("policy").filter(|policy| policy.is_object());
++    let allow_mode = policy_text(policy, "allow_mode");
++    let privacy = policy_text(policy, "min_privacy_tier");
++    let effort = policy_text(policy, "max_effort");
++    let allow = policy_list(policy, "allow");
++    let deny = policy_list(policy, "deny");
++
++    let mode_set = set && !allow_mode.is_empty();
++    let privacy_set = set && !privacy.is_empty() && privacy != "unspecified";
++    let effort_set = set && !effort.is_empty();
++    let allow_set = set && !allow.is_empty();
++    let deny_set = set && !deny.is_empty();
++    let listed = allow_mode == "listed";
++    let allow_shown = if admin {
++        Value::Array(allow.clone())
++    } else {
++        json!(allow.len())
++    };
++    let deny_shown = if admin {
++        Value::Array(deny.clone())
++    } else {
++        json!(deny.len())
++    };
++    vec![
++        org_or_platform(
++            "model_access.allow_mode",
++            json!(if allow_mode.is_empty() { "all" } else { allow_mode.as_str() }),
++            mode_set,
++            revision,
++            mode_set && listed,
++        ),
++        org_or_platform(
++            "model_access.min_privacy_tier",
++            json!(if privacy.is_empty() { "unspecified" } else { privacy.as_str() }),
++            privacy_set,
++            revision,
++            privacy_set,
++        ),
++        org_or_platform(
++            "model_access.max_effort",
++            json!(if effort.is_empty() { "unlimited" } else { effort.as_str() }),
++            effort_set,
++            revision,
++            effort_set,
++        ),
++        org_or_platform(
++            "model_access.allow",
++            allow_shown,
++            allow_set,
++            revision,
++            allow_set && listed,
++        ),
++        org_or_platform("model_access.deny", deny_shown, deny_set, revision, deny_set),
++    ]
++}
++
++fn policy_text(policy: Option<&Value>, field: &str) -> String {
++    policy
++        .and_then(|policy| policy.get(field))
++        .and_then(Value::as_str)
++        .unwrap_or("")
++        .trim()
++        .to_owned()
++}
++
++fn policy_list(policy: Option<&Value>, field: &str) -> Vec<Value> {
++    policy
++        .and_then(|policy| policy.get(field))
++        .and_then(Value::as_array)
++        .cloned()
++        .unwrap_or_default()
++}
++
++/// A value an organization may set: the organization's at its revision when it set one, otherwise the platform's.
++fn org_or_platform(
++    key: &str,
++    value: Value,
++    set: bool,
++    revision: i64,
++    restricts: bool,
++) -> Item {
++    if set {
++        Item::set(key, value, "org", Some(revision), restricts)
++    } else {
++        Item::set(key, value, "platform", None, false)
++    }
++}
++
++/// The organization's browser-site mode and rules, from org-core's policy read. Only an owner or admin may read it
++/// there, so this runs for an admin alone.
++async fn browser_site_items(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    org_id: &str,
++) -> Result<Vec<Item>, Failure> {
++    let url = format!(
++        "{}/api/v1/organizations/{}/browser-sites",
++        state.org_core_url,
++        urlencoding::encode(org_id)
++    );
++    let body = org_core_json(state, user, org_id, &url).await?;
++    Ok(browser_site_items_from(&body))
++}
++
++/// The browser-site items from org-core's policy: the mode, and the rules a site is held to. A policy never written
++/// reads as the platform's open mode with no rules.
++fn browser_site_items_from(body: &Value) -> Vec<Item> {
++    let revision = body.get("revision").and_then(Value::as_i64).unwrap_or(0);
++    let set = revision > 0;
++    let mode = body
++        .get("mode")
++        .and_then(Value::as_str)
++        .filter(|mode| !mode.is_empty())
++        .unwrap_or("open");
++    let rules = body
++        .get("rules")
++        .and_then(Value::as_array)
++        .cloned()
++        .unwrap_or_default();
++    let rules_set = set && !rules.is_empty();
++    vec![
++        org_or_platform(
++            "browser_sites.mode",
++            json!(mode),
++            set,
++            revision,
++            set && mode == "allowlist",
++        ),
++        org_or_platform(
++            "browser_sites.rules",
++            Value::Array(rules),
++            rules_set,
++            revision,
++            rules_set,
++        ),
++    ]
++}
++
++/// The organization's Zero Data Retention posture, or the request's own ZDR where the organization has none. An unknown
++/// posture is unavailable, never off.
++async fn zdr_item(
++    state: &AppState,
++    user: &AuthenticatedUser,
++    headers: &HeaderMap,
++) -> Result<Item, Failure> {
++    zdr_item_from(org_posture(state, user).await, request_zdr(headers, None))
++}
++
++fn zdr_item_from(posture: OrgPosture, requested: bool) -> Result<Item, Failure> {
++    match (posture, requested) {
++        (OrgPosture::Unknown, _) => Err(Failure::Unavailable),
++        (OrgPosture::Zdr, _) => Ok(Item::set("zdr", json!(true), "org", None, true)),
++        (OrgPosture::NotZdr, true) => Ok(Item::set("zdr", json!(true), "request", None, false)),
++        (OrgPosture::NotZdr, false) => Ok(Item::set("zdr", json!(false), "platform", None, false)),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn query(pairs: &[(&str, &str)]) -> HashMap<String, String> {
++        pairs
++            .iter()
++            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
++            .collect()
++    }
++
++    fn find<'a>(items: &'a [Item], key: &str) -> &'a Item {
++        items
++            .iter()
++            .find(|item| item.key == key)
++            .unwrap_or_else(|| panic!("{key} is listed"))
++    }
++
++    #[test]
++    fn the_switch_is_exact_and_off_by_default() {
++        assert!(switch_enabled(Some("true")));
++        for off in [None, Some(""), Some("TRUE"), Some("1"), Some("false"), Some(" true")] {
++            assert!(!switch_enabled(off), "{off:?} must stay off");
++        }
++    }
++
++    #[test]
++    fn the_thread_is_the_only_query_key_and_a_space_or_another_org_is_refused() {
++        let thread = thread_id_from(&query(&[("thread_id", " t-1 ")])).ok();
++        assert_eq!(thread.as_deref(), Some("t-1"));
++
++        let too_long = "t".repeat(MAX_THREAD_ID_LEN + 1);
++        for refused in [
++            query(&[]),
++            query(&[("thread_id", "   ")]),
++            query(&[("thread_id", too_long.as_str())]),
++            query(&[("thread_id", "t-1"), ("org_id", "org-2")]),
++            query(&[("thread_id", "t-1"), ("user_id", "user-2")]),
++            query(&[("space_id", "space-1")]),
++        ] {
++            let response = thread_id_from(&refused).expect_err("the query is refused");
++            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{refused:?}");
++        }
++    }
++
++    #[test]
++    fn a_model_plane_refusal_for_a_thread_is_named_and_any_other_answer_is_unavailable() {
++        let refused = json!({"error": {"code": "thread_not_found", "message": "x", "details": {}}});
++        assert_eq!(
++            model_plane_answer(StatusCode::NOT_FOUND, &refused),
++            Err(Failure::ThreadNotFound)
++        );
++        assert_eq!(
++            model_plane_answer(StatusCode::NOT_FOUND, &json!({})),
++            Err(Failure::Unavailable)
++        );
++        assert_eq!(
++            model_plane_answer(StatusCode::INTERNAL_SERVER_ERROR, &json!({})),
++            Err(Failure::Unavailable)
++        );
++        assert_eq!(
++            model_plane_answer(StatusCode::OK, &json!({"data": {"items": "nope"}})),
++            Err(Failure::Unavailable)
++        );
++    }
++
++    #[test]
++    fn a_model_plane_answer_is_read_into_its_items_with_the_origin_kept() {
++        let body = json!({"data": {"items": [
++            {"key": "approval.posture", "value": "auto", "origin": "platform", "locked": false},
++            {"key": "web.mode", "value": null, "origin": null, "locked": false, "unavailable": true},
++        ]}});
++        let items = model_plane_answer(StatusCode::OK, &body).expect("the items are read");
++        assert_eq!(
++            items,
++            vec![
++                Item::set("approval.posture", json!("auto"), "platform", None, false),
++                Item::unavailable("web.mode"),
++            ]
++        );
++    }
++
++    #[test]
++    fn a_member_reads_no_revision_and_the_count_where_an_admin_reads_the_list() {
++        let body = json!({
++            "state": "org",
++            "revision": 7,
++            "policy": {
++                "allow_mode": "listed",
++                "allow": ["model-a", "model-b"],
++                "deny": [],
++                "min_privacy_tier": "eu_resident",
++                "max_effort": "",
++            },
++        });
++        let member = for_viewer(model_access_from(&body, false), false);
++        let admin = for_viewer(model_access_from(&body, true), true);
++
++        let allow_member = find(&member, "model_access.allow");
++        assert_eq!(allow_member.value, json!(2));
++        assert_eq!(allow_member.revision, None);
++        assert_eq!(find(&admin, "model_access.allow").value, json!(["model-a", "model-b"]));
++        assert_eq!(find(&admin, "model_access.allow").revision, Some(7));
++
++        let privacy = find(&member, "model_access.min_privacy_tier");
++        assert_eq!(privacy.value, json!("eu_resident"));
++        assert_eq!(privacy.origin.as_deref(), Some("org"));
++        assert!(privacy.locked);
++        assert_eq!(find(&member, "model_access.max_effort").value, json!("unlimited"));
++    }
++
++    #[test]
++    fn an_organization_with_no_policy_reads_the_platform_defaults() {
++        let items = model_access_from(&json!({"state": "none", "revision": 0, "policy": null}), true);
++        let mode = find(&items, "model_access.allow_mode");
++        assert_eq!(mode.value, json!("all"));
++        assert_eq!(mode.origin.as_deref(), Some("platform"));
++        assert!(!mode.locked);
++        assert!(items.iter().all(|item| item.origin.as_deref() == Some("platform")));
++    }
++
++    #[test]
++    fn a_browser_site_policy_never_written_reads_as_the_open_platform_default() {
++        let items = browser_site_items_from(&json!({"revision": 0, "mode": "open", "rules": []}));
++        assert!(items
++            .iter()
++            .all(|item| item.origin.as_deref() == Some("platform") && !item.locked));
++    }
++
++    #[test]
++    fn an_allowlist_set_by_the_organization_is_locked_and_names_its_revision() {
++        let items = browser_site_items_from(&json!({
++            "revision": 3,
++            "mode": "allowlist",
++            "rules": [{"host": "example.com", "rule": "read"}],
++        }));
++        let mode = find(&items, "browser_sites.mode");
++        assert_eq!(mode.origin.as_deref(), Some("org"));
++        assert_eq!(mode.revision, Some(3));
++        assert!(mode.locked);
++        assert!(find(&items, "browser_sites.rules").locked);
++    }
++
++    #[test]
++    fn an_unknown_zdr_posture_is_unavailable_and_never_off() {
++        assert_eq!(
++            zdr_item_from(OrgPosture::Unknown, false),
++            Err(Failure::Unavailable)
++        );
++        assert_eq!(
++            zdr_item_from(OrgPosture::Zdr, false).expect("answered").origin.as_deref(),
++            Some("org")
++        );
++        assert_eq!(
++            zdr_item_from(OrgPosture::NotZdr, true).expect("answered").origin.as_deref(),
++            Some("request")
++        );
++        assert_eq!(
++            zdr_item_from(OrgPosture::NotZdr, false).expect("answered").value,
++            json!(false)
++        );
++    }
++
++    #[tokio::test]
++    async fn an_owner_that_does_not_answer_in_time_is_unavailable() {
++        let never = std::future::pending::<Result<Vec<Item>, Failure>>();
++        assert_eq!(within_budget(never).await, Err(Failure::Unavailable));
++    }
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index a7aff5401..20029be7b 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1131,6 +1131,22 @@ describe('action registry', () => {
+     expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on', orgId: 'org_1' }).success).toBe(false)
+   })
+ 
++  it('registers the effective-policy read as a model-plane action the model cannot execute, taking only a thread', () => {
++    expect(registered('policy.read_effective'), 'policy.read_effective').toMatchObject({
++      ownerPlane: 'model',
++      risk: 'low',
++      requiresApproval: false,
++      reversible: true,
++    })
++    expect(isModelExecutableAction('policy.read_effective')).toBe(false)
++    const input = registered('policy.read_effective')?.inputSchema
++
++    expect(input?.safeParse({ threadId: 'thread_1' }).success).toBe(true)
++    // The organization is the session's: a body that names one, or no thread at all, is refused.
++    expect(input?.safeParse({ threadId: 'thread_1', orgId: 'org_1' }).success).toBe(false)
++    expect(input?.safeParse({}).success).toBe(false)
++  })
++
+   it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
+     const setPolicy = registered('org.set_agent_policy')?.inputSchema
+ 
+@@ -1566,7 +1582,8 @@ describe('action registry', () => {
+     // +1 after EP-9-W2 registered org.set_web_policy, the organization's web access switch.
+     // +3 after EP-9-C1 registered org.set_retention, org.place_legal_hold and org.release_legal_hold.
+     // +1 after EP-11-S1 registered skills.save_from_message, the Save-as-skill message action.
+-    expect(ids).toHaveLength(301)
++    // +1 after EP-9-T2 registered policy.read_effective, the thread's effective-policy read.
++    expect(ids).toHaveLength(302)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index ad4a0881a..fe406aca9 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1539,6 +1539,20 @@ const orgSetWebPolicyInput = z
+ 
+ const orgPreviewEffectivePolicyInput = z.object({}).strict()
+ 
++// The effective policy of one thread (Wave 3 EP-9 T2): each value the gateway enforces for it, with the layer that set
++// it and a lock where a higher layer fixes it. The organization is the session's, so the input names the thread only.
++const policyReadEffectiveInput = z.object({ threadId: z.string().trim().min(1).max(200) }).strict()
++const policyEffectiveItem = z.object({
++  key: z.string(),
++  value: z.unknown(),
++  origin: z.enum(['platform', 'org', 'space', 'user', 'request']).nullable(),
++  revision: z.number().int().nonnegative().optional(),
++  locked: z.boolean(),
++  unavailable: z.boolean().optional(),
++})
++// The items as the client reads them: requestJson unwraps the route's `{ data }` envelope.
++const policyReadEffectiveOutput = z.object({ items: z.array(policyEffectiveItem) })
++
+ // A tool matcher is empty or "*" for any tool, a tool name, or a name ending in one "*" (hook/mod.rs).
+ const orgHookRuleFields = z.object({
+   event: z.enum(['pre_tool', 'post_tool']),
+@@ -3540,6 +3554,17 @@ export const actionRegistry = [
+     inputSchema: orgPreviewEffectivePolicyInput,
+     outputSchema: orgEffectivePolicyOutput,
+   },
++  {
++    id: 'policy.read_effective',
++    label: 'Read effective policy',
++    description: 'Read the effective policy of one thread: each value the gateway enforces for it, the layer that set it, and a lock where a higher layer fixes it. Any member of the organization may read it, and the organization comes from the session. Never model-executable.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: policyReadEffectiveInput,
++    outputSchema: policyReadEffectiveOutput,
++  },
+   {
+     id: 'org.create_hook',
+     label: 'Add organization hook rule',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.test.ts b/apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.test.ts
+new file mode 100644
+index 000000000..f92694984
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.test.ts	
+@@ -0,0 +1,49 @@
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { getEffectivePolicy } from './policy-effective-client'
++
++afterEach(() => {
++  vi.unstubAllGlobals()
++})
++
++describe('effective policy client', () => {
++  it('asks for the thread only and keeps each origin, lock and unavailable item the server gives', async () => {
++    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
++      new Response(
++        JSON.stringify({
++          data: {
++            items: [
++              { key: 'web.mode', value: 'off', origin: 'org', revision: 4, locked: true },
++              { key: 'model_access.allow', value: 2, origin: 'platform', locked: false },
++              { key: 'model_access', value: null, origin: null, locked: false, unavailable: true },
++            ],
++          },
++        }),
++        { status: 200, headers: { 'content-type': 'application/json' } },
++      ),
++    )
++    vi.stubGlobal('fetch', fetchMock)
++
++    const items = await getEffectivePolicy('thread_1')
++
++    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/v1/policy/effective?thread_id=thread_1')
++    expect(items).toEqual([
++      { key: 'web.mode', value: 'off', origin: 'org', revision: 4, locked: true, unavailable: false },
++      { key: 'model_access.allow', value: 2, origin: 'platform', locked: false, unavailable: false },
++      { key: 'model_access', value: null, origin: null, locked: false, unavailable: true },
++    ])
++  })
++
++  it('refuses an origin the view does not name, rather than showing it', async () => {
++    vi.stubGlobal(
++      'fetch',
++      vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
++        new Response(
++          JSON.stringify({ data: { items: [{ key: 'web.mode', value: 'off', origin: 'elsewhere', locked: true }] } }),
++          { status: 200, headers: { 'content-type': 'application/json' } },
++        ),
++      ),
++    )
++
++    await expect(getEffectivePolicy('thread_1')).rejects.toThrow()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.ts
+new file mode 100644
+index 000000000..04cb8e682
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/policy-effective-client.ts	
+@@ -0,0 +1,28 @@
++import { requestJson } from './http'
++import { z } from 'zod'
++
++// The effective policy of one thread (Wave 3 EP-9 T2), as the browser's aggregate route returns it. Each value names
++// the layer that set it, and `locked` is set when a higher layer fixes it. A value an owner did not answer for is
++// `unavailable` with no value, so a caller shows that state and never a guess in its place. A member's items carry no
++// `revision`; the revision is admin detail.
++const effectivePolicyItemSchema = z.object({
++  key: z.string(),
++  value: z.unknown(),
++  origin: z.enum(['platform', 'org', 'space', 'user', 'request']).nullable(),
++  revision: z.number().int().nonnegative().optional(),
++  locked: z.boolean(),
++  unavailable: z.boolean().default(false),
++})
++
++// requestJson has already unwrapped the route's `{ data }` envelope.
++const effectivePolicyBodySchema = z.object({
++  items: z.array(effectivePolicyItemSchema),
++})
++
++export type EffectivePolicyItem = z.infer<typeof effectivePolicyItemSchema>
++
++/** The effective policy of one thread, value by value, in the order the server lists them. */
++export async function getEffectivePolicy(threadId: string): Promise<EffectivePolicyItem[]> {
++  const params = new URLSearchParams({ thread_id: threadId })
++  return effectivePolicyBodySchema.parse(await requestJson(`/api/v1/policy/effective?${params}`)).items
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index 85cf2fa28..f06f12ca6 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -576,6 +576,12 @@ fn proxy_routes() -> Router<AppState> {
+             "/v1/org/agent-policy/effective",
+             get(get_org_agent_policy_effective_proxy),
+         )
++        // The effective policy of one thread (Wave 3 EP-9 T2). Mounted always: the handler answers 404 while its switch
++        // is off, so the route fence below still reaches it.
++        .route(
++            "/v1/policy/effective",
++            get(crate::policy_effective::get_policy_effective),
++        )
+         .route(
+             "/v1/org/hooks",
+             get(list_org_hooks_proxy).post(create_org_hook_proxy),
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/policy_effective.rs b/apps/Model Plane/rust/services/model-gateway/src/policy_effective.rs
+new file mode 100644
+index 000000000..0a3cf8092
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/policy_effective.rs	
+@@ -0,0 +1,560 @@
++//! `GET /v1/policy/effective?thread_id=`: the values the gateway enforces for one thread, each with the layer that set
++//! it and that layer's revision (Wave 3 EP-9 T2).
++//!
++//! Each owner answers for its own layers and the BFF aggregates them, so this view carries only what the gateway
++//! decides itself: the approval posture and whether a pin fixes it, the run budget, and the organization's agent
++//! switches as the gateway enforces them. An organization value is reported only where the enforced policy changed it
++//! from the platform default. A policy the gateway cannot read is unavailable for each key it would have set, never a
++//! guess. Session Core says whether the caller owns the thread, and a thread the caller does not own answers exactly as
++//! one that does not exist. The view is read-only and stores nothing.
++
++use std::sync::{Arc, OnceLock};
++
++use axum::extract::{Query, State};
++use axum::http::StatusCode;
++use axum::response::{IntoResponse, Response};
++use axum::{Extension, Json};
++use mp_contracts::agent_mode::AgentMode;
++use mp_contracts::model_plane::v1::{AutonomyRung, ResolveThreadOwnerRequest};
++use mp_contracts::org_agent_policy::{
++    Status, DEFAULT_MAX_FAN_OUT_ITEMS, RESEARCH_MAX_FAN_OUT_ITEMS, SETTINGS,
++};
++use serde::{Deserialize, Serialize};
++use serde_json::{json, Map, Value};
++
++use crate::auth::{Claims, VerifiedCapabilityBearer, VerifiedModelBearer};
++use crate::http_routes::authenticated_session_request;
++use crate::org_agent_policy::{ensure, policy_mode, shared_cache, OrgPolicy, PolicyMode};
++use crate::profile::ApprovalPosture;
++use crate::run_budget::{run_budget_from_env, RunBudget};
++use crate::state::AppState;
++
++/// The environment switch of this view (Wave 3 EP-9 T2). Off by default: the route answers 404 and nothing is read.
++/// Parsed by the shared strict parser, so only the literal `true` enables it.
++pub const POLICY_EFFECTIVE_ENV: &str = "MODEL_GATEWAY_POLICY_EFFECTIVE";
++
++/// The one strict parser of the switch.
++#[must_use]
++pub fn policy_effective_from(value: Option<&str>) -> bool {
++    mp_contracts::loop_fold::switch_from(value)
++}
++
++/// Whether the switch is on in this process. Read once, so it cannot change under a request.
++#[must_use]
++pub fn policy_effective_enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        policy_effective_from(std::env::var(POLICY_EFFECTIVE_ENV).ok().as_deref())
++    })
++}
++
++const ORIGIN_PLATFORM: &str = "platform";
++const ORIGIN_ORG: &str = "org";
++
++/// The longest thread id the view accepts. A session thread id is a short opaque string.
++const MAX_THREAD_ID_LEN: usize = 200;
++
++const APPROVAL_POSTURE: &str = "approval.posture";
++const BUDGET_MAX_ROUNDS: &str = "budget.max_rounds";
++const BUDGET_MAX_SUBAGENTS: &str = "budget.max_subagents";
++const MODE_CAP: &str = "mode_cap";
++const RUNG_CAP: &str = "rung_cap";
++const WEB_MODE: &str = "web.mode";
++const WEB_PAID_PROVIDERS: &str = "web.paid_providers";
++
++/// The organization keys this view reports from the enforced policy, in the order the view lists them.
++const ORG_KEYS: [&str; 5] = [
++    MODE_CAP,
++    RUNG_CAP,
++    WEB_MODE,
++    WEB_PAID_PROVIDERS,
++    RESEARCH_MAX_FAN_OUT_ITEMS,
++];
++
++/// The rung cap a policy that sets none reads as: the loosest rung, which caps nothing.
++const RUNG_CAP_DEFAULT: &str = "danger_full_access";
++
++/// One value in the view: what it is, the layer that set it, and whether a layer above the person fixes it.
++#[derive(Debug, Clone, PartialEq, Serialize)]
++pub struct EffectiveItem {
++    pub key: &'static str,
++    /// The value in force. `None` only when `unavailable` is set.
++    pub value: Option<Value>,
++    /// The layer that set the value: `platform`, `org`, `space`, `user` or `request`. `None` only when unavailable.
++    pub origin: Option<&'static str>,
++    /// The organization policy revision the value was set at. Set only for an organization origin.
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub revision: Option<i64>,
++    /// Whether a layer above the person fixes the value, so the person cannot choose a looser one.
++    pub locked: bool,
++    /// The gateway could not answer for this key, so it gives no value rather than a guess.
++    #[serde(skip_serializing_if = "is_false")]
++    pub unavailable: bool,
++}
++
++fn is_false(value: &bool) -> bool {
++    !*value
++}
++
++impl EffectiveItem {
++    fn platform(key: &'static str, value: Value, locked: bool) -> Self {
++        Self {
++            key,
++            value: Some(value),
++            origin: Some(ORIGIN_PLATFORM),
++            revision: None,
++            locked,
++            unavailable: false,
++        }
++    }
++
++    fn unavailable(key: &'static str) -> Self {
++        Self {
++            key,
++            value: None,
++            origin: None,
++            revision: None,
++            locked: false,
++            unavailable: true,
++        }
++    }
++}
++
++/// What the gateway's layers hold for one call, read before the view is built.
++#[derive(Debug)]
++pub struct Layers {
++    /// The approval posture floor: the platform default, or `Ask` when the verified scopes pin it.
++    pub posture: ApprovalPosture,
++    /// The run budget the environment sets for a standard route.
++    pub budget: RunBudget,
++    /// The organization's agent policy as the gateway enforces it for this call.
++    pub org: OrgLayer,
++}
++
++/// The organization layer as the gateway enforces it. Only an enforced policy binds a value.
++#[derive(Debug)]
++pub enum OrgLayer {
++    /// The switch does not enforce the policy (off, or shadow), so the platform defaults apply.
++    NotBinding,
++    /// The enforced policy, held through the cache.
++    Held(Arc<OrgPolicy>),
++    /// The switch enforces the policy but it cannot be read. Each organization key is unavailable, never guessed.
++    Unreadable,
++}
++
++/// The view for one call, in the order the view lists it: the approval posture, the run budget, the organization's
++/// switches as enforced, then the reserved keys at their platform default.
++#[must_use]
++pub fn effective_items(layers: &Layers) -> Vec<EffectiveItem> {
++    let mut items = vec![
++        EffectiveItem::platform(
++            APPROVAL_POSTURE,
++            json!(layers.posture.as_permission_mode()),
++            layers.posture == ApprovalPosture::Ask,
++        ),
++        // No person sets the budget, so the platform's value is fixed for every person.
++        EffectiveItem::platform(BUDGET_MAX_ROUNDS, json!(layers.budget.max_rounds), true),
++        EffectiveItem::platform(
++            BUDGET_MAX_SUBAGENTS,
++            json!(layers.budget.max_subagents),
++            true,
++        ),
++    ];
++    items.extend(org_items(&layers.org));
++    // A reserved key is enforced by no owner yet, so its platform default is what is in force. It is listed so the
++    // view names every key the organization may set, not only the ones enforced today.
++    items.extend(
++        SETTINGS
++            .iter()
++            .filter(|def| def.status == Status::Reserved)
++            .map(|def| EffectiveItem::platform(def.key, json!(def.default), false)),
++    );
++    items
++}
++
++fn org_items(org: &OrgLayer) -> Vec<EffectiveItem> {
++    match org {
++        // A policy that does not bind is the platform defaults, which is exactly the document with no keys.
++        OrgLayer::NotBinding => held_items(&OrgPolicy::from_settings(0, "", &Map::new())),
++        OrgLayer::Held(policy) => held_items(policy),
++        OrgLayer::Unreadable => ORG_KEYS
++            .into_iter()
++            .map(EffectiveItem::unavailable)
++            .collect(),
++    }
++}
++
++/// The organization keys as the enforced policy states them. A key the organization did not change reads as the
++/// platform default, so the origin names the organization only for a value it set.
++fn held_items(policy: &OrgPolicy) -> Vec<EffectiveItem> {
++    let revision = policy.revision;
++    let caps = policy.web;
++    let cap_changed = policy.mode_cap != AgentMode::Auto;
++    let rung_changed = policy.rung_cap.is_some();
++    let fan_out = policy.max_fan_out_items;
++    vec![
++        org_key(
++            MODE_CAP,
++            json!(policy.mode_cap.as_str()),
++            cap_changed,
++            cap_changed,
++            revision,
++        ),
++        org_key(
++            RUNG_CAP,
++            json!(policy.rung_cap.map_or(RUNG_CAP_DEFAULT, rung_token)),
++            rung_changed,
++            rung_changed,
++            revision,
++        ),
++        org_key(
++            WEB_MODE,
++            json!(if caps.live { "live" } else { "off" }),
++            !caps.live,
++            !caps.live,
++            revision,
++        ),
++        org_key(
++            WEB_PAID_PROVIDERS,
++            json!(if caps.paid { "on" } else { "off" }),
++            !caps.paid,
++            !caps.paid,
++            revision,
++        ),
++        // A fan-out cap the organization raised is not a restriction; only a lower one is locked.
++        org_key(
++            RESEARCH_MAX_FAN_OUT_ITEMS,
++            json!(fan_out),
++            fan_out != DEFAULT_MAX_FAN_OUT_ITEMS,
++            fan_out < DEFAULT_MAX_FAN_OUT_ITEMS,
++            revision,
++        ),
++    ]
++}
++
++/// One organization key: the platform default unless the organization changed it, and then the organization at the
++/// revision it changed it at.
++fn org_key(
++    key: &'static str,
++    value: Value,
++    changed: bool,
++    locked: bool,
++    revision: i64,
++) -> EffectiveItem {
++    if !changed {
++        return EffectiveItem::platform(key, value, false);
++    }
++    EffectiveItem {
++        key,
++        value: Some(value),
++        origin: Some(ORIGIN_ORG),
++        revision: Some(revision),
++        locked,
++        unavailable: false,
++    }
++}
++
++/// The schema token of a rung cap. A cap is only ever read as read-only or workspace-write, so any other rung is the
++/// narrowest one, as `rung_from_token` reads it.
++fn rung_token(rung: AutonomyRung) -> &'static str {
++    match rung {
++        AutonomyRung::WorkspaceWrite => "workspace_write",
++        _ => "read_only",
++    }
++}
++
++/// The query of the view: the one thread the caller asks about.
++#[derive(Debug, Deserialize)]
++pub struct PolicyEffectiveQuery {
++    thread_id: Option<String>,
++}
++
++/// `GET /v1/policy/effective?thread_id=`: the effective policy of one thread for the caller. The organization comes
++/// from the verified token, never from the query, and the thread must be the caller's.
++pub async fn get_policy_effective(
++    State(state): State<AppState>,
++    Extension(claims): Extension<Claims>,
++    session: VerifiedModelBearer,
++    capability: VerifiedCapabilityBearer,
++    Query(query): Query<PolicyEffectiveQuery>,
++) -> Response {
++    if !policy_effective_enabled() {
++        return StatusCode::NOT_FOUND.into_response();
++    }
++    let thread_id = match query.thread_id.as_deref().map(str::trim) {
++        Some(id) if !id.is_empty() && id.len() <= MAX_THREAD_ID_LEN => id.to_owned(),
++        _ => {
++            return typed(
++                StatusCode::BAD_REQUEST,
++                "thread_id_required",
++                "A thread_id of 1 to 200 characters is required.",
++            )
++        }
++    };
++    // Session Core owns the thread. It is asked with the caller's own identity, so a thread that is not theirs
++    // answers the same as one that does not exist.
++    let request = match authenticated_session_request(
++        ResolveThreadOwnerRequest {
++            thread_id,
++            org_id: claims.org_id.clone(),
++            user_id: claims.user_id.clone(),
++        },
++        &session,
++    ) {
++        Ok(request) => request,
++        Err(_) => return unavailable(),
++    };
++    let authorized = match state.run_client.clone().resolve_thread_owner(request).await {
++        Ok(response) => response.into_inner().authorized,
++        Err(status) => {
++            tracing::warn!(
++                code = ?status.code(),
++                "Session Core thread ownership lookup unavailable for the policy view"
++            );
++            return unavailable();
++        }
++    };
++    if !authorized {
++        return typed(
++            StatusCode::NOT_FOUND,
++            "thread_not_found",
++            "No thread with that id is visible to the caller.",
++        );
++    }
++    let layers = Layers {
++        posture: crate::sse::posture_floor(&claims),
++        budget: run_budget_from_env(false),
++        org: org_layer(&state, &claims, &capability).await,
++    };
++    Json(json!({ "data": { "items": effective_items(&layers) } })).into_response()
++}
++
++/// The organization layer for one call. A policy the switch does not enforce binds nothing. An enforced one is read
++/// through the cache, and one that cannot be read is reported as unreadable.
++async fn org_layer(
++    state: &AppState,
++    claims: &Claims,
++    capability: &VerifiedCapabilityBearer,
++) -> OrgLayer {
++    match policy_mode() {
++        PolicyMode::Off | PolicyMode::Shadow => OrgLayer::NotBinding,
++        PolicyMode::Enforce => match ensure(
++            shared_cache(),
++            &state.http_client,
++            &state.capability_core_base_url,
++            &claims.org_id,
++            capability.as_str(),
++        )
++        .await
++        {
++            Ok(policy) => OrgLayer::Held(policy),
++            Err(error) => {
++                tracing::warn!(%error, "org agent policy cannot be read for the policy view");
++                OrgLayer::Unreadable
++            }
++        },
++    }
++}
++
++/// The typed error envelope every refusal of this view uses: `{ error: { code, message, details } }`.
++fn typed(status: StatusCode, code: &'static str, message: &'static str) -> Response {
++    (
++        status,
++        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
++    )
++        .into_response()
++}
++
++fn unavailable() -> Response {
++    typed(
++        StatusCode::SERVICE_UNAVAILABLE,
++        "policy_unavailable",
++        "The effective policy cannot be read right now; try again.",
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn settings(value: Value) -> Map<String, Value> {
++        value.as_object().cloned().unwrap_or_default()
++    }
++
++    fn held(revision: i64, body: Value) -> OrgLayer {
++        OrgLayer::Held(Arc::new(OrgPolicy::from_settings(
++            revision,
++            "sha256:test",
++            &settings(body),
++        )))
++    }
++
++    fn layers(org: OrgLayer) -> Layers {
++        Layers {
++            posture: ApprovalPosture::Auto,
++            budget: RunBudget::default(),
++            org,
++        }
++    }
++
++    fn item<'a>(items: &'a [EffectiveItem], key: &str) -> &'a EffectiveItem {
++        items
++            .iter()
++            .find(|item| item.key == key)
++            .unwrap_or_else(|| panic!("{key} is listed"))
++    }
++
++    #[test]
++    fn the_switch_is_strict_and_off_by_default() {
++        assert!(policy_effective_from(Some("true")));
++        assert!(policy_effective_from(Some(" TRUE ")));
++        for off in [
++            None,
++            Some(""),
++            Some("false"),
++            Some("1"),
++            Some("on"),
++            Some("yes"),
++            Some("truee"),
++        ] {
++            assert!(!policy_effective_from(off), "{off:?} must stay off");
++        }
++    }
++
++    #[test]
++    fn the_posture_is_platform_and_locked_only_when_its_floor_is_ask() {
++        let auto = effective_items(&layers(OrgLayer::NotBinding));
++        assert_eq!(item(&auto, APPROVAL_POSTURE).value, Some(json!("auto")));
++        assert_eq!(item(&auto, APPROVAL_POSTURE).origin, Some("platform"));
++        assert!(!item(&auto, APPROVAL_POSTURE).locked);
++
++        let ask = effective_items(&Layers {
++            posture: ApprovalPosture::Ask,
++            ..layers(OrgLayer::NotBinding)
++        });
++        assert_eq!(item(&ask, APPROVAL_POSTURE).value, Some(json!("ask")));
++        assert!(item(&ask, APPROVAL_POSTURE).locked);
++    }
++
++    #[test]
++    fn the_budget_is_platform_and_locked_because_no_person_sets_it() {
++        let items = effective_items(&Layers {
++            budget: RunBudget {
++                max_rounds: 6,
++                max_subagents: 2,
++            },
++            ..layers(OrgLayer::NotBinding)
++        });
++        assert_eq!(item(&items, BUDGET_MAX_ROUNDS).value, Some(json!(6)));
++        assert_eq!(item(&items, BUDGET_MAX_ROUNDS).origin, Some("platform"));
++        assert!(item(&items, BUDGET_MAX_ROUNDS).locked);
++        assert_eq!(item(&items, BUDGET_MAX_SUBAGENTS).value, Some(json!(2)));
++    }
++
++    #[test]
++    fn a_policy_that_does_not_bind_reads_the_platform_defaults() {
++        let items = effective_items(&layers(OrgLayer::NotBinding));
++        for (key, value) in [
++            (MODE_CAP, json!("auto")),
++            (RUNG_CAP, json!("danger_full_access")),
++            (WEB_MODE, json!("live")),
++            (WEB_PAID_PROVIDERS, json!("on")),
++            (RESEARCH_MAX_FAN_OUT_ITEMS, json!(8)),
++        ] {
++            let found = item(&items, key);
++            assert_eq!(found.value, Some(value), "{key}");
++            assert_eq!(found.origin, Some("platform"), "{key}");
++            assert_eq!(found.revision, None, "{key}");
++            assert!(!found.locked, "{key}");
++        }
++    }
++
++    #[test]
++    fn an_enforced_policy_names_the_organization_and_its_revision_for_a_value_it_changed() {
++        let items = effective_items(&layers(held(4, json!({"web.mode": "off"}))));
++        let web = item(&items, WEB_MODE);
++        assert_eq!(web.value, Some(json!("off")));
++        assert_eq!(web.origin, Some("org"));
++        assert_eq!(web.revision, Some(4));
++        assert!(web.locked, "an organization switch that is off fixes web access");
++        // A key the organization did not change keeps the platform's name and carries no revision.
++        assert_eq!(item(&items, WEB_PAID_PROVIDERS).origin, Some("platform"));
++        assert_eq!(item(&items, WEB_PAID_PROVIDERS).revision, None);
++        assert_eq!(item(&items, MODE_CAP).origin, Some("platform"));
++    }
++
++    #[test]
++    fn a_value_the_organization_sets_to_its_default_still_reads_as_platform() {
++        let items = effective_items(&layers(held(2, json!({"web.mode": "live"}))));
++        assert_eq!(item(&items, WEB_MODE).origin, Some("platform"));
++        assert!(!item(&items, WEB_MODE).locked);
++    }
++
++    #[test]
++    fn a_mode_cap_and_a_rung_cap_are_locked_and_read_as_their_tokens() {
++        let items = effective_items(&layers(held(
++            5,
++            json!({"mode_cap": "read_only", "rung_cap": "workspace_write"}),
++        )));
++        assert_eq!(item(&items, MODE_CAP).value, Some(json!("read_only")));
++        assert_eq!(item(&items, MODE_CAP).origin, Some("org"));
++        assert!(item(&items, MODE_CAP).locked);
++        assert_eq!(item(&items, RUNG_CAP).value, Some(json!("workspace_write")));
++        assert!(item(&items, RUNG_CAP).locked);
++    }
++
++    #[test]
++    fn a_fan_out_cap_is_locked_only_when_the_organization_lowers_it() {
++        let lower = effective_items(&layers(held(3, json!({"research.max_fan_out_items": 3}))));
++        let cap = item(&lower, RESEARCH_MAX_FAN_OUT_ITEMS);
++        assert_eq!(cap.value, Some(json!(3)));
++        assert_eq!(cap.origin, Some("org"));
++        assert!(cap.locked);
++    }
++
++    #[test]
++    fn an_unreadable_organization_is_unavailable_for_each_key_and_never_guessed() {
++        let items = effective_items(&layers(OrgLayer::Unreadable));
++        for key in ORG_KEYS {
++            let found = item(&items, key);
++            assert!(found.unavailable, "{key}");
++            assert_eq!(found.value, None, "{key}");
++            assert_eq!(found.origin, None, "{key}");
++        }
++        // The platform's own values are still answered when the organization cannot be read.
++        assert!(!item(&items, APPROVAL_POSTURE).unavailable);
++    }
++
++    #[test]
++    fn a_reserved_key_is_listed_at_its_platform_default_whatever_the_document_says() {
++        let items = effective_items(&layers(held(1, json!({"ext.skills": "none"}))));
++        let skills = item(&items, "ext.skills");
++        assert_eq!(skills.value, Some(json!("any")));
++        assert_eq!(skills.origin, Some("platform"));
++        assert!(!skills.locked);
++    }
++
++    #[test]
++    fn an_unavailable_item_serializes_with_a_null_value_and_no_revision() {
++        let value = serde_json::to_value(EffectiveItem::unavailable(MODE_CAP))
++            .expect("the item serializes");
++        assert_eq!(
++            value,
++            json!({"key": "mode_cap", "value": null, "origin": null, "locked": false, "unavailable": true})
++        );
++    }
++
++    #[test]
++    fn a_platform_item_carries_no_revision_key() {
++        let value = serde_json::to_value(EffectiveItem::platform(
++            APPROVAL_POSTURE,
++            json!("auto"),
++            false,
++        ))
++        .expect("the item serializes");
++        assert_eq!(
++            value,
++            json!({"key": "approval.posture", "value": "auto", "origin": "platform", "locked": false})
++        );
++    }
++}

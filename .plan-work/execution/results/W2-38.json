@@ -1,0 +1,777 @@
+{
+ "batchId": "W2-38",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS15-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\stream-activity.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\stream-activity.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\lib\\chat-accessibility.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-types.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPage.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\types.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\derive.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\derive.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\registry.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\chat-nodes\\registry.live.test.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.lifecycle.test.tsx (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\use-chat-controller.lifecycle.test.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\tests\\e2e\\chat-lifecycle-cues.spec.ts (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "./node_modules/.bin/vitest run src/features/chat src/shared/chat-nodes src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts (final run, started 02:34, after the last code edit)",
+     "outcome": "120 files, 1794 tests passed, exit 0 (includes the new use-chat-controller.lifecycle and ChatMessages.lifecycle suites, the locale smoke and chat-accessibility)"
+    },
+    {
+     "command": "./node_modules/.bin/vitest run src/features/chat/components/use-chat-controller.lifecycle.test.ts",
+     "outcome": "5 passed (notices collected in arrival order, retry matched to the running call, replay dropped, cap of 20, session-only for ordinary and temporary threads)"
+    },
+    {
+     "command": "./node_modules/.bin/vitest run src/features/chat/components/ChatMessages.lifecycle.test.tsx",
+     "outcome": "9 passed (sentences, generic fallback, failed summary as truncation, thinking line, plain turn silent, English locale with expectNoNorwegian)"
+    },
+    {
+     "command": "./node_modules/.bin/tsc -p tsconfig.app.json --noEmit",
+     "outcome": "23 errors, none in files this slice touched: 21 in src/shared/api/quarry-client.ts (no @quarry/client link in this worktree) and 1 in schedule-contract.test.ts, both pre-existing (22 on the first run). One new error, src/shared/api/ag-ui-client.ts:127 TS2366, comes from WS22-S6's uncommitted lifecycle.sandbox variant in src/shared/chat/verevon-ui-events.ts, which this slice did not edit and I did not revert"
+    },
+    {
+     "command": "./node_modules/.bin/eslint on the 15 touched and new frontend files (product config, includes the UI copy gate)",
+     "outcome": "0 errors. 25 solid/reactivity warnings, all pre-existing and none on lines written here. Suppression counts match the baseline for ChatMessages 37, ChatPage 4, chat-types 9, use-chat-controller 15. stream-activity.ts now has 0 against a recorded 3, so eslint exits 2 with 'suppressions left that do not occur anymore' until the lead prunes"
+    },
+    {
+     "command": "./node_modules/.bin/playwright test --list tests/e2e/chat-lifecycle-cues.spec.ts",
+     "outcome": "2 tests discovered under the e2e project. Not executed: it needs the signed-in :5199 stack"
+    },
+    {
+     "command": "git diff --check on verevonv3",
+     "outcome": "clean for this slice; the only warning is CRLF in verevon-ui-events.ts, which this slice did not touch"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\eslint-suppressions.json: prune the no-restricted-syntax entry for src/features/chat/lib/stream-activity.ts (recorded count 3, now 0). Run the prune command the comment in eslint.ui-gates.config.js gives (--prune-suppressions over src), then confirm pnpm lint exits 0. Until then eslint exits 2 on this slice's files.",
+    "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\styles\\global.css: add .verevon-chat-lifecycle-notices {display:flex; flex-direction:column; align-items:flex-start} and give .verevon-chat-lifecycle-notice the same declarations as .verevon-chat-source-scope-notice (around line 27290). Also add .verevon-chat-lifecycle-notice to the svg flex-shrink group near line 27281. Without this the notes render legible but unstyled.",
+    "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\docs\\UI_STATE_CHECKLIST.md: add a 'Retrying and trimmed' state row. Automated: ChatMessages.lifecycle.test.tsx (sentences in both locales; a plain turn is silent), use-chat-controller.lifecycle.test.ts (collected, replay dropped, cap 20, session-only), stream-activity.test.ts (retrying line), tests/e2e/chat-lifecycle-cues.spec.ts (browser). Tick it only on browser evidence.",
+    "Live proof (lead, needs a rebuilt stack): rebuild model-gateway and execution-core with MODEL_GATEWAY_LIFECYCLE_EVENTS=true for the run, e.g. bash 'apps/Model Plane/scripts/compose.sh' up -d --no-deps --build model-gateway (and execution-core). Make a transient Data Plane outage so knowledge_search fails transiently. Capture curl -N SSE showing retry_scheduled frames. Run pnpm dev --port 5174 --strictPort from the worktree. Screenshot the notes and the live-region text, and check the Trace rows the row names. Record the evidence file and date in the plan's Build ledger.",
+    "Browser run: pnpm test:e2e -- chat-lifecycle-cues, which the row names. The spec sits in the e2e project, so it needs the :5199 stack's setup project. To run it against the second dev server as the perf spec does, add lifecycle-cues to CHAT_WORKSPACE_SPECS in playwright.config.ts (shared-edit) and run it with --project=chat and LOCAL_E2E_BASE_URL=http://localhost:5174. The spec has never run in a browser.",
+    "Compose flip, only after the live evidence exists (owner decision in the row): change MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false} to :-true at apps\\Model Plane\\deploy\\docker-compose.yml line 302 (model-gateway) and line 1545 (execution-core). Do not flip before the evidence.",
+    "Ledger: add the WS15-S5 entry to apps\\Model Plane\\docs\\decisions\\ledger.md (the session-only decision, the callId deviation, the retrieval note), and the Build ledger row in docs\\plans\\model-plane-chat-build-plan-2026-10-14.md.",
+    "Typecheck: src/shared/api/ag-ui-client.ts:127 (TS2366) is not this slice's. It comes from WS22-S6's uncommitted lifecycle.sandbox variant in src/shared/chat/verevon-ui-events.ts, whose toAgUiEvent switch has no case for it. The WS22-S6 owner must add a case or a default; ag-ui-client.ts is not in WS22-S6's file list, so it needs a shared edit or an owner decision. Pre-existing environment errors (21 in quarry-client.ts for the missing @quarry/client link, 1 in schedule-contract.test.ts) are unrelated."
+   ],
+   "deviations": [
+    "No ChatToolCall.attempts field. Retry state lives on the lifecycle notice as callId, and deriveStreamActivity(calls, notices) reads it. turnsToTranscript copies tool calls, so an attempts field would be persisted with them, and the S1 ledger line says nothing is stored S1-S7.",
+    "Lifecycle notices are session-only for every thread, not 'skipped for temporary/ZDR threads' only. Persisting them for ordinary threads would need edits in chat-normalizers.ts and chat-thread-history.ts, which are not owned, and it would contradict the S1 ledger line. S8 is the counts-only persistence path if wanted.",
+    "retrieval_notice is not one of the S1 tokens. It is rendered as a lifecycle note keyed by its catalogued wording_key, because the row requires onRetrievalNotice wiring and the gateway sends no sentence. Keys handled: retrieval.zdr_dense_unavailable, and any other key as the generic reduced-answer sentence.",
+    "streamActivityLabel signature changed to (activity, i18n). Call sites updated: ChatMessages ThinkingDots and ChatPage spokenActivity. Its three Norwegian literals moved into i18n.tr, so the eslint suppression recorded for stream-activity.ts (count 3) is now stale.",
+    "chat-accessibility.test.ts was edited although it is not in the owned list. It asserts ChatPage source text, so I updated the two call-shape assertions and added one for the lifecycle announcement. I treated it as a test beside stream-activity.ts, which changed.",
+    "registry.test.ts and registry.live.test.ts ALL_KINDS lists gained 'lifecycle-notices' (test files beside types.ts, which changed).",
+    "MODEL_GATEWAY_LIFECYCLE_EVENTS stays default false, per the wave-mode rule that every new switch is off. The row's flip to true waits for the live proof."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\eslint-suppressions.json (prune stream-activity.ts entry)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\styles\\global.css (notice styles)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\docs\\UI_STATE_CHECKLIST.md (state rows)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\playwright.config.ts (optional: chat project regex for the new spec)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\deploy\\docker-compose.yml (lines 302 and 1545: flip only after live evidence)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\decisions\\ledger.md (WS15-S5 entry)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\docs\\plans\\model-plane-chat-build-plan-2026-10-14.md (Build ledger row)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "pnpm lint exits 2 on 'suppressions left that do not occur anymore' because stream-activity.ts no longer needs its 3 recorded no-restricted-syntax suppressions. The lead must prune that entry in apps/Frontend Plane/verevonv3/eslint-suppressions.json (line 222), which is a shared file. With --pass-on-unpruned-suppressions the owned files show 0 errors.",
+     "pnpm typecheck: src/shared/api/ag-ui-client.ts(127) TS2366 comes from WS22-S6's uncommitted lifecycle.sandbox variant in verevon-ui-events.ts, not from this slice. It needs a case or default in ag-ui-client.ts through a shared edit. The other errors (quarry-client.ts link, schedule-contract.test.ts) were already there.",
+     "global.css styles for .verevon-chat-lifecycle-notices and .verevon-chat-lifecycle-notice are a shared edit and are not added yet. Without them the notes render unstyled.",
+     "UI_STATE_CHECKLIST.md rows (retrying, history trimmed, compacted, parked) are a shared edit and are not added.",
+     "pnpm test:e2e -- chat-lifecycle-cues has never run in a browser. It needs the signed-in stack or a playwright.config.ts chat-project regex entry (shared).",
+     "Live proof is not done: rebuild model-gateway and execution-core with the switch on, cause a transient Data Plane outage, capture SSE retry_scheduled with curl, and take screenshots of the notes and live-region text on the second dev server.",
+     "The row's DoD flip of MODEL_GATEWAY_LIFECYCLE_EVENTS to default true in apps/Model Plane/deploy/docker-compose.yml is deliberately not done. Wave mode keeps switches off, so the lead flips it only after live evidence exists.",
+     "Ledger entries are not written: the decisions ledger.md WS15-S5 entry and the plan's Build ledger row."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The live proof for WS15-S5 is not run: no rebuilt model-gateway or execution-core with the switch on, no transient Data Plane outage producing retry_scheduled, and no browser screenshot of the notes and live-region text. The compose default must not flip until this evidence exists."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "tests/e2e/chat-lifecycle-cues.spec.ts has only been listed by Playwright, never executed. It depends on the signed-in stack, the fetch shim's frame timing and the live-region observer, so its first run may need fixes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The announcement effect keys on the last notice of the waiting turn. Notices appended in the same render flush collapse into one live-region sentence, so an earlier notice is never announced (it still shows in the transcript). Fix: track the count already announced and speak each new notice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Retry-to-call matching is by tool name among running calls at arrival, because the retry frame carries no call id. Two parallel calls to the same tool can be mismatched, so the retrying line may name the wrong call. The fix needs the call id on the retry frame, which is a gateway-side contract change for the WS15-S3 owner."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner to review the Norwegian and English wording of the zdr_dense_unavailable note and the generic reduced-answer note. The client writes this copy, so it needs a sign-off before the switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Lifecycle notices are session-only, so a reload loses them. Owner to decide whether S8 (persisted counts-only notes) is wanted for reload parity."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Identical notices within one turn are de-duplicated, so two retries of the same tool with the same attempt number show once. The sentence is identical, but the count is lost. Owner may prefer a count."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The row's evidence names 'Trace rows'. This slice did not change the Trace panel and I did not verify what it already shows for lifecycle events. The lead should check the screenshot evidence against it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "chat-lifecycle-cues is not in the chat project regex of playwright.config.ts, so it runs only under e2e with the :5199 setup dependency and cannot run fixture-only against the local dev server."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ChatPage announcement effect runs a findLast over the turns on every streamed token. This is cheap, but it should be checked against chat-perf-budget.json once that budget is measured."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ChatPage announcement effect keys on lifecycle.at(-1) of the waiting turn, so several notices that arrive in one flush produce only one live-region sentence, against the row's 'one polite sentence per notice'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A retry is matched to its call by tool name among running calls, because retry_scheduled carries no call id. Two parallel calls to the same tool can show the retrying line on the wrong call."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Lifecycle notices are session-only for every thread, not only temporary/ZDR threads, and ChatToolCall.attempts was replaced by LifecycleNotice.callId. Both are stricter than the row and consistent with the S1 'no store in S1-S7' clause, but the owner should accept them in the ledger."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The client-authored Norwegian and English copy for retrieval.zdr_dense_unavailable, the generic reduced-answer note and the retry reasons needs owner wording sign-off before the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Exact-duplicate de-duplication (JSON.stringify equality) merges two genuine retries with identical tool, attempt and reason in one turn, for example across two separate calls of the same tool. No test pins the intended behaviour."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "There is no browser or live evidence that the lifecycle-notices node and the live-region sentence render against a rebuilt gateway emitting retry_scheduled, compaction or context_change. This must exist before MODEL_GATEWAY_LIFECYCLE_EVENTS defaults to true."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The row's evidence names Trace rows. This slice did not touch the Trace panel, so the lead should confirm that Trace shows lifecycle events when capturing evidence."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ChatPage announcement effect runs findLast over state.turns on every streamed token. This is cheap, but it should be checked against the chat perf budget."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "vitest run derive.test.ts stream-activity.test.ts ChatMessages.lifecycle.test.tsx use-chat-controller.lifecycle.test.ts --pool=threads",
+      "outcome": "4 files, 67 tests passed",
+      "passed": true
+     },
+     {
+      "command": "vitest run src/features/chat src/shared/chat-nodes --pool=threads (broader, includes locale smoke and chat-accessibility)",
+      "outcome": "118 files, 1648 tests passed",
+      "passed": true
+     },
+     {
+      "command": "tsc -p tsconfig.app.json --noEmit (compile check)",
+      "outcome": "Fails. Excluding the 21 quarry-client.ts errors (missing @quarry/client link), 2 errors remain. schedule-contract.test.ts(28) is pre-existing. src/shared/api/ag-ui-client.ts(127,53) TS2366 'Function lacks ending return statement' is new. It is caused by the uncommitted lifecycle.sandbox variant in verevon-ui-events.ts, which belongs to WS22-S6, not this slice. No error is in this slice's files.",
+      "passed": false
+     },
+     {
+      "command": "eslint on the 11 owned or new frontend files (pnpm lint equivalent)",
+      "outcome": "0 errors, 22 solid/reactivity warnings. The run still reports 'suppressions left that do not occur anymore' (stream-activity.ts now needs 0 suppressions), so eslint exits non-zero until the lead prunes them (--prune-suppressions). The echoed exit 0 came from tail, not eslint.",
+      "passed": false
+     },
+     {
+      "command": "pnpm test:e2e -- chat-lifecycle-cues",
+      "outcome": "Not run. It needs the signed-in :5199 stack, and docker is forbidden. The implementer only listed the spec, which showed 2 tests discovered.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "WS15-S5 SPA status cues are built with every switch off (MODEL_GATEWAY_LIFECYCLE_EVENTS not flipped). What is in place: (1) Node model: ConversationNode 'lifecycle-notices', one per turn, placed after source-scope and before truncated, shown while the turn waits, absent for a plain turn. ChatTurn.lifecycle is session-only, capped at 20, with exact replays dropped by addLifecycleNotice. (2) Controller: onRetryScheduled, onCompaction, onContextChange and onRetrievalNotice are wired in createEvidenceHandlers, which the live stream and resume both use. A retry is matched to the newest running call of its tool at arrival. (3) Activity: StreamActivity gains 'retrying', read from the notice's callId. streamActivityLabel takes the translator, and the thinking line and the spoken heartbeat both use it. All new copy goes through i18n.tr. (4) Renderer: LifecycleNotices in ChatMessages, one role=note paragraph per notice inside a block wrapper. lifecycleNoticeSentence builds every sentence from counts and closed tokens, with a generic fallback for unknown tokens; a failed summary reads as truncation. (5) ChatPage: one polite sentence per notice through the existing streamAnnouncement region, via an effect keyed on the last notice. (6) Nothing is persisted: turnsToTranscript does not copy lifecycle, so there is no local or server copy for any thread. Not verified: no browser run, no rebuilt image, no live proof, and the e2e spec has never executed. pnpm exec fails in this worktree on a missing Ingestion Plane Quarry SDK path, so I ran the local vitest, eslint and tsc binaries directly. No cargo, docker, DB harness or commit was used."
+  },
+  {
+   "id": "WS25-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/execution.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/gateway.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/hook/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/org_policy_characterisation.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/do_run_hooks_test.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --test do_run_hooks_test (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "exit 0, 2 passed: a_deny_rule_blocks_a_do_run_tool_call_before_it_is_dispatched, an_allow_rule_never_bypasses_the_signed_gate"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test org_policy_characterisation",
+     "outcome": "exit 0, 12 passed (includes the reversed first-match, unknown-token and strictest goldens and the Do-loop dispatch golden now expecting ctx.hook_context)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib hook_rules",
+     "outcome": "exit 0, 7 passed (5 new: priority order, deny/ask-only storable, observe_only marking, HOOKS_DO_RUNS strict parse, Do-run org policy off/enforce/empty)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib build_run_agent_request",
+     "outcome": "exit 0 but 0 tests matched the filter, so no builder test ran; the sse.rs builder and spawn_run_dispatch change is covered only by compile"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib hook::",
+     "outcome": "NOT RUN: exit 101, lib test target does not compile. Cause is outside this slice: WS22-S6 is editing sandboxes.proto in this shared worktree (adds GetLeaseStatus), and FakeSandboxManager in execution-core/src/workspace_sync.rs:635 does not implement get_lease_status. The earlier E0063 in agent.rs test literal was fixed; the latest compile reports only the E0046, so the S3 code type-checks in the lib-test cfg."
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib runtime_loop::tests::post_deny",
+     "outcome": "NOT RUN: same external E0046 blocker"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on hook/mod.rs and do_run_hooks_test.rs; file-level rustfmt diff line check on runtime_registries.rs, runtime_loop/mod.rs, sse.rs, agent.rs",
+     "outcome": "no diff inside any line this slice added; remaining diffs are in pre-existing code"
+    },
+    {
+     "command": "git diff --check on the changed files",
+     "outcome": "clean"
+    },
+    {
+     "command": "proto tag additivity (N2): per-message tag set vs git show HEAD",
+     "outcome": "RunAgentRequest HEAD {1-21,23} now also 24 (org_policy); Hook HEAD {1-7} now also 8 (priority); no tag removed or renumbered"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Coordinate with WS22-S6 (or fix as shared-edit): add get_lease_status to FakeSandboxManager in apps/Model Plane/rust/services/execution-core/src/workspace_sync.rs (around line 635), then run cargo test -q -p execution-core --lib hook:: and cargo test -q -p execution-core --lib runtime_loop::tests::post_deny. Set CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0.",
+    "Run cargo test -q -p model-gateway --lib the_dispatch_resolves (sse.rs source-text test on spawn_run_dispatch).",
+    "Regenerate the checked-in Go bindings with buf: apps/Model Plane/go/gen/model_plane/v1/execution.pb.go (OrgPolicyContext and RunAgentRequest.org_policy 24) and gateway.pb.go (Hook.priority 8). Rust bindings come from build.rs and need no regeneration.",
+    "Shared-edit apps/Model Plane/deploy/docker-compose.yml: add HOOKS_DO_RUNS: ${HOOKS_DO_RUNS:-} to the model-gateway environment (near the LOOP_GUARD_MODE line around 372) and HOOKS_FAIL_CLOSED: ${HOOKS_FAIL_CLOSED:-} to the execution-core environment (near 1297). Defaults stay off.",
+    "Record in apps/Model Plane/docs/decisions/ledger.md (append only): WS25-S3 built; the observe_only carrier for shadow; the unflagged strictest-wins, unknown-token-as-ask and post-tool withhold per DEC-15; HookAsk deferred.",
+    "Live proof, lead-run only (not done here): rebuild model-gateway and execution-core; register a deny rule on shell via RegisterHook; run a Do turn and confirm the blocked step and audit row; restart the gateway and confirm the rule is gone (the S8 motivation)."
+   ],
+   "deviations": [
+    "Ask carries no typed HookAsk{rule_id,reason}: the approval still routes to CauseCode::HookAsk and the rule JSON has no id field. Deferred to depth; WS13 owns cause org_hook.",
+    "No HookDecision::DenyWithhold variant: the withhold-versus-fail choice is made at the post-tool call site from the tool class (permission::is_risky_call, the interim class until WS05). Same behaviour, different placement.",
+    "Strictest-wins, unknown-token-as-ask and post-tool withhold ship UNFLAGGED, per the batch decision DEC-15 (only the malformed-context deny is behind HOOKS_FAIL_CLOSED). They change behaviour for existing non-Do paths (tools.rs and browser_run.rs already forward hook_context) when several rules match or a token is unknown, so 'switch off = byte-identical' holds only for single-match contexts. Owner to confirm or gate.",
+    "Shadow mode carries observe_only as a key inside the hook_context JSON (set only by do_run_org_policy for HOOKS_DO_RUNS=shadow), not as a proto field, so OrgPolicyContext keeps the row's three fields. The ledger should record this carrier.",
+    "OrgPolicyContext.policy_revision and policy_digest are always 0 and empty until WS25-S7/S8 supply them.",
+    "tests/org_policy_characterisation.rs was edited even though it is not in the owned list: the WS25-S0 ledger entry says S3 reverses these goldens, so they were updated in the same change. Its dispatch golden header named execute_step_with_subagent, which agent.rs no longer calls (the Do loop calls execute_step_with_result_handles), so it now names the current call; that golden's HEAD status was not run in isolation.",
+    "spawn_run_dispatch sets org_policy after the pure builder returns, because build_run_agent_request is pure and cannot read the registry; the builder itself sets org_policy: None.",
+    "handle_register_hook now refuses any decision other than deny or ask (after trim and lowercase), implementing DEC-15 'allow rules not storable'. Any caller that registered allow or empty decisions now gets InvalidArgument.",
+    "The child-denied Do-run test (root and delegated child both denied) is NOT written: it needs the private agent-loop harness. Propagation is the one-line copy hook_context: parent.hook_context in the child LoopContext construction (agent.rs, child literal)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/workspace_sync.rs (FakeSandboxManager needs get_lease_status; WS22-S6 owns the proto change, and the test double is not in either slice's list)",
+    "apps/Model Plane/deploy/docker-compose.yml (env passthrough for HOOKS_DO_RUNS and HOOKS_FAIL_CLOSED)",
+    "apps/Model Plane/docs/decisions/ledger.md (ledger entry for the S3 decisions and the observe_only carrier)",
+    "apps/Model Plane/go/gen/model_plane/v1/execution.pb.go and gateway.pb.go (buf regeneration)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The execution-core lib unit tests (hook::tests, including malformed_context_fails_closed_when_the_switch_is_on and observe_only_enforces_nothing, plus runtime_loop::tests::post_deny_*) cannot run. The lib-test target fails with E0046: FakeSandboxManager at apps/Model Plane/rust/services/execution-core/src/workspace_sync.rs:635 does not implement get_lease_status, which the concurrent WS22-S6 sandboxes.proto change adds. I confirmed with cargo check --lib --tests that this is the only compile error. Once the lead or WS22-S6 adds the stub, re-run `cargo test -p execution-core hook::` and `--lib runtime_loop::tests::post_deny`.",
+     "Go bindings are not regenerated with buf: execution.pb.go (OrgPolicyContext, RunAgentRequest.org_policy=24) and gateway.pb.go (Hook.priority=8).",
+     "Shared edits to apps/Model Plane/deploy/docker-compose.yml: HOOKS_DO_RUNS passthrough for model-gateway and HOOKS_FAIL_CLOSED passthrough for execution-core, both defaulting to empty/off.",
+     "Append-only entry in the decision ledger: evaluator semantics change (strictest-wins, unknown token as ask, post-tool withhold, unflagged per DEC-15); observe_only JSON carrier for shadow; HookAsk deferred.",
+     "Live proof, run by the lead: register a deny rule on shell via RegisterHook, run a Do turn that includes a delegated child, capture the blocked step and audit row, restart the gateway and confirm the rule is gone."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core lib unit tests (hook::tests including malformed_context_fails_closed_when_the_switch_is_on, observe_only_enforces_nothing, allow_never_overrides_a_later_deny; runtime_loop::tests::post_deny_*) have not run. Blocked by WS22-S6's concurrent sandboxes.proto change: FakeSandboxManager in execution-core/src/workspace_sync.rs:635 needs get_lease_status (owned by WS22-S6 or the lead). Re-run: cargo test -q -p execution-core --lib hook:: and --lib runtime_loop::tests::post_deny."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The root-and-child denied Do-run test named in the row is not written; it needs an agent-loop harness with a scripted model that delegates to a child."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The D7 write-versus-read class is a name heuristic (permission::is_risky_call) until WS05 declares tool classes; a write the heuristic misses fails its step and can invite a retry. Needed before HOOKS_DO_RUNS=enforce."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Strictest-wins, unknown-token-as-ask and post-tool withhold ship unflagged (DEC-15). Owner to confirm, or gate them, given the switch-off byte-identical promise."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway hook registry is in-memory: HOOKS_DO_RUNS=enforce only applies rules registered since the last gateway start until WS25-S8 makes them durable."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The source-text test the_dispatch_resolves_the_rung_in_one_place_for_the_runs_own_thread in sse.rs (it scans spawn_run_dispatch) was not executed; the build_run_agent_request filter matched zero tests. Run cargo test -q -p model-gateway --lib the_dispatch_resolves."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "HookAsk{rule_id,reason} is not carried into awaiting_approval; WS13's org_hook cause needs the rule id, and the rule JSON has no id field."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "post_tool_use ask has no effect (only deny withholds after the call), so an unknown token on a post rule does not fail closed at the engine. Storage refuses non-deny/ask at RegisterHook, so this is not reachable through the gateway today."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Shadow logs would_have_denied without a rule id, since the rule JSON has no id field."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The observe_only key on the hook-context wire needs a ledger entry (apps/Model Plane/docs/decisions/ledger.md, owned by the lead)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A registered ask on post_tool_use is a no-op: the post-tool path enforces only deny, so an org rule written as ask does not withhold a result after the call."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt reports pre-existing diffs in untouched code of runtime_registries.rs, sse.rs, runtime_loop/mod.rs, agent.rs and org_policy_characterisation.rs (around line 234); none are in lines added here, and they were left alone."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row's execution-core lib unit tests (hook::tests rewrite, malformed_context_fails_closed_when_the_switch_is_on, allow_never_overrides_a_later_deny, post_deny_on_a_write_withholds_and_never_fails_the_step) have never been executed. The external WS22-S6 E0046 blocks the lib-test target. I read the code and it is correct, but no test has proved it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row asks for a root-and-delegated-child denied Do-run test, and it was not written. Child inheritance is only the one-line `hook_context: parent.hook_context` in run_delegated_child (agent.rs), and the source-text golden covers the root dispatch argument only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The D7 write/read class comes from permission::is_risky_call, a name heuristic. A write it misses after a post-tool deny returns a failed step instead of a withheld success, which can invite a retry of a side effect. WS05 tool classes are needed before HOOKS_DO_RUNS=enforce."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Strictest-wins, unknown-token-as-ask and post-tool withhold ship without a flag on every hook path, including tools.rs and browser_run.rs, which already forward hook_context. That matches DEC-15 and the row's 'intentional, recorded in ledger', but behaviour with switches off is identical only for contexts where at most one rule matches and every token is known. The ledger entry must record this."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The row's typed `HookAsk{rule_id,reason}` carried into awaiting_approval is not built. Ask still routes to CauseCode::HookAsk without a rule id, because the hook-context rule JSON carries no hook_id."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Shadow mode logs 'hook rule would have decided' with tool/event/verdict but no rule id, while the row asks for `would_have_denied` plus the rule id. Forwarding hook_id in the rule JSON would close this and the HookAsk gap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "HooksDoRunsMode::from_env_value treats any value other than unset/''/'off' (for example 'OFF', 'false', '0') as Enforce. K3-26 asks for exactly this, but an operator writing HOOKS_DO_RUNS=false would turn enforcement on. Document the vocabulary in .env.example."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway's org hook rules reach only the spawn_run_dispatch path. Scheduled runs built inside execution-core (scheduled_agent::run_request) carry no org_policy, so org hooks never govern them. They are read-only with plan_mode, but the gap should be recorded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "handle_register_hook now refuses 'allow' and empty decisions with InvalidArgument, a gRPC contract narrowing. I found no caller outside the gateway in the repo (only grpc.rs and the Python gen stub), so nothing breaks today."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A post_tool_use 'ask' rule, and any unknown token on a post rule, does nothing at the post-tool path, which acts only on Deny. RegisterHook storing only deny/ask makes this reachable through a stored 'ask' post rule."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The hook registry is in-memory: with HOOKS_DO_RUNS=enforce, rules vanish on gateway restart until WS25-S8."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "OrgPolicyContext.policy_revision and policy_digest are always 0/empty until WS25-S7/S8."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -p execution-core hook:: (plan test command 1)",
+      "outcome": "FAILED to compile: the lib-test target fails with E0046 (FakeSandboxManager in execution-core/src/workspace_sync.rs:635 is missing get_lease_status). It comes from the WS22-S6 sandboxes.proto change (GetLeaseStatus) in the same worktree, not from WS25-S3. The hook::tests unit tests did not run.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p model-gateway --lib hook_rules (plan test command 2)",
+      "outcome": "7 passed, 0 failed (do_runs switch parse, deny/ask-only storable, observe_only marking, priority order, org isolation, Do-run only when switch on, shape execution-core parses)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test do_run_hooks_test",
+      "outcome": "2 passed, 0 failed (deny rule blocks a Do-run tool call before dispatch; allow never bypasses the signed gate)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test org_policy_characterisation",
+      "outcome": "12 passed, 0 failed (strictest-wins, unknown token as ask, malformed context allows when the switch is off, Do-loop dispatch golden)",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p execution-core -p model-gateway",
+      "outcome": "Finished with no errors (non-test build compiles)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "WS25-S3 is built to the row's code, but partial: the unit tests the row names in execution-core's lib (hook::tests, including malformed_context_fails_closed_when_the_switch_is_on and observe_only_enforces_nothing, and runtime_loop post_deny_* ) have not run because the lib-test target fails on the external WS22-S6 change described above. What was built: (1) execution.proto RunAgentRequest.org_policy = 24 (section 4.3, N4) and new message OrgPolicyContext {hook_context=1, policy_revision=2, policy_digest=3}; gateway.proto Hook.priority = 8 and a decision comment that matches the stored set. (2) hook/mod.rs: evaluate_with plus evaluate reading HOOKS_FAIL_CLOSED once per process (only the literal \"true\" enables); strictest-wins over every matching rule (deny over ask over allow, allow inert); an unknown or empty decision token is ask; a malformed non-empty context is Deny hook_context_malformed only when the switch is on; observe_only in the context computes verdicts, logs them and enforces nothing. (3) runtime_loop: the Do loop dispatches with ctx.hook_context (was the literal \"\") in agent.rs; LoopContext.hook_context comes from req.org_policy at the root and is copied to delegated children; post_tool_denied: a write (permission::is_risky_call) completes the step with a fixed withheld notice, a read keeps its failure. (4) model-gateway: hook_context_json_observing sorts rules by priority desc then id; handle_register_hook stores only deny/ask (trimmed, lowercased); HooksDoRunsMode parses off/shadow/enforce with unknown = enforce (K3-26); do_run_org_policy returns None when off or no rules; spawn_run_dispatch in sse.rs sets run_agent_req.org_policy from state.hooks, and build_run_agent_request sets org_policy: None. All switches default off. Recorded as deviations below. Not done: docker, compose, image rebuild, live proof, commit (none run per the lead's rules)."
+  },
+  {
+   "id": "WS22-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sandboxes.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/sandboxes.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/sandboxes_grpc.pb.go",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0007_lease_lifecycle.up.sql",
+    "apps/Model Plane/go/services/sandbox-manager/migrations/0007_lease_lifecycle.down.sql",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease_test.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/lease/lease_integration_test.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/server.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/store.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/memory_store.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/types.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/server/thread_workspace_test.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/authz/authz.go",
+    "apps/Model Plane/go/services/sandbox-manager/internal/authz/authz_test.go",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lifecycle_notice.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/docs/sse-event-taxonomy.md",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.test.ts",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Model Plane/go/services/sandbox-manager && go test ./... -count=1",
+     "outcome": "PASS: every package ok (cmd, authz, lease, objectstore, process, redact, server, snapshot, threadworkspace, workspace), exit 0. Includes the new TestGetLeaseStatusReportsTheLatestApplyCauseAndCounts, TestGetLeaseStatusIsOwnerBoundAndStillAnswersAfterRelease, TestAcquireThreadStampsActivityAndReadsTheLifecycleColumns, TestScanLeaseCarriesTheFailureCauseActivityAndHeartbeat, TestRecordActivityWritesTheCauseAndActivityOnlyWithinTheOwner and the authz rows for GetLeaseStatus."
+    },
+    {
+     "command": "go vet ./... (sandbox-manager) and go vet -tags integration ./internal/lease/",
+     "outcome": "PASS, exit 0 for both."
+    },
+    {
+     "command": "cd apps/Model Plane/go/gen && go build ./... && go test ./...",
+     "outcome": "PASS: build exit 0, model_plane/v1 package ok after regenerating sandboxes*.pb.go."
+    },
+    {
+     "command": "buf generate (native buf 1.72, local protoc-gen-go v1.36.12 / protoc-gen-go-grpc v1.6.2) on the unmodified HEAD proto first",
+     "outcome": "PASS as a toolchain check: regenerated files were byte-identical to the checked-in sandboxes.pb.go and sandboxes_grpc.pb.go before the proto edit, so the regenerated output after the edit is trustworthy."
+    },
+    {
+     "command": "tag-additivity diff of sandboxes.proto against git show HEAD (scratchpad tag_diff.py) plus git diff --numstat",
+     "outcome": "PASS: no removed or renumbered field, value or rpc; added are GetLeaseStatus rpc, enum SandboxFailureCause, messages GetLeaseStatusRequest and GetLeaseStatusResponse. Numstat 73 insertions, 0 deletions."
+    },
+    {
+     "command": "buf breaking apps/Model Plane/proto --against apps/Model Plane/proto/baseline.binpb",
+     "outcome": "PASS, exit 0."
+    },
+    {
+     "command": "buf lint + scripts/gates/buf-lint-ratchet.py (paths normalised to forward slashes)",
+     "outcome": "Ratchet reports 85 findings not in baseline; none are in sandboxes.proto (all in browser, capabilities, execution, gateway, memory, orchestration protos, not touched by this slice). Not a regression from this slice."
+    },
+    {
+     "command": "cargo test -q -p mp-contracts --lib lifecycle_notice (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "PASS: 5 passed, 0 failed."
+    },
+    {
+     "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py (regenerate) then --check",
+     "outcome": "PASS: wrote doc (30 events); --check: sse taxonomy up to date (30 events). Diff is the single new row sandbox_state | steps | ChatEvent::SandboxState."
+    },
+    {
+     "command": "node ./node_modules/vitest/vitest.mjs run src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts (pnpm exec was blocked by an unrelated workspace install check, so vitest was invoked directly)",
+     "outcome": "PASS: 2 files, 146 tests passed. The three new sandbox tests were confirmed by name."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib sse_events (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "NOT RECORDED. Still compiling when this report was written, so I cannot claim sandbox_state_frame_contract passed. Expected failure: sse_event_payload_golden, because the committed golden lacks the new variant; that is outside owned files (see lead_todo)."
+    },
+    {
+     "command": "cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml lifecycle_notices_are_carried (CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+     "outcome": "NOT RECORDED. Queued in the background, still running when this report was written."
+    },
+    {
+     "command": "tsc6 -p tsconfig.app.json --noEmit (verevonv3, full project, background)",
+     "outcome": "NOT RECORDED. Still running when this report was written; the new VerevonUiEvent union member is expected to need the shared-edit in ag-ui-client.ts before it is clean."
+    }
+   ],
+   "db_tests_written": [
+    "TestLeaseStore_LifecycleColumnsRoundTripInPostgres (apps/Model Plane/go/services/sandbox-manager/internal/lease/lease_integration_test.go, //go:build integration): run with `go test -tags integration ./internal/lease/ -run TestLeaseStore_LifecycleColumnsRoundTripInPostgres` on a disposable Postgres; not run by me."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts: in toAgUiEvent (switch on VerevonUiEvent, around line 195) add `case 'lifecycle.sandbox':` beside `case 'lifecycle.context':`, returning null. Without it the exhaustive switch no longer type-checks (pnpm typecheck fails). I am recording this as needed and have not edited the file.",
+    "Golden chain for sse-event-payloads (the SSE payload golden is a contract, so each step is required): (a) from apps/Model Plane/rust with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 run `MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden`, which rewrites apps/Model Plane/api/contracts/sse-event-payloads.json (LF); (b) refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 to the new digest, keeping its `<hex> *sse-event-payloads.json` format; (c) re-vendor the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json and refresh its sibling .sha256; (d) update the GOLDENS digest for apps/Model Plane/api/contracts/sse-event-payloads.json in scripts/tests/zdr-contract-sync.test.sh (around line 198); (e) run `bash scripts/tests/zdr-contract-sync.test.sh`; (f) in apps/Frontend Plane/verevonv3 run `pnpm gen:chat-events` to regenerate src/shared/api/chat-event-payloads.generated.ts. Until this is done, model-gateway's sse_event_payload_golden fails and the contract-goldens CI job is red. This is expected: the new variant changes the committed golden.",
+    "Emitter call-in (needed before the frame reaches a client; not in this slice's owned list): where a code_interpreter tool result is written (tool_loop.rs handle_code_interpreter path, or sse.rs if that is where the tool events are shaped), read the tool output's `workspace` object (WS22-S3 shape: scope thread|space|ephemeral, state, conflicts) and call ChatEvent::sandbox_state(scope, state, cause) to build the frame, mapping synced->kept, conflict->conflict, refused->refused, ephemeral scope->ephemeral and cause from the refusal reason (quota_exceeded when over-cap). Emit it through the existing sink, which gates on the steps family, and only when the workspace object is present. This is a thin call-in in a hot file shared with other workstreams.",
+    "DoD proof, lead-run only (Docker and live proof are not mine to run): rebuild sandbox-manager (migration 0007 applies on boot via the entrypoint), model-gateway and the gateway BFF; drive a thread turn with code_interpreter via the BFF and capture the SSE transcript with a sandbox_state frame for kept, conflict and refused (over-quota), per the row's DoD. Also run `go test -tags integration ./internal/lease/ -run TestLeaseStore_LifecycleColumnsRoundTripInPostgres` (plus the existing thread integration test) on a disposable Postgres.",
+    "Run the still-pending gates recorded as NOT RECORDED in tests_run: cargo test -q -p model-gateway --lib sse_events (expect only sse_event_payload_golden red until the golden chain runs; sandbox_state_frame_contract must be green), the gateway ag_ui test (cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml lifecycle_notices_are_carried), and tsc6 -p tsconfig.app.json.",
+    "Chip UI, not built: render 'Workspace: kept / not kept / conflict' from the onSandboxState handler in the lifecycle-notice node owned by WS15-S5 (ChatMessages.tsx, chat-types.ts, derive.ts). Those files are owned by a sibling slice in this batch, so this stays with the lead or that slice."
+   ],
+   "deviations": [
+    "Enum values use the SANDBOX_FAILURE_CAUSE_ prefix (SANDBOX_FAILURE_CAUSE_UNSPECIFIED, ..._QUOTA_EXCEEDED, ...) instead of the plan row's bare names, following the repo's PROCESS_STATE_* convention and buf STANDARD ENUM_VALUE_PREFIX.",
+    "last_activity_at is NOT NULL DEFAULT now() rather than nullable, so scanning needs no pointer; heartbeat_at is nullable and scans through pgtype.Timestamptz.",
+    "The row names only the state tokens. SANDBOX_SCOPES, SANDBOX_CAUSES and SANDBOX_STATE_KEYS are added so the frame's three keys and the cause and scope values are closed too.",
+    "Added the constructor ChatEvent::sandbox_state (token validation in one place) and the closed_token helper in lifecycle_notice.rs; the emitter call-in is not in this slice's owned list and is recorded as needs_other_files.",
+    "A thread lease is refused to a service principal on GetLeaseStatus (not specified in the row). GetLeaseStatus is ungated, since the row names no flag.",
+    "failure_cause is recorded only for QUOTA_EXCEEDED and WORKSPACE_CONFLICT, the only causes an apply can produce today.",
+    "Test files beside the owned code were edited: lease_test.go, lease_integration_test.go (migration list and a new integration test), thread_workspace_test.go, authz_test.go, chat-client.test.ts, verevon-ui-events.test.ts. The new integration test is db_tests_written.",
+    "Generated Go bindings were regenerated and copied into go/gen (sandboxes.pb.go, sandboxes_grpc.pb.go), the generated output of the owned proto, as the batch's test_commands direct."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts (toAgUiEvent: add `case 'lifecycle.sandbox':` returning null, beside lifecycle.context; required by the new VerevonUiEvent member for typecheck)",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json and its .sha256, apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json and its .sha256, scripts/tests/zdr-contract-sync.test.sh (GOLDENS digest, around line 198), apps/Frontend Plane/verevonv3/src/shared/api/chat-event-payloads.generated.ts (regenerated by pnpm gen:chat-events). Required to refresh the golden after adding SandboxState; sse_event_payload_golden stays red until then.",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (and/or sse.rs): emitter call-in that maps the code_interpreter tool output's workspace object to ChatEvent::sandbox_state(scope, state, cause) and emits it through the sink. Needed for the frame to reach any client.",
+    "Frontend chip UI (ChatMessages.tsx / chat-types.ts / derive.ts, owned by sibling slice WS15-S5 in this batch): render 'Workspace: kept / not kept / conflict' from the new onSandboxState handler."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared-edit (blocks pnpm typecheck): apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts toAgUiEvent, add `case 'lifecycle.sandbox':` beside `case 'lifecycle.context':` (line ~198) returning null. I confirmed the break: tsc6 -p tsconfig.app.json reports ag-ui-client.ts(127,53) TS2366, which this slice's new VerevonUiEvent member causes. The quarry-client.ts and schedule-contract.test.ts errors were already there.",
+     "Lead golden chain (blocks model-gateway lib tests and contract-goldens CI): MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden; re-pin apps/Model Plane/api/contracts/sse-event-payloads.json.sha256; re-vendor it to the SPA copy and its .sha256; update the GOLDENS digest in scripts/tests/zdr-contract-sync.test.sh; run pnpm gen:chat-events. The plan row expects this ('second lander regenerates golden').",
+     "Emitter call-in in model-gateway tool_loop.rs/sse.rs (not owned): map the code_interpreter tool output's `workspace` object to ChatEvent::sandbox_state and send it through the sink. Until then no client ever receives the frame.",
+     "Chip 'Workspace: kept / not kept / conflict' is not rendered, because no owned file renders UI (ChatMessages.tsx/derive.ts belong to WS15-S5).",
+     "Live DoD: rebuild sandbox-manager (migration 0007 runs on boot), model-gateway and the BFF, then capture an SSE transcript with sandbox_state for kept, conflict and refused (over-quota).",
+     "Run on a disposable Postgres: go test -tags integration ./internal/lease/ -run TestLeaseStore_LifecycleColumnsRoundTripInPostgres. It compiles (go vet -tags integration is clean) but nobody has run it."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The sandbox_state frame has no emitter wired, so no client receives it; the row's DoD SSE transcript (kept, conflict, refused over-quota) needs the tool-loop call-in plus a rebuilt model-gateway and BFF, all lead-run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway sse_event_payload_golden is red until the golden chain runs (regenerate, pin, re-vendor, gen:chat-events, sync script digest); the contract-goldens CI job is red until then."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "toAgUiEvent in ag-ui-client.ts is an exhaustive switch over VerevonUiEvent; without the lifecycle.sandbox case, pnpm typecheck fails (shared-edit recorded for the lead)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The Postgres round-trip for migration 0007 and RecordActivity (TestLeaseStore_LifecycleColumnsRoundTripInPostgres) is written and compiles under the integration tag, but has not been run: it needs a container, which I may not run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Only QUOTA_EXCEEDED and WORKSPACE_CONFLICT are ever recorded as failure_cause; START_TIMEOUT, BACKEND_UNAVAILABLE, HEARTBEAT_LOST, WORKSPACE_HYDRATE_FAILED, WORKSPACE_COMMIT_FAILED, EXPIRED and POLICY_DENIED are reserved, and EXPIRED is not derived from expires_at."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RecordActivity is best effort and not atomic with the apply; a failed status write is silent (no metric or log) and can leave a stale cause or last_activity_at."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "GetLeaseStatus is ungated (the row names no flag) and answers while SANDBOX_MANAGER_THREAD_WORKSPACE is off, reading counts from thread rows; the owner should decide whether status should follow the thread switch like the other thread RPCs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Service principals are refused on thread leases (PermissionDenied after lookup, which reveals that the id exists within the org to an authorised service); the plan did not specify this, so confirm it is wanted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "GetLeaseStatus counts a thread's files by reading the whole thread (up to the 256-file cap) on every call; a COUNT and SUM query would be cheaper if status is polled."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "last_activity_at is stamped only by acquire and apply, not by reads (GetThreadWorkspace), which is intentional but undocumented outside this report."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "heartbeat_at column and HEARTBEAT_LOST are reserved for WS22-S8; nothing writes them, and GetLeaseStatus returns them unset."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "gofmt flags one composite-literal line in memory_store.go Create (State: ... alignment); the same hunk exists at HEAD, so it was left as is."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The buf lint ratchet reports 85 findings not in the baseline, all in browser, capabilities, execution, gateway, memory and orchestration protos; none are in sandboxes.proto, so the slice adds no debt, but the baseline is stale."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The worktree is shared with sibling slices (ChatMessages.tsx, execution-core, sse.rs, runtime_registries.rs, execution.proto, gateway.proto modified concurrently); the model-gateway test result reflects the combined tree and must be re-run on a clean integration."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Adding 'lifecycle.sandbox' to the VerevonUiEvent union breaks the exhaustive toAgUiEvent switch in ag-ui-client.ts (TS2366 at 127,53), so verevonv3 typecheck stays red until the lead's one-line shared edit lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway sse_events: 49/50 pass and sandbox_state_frame_contract passes, but sse_event_payload_golden fails (sse_events.rs:3825) until the committed golden chain is regenerated and re-pinned."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No emitter builds ChatEvent::sandbox_state from the code_interpreter workspace result, so the frame and the planned chip are unreachable and the row's SSE-transcript DoD cannot be met by this slice alone."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The row names the chip 'Workspace: kept / not kept / conflict', but it is not built: onSandboxState and lifecycle.sandbox have no renderer."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Postgres round-trip for migration 0007's columns, scanLease's extra columns and RecordActivity has not been run. The unit tests use MemoryLeaseStore, so a column-count mismatch in a SELECT would only show up at runtime. I checked by reading the code that all three scanLease SQL sites list the 16 columns."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "GetLeaseStatus is ungated and answers for thread leases while SANDBOX_MANAGER_THREAD_WORKSPACE is off (it reads thread rows whenever s.threads is non-nil). It also refuses service principals on thread leases, which the plan did not specify. The owner should confirm both."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "recordActivity discards its error (`_ =`) with no log or metric, so a failed status write silently leaves a stale failure_cause or last_activity_at."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Only QUOTA_EXCEEDED and WORKSPACE_CONFLICT are ever written to failure_cause. EXPIRED is not derived from expires_at in GetLeaseStatus, so an expired lease reports its last apply cause."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "GetLeaseStatus sums file_count and total_bytes by loading the whole thread snapshot on every call. A COUNT/SUM query would be cheaper if the status is polled."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Enum values use the SANDBOX_FAILURE_CAUSE_ prefix rather than the plan's bare names, which buf STANDARD requires. The numbers match the row (0-9) and the change is additive (73 insertions, 0 deletions; buf breaking reports nothing for sandboxes.proto)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The temp volume ran out of space (0 MB free) during verification. This happened after the main gates ran and before my re-run of the verevonv3 gateway test, so the lifecycle_notices_are_carried pass rests on the tester's report. Agent cargo scratch targets under %TEMP% should be cleaned by the lead."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "sandbox-manager: go test ./... -count=1",
+      "outcome": "PASS. All packages ok (cmd, authz, lease, objectstore, process, redact, server, snapshot, threadworkspace, workspace).",
+      "passed": true
+     },
+     {
+      "command": "sandbox-manager: go vet ./...; model-plane go/gen: go build ./...",
+      "outcome": "PASS. Both exit 0.",
+      "passed": true
+     },
+     {
+      "command": "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+      "outcome": "PASS. 'sse taxonomy up to date (30 events)'.",
+      "passed": true
+     },
+     {
+      "command": "sandboxes.proto tag-additivity check (git diff vs HEAD)",
+      "outcome": "PASS. 73 insertions, 0 removed lines, so the change is additive only. I did not run buf breaking.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p mp-contracts --lib lifecycle_notice (CARGO_INCREMENTAL=0, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "PASS. 5 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib sse_events (same target dir)",
+      "outcome": "FAIL. 49 of 50 passed; the only failure is sse_events::payload_contract::sse_event_payload_golden (sse_events.rs:3825). The committed golden does not contain the new sandbox_state variant. The implementer predicted this. sandbox_state_frame_contract passed.",
+      "passed": false
+     },
+     {
+      "command": "vitest run --pool=threads src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts",
+      "outcome": "PASS. 2 files, 146 tests passed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test --manifest-path apps/gateway/Cargo.toml lifecycle_notices_are_carried (verevonv3 gateway)",
+      "outcome": "PASS. domains::ag_ui::tests::lifecycle_notices_are_carried_as_custom_events_with_their_cursor passed, 1 passed and 0 failed. This also compiled the gateway.",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+      "outcome": "FAIL. Exit 2, 28 lines of output. Errors: src/shared/api/ag-ui-client.ts(127,53) TS2366 'Function lacks ending return statement' (reported twice), which is the missing handling of the new VerevonUiEvent union member in a file this slice does not own. Other errors are not from this slice: quarry-client.ts missing '@quarry/client' module and implicit any, and schedule-contract.test.ts(28,16) TS2352.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the WS22-S6 lease lifecycle status and the sandbox_state frame, all with no switch (the row names none). Proto change is additive: an rpc GetLeaseStatus, the enum SandboxFailureCause, and messages GetLeaseStatusRequest/Response; tags unchanged. Enum values carry the SANDBOX_FAILURE_CAUSE_ prefix instead of the plan's bare names, following the repo's PROCESS_STATE_* convention and buf STANDARD's ENUM_VALUE_PREFIX rule (deviation). Migration 0007 adds leases.failure_cause SMALLINT NOT NULL DEFAULT 0, last_activity_at TIMESTAMPTZ NOT NULL DEFAULT now(), and heartbeat_at TIMESTAMPTZ (nullable, unwritten until S8). Lease.go scans the three columns through the existing scanLease; AcquireThread's upsert stamps last_activity_at; a new Store.RecordActivity writes the cause and activity bound to org and owner. Server: ApplyThreadWorkspaceChanges records QUOTA_EXCEEDED on a refused over-cap batch and WORKSPACE_CONFLICT on a conflicted one, and clears to UNSPECIFIED on a clean apply; the write is best effort (the apply has already landed). GetLeaseStatus uses GetAny (descriptive: released and expired leases still answer), returns file_count and total_bytes for thread leases, and refuses a service principal on a thread lease (PermissionDenied), which the plan did not specify. Authz: GetLeaseStatus in the read class. Rust: lifecycle_notice.rs gains SANDBOX_SCOPES, SANDBOX_STATES (the six row tokens), SANDBOX_CAUSES, SANDBOX_STATE_KEYS and closed_token. sse_events.rs gains ChatEvent::SandboxState{scope,state,cause} inside WS15's fenced lifecycle block, family steps, name sandbox_state, a payload with closed tokens plus request_id only (cause omitted when absent), a constructor ChatEvent::sandbox_state that refuses any token outside its closed list, samples, VARIANTS/covered entries, and the named test sandbox_state_frame_contract. Frontend: chat-client.ts gets the sandbox_state case, ChatSandboxStateEvent type and onSandboxState handler (requires scope and state); verevon-ui-events.ts gets lifecycle.sandbox, the projection, and the CUSTOM allowlist entry. gateway ag_ui.rs gets sandbox_state in the CUSTOM allowlist plus a case in the lifecycle carry test. Taxonomy doc regenerated and --check passes. Test files edited beside the owned code: lease_test.go, lease_integration_test.go (migration list plus a new Postgres round-trip test), thread_workspace_test.go, authz_test.go, chat-client.test.ts, verevon-ui-events.test.ts. Caveats: (1) the worktree is shared with sibling slices, whose edits (ChatMessages.tsx, execution-core, sse.rs, runtime_registries.rs, execution.proto, gateway.proto) are present in git status and were not touched by me; the model-gateway test result therefore reflects the combined tree. (2) gofmt flags one composite-literal line in memory_store.go Create; the same hunk exists at HEAD, so I left it. (3) The slice does NOT produce the frame yet: no emitter is wired (see needs_other_files), so the DoD SSE transcript cannot be captured from this slice alone. (4) The chip UI ('Workspace: kept / not kept / conflict') is not built: no owned file renders it."
+  }
+ ]
+}

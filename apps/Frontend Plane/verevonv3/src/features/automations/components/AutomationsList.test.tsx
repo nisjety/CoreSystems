@@ -4,7 +4,7 @@
 // cron-client calls it makes. The WS20 assertions stay in ScheduledRunsPanel.test.tsx and
 // CronSchedulesSection.test.tsx, which mount this list.
 
-import { render, screen } from '@solidjs/testing-library'
+import { fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
 import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -25,11 +25,18 @@ vi.mock('@/shared/api/cron-client', async (importOriginal) => {
   }
 })
 
-import { listCronSchedules, listScheduleFires, type CronSchedule } from '@/shared/api/cron-client'
+vi.mock('@/shared/api/organization-client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/shared/api/organization-client')>()
+  return { ...actual, listOrganizationMembers: vi.fn() }
+})
+
+import { listCronSchedules, listScheduleFires, type CronSchedule, type CronScheduleFire } from '@/shared/api/cron-client'
+import { listOrganizationMembers } from '@/shared/api/organization-client'
 import { AutomationsList } from './AutomationsList'
 
 const mockedList = vi.mocked(listCronSchedules)
 const mockedFires = vi.mocked(listScheduleFires)
+const mockedMembers = vi.mocked(listOrganizationMembers)
 
 /** A member of the org, or an org owner, who is an admin for the Settings page. */
 function sessionAs(orgRole: 'member' | 'owner') {
@@ -56,6 +63,11 @@ function schedule(overrides: Partial<CronSchedule>): CronSchedule {
   }
 }
 
+/** One member of the org roster, as the member list reports them. */
+function memberNamed(userId: string, name: string) {
+  return { userId, name, email: `${userId}@example.test`, role: 'member', status: 'active' }
+}
+
 /** A stored approval the way WS20-S4 writes it, with the goal the schedule was created with. */
 function approvalTemplate(expiresAt: string) {
   return {
@@ -69,6 +81,7 @@ function approvalTemplate(expiresAt: string) {
 beforeEach(() => {
   session.current = sessionAs('member')
   mockedFires.mockResolvedValue([])
+  mockedMembers.mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -161,6 +174,44 @@ describe('AutomationsList', () => {
     expect(mockedFires).not.toHaveBeenCalled()
   })
 
+  it('asks the server for the caller’s own schedules when it lists mine, and for the whole org when it lists org', async () => {
+    mockedList.mockResolvedValue({ schedules: [] })
+
+    const mine = render(() => <AutomationsList scope="mine" />)
+    await waitFor(() => expect(mockedList).toHaveBeenCalledWith('org-1', { creator: 'self' }))
+    mine.unmount()
+
+    session.current = sessionAs('owner')
+    render(() => <AutomationsList scope="org" />)
+    await waitFor(() => expect(mockedList).toHaveBeenLastCalledWith('org-1'))
+  })
+
+  it('shows an admin who made each schedule by name, from the member list', async () => {
+    session.current = sessionAs('owner')
+    mockedMembers.mockResolvedValue([memberNamed('user-2', 'Kari Nordmann')])
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ id: 'theirs', name: 'Andres plan', creator_subject_id: 'user-2' })],
+    })
+
+    render(() => <AutomationsList scope="org" />)
+
+    expect(await screen.findByText(/Kari Nordmann/)).toBeTruthy()
+    expect(mockedMembers).toHaveBeenCalledWith('org-1')
+  })
+
+  it('reads the member list for an admin only, and shows a member no creator name', async () => {
+    mockedMembers.mockResolvedValue([memberNamed('user-2', 'Kari Nordmann')])
+    mockedList.mockResolvedValue({
+      schedules: [schedule({ id: 'theirs', name: 'Andres plan', creator_subject_id: 'user-2' })],
+    })
+
+    render(() => <AutomationsList scope="org" />)
+
+    expect(await screen.findByText('Andres plan')).toBeTruthy()
+    expect(mockedMembers).not.toHaveBeenCalled()
+    expect(screen.queryByText(/Kari Nordmann/)).toBeNull()
+  })
+
   it('reads the org again when its parent bumps the revision', async () => {
     session.current = sessionAs('owner')
     mockedList.mockResolvedValueOnce({ schedules: [schedule({ name: 'Første plan' })] })
@@ -175,5 +226,61 @@ describe('AutomationsList', () => {
 
     expect(await screen.findByText('Ny plan')).toBeTruthy()
     expect(mockedList).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('AutomationsList scheduled-run results', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function fire(overrides: Partial<CronScheduleFire>): CronScheduleFire {
+    return {
+      id: 'fire_1',
+      fired_at: '2026-11-06T09:00:00Z',
+      status: 'completed',
+      run_id: null,
+      thread_id: null,
+      withheld_effects: 0,
+      ...overrides,
+    }
+  }
+
+  it('rates a completed fire by its run id, inside its result row, with the switch on only', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    vi.stubEnv('VITE_AGENT_RESULT_FEEDBACK', 'true')
+    const fetchMock = vi.fn(async (_path: string, _init?: RequestInit) =>
+      new Response(JSON.stringify({ accepted: true }), { headers: { 'Content-Type': 'application/json' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    mockedList.mockResolvedValue({ schedules: [schedule({ id: 'cron_1', name: 'Daglig rapport' })] })
+    mockedFires.mockResolvedValue([
+      fire({ id: 'fire_done', run_id: 'run_fire_done' }),
+      fire({ id: 'fire_failed', status: 'failed', run_id: 'run_fire_failed' }),
+      fire({ id: 'fire_unrecorded', run_id: null }),
+    ])
+
+    render(() => <AutomationsList scope="mine" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Se resultater' }))
+
+    const groups = await screen.findAllByRole('group', { name: 'Vurder svaret' })
+    expect(groups).toHaveLength(1)
+    fireEvent.click(within(groups[0]!).getByRole('button', { name: 'Godt svar' }))
+
+    await waitFor(() => expect(fetchMock.mock.calls.filter((call) => call[0] === '/api/v1/chat/feedback')).toHaveLength(1))
+    const rating = fetchMock.mock.calls.find((call) => call[0] === '/api/v1/chat/feedback')
+    expect(JSON.parse(String(rating?.[1]?.body))).toEqual({ run_id: 'run_fire_done', rating: 'positive' })
+  })
+
+  it('shows no rating on a fire while the switch is off', async () => {
+    vi.stubEnv('VITE_SCHEDULE_RESULTS', 'true')
+    mockedList.mockResolvedValue({ schedules: [schedule({ id: 'cron_1', name: 'Daglig rapport' })] })
+    mockedFires.mockResolvedValue([fire({ run_id: 'run_fire_done' })])
+
+    render(() => <AutomationsList scope="mine" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Se resultater' }))
+
+    await waitFor(() => expect(document.querySelector('.verevon-scheduled-runs-panel__fire')).toBeTruthy())
+    expect(screen.queryByRole('group', { name: 'Vurder svaret' })).toBeNull()
   })
 })

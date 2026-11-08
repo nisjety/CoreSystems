@@ -32,6 +32,13 @@ describe('chat history action contract', () => {
     ).toBe('thread.rewind')
   })
 
+  it('accepts an undo of a rewind without a confirmation, and refuses one with no turn to return to', () => {
+    expect(
+      parseChatHistoryAction({ type: 'thread.undo_rewind', threadId: 'thread-1', messageId: 'message-4' }),
+    ).toEqual({ type: 'thread.undo_rewind', threadId: 'thread-1', messageId: 'message-4' })
+    expect(() => parseChatHistoryAction({ type: 'thread.undo_rewind', threadId: 'thread-1', messageId: ' ' })).toThrow()
+  })
+
   it('accepts an export of one thread in either format and profile, with the id trimmed', () => {
     expect(
       parseChatHistoryAction({ type: 'thread.export', threadId: ' thread-1 ', format: 'markdown', profile: 'redacted' }),

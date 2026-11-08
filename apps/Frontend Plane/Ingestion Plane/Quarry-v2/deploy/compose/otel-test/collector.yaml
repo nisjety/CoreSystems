@@ -1,0 +1,21 @@
+# THROWAWAY collector config for the WS10.S8 evidence override (docker-compose.otel-test.yml).
+# Receives OTLP over gRPC and prints every span to the collector log. Nothing is stored.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

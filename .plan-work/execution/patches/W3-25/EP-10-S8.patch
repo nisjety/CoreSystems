@@ -1,0 +1,1509 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx
+new file mode 100644
+index 000000000..4d58a369a
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.test.tsx	
+@@ -0,0 +1,143 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
++import type { ChatConnectorSuggestion } from './chat-types'
++import { ConnectorSuggestionCard, connectorSuggestionVisible } from './ConnectorSuggestionCard'
++
++// Without a provider the card renders in its default locale, Norwegian.
++
++const { listConnectorPickerTabsMock, startConnectSessionMock, runDirectOauthWindowMock } = vi.hoisted(() => ({
++  listConnectorPickerTabsMock: vi.fn(),
++  startConnectSessionMock: vi.fn(),
++  runDirectOauthWindowMock: vi.fn(),
++}))
++
++vi.mock('@/shared/api/integrations-client', () => ({
++  listConnectorPickerTabs: listConnectorPickerTabsMock,
++  startConnectSession: startConnectSessionMock,
++}))
++
++vi.mock('@/shared/integrations/provider-auth-window', () => ({
++  runDirectOauthWindow: runDirectOauthWindowMock,
++}))
++
++beforeEach(() => {
++  listConnectorPickerTabsMock.mockReset().mockResolvedValue([])
++  startConnectSessionMock.mockReset()
++  runDirectOauthWindowMock.mockReset().mockResolvedValue(undefined)
++})
++
++afterEach(() => {
++  cleanup()
++})
++
++const suggestion = (overrides: Partial<ChatConnectorSuggestion> = {}): ChatConnectorSuggestion => ({
++  suggestionId: 'sug_01',
++  provider: 'google',
++  reason: 'Your mail would answer this.',
++  ...overrides,
++})
++
++const gmail = { connectionId: 'conn_gmail', providerKey: 'google', label: 'kari@example.test' }
++const outlook = { connectionId: 'conn_outlook', providerKey: 'microsoft', label: 'Outlook' }
++
++describe('where the card may show', () => {
++  it('never in a Space thread or a temporary chat', () => {
++    expect(connectorSuggestionVisible({})).toBe(true)
++    expect(connectorSuggestionVisible({ spaceScoped: true })).toBe(false)
++    expect(connectorSuggestionVisible({ temporary: true })).toBe(false)
++  })
++
++  it('renders nothing in a Space thread or a temporary chat, and reads no connections', () => {
++    for (const hidden of [{ spaceScoped: true }, { temporary: true }]) {
++      const { container, unmount } = render(() => (
++        <ConnectorSuggestionCard suggestion={suggestion()} orgId="org-1" onUse={vi.fn()} {...hidden} />
++      ))
++      expect(container.textContent).toBe('')
++      unmount()
++    }
++    expect(listConnectorPickerTabsMock).not.toHaveBeenCalled()
++  })
++})
++
++describe('ConnectorSuggestionCard', () => {
++  it('offers Connect when the provider has no active connection, and runs the existing connect flow', async () => {
++    startConnectSessionMock.mockResolvedValueOnce({ connectUrl: 'https://accounts.google.test/auth', sessionToken: 'sess_1' })
++    listConnectorPickerTabsMock.mockResolvedValueOnce([outlook]).mockResolvedValueOnce([gmail, outlook])
++    const onConnected = vi.fn()
++    render(() => (
++      <ConnectorSuggestionCard suggestion={suggestion()} orgId="org-1" onUse={vi.fn()} onConnected={onConnected} />
++    ))
++    expect(screen.getByText('Your mail would answer this.')).toBeTruthy()
++    const connect = await screen.findByRole('button', { name: 'Koble til Google' })
++    await waitFor(() => expect((connect as HTMLButtonElement).disabled).toBe(false))
++    fireEvent.click(connect)
++    await waitFor(() =>
++      expect(runDirectOauthWindowMock).toHaveBeenCalledWith({ connectUrl: 'https://accounts.google.test/auth', sessionToken: 'sess_1' }),
++    )
++    expect(startConnectSessionMock).toHaveBeenCalledWith('org-1', 'google', { bundles: connectBundlesForSources('google') })
++    await waitFor(() => expect(onConnected).toHaveBeenCalledWith('google'))
++    // Once connected, the new account is offered for the question.
++    expect(await screen.findByRole('button', { name: 'Bruk kari@example.test for dette spørsmålet' })).toBeTruthy()
++    expect(screen.getByRole('status').textContent).toContain('Google er koblet til.')
++  })
++
++  it('offers the connected account for this question and hands its id to the caller', async () => {
++    listConnectorPickerTabsMock.mockResolvedValue([gmail])
++    const onUse = vi.fn()
++    render(() => <ConnectorSuggestionCard suggestion={suggestion()} orgId="org-1" onUse={onUse} />)
++    fireEvent.click(await screen.findByRole('button', { name: 'Bruk kari@example.test for dette spørsmålet' }))
++    expect(onUse).toHaveBeenCalledWith('conn_gmail')
++    expect(onUse).toHaveBeenCalledTimes(1)
++    expect(startConnectSessionMock).not.toHaveBeenCalled()
++    // The question goes again once; the card no longer offers it.
++    await waitFor(() => expect(screen.queryByRole('button', { name: /Bruk/ })).toBeNull())
++  })
++
++  it('does not count another provider\'s account', async () => {
++    listConnectorPickerTabsMock.mockResolvedValue([outlook])
++    render(() => <ConnectorSuggestionCard suggestion={suggestion()} orgId="org-1" onUse={vi.fn()} />)
++    expect(await screen.findByRole('button', { name: 'Koble til Google' })).toBeTruthy()
++    expect(screen.queryByRole('button', { name: /Bruk Outlook/ })).toBeNull()
++  })
++
++  it('shows a failed connect and keeps the card', async () => {
++    startConnectSessionMock.mockRejectedValueOnce(new Error('boom'))
++    render(() => <ConnectorSuggestionCard suggestion={suggestion({ provider: 'microsoft' })} orgId="org-1" onUse={vi.fn()} />)
++    const connect = await screen.findByRole('button', { name: 'Koble til Microsoft' })
++    await waitFor(() => expect((connect as HTMLButtonElement).disabled).toBe(false))
++    fireEvent.click(connect)
++    expect(await screen.findByRole('alert')).toBeTruthy()
++    expect(runDirectOauthWindowMock).not.toHaveBeenCalled()
++    expect(screen.getByRole('button', { name: 'Koble til Microsoft' })).toBeTruthy()
++  })
++
++  it('falls back to Connect when the connections cannot be read', async () => {
++    listConnectorPickerTabsMock.mockRejectedValue(new Error('unavailable'))
++    render(() => <ConnectorSuggestionCard suggestion={suggestion()} orgId="org-1" onUse={vi.fn()} />)
++    expect(await screen.findByRole('button', { name: 'Koble til Google' })).toBeTruthy()
++  })
++
++  it('closes on Not now', async () => {
++    const onDismiss = vi.fn()
++    const { container } = render(() => (
++      <ConnectorSuggestionCard suggestion={suggestion()} orgId="org-1" onUse={vi.fn()} onDismiss={onDismiss} />
++    ))
++    fireEvent.click(await screen.findByRole('button', { name: 'Ikke nå' }))
++    expect(onDismiss).toHaveBeenCalledTimes(1)
++    await waitFor(() => expect(container.textContent).toBe(''))
++  })
++
++  it('renders a restored suggestion as a note with no actions, and reads no connections', () => {
++    const { container } = render(() => (
++      <ConnectorSuggestionCard suggestion={suggestion({ restored: true })} orgId="org-1" onUse={vi.fn()} />
++    ))
++    expect(container.querySelector('.verevon-connector-suggestion__note')?.textContent).toContain(
++      'Your mail would answer this.',
++    )
++    expect(container.querySelector('button')).toBeNull()
++    expect(listConnectorPickerTabsMock).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx
+new file mode 100644
+index 000000000..05c00a66f
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ConnectorSuggestionCard.tsx	
+@@ -0,0 +1,184 @@
++/**
++ * The connected-app suggestion card (EP-10 S8). When a question needs the person's own mail, calendar
++ * or files and no connected account was selected, the model may suggest one provider; the gateway sends
++ * that as one `connector_suggestion` frame per turn. The card offers the person's own next step:
++ *  - no active connection of the provider: "Connect", the existing connect session and sign-in window
++ *    (`integrations.start_connect_session`);
++ *  - an active connection: "Use it for this question", which the caller turns into a connected-app
++ *    selection for the question and sends it again (`chat.accept_connector_suggestion`, path `use`);
++ *  - "Not now" closes the card.
++ * Nothing is chosen for the person and nothing is remembered past the turn. A Space thread and a
++ * temporary chat never show the card (the gateway never offers the tool there either), and a card read
++ * back after a reload is a note: the moment it answered has passed.
++ */
++
++import { createSignal, For, Show } from 'solid-js'
++import { listConnectorPickerTabs, startConnectSession } from '@/shared/api/integrations-client'
++import { translateApiError, useI18n } from '@/shared/i18n'
++import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
++import { runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import type { ChatConnectorSuggestion, ConnectorSuggestionProvider } from './chat-types'
++
++/** The name the card gives each provider of the closed list. */
++export const CONNECTOR_SUGGESTION_PROVIDER_LABELS: Record<ConnectorSuggestionProvider, string> = {
++  google: 'Google',
++  microsoft: 'Microsoft',
++}
++
++/** Whether a thread may show the card at all: never in a Space and never in a temporary chat. */
++export function connectorSuggestionVisible(input: { spaceScoped?: boolean; temporary?: boolean }): boolean {
++  return input.spaceScoped !== true && input.temporary !== true
++}
++
++export function ConnectorSuggestionCard(props: {
++  suggestion: ChatConnectorSuggestion
++  orgId: string
++  spaceScoped?: boolean
++  temporary?: boolean
++  /** Select this connection for the question and send it again. */
++  onUse: (connectionId: string) => void
++  /** The provider was connected from the card. */
++  onConnected?: (provider: ConnectorSuggestionProvider) => void
++  onDismiss?: () => void
++}) {
++  const i18n = useI18n()
++  const [phase, setPhase] = createSignal<'open' | 'connecting' | 'used' | 'dismissed'>('open')
++  const [failure, setFailure] = createSignal<string | null>(null)
++  const [connected, setConnected] = createSignal(false)
++
++  const label = () => CONNECTOR_SUGGESTION_PROVIDER_LABELS[props.suggestion.provider]
++  const live = () => props.suggestion.restored !== true
++  // The person's active accounts of the suggested provider. Read only for a live card that may show: a
++  // restored note or a hidden card offers nothing, so it asks nothing. A failed read shows the Connect
++  // path, which is always safe.
++  const [accounts, { refetch }] = createResource(
++    () => (live() && connectorSuggestionVisible(props) && props.orgId ? props.orgId : false),
++    async (orgId: string) => {
++      try {
++        const tabs = await listConnectorPickerTabs(orgId)
++        return tabs.filter((tab) => tab.providerKey === props.suggestion.provider)
++      } catch {
++        return []
++      }
++    },
++  )
++
++  const connect = async () => {
++    if (phase() !== 'open') return
++    setPhase('connecting')
++    setFailure(null)
++    const provider = props.suggestion.provider
++    try {
++      // The same bundle policy as every other connect surface, so a connection made here also serves
++      // Knowledge and Settings instead of being a second, narrower one.
++      const session = await startConnectSession(props.orgId, provider, { bundles: connectBundlesForSources(provider) })
++      const connectUrl = session.connectUrl || session.redirectUrl
++      const sessionToken = session.sessionToken || session.id
++      if (!connectUrl || !sessionToken) {
++        throw new Error(i18n.tr('Tilkoblingen kunne ikke startes.', 'The connection could not be started.'))
++      }
++      await runDirectOauthWindow({ connectUrl, sessionToken })
++      setConnected(true)
++      await refetch()
++      props.onConnected?.(provider)
++    } catch (reason) {
++      setFailure(
++        translateApiError(reason, i18n.tr, {
++          no: 'Tilkoblingen kunne ikke fullføres.',
++          en: 'The connection could not be completed.',
++        }),
++      )
++    } finally {
++      setPhase('open')
++    }
++  }
++
++  const use = (connectionId: string) => {
++    if (phase() !== 'open') return
++    setPhase('used')
++    props.onUse(connectionId)
++  }
++
++  const dismiss = () => {
++    setPhase('dismissed')
++    props.onDismiss?.()
++  }
++
++  return (
++    <Show when={connectorSuggestionVisible(props) && phase() !== 'dismissed'}>
++      <Show
++        when={live()}
++        fallback={
++          <p class="verevon-connector-suggestion__note">
++            {i18n.tr(`Foreslo å bruke ${label()}: `, `Suggested using ${label()}: `)}
++            {props.suggestion.reason}
++          </p>
++        }
++      >
++        <section
++          class="verevon-connector-suggestion"
++          aria-label={i18n.tr('Forslag om tilkoblet app', 'Connected app suggestion')}
++          data-provider={props.suggestion.provider}
++        >
++          <h3 class="verevon-connector-suggestion__title">
++            {i18n.tr(`${label()} kan hjelpe med dette`, `${label()} could help with this`)}
++          </h3>
++          <p class="verevon-connector-suggestion__reason">{props.suggestion.reason}</p>
++          <Show when={connected()}>
++            <p class="verevon-connector-suggestion__status" role="status">
++              {i18n.tr(`${label()} er koblet til.`, `${label()} is connected.`)}
++            </p>
++          </Show>
++          <Show when={phase() === 'used'}>
++            <p class="verevon-connector-suggestion__status" role="status">
++              {i18n.tr('Spør på nytt med kontoen valgt.', 'Asking again with the account selected.')}
++            </p>
++          </Show>
++          <Show when={failure()}>
++            {(message) => (
++              <p class="verevon-connector-suggestion__error" role="alert">
++                {message()}
++              </p>
++            )}
++          </Show>
++          <Show when={phase() !== 'used'}>
++            <div class="verevon-connector-suggestion__actions">
++              <Show
++                when={(accounts() ?? []).length > 0}
++                fallback={
++                  <button
++                    type="button"
++                    class="verevon-connector-suggestion__connect"
++                    disabled={phase() !== 'open' || accounts.loading}
++                    onClick={() => void connect()}
++                  >
++                    {phase() === 'connecting'
++                      ? i18n.tr(`Kobler til ${label()} …`, `Connecting ${label()} …`)
++                      : i18n.tr(`Koble til ${label()}`, `Connect ${label()}`)}
++                  </button>
++                }
++              >
++                <For each={accounts() ?? []}>
++                  {(account) => (
++                    <button
++                      type="button"
++                      class="verevon-connector-suggestion__use"
++                      disabled={phase() !== 'open'}
++                      onClick={() => use(account.connectionId)}
++                    >
++                      {i18n.tr(`Bruk ${account.label} for dette spørsmålet`, `Use ${account.label} for this question`)}
++                    </button>
++                  )}
++                </For>
++              </Show>
++              <button type="button" class="verevon-connector-suggestion__dismiss" onClick={dismiss}>
++                {i18n.tr('Ikke nå', 'Not now')}
++              </button>
++            </div>
++          </Show>
++        </section>
++      </Show>
++    </Show>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.connector-suggestion.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.connector-suggestion.test.ts
+new file mode 100644
+index 000000000..d105fb977
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.connector-suggestion.test.ts	
+@@ -0,0 +1,102 @@
++import { describe, expect, it } from 'vitest'
++import {
++  CONNECTOR_SUGGESTION_MAX_REASON_CHARS,
++  mergeServerTurnsWithCachedMetadata,
++  normalizeConnectorSuggestion,
++  restoredConnectorSuggestion,
++  transcriptTurnToChatTurn,
++  turnsToTranscript,
++} from './chat-normalizers'
++import type { ChatTurn } from './chat-types'
++
++const frame = {
++  suggestion_id: 'sug_01',
++  provider: 'google',
++  reason: 'Your mail would answer this.',
++  request_id: 'req-1',
++}
++
++function assistantTurn(overrides: Partial<ChatTurn> = {}): ChatTurn {
++  return {
++    id: 'a1',
++    role: 'assistant',
++    content: 'I cannot see your mail on this turn.',
++    createdAt: '2026-11-05T10:00:00Z',
++    streaming: false,
++    tools: [],
++    attachments: [],
++    ...overrides,
++  }
++}
++
++describe('connector_suggestion frames', () => {
++  it('reads the wire frame and the stream client spelling alike', () => {
++    const expected = {
++      suggestionId: 'sug_01',
++      provider: 'google',
++      reason: 'Your mail would answer this.',
++      requestId: 'req-1',
++    }
++    expect(normalizeConnectorSuggestion(frame)).toEqual(expected)
++    expect(normalizeConnectorSuggestion(expected)).toEqual(expected)
++  })
++
++  it('accepts only the closed provider list', () => {
++    expect(normalizeConnectorSuggestion({ ...frame, provider: 'microsoft' })?.provider).toBe('microsoft')
++    for (const provider of ['slack', 'Google', '', undefined, 1]) {
++      expect(normalizeConnectorSuggestion({ ...frame, provider })).toBeNull()
++    }
++  })
++
++  it('drops a frame with no id or no reason, and anything that is not an object', () => {
++    expect(normalizeConnectorSuggestion({ ...frame, suggestion_id: '' })).toBeNull()
++    expect(normalizeConnectorSuggestion({ ...frame, suggestion_id: '   ' })).toBeNull()
++    expect(normalizeConnectorSuggestion({ ...frame, reason: '  \n ' })).toBeNull()
++    expect(normalizeConnectorSuggestion({ ...frame, reason: 5 })).toBeNull()
++    for (const value of [null, undefined, 'sug_01', 3]) {
++      expect(normalizeConnectorSuggestion(value)).toBeNull()
++    }
++  })
++
++  it('shows the reason as one bounded line', () => {
++    expect(normalizeConnectorSuggestion({ ...frame, reason: ' Your\nmail\t would  help ' })?.reason).toBe(
++      'Your mail would help',
++    )
++    const long = normalizeConnectorSuggestion({ ...frame, reason: 'a'.repeat(CONNECTOR_SUGGESTION_MAX_REASON_CHARS + 50) })
++    expect(long?.reason).toHaveLength(CONNECTOR_SUGGESTION_MAX_REASON_CHARS)
++  })
++
++  it('leaves out a request id the frame does not carry', () => {
++    const { request_id: _requestId, ...withoutRequest } = frame
++    expect(normalizeConnectorSuggestion(withoutRequest)).not.toHaveProperty('requestId')
++  })
++})
++
++describe('a suggestion after a reload', () => {
++  it('is marked restored, so the card offers nothing', () => {
++    expect(restoredConnectorSuggestion(frame)).toMatchObject({ suggestionId: 'sug_01', restored: true })
++    expect(restoredConnectorSuggestion({ ...frame, provider: 'slack' })).toBeUndefined()
++    expect(restoredConnectorSuggestion(undefined)).toBeUndefined()
++  })
++
++  it('survives the cached transcript and comes back restored', () => {
++    const live = assistantTurn({ connectorSuggestion: normalizeConnectorSuggestion(frame) ?? undefined })
++    const [stored] = turnsToTranscript([live])
++    expect(stored?.connectorSuggestion).toEqual(live.connectorSuggestion)
++    const restored = transcriptTurnToChatTurn(JSON.parse(JSON.stringify(stored)))
++    expect(restored.connectorSuggestion).toMatchObject({ provider: 'google', restored: true })
++  })
++
++  it('is carried onto the server turn from the cache, since the server message never has it', () => {
++    const cached = assistantTurn({ connectorSuggestion: normalizeConnectorSuggestion(frame) ?? undefined })
++    const [merged] = mergeServerTurnsWithCachedMetadata([assistantTurn()], [cached])
++    expect(merged?.connectorSuggestion).toMatchObject({ suggestionId: 'sug_01', restored: true })
++  })
++
++  it('a turn without one stays without one', () => {
++    const [stored] = turnsToTranscript([assistantTurn()])
++    expect(transcriptTurnToChatTurn(stored as NonNullable<typeof stored>).connectorSuggestion).toBeUndefined()
++    const [merged] = mergeServerTurnsWithCachedMetadata([assistantTurn()], [assistantTurn()])
++    expect(merged?.connectorSuggestion).toBeUndefined()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts
+index d02fea036..6ed14f1be 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts	
+@@ -61,6 +61,8 @@ import {
+   type AgentTaskStepEvidence,
+   CHAT_BROWSE_WEB_KEY,
+   type ChatArtifact,
++  type ChatConnectorSuggestion,
++  CONNECTOR_SUGGESTION_PROVIDERS,
+   type ChatKnowledgeGrounding,
+   type ChatToolCall,
+   type ChatTurn,
+@@ -838,6 +840,8 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
+       recalledMemories: turn.recalledMemories?.map(recalledMemoryWithoutText),
+       stopReason: turn.stopReason,
+       tools: turn.tools,
++      // Kept so a reload shows the suggestion as a note: a provider key and the gateway's scrubbed line.
++      connectorSuggestion: turn.connectorSuggestion,
+       // `unsavedContent` is deliberately absent: it is text the server did
+       // not save, and a reload must not bring it back.
+       // `previewUrl` is a live data URL used by the contextual canvas. It can
+@@ -902,6 +906,7 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
+     recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory).map(recalledMemoryWithoutText),
+     stopReason: turn.stopReason,
+     tools: (turn.tools ?? []).filter(isComposerToolId),
++    connectorSuggestion: restoredConnectorSuggestion(turn.connectorSuggestion),
+     attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
+   }
+ }
+@@ -917,6 +922,35 @@ function transcriptTimingToTurnTiming(value: ChatThreadTranscriptTurn['timing'])
+   return valid ? { serverMs, providerMs, orchestrationMs } : undefined
+ }
+ 
++/** Longest reason a suggestion card shows: the gateway refuses a longer one (mp-contracts `connector_suggest`). */
++export const CONNECTOR_SUGGESTION_MAX_REASON_CHARS = 200
++
++/**
++ * A `connector_suggestion` frame as the card reads it (EP-10 S8), or `null` for a frame it cannot trust: no
++ * id, a provider outside the closed list, or no reason. The frame's keys are read in either spelling, the
++ * wire's or the stream client's. The reason is shown as one line of text and cut to the gateway's bound, so
++ * a frame from a drifted build still renders as the card the gateway means.
++ */
++export function normalizeConnectorSuggestion(event: unknown): ChatConnectorSuggestion | null {
++  const record = objectValue(event)
++  if (!record) return null
++  const suggestionId = stringValue(record.suggestionId ?? record.suggestion_id)?.trim()
++  const provider = CONNECTOR_SUGGESTION_PROVIDERS.find((known) => known === record.provider)
++  const reason = stringValue(record.reason)
++    ?.replace(/\s+/g, ' ')
++    .trim()
++    .slice(0, CONNECTOR_SUGGESTION_MAX_REASON_CHARS)
++  if (!suggestionId || !provider || !reason) return null
++  const requestId = stringValue(record.requestId ?? record.request_id)
++  return { suggestionId, provider, reason, ...(requestId ? { requestId } : {}) }
++}
++
++/** A stored suggestion read back after a reload: checked again, and marked so the card offers nothing. */
++export function restoredConnectorSuggestion(value: unknown): ChatConnectorSuggestion | undefined {
++  const suggestion = normalizeConnectorSuggestion(value)
++  return suggestion ? { ...suggestion, restored: true } : undefined
++}
++
+ function visibleTurnContent(role: ChatTurn['role'], content: string): string {
+   if (role !== 'user') return content
+   const visible = splitInlinedAttachments(content).text
+@@ -1043,6 +1077,8 @@ export function mergeServerTurnsWithCachedMetadata(
+       memoryRecallCount: serverTurn.memoryRecallCount ?? cachedTurn.memoryRecallCount,
+       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
+       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
++      // Stream-only too: the server's message never carries the suggestion card.
++      connectorSuggestion: serverTurn.connectorSuggestion ?? restoredConnectorSuggestion(cachedTurn.connectorSuggestion),
+       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
+       attachments: cachedTurn.attachments.length > 0 && serverTurn.attachments.every(a => a.id.startsWith('restored-'))
+         ? cachedTurn.attachments : serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts
+index 85cf7fc05..454d0f5e7 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts	
+@@ -352,6 +352,23 @@ export type LifecycleNotice =
+ /** The most notices one turn keeps. The oldest go first. */
+ export const LIFECYCLE_NOTICE_CAP = 20
+ 
++/** The providers a connected-app suggestion may name: mp-contracts `connector_suggest`'s closed list. */
++export const CONNECTOR_SUGGESTION_PROVIDERS = ['google', 'microsoft'] as const
++export type ConnectorSuggestionProvider = (typeof CONNECTOR_SUGGESTION_PROVIDERS)[number]
++
++/**
++ * One connected-app suggestion (`connector_suggestion`, EP-10 S8). The reason is the gateway's scrubbed line,
++ * rendered as text. `restored` marks a suggestion read back from the cache after a reload: the moment it
++ * answered has passed, so the card shows it as a note and offers nothing.
++ */
++export type ChatConnectorSuggestion = {
++  suggestionId: string
++  provider: ConnectorSuggestionProvider
++  reason: string
++  requestId?: string
++  restored?: boolean
++}
++
+ /**
+  * `notices` with `notice` appended. An exact repeat of a notice the turn already holds is not added again: a
+  * resumed stream replays what the turn saw. The list keeps its newest `LIFECYCLE_NOTICE_CAP` entries.
+@@ -576,6 +593,11 @@ export type ChatTurn = {
+    * than stale suggestions for an answer the user has moved past.
+    */
+   followUps?: string[]
++  /**
++   * The connected-app suggestion this turn's model made (`connector_suggestion`, EP-10 S8): at most one
++   * per turn. Kept with the turn's cached metadata so a reloaded thread shows it as a resolved note.
++   */
++  connectorSuggestion?: ChatConnectorSuggestion
+   /** Server-derived effect evidence from the durable run proof bundle. */
+   effectClass?: ChatEffectClass
+   /**
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 184068172..9d0a61a96 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -744,6 +744,37 @@ describe('action registry', () => {
+     expect(schema?.safeParse({ connectionIds: [], userId: 'user_x' }).success).toBe(false)
+   })
+ 
++  it('registers the connected-app suggestion card as a low-risk model-plane action the model cannot execute', () => {
++    const accept = getActionDescriptor('chat.accept_connector_suggestion')
++
++    expect(accept).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.accept_connector_suggestion')).toBe(false)
++    expect(accept?.description ?? '').toContain('Never model-executable')
++
++    const schema = accept?.inputSchema
++    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google' }).success).toBe(true)
++    expect(
++      schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'microsoft', connectionId: 'conn_1' }).success,
++    ).toBe(true)
++    // The provider list is closed, as the gateway's is.
++    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'slack' }).success).toBe(false)
++    expect(schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'Google' }).success).toBe(false)
++    // Using an account names it; connecting does not.
++    expect(schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'google' }).success).toBe(false)
++    expect(
++      schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google', connectionId: 'conn_1' }).success,
++    ).toBe(false)
++    expect(
++      schema?.safeParse({ path: 'use', suggestionId: 'sug_01', provider: 'google', connectionId: 'conn 1' }).success,
++    ).toBe(false)
++    expect(schema?.safeParse({ path: 'rank', suggestionId: 'sug_01', provider: 'google' }).success).toBe(false)
++    expect(schema?.safeParse({ path: 'connect', suggestionId: '', provider: 'google' }).success).toBe(false)
++    // The org and the person come from the session.
++    expect(
++      schema?.safeParse({ path: 'connect', suggestionId: 'sug_01', provider: 'google', orgId: 'org_x' }).success,
++    ).toBe(false)
++  })
++
+   it('registers the context chips as model-plane actions the model cannot execute, and bounds them like the gateway', () => {
+     const set = getActionDescriptor('chat.set_context_refs')
+     expect(set).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
+@@ -1745,7 +1776,8 @@ describe('action registry', () => {
+     // +1 after EP-4-S10 registered chat.mcp_app_tool_call, an app's read tool call on its own server.
+     // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
+     // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
+-    expect(ids).toHaveLength(319)
++    // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
++    expect(ids).toHaveLength(320)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 2b836113e..bf9c17689 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1328,6 +1328,25 @@ const chatResearchPlanStartInput = z
+ // Dismissing a plan card sends nothing: no research state waits on the server between the turns.
+ const chatResearchPlanCancelInput = z.object({}).strict()
+ 
++// Accepting a connected-app suggestion card (EP-10 S8): `connect` starts the provider's connect session,
++// `use` selects one existing connection for the question and sends it again. The providers are mp-contracts
++// `connector_suggest`'s closed list, and a connection id has the bounds of `chat.set_connector_scope`.
++const connectorSuggestionProvider = z.enum(['google', 'microsoft'])
++const connectorSuggestionId = z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/)
++const chatAcceptConnectorSuggestionInput = z.discriminatedUnion('path', [
++  z
++    .object({ path: z.literal('connect'), suggestionId: connectorSuggestionId, provider: connectorSuggestionProvider })
++    .strict(),
++  z
++    .object({
++      path: z.literal('use'),
++      suggestionId: connectorSuggestionId,
++      provider: connectorSuggestionProvider,
++      connectionId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
++    })
++    .strict(),
++])
++
+ // The same bounds model-gateway applies before it forwards a retry (EP-2 S9): printable ASCII ids,
+ // a child run id of at most 128 characters and a batch id of at most 256.
+ const chatWideResearchRetryItemInput = z
+@@ -4892,6 +4911,17 @@ export const actionRegistry = [
+     inputSchema: chatResearchPlanCancelInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.accept_connector_suggestion',
++    label: 'Accept a connected-app suggestion',
++    description: 'Answer the card the model shows when a question needs the person\'s own mail, calendar or files and no connected account was selected: connect the suggested provider through the existing connect session and its sign-in window (integrations.start_connect_session), or use an account already connected for this question only, which selects it (chat.set_connector_scope) and sends the question again. The card names one provider from a closed list (google, microsoft) and is never shown in a Space, a temporary chat or under zero data retention. Nothing is remembered beyond the one turn. Never model-executable: a model does not connect or select the person\'s accounts.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatAcceptConnectorSuggestionInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'chat.wide_research_retry_item',
+     label: 'Retry a wide-research item',
+diff --git a/apps/Model Plane/docs/sse-event-taxonomy.md b/apps/Model Plane/docs/sse-event-taxonomy.md
+index ec58f57ca..79e36b3c0 100644
+--- a/apps/Model Plane/docs/sse-event-taxonomy.md	
++++ b/apps/Model Plane/docs/sse-event-taxonomy.md	
+@@ -22,6 +22,7 @@ asserted, not just reported.
+ | `attachment` | `artifacts` | `ChatEvent::Attachment` | ✅ |
+ | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
+ | `compaction` | — (control) | `ChatEvent::Compaction` | ✅ |
++| `connector_suggestion` | — (control) | `ChatEvent::ConnectorSuggestion` | ✅ |
+ | `context_change` | — (control) | `ChatEvent::ContextChange` | ✅ |
+ | `error` | — (control) | `ChatEvent::Error` | ✅ |
+ | `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/connector_suggest.rs b/apps/Model Plane/rust/crates/mp-contracts/src/connector_suggest.rs
+new file mode 100644
+index 000000000..4ccded2e9
+--- /dev/null
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/connector_suggest.rs	
+@@ -0,0 +1,274 @@
++//! The one contract of a connected-app suggestion (Wave 3 EP-10 S8, decision D6).
++//!
++//! When a question needs the person's own mail, calendar or files and no connected account is
++//! selected for the turn, the Ask loop may offer `suggest_connector`. The model names one provider
++//! from a closed list and says in one line why; the person sees a card offering to connect it or to
++//! use it for this question. The tool reads nothing and grants nothing: it only shows the card, and
++//! the turn continues without that data.
++//!
++//! The provider list is closed on purpose. A free-text provider would let a prompt steer the card
++//! to any vendor, and the card's order is the model's single pick, never a ranking. The reason is
++//! model-written text that is kept in the message parts and shown to the person, so it is reduced to
++//! one plain line with no address or link before it is accepted.
++
++use serde::Deserialize;
++
++/// The tool's name, the same in the offer, the dispatch arm and the event.
++pub const TOOL_NAME: &str = "suggest_connector";
++
++/// The providers a suggestion may name: the ones the Ask loop can read once a connection of theirs
++/// is selected (WS23-S2/S3). Adding one is a contract change, never a model choice.
++pub const SUGGESTABLE_PROVIDERS: &[&str] = &["google", "microsoft"];
++
++/// Most characters of a reason, after scrubbing.
++pub const MAX_REASON_CHARS: usize = 200;
++
++/// What the model reads about the tool. It carries the whole rule, so a turn that does not offer
++/// the tool carries no prompt text about it either.
++pub const TOOL_DESCRIPTION: &str = "Suggest that the person connects, or selects, one of their own \
++accounts for this question. Use it only when answering needs the person's own mail, calendar or files \
++and you cannot see them on this turn. Call it at most once per turn, name exactly one provider, and \
++never use it to compare or rank vendors. It shows the person a card and returns at once: you still \
++cannot read that data on this turn, so answer without it and say what you could do with it once the \
++account is connected. The reason is one short plain sentence about the person's question, with no \
++names, addresses or links.";
++
++/// The tool's argument schema, with the provider list taken from [`SUGGESTABLE_PROVIDERS`] so the
++/// offer and the validator cannot disagree.
++#[must_use]
++pub fn tool_parameters_json() -> String {
++    serde_json::json!({
++        "type": "object",
++        "properties": {
++            "provider": {
++                "type": "string",
++                "enum": SUGGESTABLE_PROVIDERS,
++                "description": "google for Gmail, Google Calendar and Drive; microsoft for Outlook, its calendar and OneDrive",
++            },
++            "reason": {
++                "type": "string",
++                "maxLength": MAX_REASON_CHARS,
++                "description": "One short plain sentence saying why the account would help with this question",
++            },
++        },
++        "required": ["provider", "reason"],
++        "additionalProperties": false,
++    })
++    .to_string()
++}
++
++/// A suggestion that passed every check: a provider from the closed list and a scrubbed reason.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct SuggestArgs {
++    pub provider: &'static str,
++    pub reason: String,
++}
++
++/// Why a suggestion was refused. Each refusal reaches the model as a tool error it can act on.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum SuggestProblem {
++    /// The arguments are not an object of exactly `provider` and `reason` strings.
++    Malformed,
++    /// The provider is not in [`SUGGESTABLE_PROVIDERS`].
++    UnknownProvider,
++    /// Nothing is left of the reason once it is scrubbed.
++    EmptyReason,
++    /// The scrubbed reason is longer than [`MAX_REASON_CHARS`].
++    ReasonTooLong,
++}
++
++impl SuggestProblem {
++    /// The tool error the model reads.
++    #[must_use]
++    pub const fn message(self) -> &'static str {
++        match self {
++            Self::Malformed => {
++                "suggest_connector takes exactly two strings: 'provider' and 'reason'"
++            }
++            Self::UnknownProvider => {
++                "suggest_connector can only suggest 'google' or 'microsoft'"
++            }
++            Self::EmptyReason => {
++                "suggest_connector needs a short plain reason, without names, addresses or links"
++            }
++            Self::ReasonTooLong => "suggest_connector's reason must be at most 200 characters",
++        }
++    }
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct RawArgs {
++    provider: String,
++    reason: String,
++}
++
++/// Parse and check the model's arguments. The provider must match an entry exactly, so no other
++/// spelling reaches the card; the reason is scrubbed first and then bounded.
++///
++/// # Errors
++/// [`SuggestProblem`] naming the first check that failed.
++pub fn parse_args(arguments_json: &str) -> Result<SuggestArgs, SuggestProblem> {
++    let raw: RawArgs =
++        serde_json::from_str(arguments_json).map_err(|_| SuggestProblem::Malformed)?;
++    let provider = SUGGESTABLE_PROVIDERS
++        .iter()
++        .copied()
++        .find(|known| *known == raw.provider)
++        .ok_or(SuggestProblem::UnknownProvider)?;
++    let reason = scrub_reason(&raw.reason);
++    if reason.is_empty() {
++        return Err(SuggestProblem::EmptyReason);
++    }
++    if reason.chars().count() > MAX_REASON_CHARS {
++        return Err(SuggestProblem::ReasonTooLong);
++    }
++    Ok(SuggestArgs { provider, reason })
++}
++
++/// The reason as one plain line: control and format characters dropped, every run of whitespace
++/// one space, and any word that is an address or a link left out. The card renders the line as
++/// text, and the message parts keep it, so neither a mail address nor a link the model copied from
++/// the conversation is shown or stored again.
++#[must_use]
++pub fn scrub_reason(raw: &str) -> String {
++    let plain: String = raw
++        .chars()
++        .map(|c| if c.is_whitespace() { ' ' } else { c })
++        .filter(|c| !c.is_control() && !is_format_char(*c))
++        .collect();
++    plain
++        .split(' ')
++        .filter(|word| !word.is_empty() && !is_address_or_link(word))
++        .collect::<Vec<_>>()
++        .join(" ")
++}
++
++/// Invisible characters that can reorder or hide text on the card: bidi controls, zero-width
++/// characters and the byte-order mark.
++fn is_format_char(c: char) -> bool {
++    matches!(
++        c,
++        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
++    )
++}
++
++fn is_address_or_link(word: &str) -> bool {
++    let lower = word.to_ascii_lowercase();
++    word.contains('@')
++        || lower.contains("://")
++        || lower.starts_with("www.")
++        || lower.starts_with("mailto:")
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn args(provider: &str, reason: &str) -> String {
++        serde_json::json!({ "provider": provider, "reason": reason }).to_string()
++    }
++
++    #[test]
++    fn the_provider_list_is_closed_and_exact() {
++        assert_eq!(SUGGESTABLE_PROVIDERS, &["google", "microsoft"]);
++        for provider in SUGGESTABLE_PROVIDERS {
++            let parsed = parse_args(&args(provider, "Your mail would answer this.")).expect("valid");
++            assert_eq!(parsed.provider, *provider);
++        }
++        for other in ["Google", "slack", "notion", "", " google", "google,microsoft"] {
++            assert_eq!(
++                parse_args(&args(other, "Your mail would answer this.")),
++                Err(SuggestProblem::UnknownProvider),
++                "{other:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn the_schema_offers_exactly_the_closed_list() {
++        let schema: serde_json::Value =
++            serde_json::from_str(&tool_parameters_json()).expect("schema is JSON");
++        assert_eq!(
++            schema["properties"]["provider"]["enum"],
++            serde_json::json!(["google", "microsoft"])
++        );
++        assert_eq!(schema["properties"]["reason"]["maxLength"], MAX_REASON_CHARS);
++        assert_eq!(schema["required"], serde_json::json!(["provider", "reason"]));
++        assert_eq!(schema["additionalProperties"], false);
++    }
++
++    #[test]
++    fn malformed_arguments_are_refused() {
++        for bad in [
++            "",
++            "not json",
++            "[]",
++            r#"{"provider":"google"}"#,
++            r#"{"reason":"x"}"#,
++            r#"{"provider":1,"reason":"x"}"#,
++            r#"{"provider":"google","reason":"x","rank":1}"#,
++        ] {
++            assert_eq!(parse_args(bad), Err(SuggestProblem::Malformed), "{bad:?}");
++        }
++    }
++
++    #[test]
++    fn the_reason_is_one_plain_line() {
++        assert_eq!(
++            scrub_reason("  Your\nmail\t\tfrom   yesterday\r\nwould help. "),
++            "Your mail from yesterday would help."
++        );
++        assert_eq!(
++            scrub_reason("Your\u{202E}mail\u{200B} would\u{0007} help"),
++            "Yourmail would help"
++        );
++    }
++
++    #[test]
++    fn addresses_and_links_are_left_out_of_the_reason() {
++        assert_eq!(
++            scrub_reason("Mail from kari@example.com at https://mail.google.com/x would help"),
++            "Mail from at would help"
++        );
++        assert_eq!(
++            scrub_reason("See www.example.com or mailto:kari"),
++            "See or"
++        );
++    }
++
++    #[test]
++    fn the_reason_is_bounded_after_scrubbing() {
++        let at_limit = "a".repeat(MAX_REASON_CHARS);
++        assert_eq!(
++            parse_args(&args("google", &at_limit)).map(|parsed| parsed.reason),
++            Ok(at_limit.clone())
++        );
++        let over = "a".repeat(MAX_REASON_CHARS + 1);
++        assert_eq!(parse_args(&args("google", &over)), Err(SuggestProblem::ReasonTooLong));
++        // Whitespace the scrub folds away does not count against the limit.
++        let padded = format!("{at_limit}\n\n\n   ");
++        assert!(parse_args(&args("google", &padded)).is_ok());
++        // The limit counts characters, not bytes.
++        let wide = "å".repeat(MAX_REASON_CHARS);
++        assert!(parse_args(&args("microsoft", &wide)).is_ok());
++    }
++
++    #[test]
++    fn a_reason_with_nothing_left_is_refused() {
++        for empty in ["", "   ", "\n\t", "kari@example.com", "https://example.com"] {
++            assert_eq!(
++                parse_args(&args("google", empty)),
++                Err(SuggestProblem::EmptyReason),
++                "{empty:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn the_description_states_the_rules() {
++        for rule in ["at most once per turn", "never use it to compare or rank", "answer without it"] {
++            assert!(TOOL_DESCRIPTION.contains(rule), "{rule}");
++        }
++    }
++}
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+index 272a5c9ec..4549055a2 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs	
+@@ -5,6 +5,7 @@ pub mod approval_descriptor;
+ pub mod approval_edit;
+ pub mod attachments;
+ pub mod autonomy;
++pub mod connector_suggest;
+ pub mod context_refs;
+ pub mod dataplane_posture;
+ pub mod deck_manifest;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/connector_suggestion.rs b/apps/Model Plane/rust/services/model-gateway/src/connector_suggestion.rs
+new file mode 100644
+index 000000000..85cd3402a
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/connector_suggestion.rs	
+@@ -0,0 +1,315 @@
++//! The connected-app suggestion in the Ask loop (Wave 3 EP-10 S8, decision D6).
++//!
++//! When a question needs the person's own mail, calendar or files and no connected account is
++//! selected, the model may call `suggest_connector` once per turn. The call reads nothing and
++//! grants nothing: it becomes one `connector_suggestion` card on the stream, and the turn goes on
++//! without that data. The card's two paths (connect, or select for this question) run in the SPA on
++//! its existing connect routes, so this module adds no new call to any other plane.
++//!
++//! The offer, the dispatch arm and the one-per-turn rule live here; the argument contract is
++//! `mp_contracts::connector_suggest`. It is declared from `tool_loop.rs` as `connector_reads` is.
++
++use mp_contracts::connector_suggest;
++use mp_contracts::model_plane::v1::{ToolCall, ToolDefinition};
++
++use super::connector_reads::ConnectorTurn;
++use super::{err_outcome, ToolOutcome};
++use crate::moderation::ToolProvenance;
++use crate::sse_events::ChatEvent;
++
++/// The switch. Only the literal `true` offers the suggestion.
++pub const ENABLED_ENV: &str = "CONNECTOR_SUGGESTIONS_ENABLED";
++/// What the model reads after a suggestion was shown.
++const SHOWN: &str =
++    "Shown to the person. Answer without that data and say what you could do with it.";
++/// The tool error of a second suggestion in one turn.
++const ALREADY_SUGGESTED: &str = "already suggested: a turn shows one connector suggestion; answer without that data";
++const NOT_AVAILABLE: &str = "suggest_connector is not available on this turn";
++
++/// Whether the deployment has switched the suggestion on.
++#[must_use]
++pub fn parse_enabled(raw: Option<&str>) -> bool {
++    raw == Some("true")
++}
++
++/// Whether the switch is on in this process, read on every offer so turning it off needs no restart.
++#[must_use]
++pub fn enabled() -> bool {
++    parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// Whether the Ask loop offers the suggestion on this turn. It needs the switch, a turn that is
++/// neither zero-retention (a temporary chat is one) nor in a Space, a turn that reads every source,
++/// and no connected account selected. The selection names connections, not providers, so any
++/// selection holds the card back: a person who chose an account for this turn has already answered
++/// the question the card would ask.
++#[must_use]
++pub fn offered(enabled: bool, zdr: bool, space_scoped: bool, turn: Option<&ConnectorTurn>) -> bool {
++    enabled
++        && !zdr
++        && !space_scoped
++        && turn.is_some_and(|turn| turn.all_sources && turn.selection.is_empty())
++}
++
++/// The server's own definition of the tool.
++#[must_use]
++pub fn tool_definition() -> ToolDefinition {
++    ToolDefinition {
++        name: connector_suggest::TOOL_NAME.to_owned(),
++        description: connector_suggest::TOOL_DESCRIPTION.to_owned(),
++        parameters_json: connector_suggest::tool_parameters_json(),
++    }
++}
++
++/// The suggestion's place in a turn's tool set. A client's copy of the name is always dropped, and
++/// the server's definition is added last, so the cached prefix holds and a turn that does not offer
++/// the tool lists exactly what it listed before.
++#[must_use]
++pub fn tools_for_turn(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
++    tools.retain(|tool| tool.name != connector_suggest::TOOL_NAME);
++    if offered {
++        tools.push(tool_definition());
++    }
++    tools
++}
++
++/// The dispatch arm. The loop's offered-set check already refused a turn that was not offered the
++/// tool; the switch, zero retention and a Space are checked again here for any other caller.
++#[must_use]
++pub fn outcome(enabled: bool, zdr: bool, space_scoped: bool, call: &ToolCall) -> ToolOutcome {
++    if !enabled || zdr || space_scoped {
++        return err_outcome(call, NOT_AVAILABLE);
++    }
++    match connector_suggest::parse_args(&call.arguments_json) {
++        Ok(_) => ToolOutcome {
++            call_id: call.id.clone(),
++            name: call.name.clone(),
++            output: SHOWN.to_owned(),
++            error: None,
++            provenance: ToolProvenance::unscreened(&call.name, SHOWN),
++        },
++        Err(problem) => err_outcome(call, problem.message()),
++    }
++}
++
++/// One turn's suggestion state. The calls of a round are dispatched together, so the one-per-turn
++/// rule is applied as their outcomes are read back in order, before any result is shown.
++#[derive(Debug, Default)]
++pub struct SuggestionTurn {
++    shown: bool,
++}
++
++impl SuggestionTurn {
++    /// The card event for the first accepted suggestion of the turn. A later one is turned into a
++    /// tool error, so the model is told and the person sees one card. Any other outcome is left
++    /// alone. `call` is the call the outcome answers; the arguments are parsed again from it so the
++    /// event carries exactly what the validator accepted.
++    pub fn settle(&mut self, outcome: &mut ToolOutcome, call: Option<&ToolCall>) -> Option<ChatEvent> {
++        if outcome.name != connector_suggest::TOOL_NAME || outcome.error.is_some() {
++            return None;
++        }
++        if self.shown {
++            refuse(outcome, ALREADY_SUGGESTED);
++            return None;
++        }
++        let Some(args) = call.and_then(|call| connector_suggest::parse_args(&call.arguments_json).ok())
++        else {
++            refuse(outcome, NOT_AVAILABLE);
++            return None;
++        };
++        self.shown = true;
++        Some(ChatEvent::ConnectorSuggestion {
++            suggestion_id: format!("sug_{}", mp_ids::new_ulid()),
++            provider: args.provider.to_owned(),
++            reason: args.reason,
++        })
++    }
++}
++
++fn refuse(outcome: &mut ToolOutcome, message: &str) {
++    outcome.output.clear();
++    outcome.error = Some(message.to_owned());
++    outcome.provenance = ToolProvenance::unscreened(&outcome.name, "");
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn turn(selection: &[&str], all_sources: bool) -> ConnectorTurn {
++        ConnectorTurn::new(
++            selection.iter().map(|id| (*id).to_owned()).collect(),
++            all_sources,
++        )
++    }
++
++    fn call(id: &str, provider: &str, reason: &str) -> ToolCall {
++        ToolCall {
++            id: id.to_owned(),
++            name: connector_suggest::TOOL_NAME.to_owned(),
++            arguments_json: serde_json::json!({ "provider": provider, "reason": reason }).to_string(),
++        }
++    }
++
++    fn other_tool() -> ToolDefinition {
++        ToolDefinition {
++            name: "web_search".to_owned(),
++            description: String::new(),
++            parameters_json: "{}".to_owned(),
++        }
++    }
++
++    #[test]
++    fn only_the_literal_true_switches_it_on() {
++        assert!(parse_enabled(Some("true")));
++        for off in [None, Some(""), Some("TRUE"), Some("1"), Some("yes"), Some(" true")] {
++            assert!(!parse_enabled(off), "{off:?}");
++        }
++    }
++
++    #[test]
++    fn suggestion_not_offered_without_flag() {
++        assert!(!offered(false, false, false, Some(&turn(&[], true))));
++        assert!(offered(true, false, false, Some(&turn(&[], true))));
++        let tools = tools_for_turn(vec![other_tool()], false);
++        assert!(tools.iter().all(|tool| tool.name != connector_suggest::TOOL_NAME));
++    }
++
++    #[test]
++    fn suggestion_not_offered_in_zdr() {
++        assert!(!offered(true, true, false, Some(&turn(&[], true))));
++        assert_eq!(
++            outcome(true, true, false, &call("c1", "google", "Your mail would help.")).error.as_deref(),
++            Some(NOT_AVAILABLE)
++        );
++    }
++
++    /// The ZDR golden of the design's section 5 (`e_zdr_turn_offers_no_connector_suggestion`), kept
++    /// as a gateway test because the posture matrix is keyed on resolver inputs, not feature offers:
++    /// a zero-retention turn is offered no suggestion tool, whatever else holds, and no card exists.
++    #[test]
++    fn connector_suggestion_absent_under_zdr() {
++        for space_scoped in [false, true] {
++            for all_sources in [false, true] {
++                for selection in [&[][..], &["conn_1"][..]] {
++                    let state = turn(selection, all_sources);
++                    assert!(!offered(true, true, space_scoped, Some(&state)));
++                    let tools = tools_for_turn(
++                        vec![other_tool(), tool_definition()],
++                        offered(true, true, space_scoped, Some(&state)),
++                    );
++                    assert!(tools.iter().all(|tool| tool.name != connector_suggest::TOOL_NAME));
++                }
++            }
++        }
++        let mut refused = outcome(true, true, false, &call("c1", "google", "Your mail would help."));
++        let suggestion = call("c1", "google", "Your mail would help.");
++        assert!(SuggestionTurn::default().settle(&mut refused, Some(&suggestion)).is_none());
++    }
++
++    #[test]
++    fn suggestion_not_offered_in_space() {
++        assert!(!offered(true, false, true, Some(&turn(&[], true))));
++        assert_eq!(
++            outcome(true, false, true, &call("c1", "google", "Your mail would help.")).error.as_deref(),
++            Some(NOT_AVAILABLE)
++        );
++    }
++
++    #[test]
++    fn suggestion_not_offered_when_provider_already_selected() {
++        assert!(!offered(true, false, false, Some(&turn(&["conn_gmail"], true))));
++    }
++
++    #[test]
++    fn suggestion_not_offered_outside_auto_scope_or_without_a_live_stream() {
++        assert!(!offered(true, false, false, Some(&turn(&[], false))));
++        assert!(!offered(true, false, false, None));
++    }
++
++    #[test]
++    fn the_offered_tool_replaces_a_client_copy_and_comes_last() {
++        let mut client_copy = tool_definition();
++        client_copy.description = "client text".to_owned();
++        let tools = tools_for_turn(vec![client_copy, other_tool()], true);
++        assert_eq!(tools.len(), 2);
++        assert_eq!(tools[0].name, "web_search");
++        assert_eq!(tools[1], tool_definition());
++        let closed = tools_for_turn(vec![tool_definition(), other_tool()], false);
++        assert_eq!(closed, vec![other_tool()]);
++    }
++
++    #[test]
++    fn suggestion_emits_one_event_per_turn() {
++        let mut state = SuggestionTurn::default();
++        let first = call("c1", "google", "Your mail would answer this.");
++        let mut first_outcome = outcome(true, false, false, &first);
++        assert_eq!(first_outcome.output, SHOWN);
++        let event = state.settle(&mut first_outcome, Some(&first)).expect("the first is shown");
++        let ChatEvent::ConnectorSuggestion { suggestion_id, provider, reason } = event else {
++            panic!("not a connector suggestion");
++        };
++        assert!(suggestion_id.starts_with("sug_"));
++        assert_eq!(provider, "google");
++        assert_eq!(reason, "Your mail would answer this.");
++        assert!(first_outcome.error.is_none());
++
++        let second = call("c2", "microsoft", "Your calendar would help.");
++        let mut second_outcome = outcome(true, false, false, &second);
++        assert!(state.settle(&mut second_outcome, Some(&second)).is_none());
++        assert_eq!(second_outcome.error.as_deref(), Some(ALREADY_SUGGESTED));
++        assert!(second_outcome.output.is_empty());
++    }
++
++    #[test]
++    fn a_refused_suggestion_does_not_use_up_the_turn() {
++        let mut state = SuggestionTurn::default();
++        let bad = call("c1", "slack", "Your messages would help.");
++        let mut bad_outcome = outcome(true, false, false, &bad);
++        assert!(state.settle(&mut bad_outcome, Some(&bad)).is_none());
++        let good = call("c2", "microsoft", "Your calendar would help.");
++        let mut good_outcome = outcome(true, false, false, &good);
++        assert!(state.settle(&mut good_outcome, Some(&good)).is_some());
++    }
++
++    #[test]
++    fn other_tools_are_left_alone() {
++        let mut state = SuggestionTurn::default();
++        let mut other = ToolOutcome {
++            call_id: "c1".to_owned(),
++            name: "web_search".to_owned(),
++            output: "hits".to_owned(),
++            error: None,
++            provenance: ToolProvenance::unscreened("web_search", "hits"),
++        };
++        let before = other.clone();
++        assert!(state.settle(&mut other, None).is_none());
++        assert_eq!(other, before);
++    }
++
++    #[test]
++    fn unknown_provider_is_a_tool_error() {
++        let refused = outcome(true, false, false, &call("c1", "notion", "Your pages would help."));
++        assert_eq!(
++            refused.error.as_deref(),
++            Some(connector_suggest::SuggestProblem::UnknownProvider.message())
++        );
++        assert!(refused.output.is_empty());
++    }
++
++    #[test]
++    fn reason_is_scrubbed_and_bounded() {
++        let mut state = SuggestionTurn::default();
++        let messy = call("c1", "google", "Mail from\nkari@example.com\twould   help");
++        let mut shown = outcome(true, false, false, &messy);
++        let Some(ChatEvent::ConnectorSuggestion { reason, .. }) = state.settle(&mut shown, Some(&messy)) else {
++            panic!("the suggestion is shown");
++        };
++        assert_eq!(reason, "Mail from would help");
++        let long = call("c2", "google", &"a".repeat(connector_suggest::MAX_REASON_CHARS + 1));
++        assert_eq!(
++            outcome(true, false, false, &long).error.as_deref(),
++            Some(connector_suggest::SuggestProblem::ReasonTooLong.message())
++        );
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index 1408b72bc..bd2311e5a 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -470,6 +470,18 @@ pub enum ChatEvent {
+         /// The asking server's display name, set exactly when `origin` is (EP-4 S6).
+         origin_label: Option<String>,
+     },
++    /// The one connected-app suggestion a turn's model made (Wave 3 EP-10 S8), sent only while
++    /// `CONNECTOR_SUGGESTIONS_ENABLED` is on and never on a zero-retention or Space turn. Control event,
++    /// ungated: the card is how the person learns the answer lacked their own data. An older client
++    /// ignores the unknown event name, and the answer's prose still says what it could not see.
++    ConnectorSuggestion {
++        /// Server-made id the card is keyed by.
++        suggestion_id: String,
++        /// One entry of `mp_contracts::connector_suggest::SUGGESTABLE_PROVIDERS`.
++        provider: String,
++        /// One scrubbed line, at most 200 characters, with no address or link.
++        reason: String,
++    },
+     /// The editable deep-research plan a plan turn ends with (Wave 3 EP-2 S5), sent only while
+     /// `DEEP_RESEARCH_PLAN_TURN` is on. Control event, ungated: the plan card is the turn's whole
+     /// point, so a client that opted into nothing still has to see it. The run turn sends the edited
+@@ -749,6 +761,8 @@ impl ChatEvent {
+             | ChatEvent::GoalProgress { .. }
+             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
+             | ChatEvent::UserQuestion { .. }
++            // The connected-app suggestion card (EP-10 S8): it says the answer lacked the person's data.
++            | ChatEvent::ConnectorSuggestion { .. }
+             // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
+             | ChatEvent::ResearchPlan { .. } => None,
+         }
+@@ -796,6 +810,7 @@ impl ChatEvent {
+             ChatEvent::FollowUps { .. } => "follow_ups",
+             ChatEvent::PlanProposed { .. } => "plan_proposed",
+             ChatEvent::UserQuestion { .. } => "user_question",
++            ChatEvent::ConnectorSuggestion { .. } => "connector_suggestion",
+             ChatEvent::ResearchPlan { .. } => "research_plan",
+             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
+             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
+@@ -1084,6 +1099,16 @@ impl ChatEvent {
+                 }
+                 payload
+             }
++            ChatEvent::ConnectorSuggestion {
++                suggestion_id,
++                provider,
++                reason,
++            } => json!({
++                "suggestion_id": suggestion_id,
++                "provider": provider,
++                "reason": reason,
++                "request_id": request_id,
++            }),
+             ChatEvent::ResearchPlan {
+                 sub_queries,
+                 questions,
+@@ -3594,6 +3619,7 @@ mod payload_contract {
+         "FollowUps",
+         "PlanProposed",
+         "UserQuestion",
++        "ConnectorSuggestion",
+         "ResearchPlan",
+         "Verification",
+         "MemoryRecall",
+@@ -3633,6 +3659,7 @@ mod payload_contract {
+             ChatEvent::FollowUps { .. } => "FollowUps",
+             ChatEvent::PlanProposed { .. } => "PlanProposed",
+             ChatEvent::UserQuestion { .. } => "UserQuestion",
++            ChatEvent::ConnectorSuggestion { .. } => "ConnectorSuggestion",
+             ChatEvent::ResearchPlan { .. } => "ResearchPlan",
+             ChatEvent::Verification { .. } => "Verification",
+             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
+@@ -4040,6 +4067,12 @@ mod payload_contract {
+                 origin: Some(s("mcp_elicitation")),
+                 origin_label: Some(s("Fixture server")),
+             },
++            ChatEvent::ConnectorSuggestion { suggestion_id: s("sug_1"), provider: s("google"), reason: s("") },
++            ChatEvent::ConnectorSuggestion {
++                suggestion_id: s("sug_2"),
++                provider: s("microsoft"),
++                reason: s("Your calendar would show the meeting."),
++            },
+             ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
+             ChatEvent::ResearchPlan {
+                 sub_queries: vec![s("norsk havbruk 2026"), s("lakselus tiltak")],
+@@ -4290,6 +4323,29 @@ mod payload_contract {
+         assert_eq!(payload["request_id"], "req-4");
+     }
+ 
++    /// `connector_suggestion` is a control event that carries the card's three keys and nothing else
++    /// (EP-10 S8).
++    #[test]
++    fn connector_suggestion_is_a_control_event_with_the_card_keys() {
++        let event = ChatEvent::ConnectorSuggestion {
++            suggestion_id: "sug_1".into(),
++            provider: "google".into(),
++            reason: "Your mail would answer this.".into(),
++        };
++        assert_eq!(event.name(), "connector_suggestion");
++        assert!(event.family().is_none(), "the card is a control event, never feature-gated");
++        assert!(event.should_emit(&[]));
++        assert_eq!(
++            event.payload("req-5"),
++            json!({
++                "suggestion_id": "sug_1",
++                "provider": "google",
++                "reason": "Your mail would answer this.",
++                "request_id": "req-5",
++            })
++        );
++    }
++
+     /// A model question's frame has no origin key, so an older client and today's read it the same way
+     /// (EP-4 S6).
+     #[test]
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index a255b36be..b5a6e8b9d 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -39,6 +39,8 @@ use crate::{
+ // Declared here, as sse.rs declares its own helpers, so this slice stays inside the files it owns.
+ #[path = "connector_reads.rs"]
+ pub mod connector_reads;
++#[path = "connector_suggestion.rs"]
++pub mod connector_suggestion;
+ 
+ /// Default max tool rounds before forcing a final, tool-free answer.
+ ///
+@@ -4920,6 +4922,14 @@ async fn dispatch_tool_with_cost(
+             )
+             .await
+         }
++        // The connected-app suggestion (EP-10 S8): it reads nothing, and the loop turns the first
++        // accepted call of a turn into the card.
++        mp_contracts::connector_suggest::TOOL_NAME => connector_suggestion::outcome(
++            connector_suggestion::enabled(),
++            zdr,
++            !space_id.is_empty(),
++            call,
++        ),
+         // Knowledge-base RAG — searches the org's OWN ingested documents via
+         // Data Plane v2 retrieval (canonical owner). org-scoped: `org_id` is the
+         // verified request org, never model input, so a tool call can't read
+@@ -6296,8 +6306,11 @@ const ORG_CLASS_TOOLS: &[&str] = &[
+ ];
+ 
+ /// The connected-account half: a connected account is read only under `RetrievalScope::Auto` (WS23-S5,
+-/// DEC-26), so a source-filtered turn never sees the read.
+-const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
++/// DEC-26), so a source-filtered turn never sees the read, nor the suggestion that leads to it (EP-10 S8).
++const CONNECTOR_CLASS_TOOLS: &[&str] = &[
++    mp_contracts::provider_reads::READ_TOOL_NAME,
++    mp_contracts::connector_suggest::TOOL_NAME,
++];
+ 
+ /// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
+ /// retrieval scope already calls web, so the two gates never disagree about what counts as the web.
+@@ -8888,6 +8901,15 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+         .await
+         .admits_ask_loop();
+     let tools = tools_for_connector_scope(tools, connector_offered);
++    // The connected-app suggestion (EP-10 S8) is offered on a turn that selected no account, read from
++    // the same sink selection. With its switch off the list is left as it was.
++    let suggestion_offered = connector_suggestion::offered(
++        connector_suggestion::enabled(),
++        zdr,
++        !space_id.is_empty(),
++        connector_turn,
++    );
++    let tools = connector_suggestion::tools_for_turn(tools, suggestion_offered);
+     // The page reader is offered only where a fetched page can be parked, which a ZDR or waived turn never
+     // can (see `external_parking_allowed`). With its switch off the list is left exactly as it was.
+     let reader_offered =
+@@ -8936,6 +8958,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+     // Persists across rounds: an exact repeat later in the same turn is still
+     // suppressed, not just within one round.
+     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
++    // Whether this turn has shown its one connected-app suggestion card (EP-10 S8).
++    let mut suggestion_turn = connector_suggestion::SuggestionTurn::default();
+     // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
+     // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
+     let guard_mode = loop_guard_mode();
+@@ -9855,6 +9879,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+         for result in dispatched {
+             let mut outcome = result?;
+             if outcome.name == "count_words" { count_calls += 1; }
++            // One connected-app suggestion per turn (EP-10 S8), decided before its result is shown.
++            let answered_call = resp.tool_calls.iter().find(|call| call.id == outcome.call_id);
++            let suggestion = suggestion_turn.settle(&mut outcome, answered_call);
+             // Artifact-producing tools return their payload through `output`,
+             // which would otherwise be appended to the conversation verbatim —
+             // a generated .xlsx or a long document would consume the entire
+@@ -10000,6 +10027,10 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+             for source in connector_reads::settle(&mut outcome, state, org_id, user_id, zdr) {
+                 events.push(source).await;
+             }
++            // The suggestion card follows its tool result, as a read's sources do.
++            if let Some(card) = suggestion {
++                events.push(card).await;
++            }
+             // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
+             for notice_event in retrieval_notice_events(&outcome) {
+                 events.push(notice_event).await;
+@@ -18314,6 +18345,17 @@ mod connector_scope_tests {
+             "the one connected-account read is dispatchable"
+         );
+     }
++
++    /// The suggestion leads to a connected-account read, so it follows the read's source scope (EP-10 S8).
++    #[test]
++    fn connector_suggestion_is_allowed_only_under_auto_and_is_dispatchable() {
++        use crate::normalize::RetrievalScope;
++        use mp_contracts::connector_suggest::TOOL_NAME;
++        assert!(tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::Auto));
++        assert!(!tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::KnowledgeOnly));
++        assert!(!tool_allowed_for_retrieval_scope(TOOL_NAME, RetrievalScope::WebOnly));
++        assert!(inline_tool_allowed(TOOL_NAME));
++    }
+ }
+ 
+ #[cfg(test)]

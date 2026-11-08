@@ -1,0 +1,724 @@
+.gitattributes
+.github/workflows/contract-goldens.yml
+.github/workflows/model-plane-rust-ci.yml
+.plan-work/quarry-w1w2/INNH-1-design.md
+.plan-work/quarry-w1w2/INNH-1-progress.md
+.plan-work/quarry-w1w2/INNH-1-status.md
+.plan-work/quarry-w1w2/INNH-10-design.md
+.plan-work/quarry-w1w2/INNH-10-status.md
+.plan-work/quarry-w1w2/INNH-11-status.md
+.plan-work/quarry-w1w2/INNH-12-progress.md
+.plan-work/quarry-w1w2/INNH-12-status.md
+.plan-work/quarry-w1w2/INNH-13-status.md
+.plan-work/quarry-w1w2/INNH-2-progress.md
+.plan-work/quarry-w1w2/INNH-2-status.md
+.plan-work/quarry-w1w2/INNH-3-status.md
+.plan-work/quarry-w1w2/INNH-4-progress.md
+.plan-work/quarry-w1w2/INNH-4-status.md
+.plan-work/quarry-w1w2/INNH-5-progress.md
+.plan-work/quarry-w1w2/INNH-5-status.md
+.plan-work/quarry-w1w2/INNH-6-progress.md
+.plan-work/quarry-w1w2/INNH-6-status.md
+.plan-work/quarry-w1w2/INNH-7-progress.md
+.plan-work/quarry-w1w2/INNH-7-status.md
+.plan-work/quarry-w1w2/INNH-8-progress.md
+.plan-work/quarry-w1w2/INNH-8-status.md
+.plan-work/quarry-w1w2/INNH-9-progress.md
+.plan-work/quarry-w1w2/INNH-9-status.md
+.plan-work/quarry-w1w2/INNH-STATUS.md
+.plan-work/quarry-w1w2/INNH-depth-lane-a.md
+.plan-work/quarry-w1w2/INNH-depth-lane-b.md
+.plan-work/quarry-w1w2/INNH-depth-lane-c.md
+.plan-work/quarry-w1w2/INNH-depth-lane-d.md
+.plan-work/quarry-w1w2/INNH-depth.md
+.plan-work/quarry-w1w2/MP-ASKS.md
+.plan-work/quarry-w1w2/MP-W2W3-STATUS.md
+.plan-work/quarry-w1w2/depth/INNH-1.md
+.plan-work/quarry-w1w2/mp-w2w3/AGENT-RULES.md
+.plan-work/quarry-w1w2/mp-w2w3/DEPTH.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-A.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-B.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-C.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-D.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-E.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-G.md
+.plan-work/quarry-w1w2/mp-w2w3/progress-H.md
+.plan-work/quarry-w1w2/mp-w2w3/spec-A.md
+.plan-work/quarry-w1w2/mp-w2w3/spec-B.md
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-a.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-b.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-handofffail.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-idem1.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-idem2.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-key.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing-nats.log
+.plan-work/quarry-w1w2/stack-2026-10-28/L-SC7-billing.md
+.plan-work/quarry-w1w2/stack-2026-10-28/L-X10-robots.md
+.plan-work/quarry-w1w2/stack-2026-10-28/P0-preflight-metrics.log
+.plan-work/quarry-w1w2/stack-2026-10-28/P0-preflight.md
+.plan-work/quarry-w1w2/stack-2026-10-28/README.md
+.plan-work/quarry-w1w2/stack-2026-10-28/flags-log.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC2a-authority-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC2a-authority.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-cap.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-phaseA.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-phaseB.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-rss-16.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-rss-8.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-timeout-default.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs-viewport.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC3-SC4-runs.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-sc6.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-agent-events.tsv
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-agent-failclosed-receipts.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-agent-receipts.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-agent-run.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-all-events-keys.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-all-receipts-keys.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-all-run.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-human-receipts.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19-human-run.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-x19.sh
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-zdr-run.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr-zdr.sh
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC5-SC6-docs-zdr.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-a.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-b.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-handofffail-key.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-handofffail.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-idem1.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-idem2.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-key.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-recover.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing-start.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-SC7-billing.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-d2161.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-enforce.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-legacy.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-observe.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-redirect.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots-unreachable.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X10-robots.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-checkpoints-count-final.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-checkpoints-count.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-cost-hand.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-cost-runid.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-d16-count.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-manual-runids.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-metrics-on.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-metrics-profile-after.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-metrics-profile-before.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-metrics-profile-final.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-metrics-shadow.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-metrics-start.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-on-start.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-resume.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-script-on-default-action.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-script-on-navigate.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-script-shadow.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-shadow-runid.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-shadow-steps.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-sse-steps.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16-sse.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/L-X12-D16.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/P0-live-edge.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/P0-live-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/P0-live-metrics-end.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/P0-live-metrics-start.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/P0-live.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/README.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/REVIEW.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/flags-log.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/CHECK.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-edge-scan.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-extra-scale05.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-first-step-wait-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-helper.sh.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-t1-hang-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-t1-t3-shipped.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-t2-hang-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-t2-scale05.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-t4-held.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4-t5-final-container.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-SC4.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-checkpoints.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-flags-diff.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-flags-on.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-metrics-before.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-metrics-end.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-metrics-post-sse.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-metrics-pre-sse.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-script-run1.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-script-run2.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-selftest.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-sse-runid.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-sse-steps.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12-sse.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R-X12.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-edge-scan.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-final-container.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-first-step-hang-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-ready-and-end.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-scale05.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-shipped.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-t2-first-step-hang-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-t4b1-wait-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4-t4b2-wait-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R2-SC4.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-edge-scan.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-final-container.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-helper.sh.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-ready-and-end.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-rs-expired-step-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-rs-receipts.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-rs-resume-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-rs-wait-after-resume-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-rs.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1-blank-target-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1-offlist-target-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1-redirect-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1-redirect-next-egress.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1b-landing-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1b-receipts.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-s1b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-shipped.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-t4b1-hang-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4-t4b1-wait-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R3-SC4.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d1.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d1a-first-wait-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d1b-first-wait-for-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3a-first-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3a-first-receipts.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3a-later-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3b-navigate-observation.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3c-egress-receipts-endpoint.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-d3c-next-observation-egress.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-edge-scan.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-final.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-flags-end.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-helper.sh.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-probe.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-ready-and-end.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-reg.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-rs-expired-lines.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-rs-receipts.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-rs.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-rs1-wait-after-resume-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-rs2-wait-after-resume-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-rs3-wait-after-resume-body.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-s1a-first-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4-t4b1-hang-body.raw
+.plan-work/quarry-w1w2/stack-2026-10-28/live/rerun-2026-10-29/R4-SC4.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/LEGC-DIAGNOSIS.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/MPCAP-DEPLOY.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/PREP.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/SC1-RESULTS.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/SC1-RUN.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/VERIFY.md
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/preflight-after.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/preflight-before.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/preflight.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/sc1-legs.js
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc1-2026-10-29/status-after.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc2a-ws-evaluate.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc2a-ws-evaluate2.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/sc2a-ws-reload-agent.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce/map.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/enforce/run-events.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/legacy/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/observe/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect/fixture-redirect.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/redirect/run-events.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/fixture-unreachable.log
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/map-unreachable.json
+.plan-work/quarry-w1w2/stack-2026-10-28/live/x10/unreachable/run-events.json
+.plan-work/quarry-w1w2/stack-2026-10-28/qv2e-compose.yml
+.plan-work/quarry-w1w2/stack-2026-10-28/qv2e-flags.baseline.env
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-d2161-attempt1-no-restart.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-d2161.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-enforce.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-legacy.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-observe.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-redirect.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/L-X10-robots-unreachable.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/enforce-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/enforce/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/enforce/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/enforce/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/enforce/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/enforce/map.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/legacy-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/legacy/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/legacy/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/legacy/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/legacy/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/observe-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/observe/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/observe/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/observe/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/observe/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/redirect-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/redirect/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/redirect/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/redirect/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/redirect/fixture-redirect.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/redirect/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable-metrics.txt
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable/crawl-response.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable/fixture-a.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable/fixture-b.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable/fixture-unreachable.log
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable/job.json
+.plan-work/quarry-w1w2/stack-2026-10-28/x10/unreachable/map-unreachable.json
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/ai_spec.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/artifact.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/cache.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/change_history.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/lib.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/pagination.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/resources.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/scrape.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-core/src/zdr_matrix.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/Cargo.toml
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/admission.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/api_key_runs.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/attach.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/lifecycle.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/live.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/mod.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/run_live.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/run_registry.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/sensitive_approval.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/tabs.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/tests.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/types.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/answer_status.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_error.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/api_key.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/cache.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_diff.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/change_webhook.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/control_client.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/crawl_policy.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/crawl_request.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/crawl_scrape.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/crawl_sitemap.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/extract_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/grant_boot.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/graphql/schema.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/job_lifecycle_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/job_results_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/lib.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/metrics.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/parse_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/profile_guard.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/resource_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/run_limits.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/scrape_actions.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/scrape_cache.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/scrape_contract.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/scrape_contract/ai_formats.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/state.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/test_support.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/usage_attrs.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/web_policy_edge.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/webhook_subscription_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/ai_formats.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/ai_formats_off.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/ai_formats_real_token.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/answer_provider_status.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/api_key_agent_runs.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/api_key_fence.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/artifacts_fs_list.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/change_diff_route.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/crawl_options_off.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/crawl_options_on.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/crawl_scope_robots.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/crawl_sitemap.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/crawl_sitemap_scope_off.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/job_lifecycle.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/job_results.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/parse_route.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/parse_route_off.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/parse_route_process.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/profile_guard.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/profile_owner.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/schedule_create.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/scrape_max_age.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/scrape_max_age_off.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/support/agent_harness.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/support/ai_model_double.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/support/mod.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/support/zdr_harness.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/web_policy_claim.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/web_policy_routes.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/webhook_subscriptions.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/zdr_claim_floor.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/zdr_feature_matrix.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/zdr_tombstone.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json.sha256
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_formats.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_scrape.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ai_verify.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/answer.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/artifact_store.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/content_route.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grant_validator.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/mp_client.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/pipeline.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/postgres_baseline_store.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/step_receipts.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/ai_scrape.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/doc_parse_sandbox.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/chunk.rs
+apps/Ingestion Plane/Quarry-v2/crates/quarry-transform/src/diff.rs
+apps/Ingestion Plane/Quarry-v2/deploy/compose/README.md
+apps/Ingestion Plane/Quarry-v2/deploy/compose/docker-compose.yml
+apps/Ingestion Plane/Quarry-v2/docs/BILLING.md
+apps/Ingestion Plane/Quarry-v2/docs/CHANGE_TRACKING.md
+apps/Ingestion Plane/Quarry-v2/docs/CONTRACTS.md
+apps/Ingestion Plane/Quarry-v2/docs/CRAWL_SCOPE_ROBOTS.md
+apps/Ingestion Plane/Quarry-v2/docs/ERROR_REASONS.md
+apps/Ingestion Plane/Quarry-v2/docs/GAP.md
+apps/Ingestion Plane/Quarry-v2/docs/REST_RESOURCES.md
+apps/Ingestion Plane/Quarry-v2/docs/RUNBOOKS.md
+apps/Ingestion Plane/Quarry-v2/docs/SELF_HOST.md
+apps/Ingestion Plane/Quarry-v2/docs/SITEMAP_PARSING.md
+apps/Ingestion Plane/Quarry-v2/docs/TAVILY_PARITY.md
+apps/Ingestion Plane/Quarry-v2/docs/ZDR_MATRIX.md
+apps/Ingestion Plane/Quarry-v2/docs/openapi-internal.yaml
+apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml
+apps/Ingestion Plane/Quarry-v2/docs/schemas/effective-scrape-options.schema.json
+apps/Ingestion Plane/Quarry-v2/docs/schemas/scrape-options.schema.json
+apps/Ingestion Plane/Quarry-v2/scripts/openapi-route-allowlist.json
+apps/Ingestion Plane/Quarry-v2/scripts/tests/docs-contract.test.mjs
+apps/Ingestion Plane/Quarry-v2/scripts/tests/openapi-scrape-parity.test.mjs
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/cmd/control/main.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/dispatcher/dispatcher_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/janitor/webhook_deliveries.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/janitor/webhook_deliveries_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/change_webhook_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/cycle24_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/job_credits.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/job_credits_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/job_wire.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/jobs_lifecycle.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/jobs_results.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/jobs_results_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/resources.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhook_deliveries.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhook_fanout_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhook_subscriptions.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhook_subscriptions_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/resources/webhooks.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/credits.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/credits_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/errors.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/gdpr_purge.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/credits_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/gdpr_purge.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/migrations/025_webhook_subscriptions.sql
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/pg.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/resources_v2.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/webhooks_blocklists.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/pg/webhooks_pg_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/resources_v2_mem.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/store.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/storetest/credits.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/storetest/webhooks.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-control/internal/store/webhooks_conformance_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/activities.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/crawl_sitemap.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/crawl_sitemap_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/activities/markdown_artifact_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/crawl_sitemap.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/crawl_sitemap_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/fetched_results_test.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/inputs.go
+apps/Ingestion Plane/Quarry-v2/services/quarry-orchestrator/internal/workflows/workflows.go
+apps/Ingestion Plane/docker-compose.yml
+apps/Model Plane/api/contracts/ai-chat-v1/SHA256SUMS
+apps/Model Plane/api/contracts/ai-chat-v1/request.ok.json
+apps/Model Plane/api/contracts/ai-chat-v1/response.ok.json
+apps/Model Plane/api/contracts/ai-chat-v1/response.route-denied.json
+apps/Model Plane/api/contracts/ai-chat-v1/response.zdr-unavailable.json
+apps/Model Plane/api/contracts/model-gateway-service-routes.json
+apps/Model Plane/api/contracts/model-gateway-service-routes.json.sha256
+apps/Model Plane/api/contracts/run-trace-envelope.golden.json
+apps/Model Plane/api/contracts/run-trace-envelope.golden.json.sha256
+apps/Model Plane/api/contracts/run-trace-read-v1.golden.json
+apps/Model Plane/api/contracts/run-trace-read-v1.golden.json.sha256
+apps/Model Plane/api/openapi.yaml
+apps/Model Plane/deploy/.env.example
+apps/Model Plane/deploy/docker-compose.yml
+apps/Model Plane/deploy/nats.conf
+apps/Model Plane/docs/BROWSER_PLANNER_ROLLOUT.md
+apps/Model Plane/docs/ZDR.md
+apps/Model Plane/docs/decisions/ledger.md
+apps/Model Plane/docs/sse-event-taxonomy.md
+apps/Model Plane/go/gen/model_plane/v1/browser.pb.go
+apps/Model Plane/go/gen/model_plane/v1/eventlog_grpc.pb.go
+apps/Model Plane/go/gen/model_plane/v1/events.pb.go
+apps/Model Plane/go/gen/model_plane/v1/execution.pb.go
+apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go
+apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go
+apps/Model Plane/go/gen/model_plane/v1/orchestration_grpc.pb.go
+apps/Model Plane/go/gen/model_plane/v1/proto_wire_parity_test.go
+apps/Model Plane/go/go.work.sum
+apps/Model Plane/go/pkg/authctx/apikey_test.go
+apps/Model Plane/go/pkg/authctx/authctx.go
+apps/Model Plane/go/pkg/envelope/envelope.go
+apps/Model Plane/go/pkg/envelope/go.sum
+apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json
+apps/Model Plane/go/pkg/envelope/testdata/run-trace-envelope.golden.json.sha256
+apps/Model Plane/go/pkg/envelope/trace_test.go
+apps/Model Plane/go/services/browser-broker/cmd/keyrevoke.go
+apps/Model Plane/go/services/browser-broker/cmd/keyrevoke_test.go
+apps/Model Plane/go/services/browser-broker/cmd/main.go
+apps/Model Plane/go/services/browser-broker/go.mod
+apps/Model Plane/go/services/browser-broker/go.sum
+apps/Model Plane/go/services/browser-broker/internal/authz/apikey_authz_test.go
+apps/Model Plane/go/services/browser-broker/internal/authz/authz.go
+apps/Model Plane/go/services/browser-broker/internal/authz/origin_extension_authz_test.go
+apps/Model Plane/go/services/browser-broker/internal/authz/owner_filter_test.go
+apps/Model Plane/go/services/browser-broker/internal/grant/extension.go
+apps/Model Plane/go/services/browser-broker/internal/grant/extension_test.go
+apps/Model Plane/go/services/browser-broker/internal/grant/grant.go
+apps/Model Plane/go/services/browser-broker/internal/grant/humanbrowse.go
+apps/Model Plane/go/services/browser-broker/internal/grant/key_grant_test.go
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres.go
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres_extension.go
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres_extension_integration_test.go
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres_humanbrowse.go
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres_integration_test.go
+apps/Model Plane/go/services/browser-broker/internal/grant/postgres_key_integration_test.go
+apps/Model Plane/go/services/browser-broker/internal/grant/router.go
+apps/Model Plane/go/services/browser-broker/internal/grant/router_test.go
+apps/Model Plane/go/services/browser-broker/internal/keyrevoke/consumer.go
+apps/Model Plane/go/services/browser-broker/internal/keyrevoke/consumer_test.go
+apps/Model Plane/go/services/browser-broker/internal/server/config.go
+apps/Model Plane/go/services/browser-broker/internal/server/errors.go
+apps/Model Plane/go/services/browser-broker/internal/server/grantlog.go
+apps/Model Plane/go/services/browser-broker/internal/server/human_browse.go
+apps/Model Plane/go/services/browser-broker/internal/server/key_grants.go
+apps/Model Plane/go/services/browser-broker/internal/server/key_grants_test.go
+apps/Model Plane/go/services/browser-broker/internal/server/key_issue_test.go
+apps/Model Plane/go/services/browser-broker/internal/server/origin_extension.go
+apps/Model Plane/go/services/browser-broker/internal/server/origin_extension_test.go
+apps/Model Plane/go/services/browser-broker/internal/server/owner_scope_test.go
+apps/Model Plane/go/services/browser-broker/internal/server/revoked_keys.go
+apps/Model Plane/go/services/browser-broker/internal/server/server.go
+apps/Model Plane/go/services/browser-broker/migrations/0005_browser_grants_key.down.sql
+apps/Model Plane/go/services/browser-broker/migrations/0005_browser_grants_key.up.sql
+apps/Model Plane/go/services/browser-broker/migrations/0006_browser_grants_extension.down.sql
+apps/Model Plane/go/services/browser-broker/migrations/0006_browser_grants_extension.up.sql
+apps/Model Plane/go/services/capability-core/cmd/main.go
+apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go
+apps/Model Plane/go/services/capability-core/internal/api/safety_document_pii.go
+apps/Model Plane/go/services/capability-core/internal/api/safety_document_pii_test.go
+apps/Model Plane/go/services/capability-core/internal/registry/capability_tools_seed_test.go
+apps/Model Plane/go/services/capability-core/internal/registry/web_crawl_tool_seed_test.go
+apps/Model Plane/go/services/capability-core/migrations/0031_web_crawl_tool_capabilities.down.sql
+apps/Model Plane/go/services/capability-core/migrations/0031_web_crawl_tool_capabilities.up.sql
+apps/Model Plane/go/services/capability-core/migrations/0032_document_pii_default_policy.down.sql
+apps/Model Plane/go/services/capability-core/migrations/0032_document_pii_default_policy.up.sql
+apps/Model Plane/go/services/capability-core/migrations/0034_browser_console_tool.down.sql
+apps/Model Plane/go/services/capability-core/migrations/0034_browser_console_tool.up.sql
+apps/Model Plane/go/services/cost-core/cmd/main_test.go
+apps/Model Plane/go/services/nats-provisioner/main.go
+apps/Model Plane/go/services/nats-provisioner/main_test.go
+apps/Model Plane/go/services/nats-provisioner/manifest_contract_test.go
+apps/Model Plane/go/services/nats-provisioner/publishers_registry_test.go
+apps/Model Plane/go/services/nats-provisioner/run_trace.go
+apps/Model Plane/go/services/nats-provisioner/run_trace_test.go
+apps/Model Plane/proto/model_plane/v1/browser.proto
+apps/Model Plane/proto/model_plane/v1/eventlog.proto
+apps/Model Plane/proto/model_plane/v1/events.proto
+apps/Model Plane/proto/model_plane/v1/execution.proto
+apps/Model Plane/proto/model_plane/v1/gateway.proto
+apps/Model Plane/proto/model_plane/v1/orchestration.proto
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/browser_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/events_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/execution_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/gateway_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/inference_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/routing_policy_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/runs_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sandboxes_pb2.py
+apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py
+apps/Model Plane/rust/Cargo.lock
+apps/Model Plane/rust/Cargo.toml
+apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs
+apps/Model Plane/rust/crates/mp-contracts/build.rs
+apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs
+apps/Model Plane/rust/crates/mp-contracts/src/lib.rs
+apps/Model Plane/rust/crates/mp-contracts/src/queued_limits.rs
+apps/Model Plane/rust/crates/mp-contracts/tests/proto_wire_parity.rs
+apps/Model Plane/rust/crates/mp-events/Cargo.toml
+apps/Model Plane/rust/crates/mp-events/src/envelope.rs
+apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json
+apps/Model Plane/rust/crates/mp-events/tests/fixtures/run-trace-envelope.golden.json.sha256
+apps/Model Plane/rust/crates/mp-events/tests/run_trace_golden.rs
+apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs
+apps/Model Plane/rust/crates/mp-orchestration/src/run_event.rs
+apps/Model Plane/rust/crates/mp-scrub/Cargo.toml
+apps/Model Plane/rust/crates/mp-scrub/src/lib.rs
+apps/Model Plane/rust/crates/mp-scrub/tests/fixtures/secret-shapes.v1.json
+apps/Model Plane/rust/crates/mp-scrub/tests/fixtures/secret-shapes.v1.json.sha256
+apps/Model Plane/rust/crates/mp-scrub/tests/golden.rs
+apps/Model Plane/rust/services/execution-core/Cargo.toml
+apps/Model Plane/rust/services/execution-core/src/browser_agent.rs
+apps/Model Plane/rust/services/execution-core/src/browser_agent/admission.rs
+apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs
+apps/Model Plane/rust/services/execution-core/src/browser_agent/failure.rs
+apps/Model Plane/rust/services/execution-core/src/browser_agent/metrics.rs
+apps/Model Plane/rust/services/execution-core/src/browser_agent/planner_view.rs
+apps/Model Plane/rust/services/execution-core/src/browser_agent/procedure.rs
+apps/Model Plane/rust/services/execution-core/src/browser_events.rs
+apps/Model Plane/rust/services/execution-core/src/browser_session.rs
+apps/Model Plane/rust/services/execution-core/src/capability_policy.rs
+apps/Model Plane/rust/services/execution-core/src/external_content.rs
+apps/Model Plane/rust/services/execution-core/src/grpc.rs
+apps/Model Plane/rust/services/execution-core/src/lib.rs
+apps/Model Plane/rust/services/execution-core/src/llm_planner.rs
+apps/Model Plane/rust/services/execution-core/src/main.rs
+apps/Model Plane/rust/services/execution-core/src/permission/mod.rs
+apps/Model Plane/rust/services/execution-core/src/planner_policy.rs
+apps/Model Plane/rust/services/execution-core/src/provenance.rs
+apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs
+apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+apps/Model Plane/rust/services/execution-core/src/runtime_loop/browser_grant_approval.rs
+apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs
+apps/Model Plane/rust/services/execution-core/src/scrub.rs
+apps/Model Plane/rust/services/execution-core/src/state.rs
+apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs
+apps/Model Plane/rust/services/execution-core/src/web_tools.rs
+apps/Model Plane/rust/services/execution-core/tests/browser_agent_e2e.rs
+apps/Model Plane/rust/services/execution-core/tests/browser_do_contract.rs
+apps/Model Plane/rust/services/execution-core/tests/browser_planner_hermetic.rs
+apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/prompts/browse1_first_step.txt
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/prompts/browse1_retry_strict.txt
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/prompts/browse1_with_page_and_failure.txt
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/prompts/legacy_first_step.txt
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/prompts/legacy_with_page.txt
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/bare_done.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/done_blocked.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/done_incomplete_trailing_comma.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/fenced_navigate.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/plain_click.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/prose_around_object.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/prose_only_error.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/strict_done_success.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/planner/replies/truncated_error.json
+apps/Model Plane/rust/services/execution-core/tests/fixtures/request-ask/request-ask.v1.json
+apps/Model Plane/rust/services/execution-core/tests/routing_probe.rs
+apps/Model Plane/rust/services/execution-core/tests/support/fake_quarry.rs
+apps/Model Plane/rust/services/execution-core/tests/support/mod.rs
+apps/Model Plane/rust/services/execution-core/tests/support/scripted_planner.rs
+apps/Model Plane/rust/services/execution-core/tests/tier_b_loop.rs
+apps/Model Plane/rust/services/execution-core/tests/tool_class_registry_parity.rs
+apps/Model Plane/rust/services/inference-core/src/auth.rs
+apps/Model Plane/rust/services/model-gateway/Cargo.toml
+apps/Model Plane/rust/services/model-gateway/src/approvals.rs
+apps/Model Plane/rust/services/model-gateway/src/auth.rs
+apps/Model Plane/rust/services/model-gateway/src/browser_grants.rs
+apps/Model Plane/rust/services/model-gateway/src/browser_run.rs
+apps/Model Plane/rust/services/model-gateway/src/coordinator.rs
+apps/Model Plane/rust/services/model-gateway/src/dataplane.rs
+apps/Model Plane/rust/services/model-gateway/src/finetune_routes.rs
+apps/Model Plane/rust/services/model-gateway/src/grpc.rs
+apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs
+apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+apps/Model Plane/rust/services/model-gateway/src/implicit_feedback.rs
+apps/Model Plane/rust/services/model-gateway/src/lib.rs
+apps/Model Plane/rust/services/model-gateway/src/org_quota.rs
+apps/Model Plane/rust/services/model-gateway/src/pricing.rs
+apps/Model Plane/rust/services/model-gateway/src/queued_input.rs
+apps/Model Plane/rust/services/model-gateway/src/rate_limit.rs
+apps/Model Plane/rust/services/model-gateway/src/schema_check.rs
+apps/Model Plane/rust/services/model-gateway/src/security_events.rs
+apps/Model Plane/rust/services/model-gateway/src/sse.rs
+apps/Model Plane/rust/services/model-gateway/src/state.rs
+apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+apps/Model Plane/rust/services/model-gateway/src/trajectory.rs
+apps/Model Plane/rust/services/model-gateway/src/web_extraction.rs
+apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs
+apps/Model Plane/rust/services/model-gateway/tests/fixtures/ai-extract/schema-corpus.json
+apps/Model Plane/rust/services/session-core/Cargo.toml
+apps/Model Plane/rust/services/session-core/migrations/0086_run_trace_events.sql
+apps/Model Plane/rust/services/session-core/migrations/0087_run_external_content.sql
+apps/Model Plane/rust/services/session-core/migrations/revert/0086_run_trace_events.down.sql
+apps/Model Plane/rust/services/session-core/migrations/revert/0087_run_external_content.down.sql
+apps/Model Plane/rust/services/session-core/src/attention_events.rs
+apps/Model Plane/rust/services/session-core/src/audit_publisher.rs
+apps/Model Plane/rust/services/session-core/src/dreaming.rs
+apps/Model Plane/rust/services/session-core/src/eventlog_grpc.rs
+apps/Model Plane/rust/services/session-core/src/external_content.rs
+apps/Model Plane/rust/services/session-core/src/gdpr.rs
+apps/Model Plane/rust/services/session-core/src/grpc.rs
+apps/Model Plane/rust/services/session-core/src/learning_events.rs
+apps/Model Plane/rust/services/session-core/src/main.rs
+apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs
+apps/Model Plane/rust/services/session-core/src/orchestration_nats.rs
+apps/Model Plane/rust/services/session-core/src/orchestration_store.rs
+apps/Model Plane/rust/services/session-core/src/trace_nats.rs
+apps/Model Plane/rust/services/session-core/src/write_policy.rs
+apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json
+apps/Model Plane/rust/services/session-core/tests/fixtures/run-trace-envelope.golden.json.sha256
+apps/Model Plane/scripts/release-artifact.sh
+docs/plans/model-plane-depth-register.md
+scripts/bootstrap_runtime_environment.sh
+scripts/tests/bootstrap_runtime_environment.test.sh
+scripts/tests/browser-grant-contract.test.mjs
+scripts/tests/model-trace-nats-smoke.sh
+scripts/tests/run-trace-soak.sh
+scripts/tests/zdr-contract-sync.test.sh

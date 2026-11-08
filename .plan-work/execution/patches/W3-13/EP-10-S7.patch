@@ -1,0 +1,1285 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.test.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.test.tsx
+new file mode 100644
+index 000000000..f3236c6d3
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.test.tsx	
+@@ -0,0 +1,124 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, describe, expect, it, vi } from 'vitest'
++import { ConnectedAppsPolicyView } from '@/features/settings/components/ConnectedAppsPolicy'
++import {
++  connectorPoliciesOf,
++  connectorPolicyRequest,
++  type ConnectorPolicies,
++} from '@/shared/api/orchestration-client'
++
++const defaults: ConnectorPolicies = {
++  enforced: true,
++  read: 'use_without_asking',
++  write: 'always_ask',
++  orgRead: 'use_without_asking',
++  orgWrite: 'always_ask',
++}
++
++afterEach(() => cleanup())
++
++describe('connected-app levels (EP-10 S7)', () => {
++  it('reads the person\'s and the org\'s levels from the tool-policy list, and never another capability', () => {
++    const levels = connectorPoliciesOf({
++      enforced: true,
++      policies: [
++        { capability_id: 'cap.tool.provider.read', scope_kind: 'user', decision: 'ask' },
++        { capability_id: 'cap.tool.provider.execute', scope_kind: 'org', decision: 'never' },
++        { capability_id: 'cap.mcp_tool.notes', scope_kind: 'user', decision: 'never' },
++      ],
++    })
++    expect(levels).toEqual({
++      enforced: true,
++      read: 'ask_first',
++      write: 'always_ask',
++      orgRead: 'use_without_asking',
++      orgWrite: 'off',
++    })
++  })
++
++  it('reads a list without the enforced bit as not enforced', () => {
++    expect(connectorPoliciesOf({ policies: [] }).enforced).toBe(false)
++    expect(connectorPoliciesOf([]).enforced).toBe(false)
++    expect(connectorPoliciesOf(null)).toEqual({ ...defaults, enforced: false })
++  })
++
++  it('writes ask or never on the person\'s own row, and returns to the default by revoking it', () => {
++    expect(connectorPolicyRequest({ kind: 'read', level: 'ask_first' })).toEqual({
++      capabilityId: 'cap.tool.provider.read',
++      method: 'PUT',
++      body: { scope: 'user', decision: 'ask', reason: '' },
++    })
++    expect(connectorPolicyRequest({ kind: 'read', level: 'off' })).toEqual({
++      capabilityId: 'cap.tool.provider.read',
++      method: 'PUT',
++      body: { scope: 'user', decision: 'never', reason: '' },
++    })
++    expect(connectorPolicyRequest({ kind: 'write', level: 'off' })).toEqual({
++      capabilityId: 'cap.tool.provider.execute',
++      method: 'PUT',
++      body: { scope: 'user', decision: 'never', reason: '' },
++    })
++    expect(connectorPolicyRequest({ kind: 'read', level: 'use_without_asking' })).toEqual({
++      capabilityId: 'cap.tool.provider.read',
++      method: 'DELETE',
++    })
++    expect(connectorPolicyRequest({ kind: 'write', level: 'always_ask' })).toEqual({
++      capabilityId: 'cap.tool.provider.execute',
++      method: 'DELETE',
++    })
++  })
++
++  it('says Not enforced yet while the deployment does not enforce the levels', () => {
++    render(() => <ConnectedAppsPolicyView policies={{ ...defaults, enforced: false }} busy={false} onChange={vi.fn()} />)
++    flush()
++    expect(screen.getByText(/ikke håndhevet ennå|not enforced yet/i)).toBeTruthy()
++  })
++
++  it('does not say Not enforced yet once the levels are enforced', () => {
++    render(() => <ConnectedAppsPolicyView policies={defaults} busy={false} onChange={vi.fn()} />)
++    flush()
++    expect(screen.queryByText(/ikke håndhevet ennå|not enforced yet/i)).toBeNull()
++  })
++
++  it('offers only tightening levels: three for reads, and always ask or off for writes', () => {
++    render(() => <ConnectedAppsPolicyView policies={defaults} busy={false} onChange={vi.fn()} />)
++    flush()
++    const read = document.getElementById('connected-apps-policy-read') as HTMLSelectElement
++    const write = document.getElementById('connected-apps-policy-write') as HTMLSelectElement
++    expect(Array.from(read.options).map((option) => option.value)).toEqual(['use_without_asking', 'ask_first', 'off'])
++    expect(Array.from(write.options).map((option) => option.value)).toEqual(['always_ask', 'off'])
++  })
++
++  it('hands a changed level to the parent and ignores the level already set', () => {
++    const onChange = vi.fn()
++    render(() => <ConnectedAppsPolicyView policies={defaults} busy={false} onChange={onChange} />)
++    flush()
++    const read = document.getElementById('connected-apps-policy-read') as HTMLSelectElement
++    fireEvent.change(read, { target: { value: 'off' } })
++    flush()
++    expect(onChange).toHaveBeenCalledWith({ kind: 'read', level: 'off' })
++
++    onChange.mockClear()
++    const write = document.getElementById('connected-apps-policy-write') as HTMLSelectElement
++    fireEvent.change(write, { target: { value: 'always_ask' } })
++    flush()
++    expect(onChange).not.toHaveBeenCalled()
++  })
++
++  it('says when the org\'s stricter level is the one in force', () => {
++    render(() => (
++      <ConnectedAppsPolicyView policies={{ ...defaults, orgRead: 'off', orgWrite: 'off' }} busy={false} onChange={vi.fn()} />
++    ))
++    flush()
++    expect(screen.getAllByText(/det strengeste valget gjelder|the stricter choice applies/i)).toHaveLength(2)
++  })
++
++  it('tells the person that Ask first leaves connected apps out of Ask mode', () => {
++    render(() => <ConnectedAppsPolicyView policies={{ ...defaults, read: 'ask_first' }} busy={false} onChange={vi.fn()} />)
++    flush()
++    expect(screen.getByText(/utfør-modus|do mode/i)).toBeTruthy()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.tsx
+new file mode 100644
+index 000000000..2825ed87c
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.tsx	
+@@ -0,0 +1,161 @@
++import { createSignal, Show } from 'solid-js'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import { translateApiError, useI18n } from '@/shared/i18n'
++import { SectionHeader, SettingsSelect } from '@/features/settings/components/settings-ui'
++import {
++  listConnectorPolicies,
++  setConnectorPolicy,
++  type ConnectorPolicies,
++  type ConnectorPolicyInput,
++  type ConnectorReadLevel,
++  type ConnectorWriteLevel,
++} from '@/shared/api/orchestration-client'
++
++/** The anchor a provider approval card links to ("Change for connected apps"). */
++export const CONNECTED_APPS_POLICY_ID = 'connected-apps-policy'
++
++const READ_ORDER: readonly ConnectorReadLevel[] = ['use_without_asking', 'ask_first', 'off']
++const WRITE_ORDER: readonly ConnectorWriteLevel[] = ['always_ask', 'off']
++
++/** Whether the org's level is stricter than the person's, so the org's is the one in force. */
++function orgIsStricter<T extends string>(order: readonly T[], own: T, org: T): boolean {
++  return order.indexOf(org) > order.indexOf(own)
++}
++
++/**
++ * EP-10 S7: how the agent may use the person's connected apps. Reads are used without asking, asked
++ * about first, or off; writes are always asked about, or off. The levels only tighten and apply to
++ * every connected app and account at once. While the deployment does not enforce tool policies the
++ * panel says so, because a level that is stored and not honoured must never look honoured.
++ */
++export function ConnectedAppsPolicyView(props: {
++  policies: ConnectorPolicies
++  busy: boolean
++  onChange: (input: ConnectorPolicyInput) => void
++}) {
++  const i18n = useI18n()
++  const readLabel = (level: ConnectorReadLevel) => {
++    switch (level) {
++      case 'ask_first':
++        return i18n.tr('Spør først', 'Ask first')
++      case 'off':
++        return i18n.tr('Av', 'Off')
++      default:
++        return i18n.tr('Bruk uten å spørre', 'Use without asking')
++    }
++  }
++  const writeLabel = (level: ConnectorWriteLevel) =>
++    level === 'off' ? i18n.tr('Av', 'Off') : i18n.tr('Spør alltid', 'Always ask')
++
++  return (
++    <section id={CONNECTED_APPS_POLICY_ID}>
++      <SectionHeader
++        title={i18n.tr('Hvordan agenten bruker tilkoblede apper', 'How the agent uses connected apps')}
++        description={i18n.tr(
++          'Gjelder alle tilkoblede apper og kontoer samtidig. Du kan bare stramme inn: en sending eller annen endring spør deg alltid først.',
++          'Applies to every connected app and account at once. You can only tighten: a send or any other change always asks you first.',
++        )}
++      />
++      <Show when={!props.policies.enforced}>
++        <p class="verevon-settings-status-message" role="status">
++          <span class="verevon-trust-chip">{i18n.tr('Ikke håndhevet ennå', 'Not enforced yet')}</span>{' '}
++          {i18n.tr(
++            'Valgene lagres, men agenten følger dem ikke før håndheving av verktøyregler er slått på.',
++            'Your choices are saved, but the agent does not follow them until tool policy enforcement is turned on.',
++          )}
++        </p>
++      </Show>
++      <div class="verevon-settings-list-card">
++        <SettingsSelect
++          id={`${CONNECTED_APPS_POLICY_ID}-read`}
++          label={i18n.tr('Lese e-post, kalender og filer', 'Read mail, calendar and files')}
++          value={props.policies.read}
++          disabled={props.busy}
++          options={READ_ORDER.map((level) => ({ value: level, label: readLabel(level) }))}
++          onChange={(event) => {
++            const level = READ_ORDER.find((candidate) => candidate === event.currentTarget.value)
++            if (level && level !== props.policies.read) props.onChange({ kind: 'read', level })
++          }}
++        />
++        <Show when={props.policies.read === 'ask_first'}>
++          <p class="verevon-settings-subnote">
++            {i18n.tr(
++              'Spør først: tilgjengelig i Utfør-modus, der agenten kan vente på svaret ditt. I Spør-modus brukes ikke tilkoblede apper.',
++              'Ask first: available in Do mode, where the agent can wait for your answer. Ask mode leaves connected apps out.',
++            )}
++          </p>
++        </Show>
++        <Show when={orgIsStricter(READ_ORDER, props.policies.read, props.policies.orgRead)}>
++          <p class="verevon-settings-subnote">
++            {i18n.tr('Organisasjonen din har satt lesing til', 'Your organisation has set reading to')}{' '}
++            {readLabel(props.policies.orgRead).toLowerCase()}. {i18n.tr('Det strengeste valget gjelder.', 'The stricter choice applies.')}
++          </p>
++        </Show>
++        <SettingsSelect
++          id={`${CONNECTED_APPS_POLICY_ID}-write`}
++          label={i18n.tr('Sende og endre', 'Send and change')}
++          value={props.policies.write}
++          disabled={props.busy}
++          options={WRITE_ORDER.map((level) => ({ value: level, label: writeLabel(level) }))}
++          onChange={(event) => {
++            const level = WRITE_ORDER.find((candidate) => candidate === event.currentTarget.value)
++            if (level && level !== props.policies.write) props.onChange({ kind: 'write', level })
++          }}
++        />
++        <Show when={orgIsStricter(WRITE_ORDER, props.policies.write, props.policies.orgWrite)}>
++          <p class="verevon-settings-subnote">
++            {i18n.tr('Organisasjonen din har slått av sending og endringer.', 'Your organisation has turned sending and changes off.')}{' '}
++            {i18n.tr('Det strengeste valget gjelder.', 'The stricter choice applies.')}
++          </p>
++        </Show>
++      </div>
++    </section>
++  )
++}
++
++/** The panel with its data: the levels are read from the tool-policy list and written one at a time. */
++export function ConnectedAppsPolicy() {
++  const i18n = useI18n()
++  const [policies, { refetch }] = createResource(() => listConnectorPolicies())
++  const [busy, setBusy] = createSignal(false)
++  const [actionError, setActionError] = createSignal<string | null>(null)
++
++  const change = async (input: ConnectorPolicyInput) => {
++    if (busy()) return
++    setBusy(true)
++    setActionError(null)
++    try {
++      await setConnectorPolicy(input)
++      await refetch()
++    } catch (err) {
++      setActionError(
++        translateApiError(err, i18n.tr, {
++          no: 'Kunne ikke lagre valget.',
++          en: 'Could not save the choice.',
++        }),
++      )
++    } finally {
++      setBusy(false)
++    }
++  }
++
++  return (
++    <>
++      <Show when={actionError()}>
++        {(message) => (
++          <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++            {message()}
++          </p>
++        )}
++      </Show>
++      <Show when={policies.error}>
++        <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++          {i18n.tr('Kunne ikke laste valgene for tilkoblede apper.', 'Could not load the connected app choices.')}
++        </p>
++      </Show>
++      <Show when={policies()}>
++        {(current) => <ConnectedAppsPolicyView policies={current()} busy={busy()} onChange={(input) => void change(input)} />}
++      </Show>
++    </>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx b/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx
+index 0c58fddf6..a74927b1c 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx	
+@@ -22,6 +22,7 @@ import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePo
+ import { MemorySection } from '@/features/settings/components/MemorySection'
+ import { LearningSection } from '@/features/settings/components/LearningSection'
+ import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
++import { ConnectedAppsPolicy } from '@/features/settings/components/ConnectedAppsPolicy'
+ import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
+ import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
+ import { reserveDirectOauthWindow, runDirectOauthWindow } from '@/shared/integrations/provider-auth-window'
+@@ -2050,6 +2051,7 @@ function IntegrationsSection() {
+         )}
+         {loadFailed() ? ` ${i18n.tr('Integrasjonstilstanden kunne ikke oppdateres fra de lokale tjenestene.', 'Integration state could not be refreshed from the local services.')}` : ''}
+       </p>
++      <ConnectedAppsPolicy />
+       <Show when={notice()}>
+         {(message) => <p class="verevon-settings-status-message" role="status">{message()}</p>}
+       </Show>
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 115b64cc3..beecd1c9a 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -3,7 +3,9 @@ import {
+   actionRegistry,
+   getActionDescriptor,
+   integrationsBrowseConnectionInput,
++  integrationsConnectorPoliciesOutput,
+   integrationsFetchConnectionContentInput,
++  integrationsSetConnectorPolicyInput,
+ } from '@/shared/actions/action-registry'
+ import { chatProjectSchema } from '@/shared/actions/chat-project'
+ import { MODEL_ACCESS } from '@/shared/actions/model-access'
+@@ -559,6 +561,55 @@ describe('action registry', () => {
+     expect(content?.safeParse({ connectionId: 'conn-1', operation: 'mail.send', params: {} }).success).toBe(false)
+   })
+ 
++  it('registers the connected-app levels as low-risk model-plane contracts the model cannot execute (EP-10 S7)', () => {
++    for (const id of ['integrations.set_connector_policy', 'integrations.list_connector_policies'] as const) {
++      const action = getActionDescriptor(id)
++
++      expect(action).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++      expect(isModelExecutableAction(id)).toBe(false)
++      expect(buildModelContextPack({ route: '/chat', visibleItems: [] }).availableActions).not.toContain(id)
++      expect(action?.description ?? '').toContain('Never model-executable')
++    }
++  })
++
++  it('takes only tightening levels, never an allow, and nothing a client does not own', () => {
++    const set = integrationsSetConnectorPolicyInput
++    for (const level of ['use_without_asking', 'ask_first', 'off']) {
++      expect(set.safeParse({ kind: 'read', level }).success).toBe(true)
++    }
++    for (const level of ['always_ask', 'off']) {
++      expect(set.safeParse({ kind: 'write', level }).success).toBe(true)
++    }
++    // A write is never released from asking, and an ask is not a separate level for it.
++    expect(set.safeParse({ kind: 'write', level: 'use_without_asking' }).success).toBe(false)
++    expect(set.safeParse({ kind: 'write', level: 'ask_first' }).success).toBe(false)
++    expect(set.safeParse({ kind: 'read', level: 'always_ask' }).success).toBe(false)
++    expect(set.safeParse({ kind: 'read', level: 'allow' }).success).toBe(false)
++    expect(set.safeParse({ kind: 'delete', level: 'off' }).success).toBe(false)
++    for (const forged of [{ scope: 'org' }, { orgId: 'org_x' }, { userId: 'user_x' }, { capabilityId: 'cap.x' }]) {
++      expect(set.safeParse({ kind: 'read', level: 'off', ...forged }).success).toBe(false)
++    }
++
++    expect(
++      integrationsConnectorPoliciesOutput.safeParse({
++        enforced: false,
++        read: 'ask_first',
++        write: 'always_ask',
++        orgRead: 'use_without_asking',
++        orgWrite: 'off',
++      }).success,
++    ).toBe(true)
++    expect(
++      integrationsConnectorPoliciesOutput.safeParse({
++        enforced: true,
++        read: 'ask_first',
++        write: 'ask_first',
++        orgRead: 'use_without_asking',
++        orgWrite: 'always_ask',
++      }).success,
++    ).toBe(false)
++  })
++
+   it('registers the connected-app choice as a model-plane action the model cannot execute, and bounds it like the gateway', () => {
+     const scope = getActionDescriptor('chat.set_connector_scope')
+ 
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index 48690703f..91c4bb4b5 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1049,6 +1049,28 @@ export const integrationsFetchConnectionContentInput = z
+   })
+   .strict()
+ 
++// How the agent may use the person's connected apps (EP-10 S7). The levels only tighten: a read is used
++// without asking, asked about first, or off; a write is always asked about, or off. The client maps a
++// level onto the person's own tool policy on cap.tool.provider.read or cap.tool.provider.execute and
++// never names an org, a user or an allow.
++export const CONNECTOR_READ_LEVELS = ['use_without_asking', 'ask_first', 'off'] as const
++export const CONNECTOR_WRITE_LEVELS = ['always_ask', 'off'] as const
++
++export const integrationsSetConnectorPolicyInput = z.discriminatedUnion('kind', [
++  z.object({ kind: z.literal('read'), level: z.enum(CONNECTOR_READ_LEVELS) }).strict(),
++  z.object({ kind: z.literal('write'), level: z.enum(CONNECTOR_WRITE_LEVELS) }).strict(),
++])
++
++export const integrationsConnectorPoliciesOutput = z.object({
++  // False while the deployment does not enforce tool policies: the levels are stored and not yet honoured.
++  enforced: z.boolean(),
++  read: z.enum(CONNECTOR_READ_LEVELS),
++  write: z.enum(CONNECTOR_WRITE_LEVELS),
++  // The org's own level, which wins whenever it is the stricter one.
++  orgRead: z.enum(CONNECTOR_READ_LEVELS),
++  orgWrite: z.enum(CONNECTOR_WRITE_LEVELS),
++})
++
+ const integrationsConnectorActionOutput = z.object({
+   providerKey: z.string(),
+   operation: z.string(),
+@@ -3520,6 +3542,28 @@ export const actionRegistry = [
+     inputSchema: integrationsFetchConnectionContentInput,
+     outputSchema: integrationsConnectorActionOutput,
+   },
++  {
++    id: 'integrations.list_connector_policies',
++    label: 'Show connected app levels',
++    description: 'Read how the agent may use the person\'s connected apps: reads used without asking, asked about first or off, and writes always asked about or off, for the person and for their org, with whether the deployment enforces the levels yet. Read-only. Never model-executable: a model does not read the rules it runs under to plan around them.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: z.object({}).strict(),
++    outputSchema: integrationsConnectorPoliciesOutput,
++  },
++  {
++    id: 'integrations.set_connector_policy',
++    label: 'Set connected app level',
++    description: 'Set the person\'s own level for every connected app at once: reads used without asking, asked about first or off; writes always asked about or off. Only tightens: a write is never released from asking, and nothing is relaxed past what the org set, because the strictest level in force wins. Stored as the person\'s tool policy on the provider capabilities and honoured once the deployment enforces tool policies. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: integrationsSetConnectorPolicyInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'org.soft_delete',
+     label: 'Soft-delete organization',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts
+index 75a534dd0..7d6c71fb7 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts	
+@@ -1,4 +1,9 @@
+-import { orchestrationDecideApprovalInput } from '@/shared/actions/action-registry'
++import type { z } from 'zod'
++import {
++  type integrationsConnectorPoliciesOutput,
++  integrationsSetConnectorPolicyInput,
++  orchestrationDecideApprovalInput,
++} from '@/shared/actions/action-registry'
+ import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
+ import { ApiError, requestJson } from './http'
+ import { readSseStream, type SseEvent } from './sse'
+@@ -297,6 +302,95 @@ export async function confirmApprovalRule(
+   })
+ }
+ 
++/** The capabilities whose tool policies are the connected-app levels (EP-10 S7). */
++export const PROVIDER_READ_CAPABILITY = 'cap.tool.provider.read'
++export const PROVIDER_EXECUTE_CAPABILITY = 'cap.tool.provider.execute'
++
++export type ConnectorPolicyInput = z.infer<typeof integrationsSetConnectorPolicyInput>
++export type ConnectorPolicies = z.infer<typeof integrationsConnectorPoliciesOutput>
++export type ConnectorReadLevel = ConnectorPolicies['read']
++export type ConnectorWriteLevel = ConnectorPolicies['write']
++
++/** The level a stored decision is: no row is the default level, `ask` is ask first, `never` is off. */
++function readLevelOf(decision: string | undefined): ConnectorReadLevel {
++  if (decision === 'never') return 'off'
++  if (decision === 'ask') return 'ask_first'
++  return 'use_without_asking'
++}
++
++function writeLevelOf(decision: string | undefined): ConnectorWriteLevel {
++  return decision === 'never' ? 'off' : 'always_ask'
++}
++
++/**
++ * The connected-app levels in a tool-policy list. The list holds the org's rows and the caller's own,
++ * never another person's. A list without the `enforced` bit is read as not enforced, so a level is never
++ * shown as honoured on a guess.
++ */
++export function connectorPoliciesOf(body: unknown): ConnectorPolicies {
++  const record = body && typeof body === 'object' ? (body as Record<string, unknown>) : {}
++  const rows = Array.isArray(record.policies) ? record.policies : []
++  const decisionOf = (capabilityId: string, scopeKind: 'user' | 'org') => {
++    for (const row of rows) {
++      if (!row || typeof row !== 'object') continue
++      const policy = row as Record<string, unknown>
++      if (policy.capability_id === capabilityId && policy.scope_kind === scopeKind && typeof policy.decision === 'string') {
++        return policy.decision
++      }
++    }
++    return undefined
++  }
++  return {
++    enforced: record.enforced === true,
++    read: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'user')),
++    write: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'user')),
++    orgRead: readLevelOf(decisionOf(PROVIDER_READ_CAPABILITY, 'org')),
++    orgWrite: writeLevelOf(decisionOf(PROVIDER_EXECUTE_CAPABILITY, 'org')),
++  }
++}
++
++/** The connected-app levels of the caller and their org, and whether they are enforced yet. */
++export async function listConnectorPolicies(signal?: AbortSignal): Promise<ConnectorPolicies> {
++  const body = await requestJson<unknown>('/api/v1/tool-policies', { signal })
++  return connectorPoliciesOf(body)
++}
++
++/**
++ * The request a connected-app level is: the default level revokes the person's own row, any other writes
++ * `ask` or `never` on it. Never an allow and never the org's scope.
++ */
++export function connectorPolicyRequest(input: ConnectorPolicyInput): {
++  capabilityId: string
++  method: 'PUT' | 'DELETE'
++  body?: Record<string, unknown>
++} {
++  const capabilityId = input.kind === 'read' ? PROVIDER_READ_CAPABILITY : PROVIDER_EXECUTE_CAPABILITY
++  if (input.level === 'use_without_asking' || input.level === 'always_ask') {
++    return { capabilityId, method: 'DELETE' }
++  }
++  return {
++    capabilityId,
++    method: 'PUT',
++    body: { scope: 'user', decision: input.level === 'ask_first' ? 'ask' : 'never', reason: '' },
++  }
++}
++
++/** Set the person's own connected-app level. Returning to the default when no row exists is already done. */
++export async function setConnectorPolicy(input: ConnectorPolicyInput, signal?: AbortSignal): Promise<void> {
++  const { capabilityId, method, body } = connectorPolicyRequest(integrationsSetConnectorPolicyInput.parse(input))
++  const path = `/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`
++  if (method === 'DELETE') {
++    try {
++      await requestJson<unknown>(`${path}?scope=user`, { method, signal })
++    } catch (error) {
++      if (error instanceof ApiError && error.status === 404) return
++      throw error
++    }
++    return
++  }
++  await requestJson<unknown>(path, { method, body: JSON.stringify(body), signal })
++}
++
+ /** The kind token of an approval that holds tool output back for review (build plan WS10 S8). */
+ export const UNTRUSTED_CONTENT_KIND = 'APPROVAL_KIND_UNTRUSTED_CONTENT'
+ 
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go
+index 5e55da21f..9bd99d33e 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go	
+@@ -17,6 +17,14 @@
+ // TOOL_POLICY_ENFORCED is "true" on capability-core; the API itself is not gated,
+ // so a person can set policies before the switch is turned on.
+ //
++// The list carries an "enforced" bit beside the policies, so a settings page can
++// tell a person whether the level they set is honoured yet (EP-10 S7).
++//
++// The two connected-app capabilities are tighten-only levels a person sees in
++// settings: the read takes ask or never, and the provider write takes never. An
++// ask on the write is refused as already_always_ask, because every provider
++// write already pauses for the person.
++//
+ // Who may write: a person (never a workload), carrying capability:write, with an
+ // explicit non-ZDR posture; an org-scope write also needs an admin scope from the
+ // signed principal. A ZDR principal can read and be evaluated but never writes:
+@@ -66,12 +74,19 @@ const (
+ 	// pgUniqueViolation is the SQLSTATE of the active-key index refusing a second
+ 	// concurrent first write.
+ 	pgUniqueViolation = "23505"
++
++	// The provider write (EP-10 S7), whose every call already asks the person.
++	providerExecuteCapability = "cap.tool.provider.execute"
++	errAlreadyAlwaysAsk       = "already_always_ask"
+ )
+ 
+ // ToolPoliciesHandler serves /api/v1/tool-policies and is the policy engine's
+ // source of stored policies.
+ type ToolPoliciesHandler struct {
+ 	pool registryDatabase
++	// enforced is TOOL_POLICY_ENFORCED as main read it. It only reports whether
++	// the engine honours the stored policies; the handler never decides with it.
++	enforced bool
+ }
+ 
+ // NewToolPoliciesHandler constructs the handler.
+@@ -79,6 +94,21 @@ func NewToolPoliciesHandler(pool registryDatabase) *ToolPoliciesHandler {
+ 	return &ToolPoliciesHandler{pool: pool}
+ }
+ 
++// WithEnforced records whether the policy engine honours the stored policies, so
++// the list can say so. Left unset, the list reports false: a level is never shown
++// as honoured on a guess.
++func (h *ToolPoliciesHandler) WithEnforced(enforced bool) *ToolPoliciesHandler {
++	h.enforced = enforced
++	return h
++}
++
++// toolPolicyListResponse is the list body: the policies and whether the engine
++// honours them.
++type toolPolicyListResponse struct {
++	Policies []toolPolicyView `json:"policies"`
++	Enforced bool             `json:"enforced"`
++}
++
+ // Register mounts the routes on the mux behind the blanket JWT middleware.
+ func (h *ToolPoliciesHandler) Register(mux *http.ServeMux) {
+ 	mux.HandleFunc(toolPoliciesPath, func(w http.ResponseWriter, r *http.Request) {
+@@ -151,7 +181,8 @@ type toolPolicyView struct {
+ }
+ 
+ // list is GET /api/v1/tool-policies?capability_id=: the org's active policies and
+-// the caller's own. Another person's policy is never returned.
++// the caller's own, with whether the engine honours them. Another person's policy
++// is never returned.
+ func (h *ToolPoliciesHandler) list(w http.ResponseWriter, r *http.Request) {
+ 	orgID, ok := mcpVerifiedOrganization(r, false)
+ 	if !ok {
+@@ -194,7 +225,7 @@ func (h *ToolPoliciesHandler) list(w http.ResponseWriter, r *http.Request) {
+ 		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+ 		return
+ 	}
+-	writeJSON(w, views)
++	writeJSON(w, toolPolicyListResponse{Policies: views, Enforced: h.enforced})
+ }
+ 
+ type setToolPolicyRequest struct {
+@@ -314,6 +345,12 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
+ 		jsonErr(w, "decision must be allow, ask or never", http.StatusBadRequest)
+ 		return
+ 	}
++	// Every provider write already asks the person, so an ask on it changes
++	// nothing and is refused rather than stored as a level that looks chosen.
++	if capabilityID == providerExecuteCapability && request.Decision == policy.ToolPolicyAsk {
++		jsonErr(w, errAlreadyAlwaysAsk, http.StatusUnprocessableEntity)
++		return
++	}
+ 	var expiresAt *time.Time
+ 	if request.Decision == policy.ToolPolicyAllow {
+ 		at, err := ruleExpiry(time.Now().UTC(), request.ExpiresAt)
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_integration_test.go b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_integration_test.go
+index 81fd12981..5d917e5ce 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_integration_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_integration_test.go	
+@@ -210,10 +210,11 @@ func TestToolPoliciesAgainstPostgres(t *testing.T) {
+ 		if response.Code != http.StatusOK {
+ 			t.Fatalf("status = %d", response.Code)
+ 		}
+-		var views []toolPolicyView
+-		if err := json.Unmarshal(response.Body.Bytes(), &views); err != nil {
++		var listed toolPolicyListResponse
++		if err := json.Unmarshal(response.Body.Bytes(), &listed); err != nil {
+ 			t.Fatal(err)
+ 		}
++		views := listed.Policies
+ 		for _, v := range views {
+ 			if v.ScopeKind == "user" && v.ScopeValue != "user-bob" {
+ 				t.Fatalf("bob was shown %s's policy", v.ScopeValue)
+@@ -223,7 +224,9 @@ func TestToolPoliciesAgainstPostgres(t *testing.T) {
+ 			t.Fatalf("bob sees %d policies, want the 2 org ones: %+v", len(views), views)
+ 		}
+ 		filtered := callToolPolicies(t, pool, alice, http.MethodGet, "/api/v1/tool-policies?capability_id="+echo.capabilityID, "")
+-		if err := json.Unmarshal(filtered.Body.Bytes(), &views); err != nil || len(views) != 1 || views[0].Decision != policy.ToolPolicyAllow {
++		listed = toolPolicyListResponse{}
++		err := json.Unmarshal(filtered.Body.Bytes(), &listed)
++		if views = listed.Policies; err != nil || len(views) != 1 || views[0].Decision != policy.ToolPolicyAllow {
+ 			t.Fatalf("filtered list = %+v err=%v", views, err)
+ 		}
+ 	})
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_test.go b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_test.go
+index dd7b81ead..94af396b8 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies_test.go	
+@@ -2,6 +2,7 @@ package api
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"strings"
+@@ -11,6 +12,7 @@ import (
+ 	"github.com/jackc/pgx/v5/pgconn"
+ 	"github.com/triodelab/model-plane/pkg/authctx"
+ 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
++	"github.com/triodelab/model-plane/services/capability-core/internal/models"
+ )
+ 
+ // untouchedDB fails the test on any use: every request below must be refused
+@@ -103,6 +105,8 @@ func TestToolPolicyWritesAreRefusedBeforeTheRegistryIsTouched(t *testing.T) {
+ 		{name: "the collection is read only", method: http.MethodPut, target: "/api/v1/tool-policies", principal: ptr(person(authz.WriteScope)), want: http.StatusMethodNotAllowed},
+ 		{name: "an item cannot be POSTed", method: http.MethodPost, target: "/api/v1/tool-policies/cap.x", principal: ptr(person(authz.WriteScope)), want: http.StatusMethodNotAllowed},
+ 		{name: "a nested path is not a capability id", method: http.MethodPut, target: "/api/v1/tool-policies/cap.x/y", principal: ptr(person(authz.WriteScope)), want: http.StatusNotFound},
++		{name: "an ask on the provider write is already always ask", method: http.MethodPut, target: "/api/v1/tool-policies/cap.tool.provider.execute", body: `{"decision":"ask"}`, principal: ptr(person(authz.WriteScope)), want: http.StatusUnprocessableEntity, wantBody: "already_always_ask"},
++		{name: "an org ask on the provider write is already always ask", method: http.MethodPut, target: "/api/v1/tool-policies/cap.tool.provider.execute", body: `{"decision":"ask","scope":"org"}`, principal: &admin, want: http.StatusUnprocessableEntity, wantBody: "already_always_ask"},
+ 	}
+ 	for _, tc := range tests {
+ 		t.Run(tc.name, func(t *testing.T) {
+@@ -119,6 +123,106 @@ func TestToolPolicyWritesAreRefusedBeforeTheRegistryIsTouched(t *testing.T) {
+ 
+ func ptr[T any](v T) *T { return &v }
+ 
++// builtinToolDB answers the capability read as a built-in tool, so the connected-app
++// capabilities are written against the kind they have in the registry.
++type builtinToolDB struct{ *toolPolicyRecordingDB }
++
++func (d builtinToolDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
++	if strings.Contains(sql, "FROM capabilities") {
++		d.statements = append(d.statements, recordedStatement{sql: sql, args: args})
++		return toolPolicyScanRow{values: []string{models.KindTool}}
++	}
++	return d.toolPolicyRecordingDB.QueryRow(ctx, sql, args...)
++}
++
++// putConnectedAppLevel sends one person's PUT for a connected-app capability and
++// returns the response and what the database was asked to do.
++func putConnectedAppLevel(t *testing.T, capabilityID, body string) (*httptest.ResponseRecorder, *toolPolicyRecordingDB) {
++	t.Helper()
++	db := &toolPolicyRecordingDB{t: t}
++	mux := http.NewServeMux()
++	NewToolPoliciesHandler(builtinToolDB{db}).Register(mux)
++	principal := person(authz.WriteScope)
++	response := httptest.NewRecorder()
++	mux.ServeHTTP(response, toolPolicyRequest(http.MethodPut, "/api/v1/tool-policies/"+capabilityID, body, &principal))
++	return response, db
++}
++
++// The connected-app levels a person may pick are tightenings (EP-10 S7): ask first
++// or off for the read, off for the write. Each is stored as the person's own row.
++func TestConnectedAppLevelsAreTighteningsAPersonMaySet(t *testing.T) {
++	levels := []struct{ capabilityID, decision string }{
++		{"cap.tool.provider.read", "ask"},
++		{"cap.tool.provider.read", "never"},
++		{"cap.tool.provider.execute", "never"},
++	}
++	for _, level := range levels {
++		t.Run(level.capabilityID+" "+level.decision, func(t *testing.T) {
++			response, db := putConnectedAppLevel(t, level.capabilityID, `{"decision":"`+level.decision+`"}`)
++			if response.Code != http.StatusOK {
++				t.Fatalf("status = %d, want %d, body=%s", response.Code, http.StatusOK, response.Body.String())
++			}
++			args := policyWriteArgs(t, db)
++			if args[1] != "user" || args[2] != "user-a" || args[3] != level.capabilityID || args[4] != level.decision {
++				t.Fatalf("stored scope=%v value=%v capability=%v decision=%v", args[1], args[2], args[3], args[4])
++			}
++		})
++	}
++}
++
++// A connected-app capability is built in, so it is never relaxed to allow.
++func TestAConnectedAppCapabilityIsNeverAllowed(t *testing.T) {
++	for _, capabilityID := range []string{"cap.tool.provider.read", "cap.tool.provider.execute"} {
++		response, db := putConnectedAppLevel(t, capabilityID, allowBody)
++		if response.Code != http.StatusUnprocessableEntity {
++			t.Fatalf("%s: status = %d, want %d, body=%s", capabilityID, response.Code, http.StatusUnprocessableEntity, response.Body.String())
++		}
++		for _, statement := range db.statements {
++			if statement.sql == setToolPolicySQL {
++				t.Fatalf("%s: an allow on a built-in tool was written", capabilityID)
++			}
++		}
++	}
++}
++
++// listRowsDB answers the list read with no rows; nothing else may be asked.
++type listRowsDB struct{ untouchedDB }
++
++func (listRowsDB) Query(context.Context, string, ...any) (pgx.Rows, error) {
++	return emptyRows{}, nil
++}
++
++// The list says whether the engine honours the policies, and says false unless
++// main recorded otherwise, so a level is never shown as honoured on a guess.
++func TestTheListSaysWhetherThePoliciesAreEnforced(t *testing.T) {
++	for _, enforced := range []bool{false, true} {
++		mux := http.NewServeMux()
++		handler := NewToolPoliciesHandler(listRowsDB{untouchedDB{t}})
++		if enforced {
++			handler = handler.WithEnforced(true)
++		}
++		handler.Register(mux)
++		response := httptest.NewRecorder()
++		mux.ServeHTTP(response, toolPolicyRequest(http.MethodGet, "/api/v1/tool-policies?capability_id=cap.tool.provider.read", "", ptr(person())))
++		if response.Code != http.StatusOK {
++			t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
++		}
++		var body struct {
++			Policies []toolPolicyView `json:"policies"`
++			Enforced *bool            `json:"enforced"`
++		}
++		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
++			t.Fatalf("the list is not JSON: %v", err)
++		}
++		if body.Enforced == nil || *body.Enforced != enforced {
++			t.Fatalf("enforced = %v, want %v: %s", body.Enforced, enforced, response.Body.String())
++		}
++		if body.Policies == nil || !strings.Contains(response.Body.String(), `"policies":[]`) {
++			t.Fatalf("an empty list must marshal as []: %s", response.Body.String())
++		}
++	}
++}
++
+ // The admin test used for an org-scope write is the same one the model-gateway
+ // applies (ownership.rs is_admin_claim): these are the vectors both sides must
+ // give the same answer for.
+diff --git a/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs b/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs
+index 7864fca19..f310d9e1b 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/capability_policy.rs	
+@@ -2686,6 +2686,8 @@ mod tests {
+         signed_policy_source: Mutex<Option<String>>,
+         /// When set, the evidence carries this claim-set version instead of "2".
+         signed_version: Mutex<Option<String>>,
++        /// The policy source the stand-in answers; `risk_level` when unset.
++        policy_source: Mutex<Option<String>>,
+     }
+ 
+     struct MockCapabilityCore {
+@@ -2750,7 +2752,13 @@ mod tests {
+                 decision_evidence: String::new(),
+                 side_effect_class: class,
+                 approval_floor: floor,
+-                policy_source: "risk_level".to_owned(),
++                policy_source: self
++                    .state
++                    .policy_source
++                    .lock()
++                    .expect("policy source lock")
++                    .clone()
++                    .unwrap_or_else(|| "risk_level".to_owned()),
+                 tool_digest: digest,
+             };
+             let signed_tool = self
+@@ -3076,6 +3084,81 @@ mod tests {
+         assert_eq!(deny.capability_id, "cap.browser.open");
+     }
+ 
++    // The connected-app levels (EP-10 S7) need no Do-loop code: capability-core's engine answers a stored
++    // `ask` or `never` on the provider capabilities, and the loop pauses or refuses on that answer. These pin
++    // that the provider tools are evaluated against their own capabilities with the person named, so the
++    // person's own row can apply. With the class gate off the person is not named (see
++    // `the_tool_and_the_user_are_named_to_capability_core_only_once_the_gate_is_on`).
++    const NAMING_GATES: [ToolClassGate; 2] = [ToolClassGate::Shadow, ToolClassGate::Enforce];
++
++    #[tokio::test]
++    async fn user_ask_on_provider_read_pauses() {
++        for gate in NAMING_GATES {
++            let (policy, state) = harness(gate).await;
++            ask_from(&state);
++            *state.policy_source.lock().unwrap() = Some("tool_policy_ask".to_owned());
++            let evaluation = policy
++                .evaluate_tool_call("read_provider_action", "run-a", "org-a", "user-a")
++                .await
++                .expect("an ask is an evaluation, not an error");
++            assert_eq!(evaluation.decision, CapabilityDecision::Ask, "{gate:?}");
++            assert_eq!(evaluation.policy_source, "tool_policy_ask", "{gate:?}");
++            assert_eq!(
++                evaluation.capability_id, "cap.tool.provider.read",
++                "{gate:?}"
++            );
++            let sent = state.evaluated.lock().unwrap();
++            assert_eq!(sent[0].capability_id, "cap.tool.provider.read", "{gate:?}");
++            assert_eq!(sent[0].user_id, "user-a", "{gate:?}");
++        }
++    }
++
++    #[tokio::test]
++    async fn user_never_on_provider_read_denies() {
++        for gate in NAMING_GATES {
++            for tool in ["read_provider_action", "list_provider_actions"] {
++                let (policy, state) = harness(gate).await;
++                *state.decision.lock().unwrap() = Some("deny".to_owned());
++                *state.policy_source.lock().unwrap() = Some("tool_policy_never".to_owned());
++                let case = format!("{gate:?} {tool}");
++                let evaluation = policy
++                    .evaluate_tool_call(tool, "run-a", "org-a", "user-a")
++                    .await
++                    .expect("a deny is an evaluation");
++                assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{case}");
++                assert_eq!(evaluation.policy_source, "tool_policy_never", "{case}");
++                assert_eq!(evaluation.capability_id, "cap.tool.provider.read", "{case}");
++                assert!(!evaluation.ask_evidence_verified, "{case}");
++                let sent = state.evaluated.lock().unwrap();
++                assert_eq!(sent[0].user_id, "user-a", "{case}");
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn user_never_on_provider_execute_denies() {
++        for gate in NAMING_GATES {
++            let (policy, state) = harness(gate).await;
++            *state.decision.lock().unwrap() = Some("deny".to_owned());
++            *state.policy_source.lock().unwrap() = Some("tool_policy_never".to_owned());
++            let evaluation = policy
++                .evaluate_tool_call("execute_provider_action", "run-a", "org-a", "user-a")
++                .await
++                .expect("a deny is an evaluation");
++            assert_eq!(evaluation.decision, CapabilityDecision::Deny, "{gate:?}");
++            assert_eq!(
++                evaluation.capability_id, "cap.tool.provider.execute",
++                "{gate:?}"
++            );
++            let sent = state.evaluated.lock().unwrap();
++            assert_eq!(
++                sent[0].capability_id, "cap.tool.provider.execute",
++                "{gate:?}"
++            );
++            assert_eq!(sent[0].user_id, "user-a", "{gate:?}");
++        }
++    }
++
+     #[test]
+     fn a_local_policy_is_trusted_for_an_ask_as_it_is_for_an_allow() {
+         let evaluation = CapabilityEvaluation::unverified(CapabilityDecision::Ask);
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs b/apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs
+index 3c23f50ca..40e834914 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs	
+@@ -6,8 +6,13 @@
+ //! ingestion bearer, the screening and framing of what comes back, and the connected-account sources a
+ //! read leaves on the turn. It is declared from `tool_loop.rs` the way `sse.rs` declares its own helpers,
+ //! so the slice stays inside the files it owns.
++//!
++//! It also reads the person's connected-app level (EP-10 S7): once capability-core enforces tool policies,
++//! "Ask first" or "Off" on the read, set by the person or their org, takes the read out of the Ask loop.
+ 
+-use std::time::Duration;
++use std::collections::HashMap;
++use std::sync::{Mutex, OnceLock, PoisonError};
++use std::time::{Duration, Instant};
+ 
+ use mp_contracts::model_plane::v1::{ToolCall, ToolDefinition};
+ use mp_contracts::provider_reads::{self, ProviderRead};
+@@ -38,6 +43,15 @@ const PROVIDER_HOSTS: &[&str] = &[
+     "calendar.google.com",
+ ];
+ const NOT_AVAILABLE: &str = "read_provider_action is not available on this turn";
++/// The capability whose stored tool policy governs the connected-app read (EP-10 S7).
++const READ_CAPABILITY: &str = "cap.tool.provider.read";
++/// How long one person's read level is reused before capability-core is asked again, so a turn costs at
++/// most one policy read a minute per person.
++const POLICY_TTL: Duration = Duration::from_secs(60);
++/// The policy read is on the turn's critical path; a slower answer counts as unknown.
++const POLICY_TIMEOUT: Duration = Duration::from_secs(3);
++/// Most people whose level is remembered at once. Past it the remembered levels are dropped and read again.
++const POLICY_CACHE_MAX: usize = 4096;
+ 
+ /// Whether the deployment has switched the Ask loop's connected-app read on.
+ #[must_use]
+@@ -81,6 +95,166 @@ pub fn offered(enabled: bool, zdr: bool, space_scoped: bool, turn: Option<&Conne
+         && turn.is_some_and(|turn| turn.all_sources && !turn.selection.is_empty())
+ }
+ 
++/// What the person's, or their org's, tool policy on the connected-app read means for the Ask loop (EP-10
++/// S7). The Do loop needs none of this: capability-core's engine pauses or denies its calls directly.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ReadPolicy {
++    /// No tightening is in force, or capability-core does not enforce policies yet: the offer is as before.
++    Unrestricted,
++    /// "Ask first". The Ask loop cannot pause for the person, so the read is left to the Do loop.
++    AskFirst,
++    /// "Off".
++    Off,
++    /// The level could not be read. A tightening may be in force, so the read is not offered.
++    Unknown,
++}
++
++impl ReadPolicy {
++    /// Whether the Ask loop may offer the read under this level.
++    #[must_use]
++    pub fn admits_ask_loop(self) -> bool {
++        self == Self::Unrestricted
++    }
++}
++
++/// The level a capability-core tool-policy list states. While the policies are not enforced every stored
++/// level is ignored, as the engine ignores it; once they are, the strictest active row on the read wins,
++/// whether the org or the person set it. A body that is not the list is unknown.
++#[must_use]
++pub fn policy_of(body: &Value) -> ReadPolicy {
++    let (Some(enforced), Some(policies)) = (
++        body.get("enforced").and_then(Value::as_bool),
++        body.get("policies").and_then(Value::as_array),
++    ) else {
++        return ReadPolicy::Unknown;
++    };
++    if !enforced {
++        return ReadPolicy::Unrestricted;
++    }
++    let mut level = ReadPolicy::Unrestricted;
++    for policy in policies {
++        if policy.get("capability_id").and_then(Value::as_str) != Some(READ_CAPABILITY) {
++            continue;
++        }
++        match policy.get("decision").and_then(Value::as_str) {
++            Some("never") => return ReadPolicy::Off,
++            Some("ask") => level = ReadPolicy::AskFirst,
++            _ => {}
++        }
++    }
++    level
++}
++
++/// One read of the caller's level from capability-core's tool-policy list, with the person's own capability
++/// bearer: the list holds the org's rows and that person's, never another person's.
++pub async fn fetch_policy(http: &reqwest::Client, base_url: &str, bearer: &str) -> ReadPolicy {
++    let Ok(response) = http
++        .get(format!(
++            "{base_url}/api/v1/tool-policies?capability_id={READ_CAPABILITY}"
++        ))
++        .bearer_auth(bearer)
++        .timeout(POLICY_TIMEOUT)
++        .send()
++        .await
++    else {
++        return ReadPolicy::Unknown;
++    };
++    if !response.status().is_success() {
++        return ReadPolicy::Unknown;
++    }
++    response
++        .json::<Value>()
++        .await
++        .map_or(ReadPolicy::Unknown, |body| policy_of(&body))
++}
++
++/// A level read for one person and when it was read.
++#[derive(Debug, Clone, Copy)]
++struct CachedPolicy {
++    read_at: Instant,
++    policy: ReadPolicy,
++}
++
++type PolicyCache = HashMap<(String, String), CachedPolicy>;
++
++fn policy_cache() -> &'static Mutex<PolicyCache> {
++    static CACHE: OnceLock<Mutex<PolicyCache>> = OnceLock::new();
++    CACHE.get_or_init(Mutex::default)
++}
++
++/// The level remembered for this person when it is younger than [`POLICY_TTL`].
++fn cached_policy(
++    cache: &PolicyCache,
++    key: &(String, String),
++    now: Instant,
++) -> Option<ReadPolicy> {
++    cache
++        .get(key)
++        .filter(|cached| now.saturating_duration_since(cached.read_at) < POLICY_TTL)
++        .map(|cached| cached.policy)
++}
++
++/// Remember a level. Expired entries go first; a cache still full of live ones is emptied, so it stays bounded.
++fn remember_policy(
++    cache: &mut PolicyCache,
++    key: (String, String),
++    policy: ReadPolicy,
++    now: Instant,
++) {
++    if cache.len() >= POLICY_CACHE_MAX {
++        cache.retain(|_, cached| now.saturating_duration_since(cached.read_at) < POLICY_TTL);
++        if cache.len() >= POLICY_CACHE_MAX {
++            cache.clear();
++        }
++    }
++    cache.insert(
++        key,
++        CachedPolicy {
++            read_at: now,
++            policy,
++        },
++    );
++}
++
++/// The caller's level on the connected-app read, read once per turn and reused for a minute per (org,
++/// person). Without a capability bearer, or when capability-core does not answer, the level is unknown and is
++/// not remembered, so the next turn asks again.
++pub async fn read_policy(
++    state: &AppState,
++    org_id: &str,
++    user_id: &str,
++    capability_bearer: Option<&str>,
++) -> ReadPolicy {
++    let key = (org_id.to_owned(), user_id.to_owned());
++    let now = Instant::now();
++    let remembered = cached_policy(
++        &policy_cache().lock().unwrap_or_else(PoisonError::into_inner),
++        &key,
++        now,
++    );
++    if let Some(policy) = remembered {
++        return policy;
++    }
++    let Some(bearer) = capability_bearer else {
++        return ReadPolicy::Unknown;
++    };
++    let policy = fetch_policy(
++        &state.http_client,
++        &state.capability_core_base_url,
++        bearer,
++    )
++    .await;
++    if policy != ReadPolicy::Unknown {
++        remember_policy(
++            &mut policy_cache().lock().unwrap_or_else(PoisonError::into_inner),
++            key,
++            policy,
++            Instant::now(),
++        );
++    }
++    policy
++}
++
+ /// The read as the Ask loop offers it: the name, description and schema the Do loop offers too.
+ #[must_use]
+ pub fn tool_definition() -> ToolDefinition {
+@@ -539,7 +713,7 @@ mod tests {
+     use super::*;
+     use crate::moderation::{ScreeningPosture, ToolProvenance, TrustClass};
+     use mp_contracts::provider_reads::{ReadStatus, READ_MAX_RESULTS};
+-    use wiremock::matchers::{header, method, path};
++    use wiremock::matchers::{header, method, path, query_param};
+     use wiremock::{Mock, MockServer, ResponseTemplate};
+ 
+     fn turn(selection: &[&str], all_sources: bool) -> ConnectorTurn {
+@@ -592,6 +766,145 @@ mod tests {
+         assert!(!offered(true, false, false, Some(&turn(&["conn_1"], false))));
+     }
+ 
++    fn listed(enforced: bool, decisions: &[(&str, &str)]) -> Value {
++        json!({
++            "enforced": enforced,
++            "policies": decisions
++                .iter()
++                .map(|(scope, decision)| json!({
++                    "capability_id": READ_CAPABILITY,
++                    "scope_kind": scope,
++                    "decision": decision,
++                }))
++                .collect::<Vec<_>>(),
++        })
++    }
++
++    fn offered_under(policy: ReadPolicy) -> bool {
++        offered(true, false, false, Some(&turn(&["conn_1"], true))) && policy.admits_ask_loop()
++    }
++
++    #[test]
++    fn ask_first_removes_the_read_tool_in_ask() {
++        // The Ask loop cannot pause, so "Ask first" leaves the read to the Do loop, from either scope.
++        for scope in ["user", "org"] {
++            let policy = policy_of(&listed(true, &[(scope, "ask")]));
++            assert_eq!(policy, ReadPolicy::AskFirst, "{scope}");
++            assert!(!offered_under(policy), "{scope}");
++        }
++    }
++
++    #[test]
++    fn off_removes_it() {
++        for scope in ["user", "org"] {
++            let policy = policy_of(&listed(true, &[(scope, "never")]));
++            assert_eq!(policy, ReadPolicy::Off, "{scope}");
++            assert!(!offered_under(policy), "{scope}");
++        }
++        assert_eq!(
++            policy_of(&listed(true, &[("user", "ask"), ("org", "never")])),
++            ReadPolicy::Off,
++            "the strictest level wins whoever set it"
++        );
++    }
++
++    #[test]
++    fn not_enforced_changes_nothing() {
++        for decisions in [&[][..], &[("user", "ask")][..], &[("org", "never")][..]] {
++            let policy = policy_of(&listed(false, decisions));
++            assert_eq!(policy, ReadPolicy::Unrestricted, "{decisions:?}");
++            assert!(offered_under(policy), "{decisions:?}");
++        }
++        assert!(
++            offered_under(policy_of(&listed(true, &[]))),
++            "no level set is the offer as before"
++        );
++    }
++
++    #[test]
++    fn a_level_that_cannot_be_read_is_not_offered() {
++        for body in [
++            json!({"policies": []}),
++            json!({"enforced": true}),
++            json!([]),
++            json!({"error": "authentication required"}),
++        ] {
++            assert_eq!(policy_of(&body), ReadPolicy::Unknown, "{body}");
++        }
++        assert!(!offered_under(ReadPolicy::Unknown));
++    }
++
++    #[test]
++    fn a_level_for_another_capability_is_not_the_reads() {
++        let body = json!({"enforced": true, "policies": [
++            {"capability_id": "cap.tool.provider.execute", "scope_kind": "user", "decision": "never"}
++        ]});
++        assert_eq!(policy_of(&body), ReadPolicy::Unrestricted);
++    }
++
++    #[test]
++    fn a_level_is_reused_for_a_minute_per_person_and_the_cache_stays_bounded() {
++        let mut cache = PolicyCache::new();
++        let start = Instant::now();
++        let alice = ("org-a".to_owned(), "user-a".to_owned());
++        remember_policy(&mut cache, alice.clone(), ReadPolicy::Off, start);
++        assert_eq!(
++            cached_policy(&cache, &alice, start + Duration::from_secs(59)),
++            Some(ReadPolicy::Off)
++        );
++        assert_eq!(cached_policy(&cache, &alice, start + POLICY_TTL), None);
++        assert_eq!(
++            cached_policy(&cache, &("org-b".to_owned(), "user-a".to_owned()), start),
++            None,
++            "a level is never shared across orgs"
++        );
++        for index in 0..POLICY_CACHE_MAX + 10 {
++            remember_policy(
++                &mut cache,
++                ("org-a".to_owned(), format!("user-{index}")),
++                ReadPolicy::Unrestricted,
++                start,
++            );
++        }
++        assert!(cache.len() <= POLICY_CACHE_MAX, "{}", cache.len());
++    }
++
++    #[tokio::test]
++    async fn the_level_is_read_with_the_persons_bearer_for_the_read_capability() {
++        let capability_core = MockServer::start().await;
++        Mock::given(method("GET"))
++            .and(path("/api/v1/tool-policies"))
++            .and(query_param("capability_id", READ_CAPABILITY))
++            .and(header("authorization", "Bearer user-capability-token"))
++            .respond_with(
++                ResponseTemplate::new(200).set_body_json(listed(true, &[("user", "ask")])),
++            )
++            .expect(1)
++            .mount(&capability_core)
++            .await;
++        let policy = fetch_policy(
++            &reqwest::Client::new(),
++            &capability_core.uri(),
++            "user-capability-token",
++        )
++        .await;
++        assert_eq!(policy, ReadPolicy::AskFirst);
++    }
++
++    #[tokio::test]
++    async fn a_refused_policy_read_is_unknown() {
++        let capability_core = MockServer::start().await;
++        Mock::given(method("GET"))
++            .and(path("/api/v1/tool-policies"))
++            .respond_with(
++                ResponseTemplate::new(503).set_body_json(json!({"error": "database unavailable"})),
++            )
++            .mount(&capability_core)
++            .await;
++        let policy = fetch_policy(&reqwest::Client::new(), &capability_core.uri(), "token").await;
++        assert_eq!(policy, ReadPolicy::Unknown);
++    }
++
+     #[test]
+     fn a_read_names_only_an_account_the_person_selected() {
+         let selected = turn(&["conn_1"], true);

@@ -810,6 +810,19 @@
       "expect": {"decision": "zdr", "code": "explicit_zdr"}
     },
     {
+      "id": "e_computer_tools_refused_under_zdr",
+      "title": "A temporary chat that asks for ZDR, on an org that is not ZDR, is refused the computer tools: ZDR.",
+      "tags": [],
+      "note": "computer.observe and computer.act are offered to no run in this slice. A call that reaches the dispatch anyway is refused under zero retention with the feature tool_execution, whatever EXECUTION_DO_COMPUTER_ENABLED says. The org default is off here, so the explicit request alone makes the turn zero-retention.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": true}
+      },
+      "expect": {"decision": "zdr", "code": "explicit_zdr"}
+    },
+    {
       "id": "e_zdr_token_web_reader_not_offered",
       "title": "A ZDR token on a platform provider route, asking for the long-page reader: ZDR, with no reader tool offered and no page held for reading.",
       "tags": [],

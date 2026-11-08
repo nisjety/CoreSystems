@@ -167,6 +167,7 @@ pub(crate) const THREAD_BOUND_TABLES: &[&str] = &[
     "message_revisions",
     "artifact_revisions",
     "thread_goals",
+    "thread_share_snapshots",
 ];
 
 /// What the switch asks for.

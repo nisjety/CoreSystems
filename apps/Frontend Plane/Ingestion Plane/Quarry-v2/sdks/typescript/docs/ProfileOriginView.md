@@ -1,0 +1,44 @@
+
+# ProfileOriginView
+
+
+## Properties
+
+Name | Type
+------------ | -------------
+`origin` | string
+`idbDatabases` | Array&lt;string&gt;
+`idbRows` | number
+`localStorageCount` | number
+`sessionStorageCount` | number
+`truncated` | boolean
+
+## Example
+
+```typescript
+import type { ProfileOriginView } from '@quarry/client'
+
+// TODO: Update the object below with actual values
+const example = {
+  "origin": null,
+  "idbDatabases": null,
+  "idbRows": null,
+  "localStorageCount": null,
+  "sessionStorageCount": null,
+  "truncated": null,
+} satisfies ProfileOriginView
+
+console.log(example)
+
+// Convert the instance to a JSON string
+const exampleJSON: string = JSON.stringify(example)
+console.log(exampleJSON)
+
+// Parse the JSON string back to an object
+const exampleParsed = JSON.parse(exampleJSON) as ProfileOriginView
+console.log(exampleParsed)
+```
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+

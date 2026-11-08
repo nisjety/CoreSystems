@@ -1,0 +1,12 @@
+-- sources.tenant_id has been NOT NULL since 0001_init.sql, but EnsureSource's
+-- upsert (internal/store/sources.go) has always treated it as optional:
+-- nullableString(src.TenantID) converts a blank value to NULL, and the
+-- ON CONFLICT clause explicitly preserves the prior stored value with
+-- COALESCE(NULLIF(EXCLUDED.tenant_id, ''), sources.tenant_id) rather than
+-- requiring a caller to supply one. The register-source API forms (both the
+-- SharePoint site/library picker and the manual-id fallback) label Tenant ID
+-- "optional" and have never required it, so every call that left it blank
+-- was hitting a NOT NULL constraint violation with no useful error surfaced
+-- past a generic 500. Loosen the column to match the code's actual, always-
+-- intended contract instead of adding a fake default value.
+ALTER TABLE sources ALTER COLUMN tenant_id DROP NOT NULL;

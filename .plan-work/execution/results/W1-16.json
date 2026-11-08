@@ -1,0 +1,179 @@
+{
+ "batchId": "W1-16",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS08-S2.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/attachment_policy.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/vision.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/attachment_policy_contract.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/streams.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.attachment-policy.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.attachment-refusals.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib (CARGO_INCREMENTAL=0)",
+     "outcome": "2266 passed, 0 failed, 4 ignored (includes 23 new attachment_policy tests)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test attachment_policy_contract --test zdr_feature_table --test zdr_posture_matrix",
+     "outcome": "5 + 9 + 6 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_refusal_inventory",
+     "outcome": "FAILED, one finding: browser_run.rs:802 untyped ZDR refusal. File not touched by this slice."
+    },
+    {
+     "command": "cargo clippy -q -p model-gateway --lib, filtered to attachment_policy",
+     "outcome": "no warnings left in attachment_policy.rs after two fixes"
+    },
+    {
+     "command": "cargo test -q --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+     "outcome": "719 + 7 + 3 + 1 passed, 0 failed (includes the 2 new chat::streams tests)"
+    },
+    {
+     "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+     "outcome": "up to date (27 events)"
+    },
+    {
+     "command": "pnpm vitest run (new chat-client.attachment-policy, new chat-normalizers.attachment-refusals, chat-client, chat-client.zdr-capability, attachment-policy)",
+     "outcome": "5 files, 147 tests passed"
+    },
+    {
+     "command": "pnpm typecheck, filtered to my files",
+     "outcome": "no errors in chat-client.ts or chat-normalizers.ts; the errors are in RemoteSupportPage.tsx and quarry-client.ts, which I did not touch (missing @verevon/remote-core and @quarry/client modules)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway block (about lines 191-711) add these pass-through env lines: CHAT_ATTACHMENT_POLICY_ENABLED: ${CHAT_ATTACHMENT_POLICY_ENABLED:-true}, CHAT_ATTACHMENT_MAX_IMAGES: ${CHAT_ATTACHMENT_MAX_IMAGES:-4}, CHAT_ATTACHMENT_MAX_IMAGE_BYTES: ${CHAT_ATTACHMENT_MAX_IMAGE_BYTES:-1000000}, CHAT_ATTACHMENT_MAX_FILES: ${CHAT_ATTACHMENT_MAX_FILES:-3}, CHAT_ATTACHMENT_MAX_FILE_BYTES: ${CHAT_ATTACHMENT_MAX_FILE_BYTES:-1000000}, CHAT_ATTACHMENT_MAX_TOTAL_BYTES: ${CHAT_ATTACHMENT_MAX_TOTAL_BYTES:-3145728}, CHAT_STREAM_BODY_LIMIT_BYTES: ${CHAT_STREAM_BODY_LIMIT_BYTES:-12582912}. Do not pass CHAT_SANDBOX_ATTACHMENTS_ENABLED; that is WS08-S5's opt-in.",
+    "Live proof: rebuild model-gateway and the BFF image. curl /v1/invoke/stream with provider openai-codex-subscription plus an image and expect an error frame attachment_route_unsupported with no run row in session-core. curl a 5 MiB body through the BFF and model-gateway and expect 200. Capture /api/v1/models and check it carries attachment_policy beside models.",
+    "Check that the vision-feature scan of the /v1/models catalogue gives modes.vision=true on the live stack."
+   ],
+   "deviations": [
+    "validate takes &[InvokeAttachment] instead of &InvokeRequest. Fewer dependencies, easier to test. The route is passed as an AttachmentRoute built from the raw provider and connection id.",
+    "Under the contract, any attachment on a waived turn is refused with WAIVER_ROUTE_MISMATCH, not only an image (DEC-32 wording in the plan). This adds a disjunct to the existing waiver check in sse.rs and applies only while the contract is on.",
+    "kind:\"file\" is refused with attachment_media_unsupported unless CHAT_SANDBOX_ATTACHMENTS_ENABLED is the literal \"true\". Nothing consumes a file until WS08-S5, and accepting one now would drop it silently, which is the loss this slice removes. The policy publishes that mode as modes.sandbox_files.",
+    "Not edited: apps/Model Plane/docs/sse-event-taxonomy.md. It is generated and lists event names only, with no error-code rows. No new event variant was added, so gen-sse-event-taxonomy.py --check passes unchanged.",
+    "Not edited: zdr_features.rs. FIELD_TREATMENTS covers only top-level InvokeRequest fields and attachments is already refused wholesale, so a nested name needs no classification.",
+    "Not edited: vision.rs select_image. Only the InvokeAttachment doc comment and the new `name` field changed there.",
+    "The i18n files (no.ts, en.ts, errors.ts) are not owned, so the five new refusal texts are inline tr(no, en) strings in chat-normalizers.ts.",
+    "The body-limit contract test uses a minimal router layered the way build_router layers the stream route, plus source-pin tests on http_routes.rs and sse.rs. The real handler needs six signed bearers before it reads its body."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead: apply the shared-edit to apps/Model Plane/deploy/docker-compose.yml model-gateway block (CHAT_ATTACHMENT_POLICY_ENABLED, _MAX_IMAGES, _MAX_IMAGE_BYTES, _MAX_FILES, _MAX_FILE_BYTES, _MAX_TOTAL_BYTES, CHAT_STREAM_BODY_LIMIT_BYTES pass-through lines from the implementer's lead_todo; not CHAT_SANDBOX_ATTACHMENTS_ENABLED).",
+     "Live proof needs docker: rebuild model-gateway and the BFF image; curl /v1/invoke/stream with provider openai-codex-subscription plus an image and expect an error frame attachment_route_unsupported with no session-core run row; a 5 MiB body through both hops returns 200; capture /api/v1/models and confirm attachment_policy beside models with modes.vision=true.",
+     "/api/v1/models reaches the client through the BFF proxy_model_json_with_inference verbatim (read-only check), so attachment_policy should survive the hop; confirm in the live capture."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "CHAT_SANDBOX_ATTACHMENTS_ENABLED=true makes the policy accept kind:\"file\" and publish modes.sandbox_files, but no consumer exists until WS08-S5. A file would validate and then be ignored by the stream, so the switch must not be turned on before S5."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An image attachment given as a hosted `url` with no bytes still passes validation (size counted as 0) and is fetched by inference-core's AnalyzeImage as before. The policy declares no URL allowlist, so the owner should decide whether URL images stay allowed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the real /v1/invoke/stream handler end to end: attachment_route_unsupported arriving as an error SSE frame with no run row, and a 13 MiB 413 on the real route. Both are source-pinned or proven on a mini router, so the lead's live curl proof is the only end-to-end check."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No golden rows were added for (file, waived) and (attachment, subscription, non-ZDR) in zdr_posture_matrix.rs or zdr_waiver_route_tests.rs. The waiver path is source-pinned only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Client composer limits are still the S1 constants. getAttachmentPolicy() exists but nothing reads it yet; WS08-S1's attachment-policy.ts / DashboardComposer should consume it (absent keeps the constants)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Memory per request: a 12 MiB body cap is read into memory by the Json extractor on both hops, and the decode check allocates up to the per-item cap again. No concurrency bound on this route was verified."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The BFF 12 MiB limit is a const, so CHAT_STREAM_BODY_LIMIT_BYTES set on model-gateway alone can drift from it. Deriving both from one config value belongs to WS08-S7."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Existing: tests/zdr_refusal_inventory.rs fails on browser_run.rs:802 (an untyped ZDR refusal). That is outside this slice and was not changed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An image given as a hosted url with no bytes validates with size 0 and is still fetched by inference-core AnalyzeImage; no URL allowlist exists, so the owner should decide whether url images stay allowed before this contract is claimed as no-silent-loss or egress-safe."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "CHAT_SANDBOX_ATTACHMENTS_ENABLED=true makes validate accept kind:file and publish modes.sandbox_files while no consumer exists until WS08-S5, so a validated file would be silently ignored; the switch must stay off until S5."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Wiring is source-pinned (include_str position checks on sse.rs and http_routes.rs) and the 13 MiB 413 is proven on a mini router, not the real handlers; the live curl proof is the only end-to-end check of attachment_route_unsupported arriving as an error frame with no run row."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No golden rows for (file, waived) or (attachment, subscription, non-ZDR) in zdr_posture_matrix.rs / zdr_waiver_route_tests.rs; the new waiver disjunct (any attachment while the policy is on) is only source-pinned."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "apps/Model Plane/docs/sse-event-taxonomy.md has no error-code rows, so the plan row's taxonomy rows for the five attachment codes were not added; decide whether the generator should list error codes or the plan row should be amended."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "getAttachmentPolicy() exists but nothing consumes it yet; the composer limits stay the S1 constants until WS08-S1 attachment-policy.ts / DashboardComposer read it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A 12 MiB body is buffered by the Json extractor on both hops and the validator decodes up to the per-item cap again; no concurrency bound on this route was verified."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "BFF body limit is a const (12 MiB) while model-gateway reads CHAT_STREAM_BODY_LIMIT_BYTES, so setting the env on one side can drift; derive both from one value in WS08-S7."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Pre-existing and out of scope: tests/zdr_refusal_inventory.rs fails on an untyped ZDR refusal at browser_run.rs:802, which this slice did not touch."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "policy",
+    "data-loss"
+   ],
+   "notes": "Built the server attachment contract. A new model-gateway module, attachment_policy.rs, holds the AttachmentPolicy and its validator.\n\n- Closed codes: attachment_media_unsupported, attachment_too_large, attachment_count_exceeded, attachment_route_unsupported, attachment_encoding_invalid.\n- Validation: image mimes png/jpeg/webp/gif, decoded size caps per item and in total, name check (a bare file name; a path or '..' is refused, never repaired), and base64 checked by decoding. A payload far over the cap is refused before it is decoded.\n- Route: the route is read from the raw provider and connection id. A subscription turn with any attachment gets attachment_route_unsupported.\n- Where it runs: invoke_stream_sse calls validate right after the waiver check, before normalize_stream. normalize_stream would otherwise refuse a subscription turn with attachments under a generic code. A ZDR turn skips validate, so the zdr_features attachments refusal keeps priority. A contract test pins this order in the sse.rs source.\n- Switch: CHAT_ATTACHMENT_POLICY_ENABLED is on by default, per the plan row. Only the values \"0\" and \"false\" switch it off. When off, validate accepts everything and /v1/models omits attachment_policy.\n- Env caps: CHAT_ATTACHMENT_MAX_IMAGES (4), _MAX_IMAGE_BYTES (1,000,000), _MAX_FILES (3), _MAX_FILE_BYTES (1,000,000), _MAX_TOTAL_BYTES (3,145,728). A missing, zero or unparsable value keeps its default.\n- Wire changes: InvokeAttachment gained `name`, and `kind:\"file\"` is recognised.\n- /v1/models: now carries a sibling `attachment_policy`. modes.vision is true when any listed model has the \"vision\" feature.\n- Body limit: /v1/invoke/stream on model-gateway and /api/v1/chat/stream on the BFF both take 12 MiB. On model-gateway it can be set with CHAT_STREAM_BODY_LIMIT_BYTES; the BFF value is a const.\n- BFF: the route is now streams::stream_route(), so the test drives the same wiring. The BFF test checks a 5 MiB body is not refused and a body over the limit gets 413.\n- Frontend: chat-client.ts exports AttachmentPolicy, parseAttachmentPolicy and getAttachmentPolicy. listModels sets the policy as a side effect. A malformed policy is treated as absent. chat-normalizers.ts gives all five codes Norwegian and English text with no retry action.\n- Test rows: zdr_feature_table.rs gained two rows (an inline image and a named file under ZDR are both refused as `attachments`).\n- A previous attempt had left no partial edits on my files."
+  }
+ ]
+}

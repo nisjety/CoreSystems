@@ -1,0 +1,428 @@
+[
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 273,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"denied_domains\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 274,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"absolute_expires_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 303,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"DeriveRunGrantRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 351,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"DeriveRunGrantResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 352,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"grant_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 353,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"endpoint\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 354,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"expires_at\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 385,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RenewGrantRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/browser.proto",
+  "line": 393,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RenewGrantResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 42,
+  "type": "RPC_RESPONSE_STANDARD_NAME",
+  "message": "RPC response type \"SkillBundleManifest\" should be named \"GetSkillBundleManifestResponse\" or \"CapabilityCoreGetSkillBundleManifestResponse\"."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 321,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListSkillBundlesRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 326,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListSkillBundlesResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 327,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"bundles\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 330,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SkillBundleSummary\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 332,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"manifest_sha256\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 333,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"file_count\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 334,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"total_bytes\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 335,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"created_by\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 344,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetSkillBundleManifestRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 348,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SkillBundleManifest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 350,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"manifest_sha256\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 351,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"files\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 354,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"SkillBundleFile\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 357,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"sha256\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 358,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"size_bytes\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 359,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"executable\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 364,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetSkillBlobRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 366,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"sha256\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 369,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"GetSkillBlobResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+  "line": 370,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"content\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+  "line": 76,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"withheld_effects\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+  "line": 77,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"tool_calls\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+  "line": 78,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"input_tokens\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+  "line": 79,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"output_tokens\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+  "line": 659,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"RUN_ATTACHMENT_KIND_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/execution.proto",
+  "line": 684,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 544,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"start\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 545,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"end\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 553,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"final_url\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 555,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"source_fingerprint\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 563,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"found\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 572,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"model_used\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 573,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"input_tokens\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+  "line": 1645,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"user_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 398,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"CONTINUATION_STATE_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 420,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"state\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 431,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"ADDRESSEE_KIND_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 444,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"kind\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 543,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"APPROVAL_DECISION_SOURCE_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 559,
+  "type": "COMMENT_ENUM_VALUE",
+  "message": "Enum value \"APPROVAL_SCOPE_UNSPECIFIED\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1238,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1239,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1281,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1282,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_read_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1324,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1325,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1356,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RerouteApprovalRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1368,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_decision_ref\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1369,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"space_decision_token\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1372,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RerouteApprovalResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1725,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"scope\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1727,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"decision_source\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1851,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"attach_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 1854,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"tab_id\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2320,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"UseApprovalScopeGrantRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2343,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"UseApprovalScopeGrantResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2348,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListApprovalScopeGrantsRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2356,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"ListApprovalScopeGrantsResponse\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2357,
+  "type": "COMMENT_FIELD",
+  "message": "Field \"grants\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2360,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RevokeApprovalScopeGrantRequest\" should have a non-empty comment for documentation."
+ },
+ {
+  "path": "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+  "line": 2368,
+  "type": "COMMENT_MESSAGE",
+  "message": "Message \"RevokeApprovalScopeGrantResponse\" should have a non-empty comment for documentation."
+ }
+]

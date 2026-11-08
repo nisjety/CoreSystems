@@ -1,0 +1,1039 @@
+{
+ "batchId": "W2-31",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS25-S1",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/loop_guard.rs (new, prior round, unchanged this round)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/lib.rs (prior round, unchanged this round)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (prior round, unchanged this round)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs (this round: loop_stop carried out of the tool phase, written into the streaming answer metadata, helper and unit tests)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/loop_guard_inline_test.rs (new; this round adds one source pin and generalises the source reader to source_of(file))",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs (prior round, unchanged this round)"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib loop_stop (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "3 passed, 0 failed: the two new unit tests and one existing deep_research test whose name contains loop_stop. Run before and after the final assertion fix."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib duplicate_signature",
+     "outcome": "3 passed, 0 failed (row command, lib form)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib",
+     "outcome": "2561 passed, 0 failed, 4 ignored (2559 before this round; +2 new tests)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test loop_guard_inline_test",
+     "outcome": "7 passed, 0 failed (the prior 6 plus the new source pin an_enforced_stop_leaves_the_tool_phase_and_reaches_the_answers_metadata)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test context_recovery_contract --test tool_retry_contract --test zdr_posture_matrix --test provider_read_contract --test overflow_contract --test zdr_feature_table --test effort_ladder_contract",
+     "outcome": "all pass: 3+14+3+3+4+11+7 = 45 tests across 7 targets"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test e2e_invoke_chain_test --test attachment_policy_contract --test model_entitlement_admission --test continue_preconsume_test --test offline_downstreams_contract",
+     "outcome": "all pass: 5+13+158+5+3 = 184 tests across 5 targets; these read sse.rs as source or drive the answer path; none need DATABASE_URL and none are ignored"
+    },
+    {
+     "command": "cargo clippy -q -p model-gateway --lib --tests --message-format=short",
+     "outcome": "exit 0. The first run flagged one strict f64 comparison in my new test (fixed to an epsilon check); the re-run has no warnings in the lines this slice owns. Crate-wide 636 warning lines (637 before the fix). The two tool_loop.rs warnings (8461, 8524) are unchanged HEAD lines outside this slice's hunks; the 7 unused axum::Json warnings are in browser_run.rs test code, which this slice does not touch."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit only the six slice files: mp-contracts loop_guard.rs and lib.rs, model-gateway tool_loop.rs, sse.rs and tests/loop_guard_inline_test.rs, and execution-core tests/cross_service_loop_contract.rs. Do not stage http_routes.rs or approval_cause.rs; those are WS13 edits in the same worktree.",
+    "Rule on the sink (answer message metadata versus a run-audit record) and record it in apps/Model Plane/docs/decisions/ledger.md, including the failure-path gap and waived-turn reuse, before WS25-S1 is called done.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: model-gateway service environment: add LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-} (unset means off). Leave the default off in this batch. Carried from the prior round.",
+    "Before any enforce flip: decide the signature_hash policy (keep, keyed or drop) and confirm waived-turn reuse under DEC-32.",
+    "After commit, rebuild with bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build model-gateway. Run a shadow turn against an always-failing URL and capture the verdict lines at calls 3, 5 and 8. Run an enforce turn and check metadata.loop_stop on the answer message. Run an off turn and check the key is absent.",
+    "No DB tests written and db_tests_written is empty. The DB harness and docker were not run by this slice."
+   ],
+   "deviations": [
+    "Sink: the entry is persisted in the streaming answer message's metadata Struct (durable per turn, written with the answer by complete_direct_inference_run_with_message), not in run/step audit detail as the plan row names. This is the minimal sink reachable from the owned files; the lead must rule on it and record it in the ledger.",
+    "Only the successful streaming answer persists the stop. A turn that stops and then fails (answer validation, cancel, liveness check, completion error) writes a fixed explanation message with no metadata, so the stop leaves no trace on those turns.",
+    "Added an integration source pin (an_enforced_stop_leaves_the_tool_phase_and_reaches_the_answers_metadata) to loop_guard_inline_test.rs, a file this slice owns, and generalised its source reader to source_of(file). This was not requested; it guards against the field shipping unread."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (model-gateway environment passthrough for LOOP_GUARD_MODE; shared file, lead edit)",
+    "apps/Model Plane/docs/decisions/ledger.md (record the sink decision and its failure-path and waived-turn consequences; lead edit)",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto and session-core, only if the owner wants a run-audit sink instead of the answer metadata (not needed for the answer-metadata sink)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Compose passthrough: the plan says the compose default is shadow for one release, then enforce. The code reads unset as off, and apps/Model Plane/deploy/docker-compose.yml has no LOOP_GUARD_MODE entry yet. That is a shared-file edit for the lead, who also picks the default for this batch.",
+     "Live proof: rebuild model-gateway with compose.sh, then run a chat turn against an always-failing URL. In shadow, capture the 'loop_guard verdict' log lines at calls 3, 5 and 8. In enforce, capture the final-answer note and metadata.loop_stop on the stored answer, and check that the SSE stream has no new event type.",
+     "Ledger: record the sink decision (answer-message metadata instead of run/step audit detail) in apps/Model Plane/docs/decisions/ledger.md before the row is marked done.",
+     "Commit only the six slice files (mp-contracts lib.rs and loop_guard.rs; model-gateway tool_loop.rs, sse.rs and tests/loop_guard_inline_test.rs; execution-core tests/cross_service_loop_contract.rs). Leave out http_routes.rs, approval_cause.rs, runtime_loop/mod.rs and the session-core files, which belong to other slices in the same worktree."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner or lead ruling needed on the sink. The stop is persisted in the streaming answer's message metadata, not in run/step audit detail as the row names. A true run-audit record needs a session-core change or the WS06 audit sink, neither in this slice's files. Record the choice in apps/Model Plane/docs/decisions/ledger.md before the row is called done."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Residual gap: a turn that stops and then fails (answer validation, cancel, session liveness check, completion error) leaves no trace of the stop, because those paths write fixed messages without metadata. Acceptable only if the answer-only sink is accepted."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "signature_hash is an unkeyed blake3 digest of the tool name and canonical arguments. For low-entropy arguments (a bare URL or a short query) a stored hash can be confirmed by guessing, so it is not strictly content-free on persistent and waived turns. ZDR turns never reach the tool loop. Decide before any enforce flip: keep it, switch to a per-process keyed hash, or drop it and keep tool, reason and count."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Waived turns (zdr_waived) persist their answer message like persistent turns, so the entry is written there too. It is content-free, but DEC-32 says waived runs count as ZDR for new durable stores. The owner should confirm reuse of the answer metadata for waived turns."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The wiring from ToolRounds.loop_stop to the persisted answer is pinned by source text, and the helper by unit tests. No behavioural test drives an enforced stop through invoke_stream_sse to the stored message. That needs the inference-stub harness, the same gap as the earlier round."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Lead proof after rebuild: set LOOP_GUARD_MODE=enforce, run a turn against an always-failing URL, and confirm the answer message metadata carries loop_stop with exactly reason, tool, signature_hash and count. Confirm the key is absent with the switch off and in shadow, and that the tool_call count stops at 8."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The row says loop_stop is saved content-free in run/step audit detail. The code instead writes it into the streaming answer message's metadata Struct (sse.rs with_loop_stop wrapping stamp_generation). The lead must accept this sink or move it before enforce is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A turn that stops under enforce and then fails afterwards (validation, cancel, liveness or completion error) writes a fixed message with no metadata. The stop then leaves only a log line and a metric, with no durable trace."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "signature_hash is an unkeyed blake3 hash of the tool name plus the canonical arguments. It is persisted in answer metadata and logged at info level, so a low-entropy argument such as a URL or a short query can be confirmed by guessing. Decide between a keyed hash, a truncated hash or dropping it before enforce."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Waived (DEC-32) turns persist their answer, so loop_stop lands in their metadata as well. ZDR turns cannot write it, because sse.rs returns at the effective_zdr branch (~1701) before any tool loop. The owner should confirm reuse of the answer metadata for waived turns."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "loop_guard_inline_test.rs drives the public LoopGuard and pins the tool_loop.rs/sse.rs wiring by source text. No behavioural test runs run_tool_rounds_for_model_with_attachments with 8 failing fetch_url calls to show the loop ends at 8, the reminders reach the messages, and nothing is re-dispatched. That needs the inference-stub harness."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With existing duplicate suppression, the 2nd and later identical fetch_url calls come back Suppressed. Reaching 8 repeats therefore relies on the model insisting through 7 suppression errors within max_tool_rounds. The repeat-stop path may rarely fire in practice; check this in the shadow proof."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In shadow mode, once a signature reaches 8 the guard returns Stop on every later round that repeats it (and cycle/stall can re-fire). The 'loop_guard verdict: stop' log and the stop metric are then counted many times per turn, which inflates shadow tuning data."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "cross_service_loop_contract only pins the inline half. Add the Do-loop import assertion for mp_contracts::loop_guard when WS25-S2 lands, as the test comment says."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p mp-contracts loop_guard",
+      "outcome": "14 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway duplicate_signature (non-lib form)",
+      "outcome": "lib target 3 passed, 0 failed; all other targets 0 tests, ok",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib loop_stop",
+      "outcome": "3 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (full)",
+      "outcome": "2561 passed, 0 failed, 4 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test loop_guard_inline_test",
+      "outcome": "7 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test cross_service_loop_contract",
+      "outcome": "10 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p mp-contracts -p model-gateway -p execution-core --tests",
+      "outcome": "no errors (only pre-existing warnings)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "audit",
+    "zdr"
+   ],
+   "notes": "Fix applied in sse.rs as the reviewer specified. (1) `let mut loop_stop: Option<mp_contracts::loop_guard::LoopStop>` is declared beside `document_tool_failures` in the spawned answer task, and `loop_stop = rounds.loop_stop;` follows the tool-phase reads. (2) The streaming answer's `DirectAnswer.metadata` is now `with_loop_stop(stamp_generation(...), loop_stop.as_ref())`, wrapping the existing chain unchanged. (3) The new helper `with_loop_stop` writes a `loop_stop` struct with exactly four keys: `reason` (StopReason label: repeat, cycle or no_progress), `tool`, `signature_hash` and `count` (number). It has no arguments and no result content. With no stop it returns the metadata as it was, so switch off and shadow are byte-identical, because loop_stop is only set under enforce. (4) Unit tests: an_enforced_stop_writes_exactly_four_content_free_fields and without_a_stop_the_answer_metadata_is_returned_as_it_was. (5) Source pin in loop_guard_inline_test.rs: the stop leaves the tool phase once and is read by the answer metadata once. Notes: the sink is the answer message metadata. complete_direct_inference_run_with_message saves it atomically with the answer through session-core's append_message_in_tx, so it is a durable per-turn record, not the run or step audit detail the row names. ZDR turns return at the persistence-free branch (sse.rs ~1794) before any tool loop, so the entry is never written under ZDR. The fallback path (run_infer_fallback) runs no tool loop. Waived (zdr_waived) runs persist their answer like persistent runs, so the entry lands there too; it is content-free. Prost-types 0.13.5 derives no Debug for Struct, Value or Kind, so the tests compare with == inside assert! and match on Kind. No proto, migration, ChatEvent or flag change; LOOP_GUARD_MODE still defaults off. sse.rs stays LF (HEAD is LF too, so git's eol warning is not from this change); loop_guard_inline_test.rs stays CRLF. Nothing staged or committed. Status is partial only because the sink ruling is the lead's: the code and tests for the requested fix are complete."
+  },
+  {
+   "id": "WS16-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/attention.rs (new: GET /api/v1/attention, POST /api/v1/attention/seen, 4 unit tests)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs (+1 line, CRLF kept)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs (+1 merge line, CRLF kept)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/attention/attention-state.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/attention/attention-state.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/attention-client.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/attention-client.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/lib/attention-badge.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/lib/attention-badge.test.ts (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatAttentionSections.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.attention-sections.test.tsx (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (rail wiring, badge effect, chip on shared vocabulary)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.chat-sessions.test.tsx (+ run-status chip describe)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx (attentionSections prop, rail above the list)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts (two literal sets dropped; filters use the shared states)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.test.ts (+ one filter test)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts (mark-read announces the rail; a reply finished while hidden is marked on return)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/attention-sidebar.spec.ts (new; written, not run)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/gateway/Cargo.toml --all-targets attention",
+     "outcome": "exit 0; 5 passed, 0 failed (4 new domains::attention::tests plus the existing chat history attention test)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (full gateway)",
+     "outcome": "exit 0; 1070 passed, 0 failed, 1 ignored (ignore predates this slice)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run on the six slice test files (attention-state, attention-client, attention-badge, CoreSidebar.attention-sections, chat-organization, CoreSidebar.chat-sessions)",
+     "outcome": "43 passed, 0 failed (before the final edits)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/core/components src/features/core/lib src/shared/attention src/shared/api/attention-client.test.ts src/features/chat/lib/chat-organization.test.ts (after the final edit)",
+     "outcome": "20 files, 157 passed, 0 failed"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat/components/use-chat-controller (15 files)",
+     "outcome": "171 passed, 0 failed"
+    },
+    {
+     "command": "node_modules/.bin/tsc6 -b (stands in for pnpm typecheck)",
+     "outcome": "24 errors, all pre-existing and in files this slice does not touch (quarry-client.ts 21, AgentRunConsole.tsx 2, schedule-contract.test.ts 1); none in slice files"
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on every touched and new FE file",
+     "outcome": "0 errors; warnings are the two already on HEAD in CoreSidebar.tsx and pre-existing reactivity warnings in use-chat-controller.ts"
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js -c eslint.ui-gates.config.js on the new src files",
+     "outcome": "clean (copy and colour gate)"
+    },
+    {
+     "command": "node --test apps/gateway/scripts/security-coverage-gate.test.mjs apps/gateway/scripts/action-surface-contract.test.mjs apps/gateway/scripts/product-truth-contract.test.mjs apps/gateway/scripts/zdr-seed-test-org.test.mjs",
+     "outcome": "25 pass, 1 fail: 'every registered action has exactly one live gateway dispatcher contract', which fails on actions this slice did not touch (approvals.decide, chat.answer_question, chat.execute_approved_plan, chat.run.continue, chat.set_connector_scope, audit.*); the registry and dispatchers are unchanged here"
+    },
+    {
+     "command": "pnpm test:e2e for tests/e2e/attention-sidebar.spec.ts",
+     "outcome": "not run: needs the running dev stack behind playwright.config's e2e project and an installed Chromium, neither available here"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts: after the chat.delete_thread entry insert { id: 'chat.mark_thread_seen', label: 'Mark chat thread seen', description: 'Mark one of the caller's threads read. Owner-only; refused for zero-retention and temporary chats, which keep read state on the client. Never model-executable.', ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true, inputSchema: chatMarkThreadSeenInput, outputSchema: envelopeStatusOutput }, and beside chatDeleteThreadInput add const chatMarkThreadSeenInput = z.object({ threadId: z.string().trim().min(1) }).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: add row 'chat.mark_thread_seen': exempt('ui_state_only', 'context_write') (recommended reason; 'ui_state_only' is an existing ModelExemptReason).",
+    "shared-edit golden: VEREVON_UPDATE_GOLDEN=1 node node_modules/vitest/vitest.mjs run src/shared/actions/admission-contract.test.ts; refresh src/shared/api/contracts/agent-action-admission.json.sha256; re-vendor to apps/Model Plane/api/contracts/agent-action-admission.json and its .sha256; run scripts/tests/zdr-contract-sync.test.sh.",
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs and handlers.rs: add dispatch_chat_mark_thread_seen (POST {model_gateway_url}/v1/threads/{id}/seen with the session token, the same route attention.rs calls) and a 'chat.mark_thread_seen' arm; then action-surface-contract.test.mjs covers the id.",
+    "Add a registry test to action-registry.test.ts: owner-only, not model-executable, threadId required, blank refused.",
+    "Live proof (S2 DoD, not run): rebuild the BFF with `docker compose -f \"apps/Frontend Plane/verevonv3/docker-compose.yml\" up -d --no-deps --build gateway` (service key unverified) and the model services with `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build session-core model-gateway`, with the S1 attention switch on (session-core reads SESSION_CORE_ATTENTION_ENABLED per the plan; confirm the compose name). Then one flow: a Do run pauses, navigate away: Waiting section, '(1)' title and badge; open the thread: seen clears. Record a screenshot, the a11y tree, and a network check that a temporary chat makes no call to /api/v1/attention or /seen.",
+    "Run the e2e spec on the dev stack: pnpm test:e2e (or pnpm exec playwright test tests/e2e/attention-sidebar.spec.ts) once Chromium is installed. Not run here.",
+    "Typecheck through pnpm: run pnpm run build:quarry-client then pnpm typecheck; expect only the 24 pre-existing errors (quarry-client.ts, AgentRunConsole.tsx, schedule-contract.test.ts).",
+    "Commit only this slice's paths. The tree also holds WS13-S6's uncommitted ChatMessages.tsx, orchestration-client.ts and ChatMessages.scope.test.tsx, which this slice did not touch."
+   ],
+   "deviations": [
+    "action-registry.ts: chat.mark_thread_seen is NOT added. The row asks for it, but the entry cannot land inside this slice's owned files: ActionId is derived from the registry, MODEL_ACCESS (model-access.ts, not owned) is an exhaustive Record over ActionId so the entry fails typecheck without a row there, the admission golden (src/shared/api/contracts/agent-action-admission.json, vendored byte-identical by the Model Plane) changes with any registry row, and the action-surface contract needs a live BFF dispatcher. The UI calls the typed attention-client directly instead. This is why the status is partial; CLAUDE.md asks for the contract before the UI operation.",
+    "Mark-read path: use-chat-controller keeps markChatThreadRead (PUT /api/v1/chat/threads/{id}/flags with unread:false) for persistent threads, not markThreadSeen. session-core's MarkThreadSeen fails with failed_precondition 'attention_disabled' while the S1 switch is off, so switching would stop the unread dot clearing for every user. Both write the same unread flag (attention_grpc.rs marks read via UpdateThreadPresentation with unread false). markThreadSeen and the BFF POST route have no UI caller yet.",
+    "Stream-end mark-read now defers while document.visibilityState is 'hidden': the thread is marked on visibilitychange to visible or on window focus, if it is still the open thread. Before, the mark happened at stream end regardless of visibility. This is the plan's 'on open/focus' behaviour and is a deliberate controller behaviour change.",
+    "Legacy chip copy: queued and pending runs now read 'Pågår' / 'Running' instead of 'I kø' / 'Queued', because the closed vocabulary has no queued state and a legacy queued run maps to working. Owner decision.",
+    "WS16-D7 client-local seen marker for ZDR/temporary threads is not written. Temporary threads already make no server call (existing guard in markThreadRead), and no ZDR thread reaches the rail in S2 (it is not in the thread list), so nothing would read the marker.",
+    "No stylesheet change: global.css is not owned, so the rail reuses verevon-sidebar-group-title and core-chat-session. The chat-attention and chat-attention__group classes are unstyled hooks.",
+    "BFF envelope capabilities.stream and capabilities.push are fixed false until WS16 S5 and S6 land."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (one row for chat.mark_thread_seen)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json and .sha256 (regenerate golden)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json and .sha256 (vendored copy)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs and handlers.rs (BFF dispatcher for the registry action)",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx (duplicate historyRunStatusChip with literal run-status sets around lines 6217-6255; route through legacyStateFromRunStatus)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The row's action-registry entry chat.mark_thread_seen is missing. It cannot be added inside the ownership set: I confirmed that MODEL_ACCESS in src/shared/actions/model-access.ts:90 is an exhaustive Readonly<Record<ActionId, ...>>, and the entry also needs the admission golden regenerated and re-vendored plus a BFF dispatcher. The lead should apply the implementer's lead_todo shared-edits (action-registry.ts entry and input schema, a model-access.ts exempt row, golden and .sha256 refresh plus the Model Plane vendored copy, dispatchers.rs/handlers.rs arm, a registry test). No UI caller uses markThreadSeen yet, so nothing is wired ahead of its contract.",
+     "Live proof (S2 DoD) not run: rebuild the BFF, session-core and model-gateway with SESSION_CORE_ATTENTION_ENABLED on. Then: a Do run pauses, navigate away, and the Waiting section, a '(1)' title and the badge show; opening the thread clears Unseen. Record a screenshot, the a11y tree, and a network check that a temporary chat makes no /api/v1/attention/seen or flags call.",
+     "pnpm test:e2e for tests/e2e/attention-sidebar.spec.ts not run (needs the dev stack and Chromium).",
+     "pnpm typecheck through pnpm (after build:quarry-client) not run; pnpm's dependency check fails in this sandbox. tsc6 -b directly shows errors only in quarry-client.ts, AgentRunConsole.tsx and schedule-contract.test.ts, none in slice files.",
+     "Owner decision: the legacy chip now labels queued/pending runs 'Pågår'/'Running' instead of 'I kø'/'Queued'."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Rail, badge and seen flow need a live proof on rebuilt images with the S1 attention switch on: Do run pauses, navigate away shows Waiting, (1) title and badge; opening the thread clears Unseen; screenshot, a11y tree, and temporary chat makes no server call."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "use-chat-controller visibility deferral (markSeenOnReturn and the stream-end hidden branch) has no unit test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "BFF attention routes are covered only by pure-function tests (mapping and URL encoding); the handlers' auth pass-through and MG 412/404 pass-through are not exercised through the router."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Favicon dot (canvas plus Image load) is untested; jsdom does not load images, so only the restore-to-base path is covered."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "tests/e2e/attention-sidebar.spec.ts uses route mocks only, asserts no live seen flow, and has not been run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Literal run-status sets remain outside legacyStateFromRunStatus: DashboardComposer.tsx historyRunStatusChip (duplicate chip), chat-normalizers.ts:128 ACTIVE_RUN_STATUSES, CoreSidebarSpacesPanel.tsx:387, use-chat-controller.ts:3639, chat-media-markdown.tsx:573. The S2 DoD sentence holds only for the sidebar chip, organizer filters and rail."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "chat-client.ts CHAT_ATTENTION_STATES duplicates the closed union; alias it to attention-state.ts when chat-client.ts is in an owned set."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Queued and pending runs now read 'Pågår' in the legacy chip instead of 'I kø'; owner to confirm the copy change."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "WS16-D7 client-local seen marker for ZDR and temporary threads is not written; decide whether S7 or the Space slice owns it, since no S2 surface reads it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Badge and rail update only while ChatSidebarPanel is mounted (plus focus, history and attention events); on other pages the tab count can be stale until the S5 shell stream."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "getAttention runs on every window focus and every history change (one GET each); acceptable now, replaced by the S5 stream."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ATTENTION_PRECEDENCE is consumed only by its test until WS15-S6 re-exports the module; remove it if WS15-S6 does not consume it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Cross-cutting, not S2: the action-surface contract test fails at HEAD for approvals.decide, chat.answer_question, chat.execute_approved_plan, chat.run.continue, chat.set_connector_scope and audit.* (no live dispatcher contract). Their owning slices should add the dispatcher entries."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The chat.mark_thread_seen action contract required by the row and by CLAUDE.md is not in action-registry.ts; it must land through the lead's shared edits (model-access row, admission golden, BFF dispatcher) before any UI calls markThreadSeen."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The rail, title count, favicon dot, app badge and the seen-clears flow are unproven on rebuilt images with the S1 attention switch on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In ChatAttentionSections.tsx the aria-live='polite' paragraph sits inside <Show when={total() > 0}>, so it mounts already holding its text. Many screen readers do not announce a live region inserted with content, and the first waiting count may go unannounced; keep the region mounted at all times."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The use-chat-controller visibility deferral (seenOnReturnThreadId and markSeenOnReturn on visibilitychange/focus) and the announceAttentionChanged call after markChatThreadRead have no unit test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "BFF attention.rs tests cover only attention_view mapping and seen_url encoding. require_session, the blank-threadId 400, and pass-through of model-gateway 412/404 are not exercised through the router."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Literal run-status sets remain outside legacyStateFromRunStatus: DashboardComposer.tsx historyRunStatusChip, chat-normalizers.ts ACTIVE_RUN_STATUSES, CoreSidebarSpacesPanel.tsx, use-chat-controller.ts and chat-media-markdown.tsx. The DoD sentence 'no literal run-status string sets outside legacyStateFromRunStatus' holds only for the sidebar chip, the organizer filters and the rail."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The tab title and badge update only while ChatSidebarPanel is mounted, and onCleanup resets them to 0. On pages without the chat sidebar the badge shows nothing until the S5 shell stream exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "getAttention runs on every window focus and every history-change event, including while a temporary chat is open. It sends no thread id or content, but it is one GET per event until S5 replaces it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The WS16-D7 client-local seen marker for ZDR/temporary threads is not written. Temporary threads already skip the server call, and no S2 surface would read the marker, so S7 or the Space slice should own it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "chat-client.ts CHAT_ATTENTION_STATES duplicates the closed union in src/shared/attention/attention-state.ts; alias it once chat-client.ts is in an owned set."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ATTENTION_PRECEDENCE is consumed only by its own test until WS15-S6 re-exports the module."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "vitest run --pool=threads on the six slice test files (attention-state, attention-client, attention-badge, CoreSidebar.attention-sections, chat-organization, CoreSidebar.chat-sessions)",
+      "outcome": "6 files passed, 43 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "tsc -b (stand-in for pnpm typecheck; pnpm's build:quarry-client and remote-core prebuild steps not run)",
+      "outcome": "24 errors, all in files outside the slice: quarry-client.ts 21, AgentRunConsole.tsx 2, schedule-contract.test.ts 1. No errors in slice files. Failed overall, but the failures are pre-existing and not caused by this slice.",
+      "passed": false
+     },
+     {
+      "command": "eslint on slice src, tests and e2e paths (stand-in for pnpm lint, which runs eslint .)",
+      "outcome": "0 errors, 24 warnings. The warnings I saw were solid/reactivity and self-closing-comp in untouched sidebar panels. Only the tail of the output was inspected.",
+      "passed": true
+     },
+     {
+      "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+      "outcome": "All test result lines ok: 1045 passed, 1 ignored in the lib, plus 1, 7, 13, 3 and 1 passed in the other targets. 0 failed. It compiled, with unused-import warnings only.",
+      "passed": true
+     },
+     {
+      "command": "pnpm test:e2e (attention-sidebar.spec.ts)",
+      "outcome": "Not run: it needs the running dev stack and Chromium, and docker is forbidden.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "auth"
+   ],
+   "notes": "WS16-S2 is built to the row except the action-registry entry. Built: BFF GET /api/v1/attention and POST /api/v1/attention/seen (camelCase envelope {enabled, items, counts, capabilities}, identifiers and closed state only, session-scoped, no query-supplied identity); the shared attention vocabulary (closed union, precedence, section mapping, legacyStateFromRunStatus as the only place legacy run statuses are named); attention-client (getAttention, markThreadSeen, announceAttentionChanged); attention-badge (distinct waiting count, '(N) ' title, favicon dot, guarded navigator.setAppBadge); the Waiting/Working/Unseen rail above the list in plain and organizer modes (hidden when empty, oldest waiting first, polite live region for the waiting count); the legacy chip and the organizer filters on the shared states; rail refresh on history, active-thread, focus and attention events; mark-read announces the rail, and a reply that finishes while the page is hidden is marked on return. No new switch (flag is empty), so the rail is server-driven: with the S1 attention switch off the listing is empty and only the queued copy changed. The working tree also holds other slices' uncommitted files (ChatMessages.tsx, orchestration-client.ts, ChatMessages.scope.test.tsx); this slice did not touch them, so commit only the paths above. pnpm exec and pnpm typecheck fail in this sandbox at pnpm's own dependency check (ENOENT under Frontend Plane/Quarry-v2/sdks/typescript), so vitest and tsc6 were run through node_modules directly; the build:quarry-client prerequisite was not run."
+  },
+  {
+   "id": "WS16-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/runwatch/attention.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/runwatch/attention_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/runwatch/consumer.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/runtime/native.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/runtime/native_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/notification/service.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/notification/service_attention_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/preferences/preferences.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/preferences/preferences_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/config/config.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/config/config_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/http/handlers.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/internal/http/server_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/cmd/server/main.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/migrations/015_register_attention_notifications.up.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/migrations/015_register_attention_notifications.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/notification-core/README.md"
+   ],
+   "tests_run": [
+    {
+     "command": "cd capability-core && go test ./internal/runwatch/ ./internal/notifyclient/ (before any edit)",
+     "outcome": "ok (baseline green)"
+    },
+    {
+     "command": "cd notification-core && go test ./... (before any edit)",
+     "outcome": "exit 0, every package ok (baseline green)"
+    },
+    {
+     "command": "cd capability-core && go test ./internal/runwatch/ -count=1 -v",
+     "outcome": "PASS: the 11 existing consumer tests plus 12 new top-level attention tests with subtests (golden decode of run-attention-envelope.json, zdr nil/true refusal, switch-off ack, state mapping, non-waiting states, missing identifiers, coalescing window, per thread and state, delegation retry not coalesced, coalescing off, run_completed of a zdr run acked without lookup, ParseAttentionCoalesce)"
+    },
+    {
+     "command": "cd capability-core && go test ./... (run after the last capability-core edit)",
+     "outcome": "exit 0, every package ok"
+    },
+    {
+     "command": "cd capability-core && go vet ./...",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "cd notification-core && go vet ./...",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "cd notification-core && go test ./... -count=1 (final, after the last edit)",
+     "outcome": "exit 0, every package ok; includes 7 service attention tests, 5 native runtime tests, 4 preferences tests, the literal-true config test, a native readiness case, an attention accept case over HTTP, and the extended capability-core allowlist test"
+    },
+    {
+     "command": "cd notification-core && go build -o <scratchpad>/nc-server-check.exe ./cmd/server",
+     "outcome": "built; the binary stays in the scratchpad, no repo artifact"
+    },
+    {
+     "command": "gofmt -l over LF copies of every touched Go file",
+     "outcome": "no output (clean); gofmt flags the CRLF working copies even at baseline, so the check ran on LF copies"
+    },
+    {
+     "command": "python scan of added lines in new files for non-ASCII",
+     "outcome": "0 lines"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Application Plane/notification-core/internal/http/handlers.go: the capability-core block of isNotificationTypeAuthorized gained three lines (modelplane.needs_approval, modelplane.needs_input, modelplane.plan_ready). The Space session shares this allowlist, so whichever lands second rebases onto the other.",
+    "Confirm that notification-core migration number 015 is reserved for WS16-S4 under DEC-39. The worktree's latest is 014; the live tree was not checked.",
+    "Add the WS16-S4 entry to apps/Model Plane/docs/decisions/ledger.md: the native adapter for allowlisted content-free types, the in-app-only gate, and the all-types gate deferred to the owner.",
+    "Live proof, only after the owner's go-ahead and after depth item 1 exists: rebuild notification-core (apps/Application Plane compose) and capability-core (apps/Model Plane, ./scripts/compose.sh up -d --no-deps --build capability-core). Set NOTIFICATION_NATIVE_TYPES_ENABLED=true on notification-core first, then CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED=true on capability-core (ATTENTION_NOTIFY_COALESCE_SECONDS defaults to 60), with SESSION_CORE_ATTENTION_EVENTS_ENABLED=true already on from S3. Record NOTIFICATION_DELIVERY_MODE. Check one notification_feed_items row with event_type modelplane.needs_approval, the BFF notifications read, an email-off user still getting the in-app row, and a watched run_completed still notifying. Read MaxDeliver for capability-core-run-watch-notify first.",
+    "After WS01-S0 lands: reconcile apps/Frontend Plane/verevonv3/src/shared/api/notifications-client.ts (cta_href and event_type snake_case drift from the live tree) and localise the attention copy by message_key. Then the slice status becomes done.",
+    "Compose wiring for the live flip only: add NOTIFICATION_NATIVE_TYPES_ENABLED to the notification-core service and the two capability-core variables to its service. Code defaults are off, so nothing needs wiring while the switches stay off.",
+    "No DB-gated tests were written and none need the harness: migration 015 is data only, and the feed and preference SQL is unchanged. Do not run docker or the DB harness from this slice; the image rebuilds above are lead steps.",
+    "Nothing was committed or staged. The lead commits the work in the two services and the migration together."
+   ],
+   "deviations": [
+    "The channel-aware gate is applied to the three attention types only. The row and the design say it fixes the latent per-type bug for all types, but the owner rule requires byte-identical behaviour with every switch off, and a legacy-type fix would change behaviour for users with partial preference rows. Legacy types keep IsNotificationEnabled, pinned by TestLegacyTypeKeepsItsPerTypeGate.",
+    "The gate for native types reads the in-app channel alone, not 'suppressed only when every channel off'. Native delivery is the only channel these types have here, and an any-channel gate would write an in-app feed row for a user who opted out of in-app.",
+    "preferences.IsEnabled now reads through ListForUser and a pure helper channelEnabled instead of a single-row Get, so the gate is unit-testable without a database. It had no callers, so behaviour is unchanged.",
+    "The provider column for native requests is set at Accept to native, because the repository cannot change provider after Create. The provider request id is native:<request id> as the row specifies.",
+    "The coalescing key is (org, user, thread, state), where the row lists (user, thread, state); the organization id is added so tenants never share a window.",
+    "The native adapter enforces a closed payload key set (fixed copy, deep link, opaque ids) and refuses zdr, beyond what the row lists; it is defence in depth at the native boundary.",
+    "Readiness and health count native delivery as available when NOTIFICATION_NATIVE_TYPES_ENABLED is on, because the row asked for this slice to define composite readiness. With the switch off the output is identical.",
+    "process applies the IsZDR ack to every event type, as the row states, so it changes run_completed and run_failed only for zdr:true envelopes, which no producer emits today.",
+    "Added an HTTP accept test for an attention type beside the existing run-notification accept test, because the row names an accept/reject pair.",
+    "The frontend notifications-client.ts is untouched: the row ties its reconcile to WS01-S0, which has not landed in this worktree."
+   ],
+   "needs_other_files": [
+    "apps/Application Plane/notification-core/internal/database/delivery_migration_contract_test.go (or a sibling test in internal/database): add a contract case for migrations/015 (three types, in_app and push on, email off). The test file is outside this slice's ownership.",
+    "apps/Model Plane/docs/decisions/ledger.md: the WS16-S4 entry (see lead_todo).",
+    "apps/Application Plane/docker-compose.yml: NOTIFICATION_NATIVE_TYPES_ENABLED for the live flip only; not needed while the switch stays off."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not done (lead/docker): rebuild notification-core and capability-core, record NOTIFICATION_DELIVERY_MODE, turn on NOTIFICATION_NATIVE_TYPES_ENABLED first and then CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED (SESSION_CORE_ATTENTION_EVENTS_ENABLED on from S3). Then run a gated approval with the tab closed and check four things: one notification_feed_items row with type modelplane.needs_approval, the BFF notifications read, a user with email off still getting the in-app row, and a watched run_completed still notifying.",
+     "Frontend notifications-client.ts reconcile (snake_case cta_href/event_type drift) and message_key localisation are not done; the slice row ties them to WS01-S0, which has not landed, so the slice stays partial.",
+     "The lead must confirm notification-core migration 015 is reserved for WS16-S4 under DEC-39 and that the live tree has no other 015.",
+     "Ledger entry for WS16-D2/DEC-38 (native adapter, in-app-only gate for native types, all-types gate deferred) in apps/Model Plane/docs/decisions/ledger.md, which this slice does not own.",
+     "Commit the two services and the migration together (nothing is staged)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The RUN_ATTENTION notifier has no still-requested re-check, so an approval decided after its event was written, or one past its sweep window, still notifies the user; the W2-29 ledger entry lists this as open before the switch goes on, and it needs a session-core read over the API, not a database read across planes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The channel-aware gate covers only the three attention types: the design says it fixes the per-type gate for all types, but changing legacy types while every switch is off breaks the owner's byte-identical rule for users with partial preference rows, so the owner must choose between a default-off switch for the legacy types and accepting that change."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "For the native types an email or push opt-out does not suppress anything and an in-app opt-out suppresses the request, so a user who wants only email gets no attention request at all, because native delivery is their only deliverer in this build; the email path belongs with S6 and needs an owner decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Turning CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED on before NOTIFICATION_NATIVE_TYPES_ENABLED makes every attention request fail at the disabled provider with 502; capability-core Naks every non-2xx, so JetStream redelivers until MaxDeliver, and the MaxDeliver of capability-core-run-watch-notify has to be read before the switch goes on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The definition of done is not proved: rebuild notification-core and capability-core, record NOTIFICATION_DELIVERY_MODE and the native switch, then run a gated approval with the tab closed and check one notification_feed_items row of type modelplane.needs_approval, the BFF notifications read, the email-off case still showing in-app, and a watched run_completed still notifying."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The coalescing window lives in each capability-core process, so N replicas can send up to N notifications in one window; a durable window needs a store that this slice does not own."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The idempotency key attention:{org}:{run}:{user}:{state}:{source} can exceed notification-core's 256-byte limit when ids are long, and the resulting validation error would be Nak'd forever; hash the key or check id lengths before the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No migration contract asserts migration 015's rows (three types, in_app and push on, email off); the pattern is internal/database/delivery_migration_contract_test.go, which this slice does not own."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The cross-service coupling is pinned only by literals: capability-core's state-to-type map and notification-core's native closed key set have no shared golden, only NEEDS_APPROVAL crosses the run-attention golden, and nothing is mutation-tested, which the Model Plane CLAUDE.md asks for on cross-service coupling."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "notification-core accepts the three attention types from capability-core whenever they arrive, because isNotificationTypeAuthorized is not gated by NOTIFICATION_NATIVE_TYPES_ENABLED; capability-core emits them only behind its own switch, so gating the allowlist on the native switch is an owner choice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The snake_case reconcile of notifications-client.ts and the message_key localisation are not done; the row ties them to WS01-S0, and the live tree carries the cta_href and event_type drift."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The process IsZDR ack now applies to run_completed and run_failed; grep found no producer that sets zdr:true on those subjects (learning events are withheld for ZDR runs and the Go orchestrator never sets Zdr), so nothing changes observably today, but any future producer that sets it is silently dropped, by design."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A ledger entry for WS16-D2 and DEC-38 belongs in apps/Model Plane/docs/decisions/ledger.md (native adapter for allowlisted content-free types, the in-app-only gate, the all-types gate deferred); this slice does not own that file."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The notification-core README paragraph describes the in-app-only gate; update it once the owner decides the two gate questions above."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The row asks for a channel-aware gate `EnabledChannels` (suppressed only when every channel is off) that fixes the per-type bug for all types, but the build applies an in-app-only gate to the three native types and leaves legacy types on IsNotificationEnabled (service.go isNotificationEnabled). The deviation is defensible under the switches-off byte-identical rule, but the owner must pick: fix the legacy types behind a flag, or accept the change unflagged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "processAttention (runwatch/attention.go) has no still-requested re-check, so an approval decided after session-core wrote its RUN_ATTENTION event still notifies the user. W2-29 lists this re-check as a precondition for switching the path on, and it needs a session-core API read, not a database read across planes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "If CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED goes on while NOTIFICATION_NATIVE_TYPES_ENABLED is off, the attention types are accepted (the allowlist is not gated) and sent to the disabled Novu provider. The provider fails them, and capability-core Naks every non-2xx, so JetStream redelivers until MaxDeliver. Enforce the switch order, or gate the allowlist entries on the native switch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The idempotency key attention:{org}:{run}:{user}:{state}:{source} has no length check against notification-core's 256-byte limit. With long ids the request fails validation, and processAttention would Nak it on every redelivery; hash the key or bound the id lengths."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The coalescing window is in-process (attentionNotify.lastSent), so N capability-core replicas can each notify once per window."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "isNotificationEnabled takes the in-app-only native branch for the three types even when WithNativeDelivery is off. In that configuration the provider path runs under a different gate than legacy types, a mixed mode no test pins beyond TestNativeTypeWithoutNativeDeliveryKeepsTheProviderPath."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No migration contract test asserts the rows of migration 015 (three types, in_app and push on, email off); the pattern is internal/database/delivery_migration_contract_test.go."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "capability-core's state-to-type map and notification-core's nativeTypes/nativePayloadKeys sets are coupled only by duplicated literals, with no shared golden and no mutation test. Only NEEDS_APPROVAL is covered by the run-attention golden."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The IsZDR() ack in process now also covers run_completed/run_failed envelopes with zdr:true. No producer sets that today, so nothing changes observably; the row asks for this behaviour."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The README paragraph on the in-app-only gate needs an update once the owner settles the gate decisions above."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go test ./...",
+      "outcome": "exit 0, every package ok (runwatch and cmd also re-run uncached with -count=1: ok)",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go vet ./...",
+      "outcome": "exit 0, no output",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Application Plane/notification-core && go test -v ./...",
+      "outcome": "exit 0; 150 '--- PASS', 0 '--- FAIL'; packages config, consumers, database, delegation, http, nats, notification, preferences, runtime, subscribers all ok",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Application Plane/notification-core && go build -v ./cmd/server (output redirected to scratch dir)",
+      "outcome": "exit 0, built",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "policy"
+   ],
+   "notes": "Built the RUN_ATTENTION notifier in capability-core (runwatch/attention.go, a branch in Notifier.process, switch CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED read as the literal \"true\", ATTENTION_NOTIFY_COALESCE_SECONDS default 60) and the native in-app path in notification-core (runtime/native.go with NativeAdapter and Composite, switch NOTIFICATION_NATIVE_TYPES_ENABLED read as the literal \"true\", allowlist entries, a channel gate for the three attention types, provider \"native\", migration 015 up and down, readiness counts native delivery). Both switches default off, and with them off the code paths are unchanged. Unit tests, vet, gofmt and both service builds are green. Not deployed, no live proof, nothing committed or staged. Status is partial: the frontend notifications-client.ts reconcile is explicitly after WS01-S0. The W2-29 ledger note makes a still-requested re-check a precondition for switching the attention path on; that is depth item 1."
+  },
+  {
+   "id": "WS13-S6",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0062_approval_scope_grants.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0062_approval_scope_grants.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.scope.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path \"apps/Model Plane/rust/Cargo.toml\" -p execution-core --lib standing_grant_gate_tests",
+     "outcome": "7 passed, 0 failed (includes the new a_zdr_or_waived_run_never_asks_for_a_standing_release); re-run after the final doc-comment edit, still 7 passed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path \"apps/Model Plane/rust/Cargo.toml\" -p execution-core --lib",
+     "outcome": "1557 passed, 0 failed, 302.49 s (run before the final doc-comment edit, which changes no code)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path \"apps/Model Plane/rust/Cargo.toml\" -p execution-core --lib approval",
+     "outcome": "90 passed, 0 failed (after the final doc-comment edit)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check --manifest-path \"apps/Model Plane/rust/Cargo.toml\" -p execution-core --lib (non-test build)",
+     "outcome": "exit 0; 4 warnings, all pre-existing and none from this change: capability_policy.rs:367 unreachable else, approval_delivery_worker.rs:746 verification_result_for, runtime_loop/mod.rs:652 execute_step_with_subagent, resume.rs:581 decision_closer"
+    },
+    {
+     "command": "python3 line-ending count on apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+     "outcome": "5118 CRLF and 5118 LF, no bare LF; the file stays CRLF throughout; rustfmt not run"
+    }
+   ],
+   "db_tests_written": [
+    "approval_scope_grant_db_tests::a_thread_grant_is_created_in_the_decision_transaction",
+    "approval_scope_grant_db_tests::a_grant_is_refused_for_an_ineligible_cause",
+    "approval_scope_grant_db_tests::a_replayed_decision_creates_one_grant",
+    "approval_scope_grant_db_tests::a_grant_expires",
+    "approval_scope_grant_db_tests::a_revoked_grant_is_not_matched",
+    "approval_scope_grant_db_tests::a_grant_in_another_thread_or_for_another_user_is_not_matched",
+    "approval_scope_grant_db_tests::grants_are_erased_with_the_thread",
+    "approval_scope_grant_db_tests::a_child_agent_never_consumes_a_thread_grant",
+    "approval_scope_grant_db_tests::a_run_grant_dies_with_its_run",
+    "approval_scope_grant_db_tests::a_grant_is_refused_in_a_space_thread",
+    "approval_scope_grant_db_tests::a_release_is_counted_and_audited_in_its_own_transaction"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/src/grpc.rs (about line 9923, beside the OrchestrationCoreServiceServer add_service): register ApprovalScopeGrantServiceServer::with_interceptor with the same OrchestrationGrpc and interceptor. Until then the grant call is Unimplemented and grantable pauses stay paused.",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/main.rs (startup): make scope_grants_require_audit (orchestration_grpc.rs) pub(crate) and refuse boot when APPROVAL_SCOPE_GRANTS_ENABLED=true without APPROVAL_AUDIT_EVENTS_ENABLED=true (K3-2).",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (pause_for_approval, about line 7343) and apps/Model Plane/rust/services/execution-core/src/grpc.rs (about line 1519): replace approval_cause::for_call with for_call_with_class, passing the signed effect class of the call (StepOutcome and PendingPause carry it; mod.rs has signed_class.class). Until then every creator states no class, so only once is offered and no grant is created.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs (N7 test every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs, about line 826): add UseApprovalScopeGrant and RevokeApprovalScopeGrant to the durable-mutation inventory.",
+    "Control Plane config apps/Control Plane/config/plane-service-principals.json: grant approval:grant_use to the execution-core principal only, and approval:grant_manage to the gateway principal if it forwards list and revoke. Do not read or copy .env.generated-secrets.",
+    "Regenerate the Go bindings with buf generate under apps/Model Plane/proto (go/gen is not owned). buf lint and buf breaking were not run; the N2 tag-diff is the additivity evidence.",
+    "Gateway list and revoke (not built): add an ApprovalScopeGrantServiceClient to AppState (model-gateway state.rs, about line 439) and the routes GET /v1/orchestration/threads/:thread_id/approval-grants and DELETE /v1/orchestration/approval-grants/:id, both behind require_non_zdr_durable_mutation.",
+    "BFF apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs: proxy the two routes and confirm the decide body passes scope through. src/shared/actions/action-registry.ts: add the approvals.revoke_grant contract and an optional scope on the approvals.decide input.",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts: onApprovalDecision must forward scope to decideApproval(id, decision, undefined, undefined, scope). Until it does, a scoped click is decided as once. Required before the switch goes on.",
+    "ChatPanels.tsx (owned, not done): the 'Active approvals in this thread' list with Revoke, backed by listApprovalGrants and revokeApprovalGrant client functions, which are not written because the routes do not exist.",
+    "audit-core: add the approval_auto_released wire fixture (.json and .sha256) under apps/Control Plane/audit-core/internal/testdata/session-core-wire/ and confirm audit-core accepts the event before APPROVAL_SCOPE_GRANTS_ENABLED is turned on.",
+    "DB: apply migration 0062 through scripts/tests/session-core-db-tests.sh and update its migration count if it is fixed. Run the 11 ignored tests with DATABASE_URL set to a scratch database whose name contains test: cargo test -p session-core --bin session-core approval_scope_grant_db -- --ignored --test-threads=1.",
+    "Live proof (lead, docker): rebuild session-core, execution-core, model-gateway and the frontend with the switches off, then on. Evidence per the row: a Do chat under ask on an eligible read tool, approve 'this thread', the second call runs, approval_scope_grants.use_count=1, audit-core shows approval_decided and approval_auto_released (decision_source STANDING_GRANT), revoke, the third call pauses, and tickets.create still pauses and needs step-up. Also run scripts/verify-durable-layer.sh.",
+    "Set APPROVAL_SCOPE_GRANTS_ENABLED on model-gateway, execution-core and session-core together, with APPROVAL_AUDIT_EVENTS_ENABLED=true. APPROVAL_THREAD_GRANT_TTL_SECS defaults to 3600 and caps at 28800.",
+    "Commit scope: stage only the twelve files in files_changed. The worktree carries other sessions' uncommitted changes (mp-contracts lib.rs, model-gateway tool_loop.rs, execution-core cross_service_loop_contract.rs, use-chat-controller.ts, the CoreSidebar and chat-organization files, the capability-core Go files, attention and loop-guard files)."
+   ],
+   "deviations": [
+    "Added grantable_with_switch(switch_on, cause) beside grantable so the new test runs with the switch on without changing the environment. It follows the repo's *_from parser pattern (scope_grants_from, denial_memory_from).",
+    "RPCs are a new service ApprovalScopeGrantService in orchestration.proto, not methods on OrchestrationCoreService: five existing implementations outside the owned set would stop compiling.",
+    "The approval_auto_released audit body and constant live in orchestration_store.rs beside the grant code, because audit_publisher.rs is not owned. Move them next to build_approval_decision_body.",
+    "Eligibility is narrower than the D4 table: external_write and every mcp__ tool are once only, because the K3-3 pinned digest is not plumbed to the cause. eligible_scopes(cause) is the real table.",
+    "TTL follows the batch JSON and K3-3: default 3600 s, maximum 28800 s.",
+    "Deferred-pause gate: with the switch on, a permission Deny on a grantable call returns permission_denied where the capability pause was returned before. Flag-off outcomes are byte-identical.",
+    "approval_value projects scope_options as once only while the switch is off, so a card never offers a scope the decide route would refuse.",
+    "ApprovalScopeGrant carries cause_code (not in the plan's field list), and the migration adds a cause_code column so each release audit row is self-describing.",
+    "gdpr purge gained an explicit DELETE for grants and a summary field (total 28 to 29); grants also cascade from threads, runs and approvals.",
+    "The use RPC refuses non-service callers and requires approval:grant_use; list and revoke require approval:grant_manage. These are new service scopes the Control Plane must provision."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs (register ApprovalScopeGrantServiceServer beside OrchestrationCoreServiceServer, about line 9923)",
+    "apps/Model Plane/rust/services/session-core/src/main.rs (startup refusal for APPROVAL_SCOPE_GRANTS_ENABLED without APPROVAL_AUDIT_EVENTS_ENABLED)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (pause_for_approval for_call to for_call_with_class, class carried on PendingPause; about line 7343)",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs (about line 1519: for_call to for_call_with_class)",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs (AppState approval-scope-grant client; orchestration channel about line 439)",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs (N7 durable-mutation inventory, about line 826)",
+    "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs (move the approval_auto_released builder and constant beside approval_decided)",
+    "apps/Control Plane/config/plane-service-principals.json (approval:grant_use, approval:grant_manage)",
+    "apps/Control Plane/audit-core/internal/testdata/session-core-wire/ (approval_auto_released fixture and sha256)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs (BFF grant routes; decide scope pass-through check)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts (approvals.revoke_grant contract; scope on approvals.decide input)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts (forward scope in onApprovalDecision)",
+    "apps/Model Plane/go/gen (buf generate output for the new service and messages)",
+    "apps/Model Plane/api/openapi.yaml and api/sdk (decide scope field and the two grant routes, once routes exist)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs (create_scope_grant and USE_APPROVAL_SCOPE_GRANT_SQL): refuse a grant, and match no grant, when the run's retention class is ZDR or zdr_waived. Use the store precedent at about line 1688 (run_questions refuses a run that 'keeps no state (zero retention or waived)'). The row's ZDR clause and DEC-32 say 'apply the DEC-32 default refuse to grants'. Today the decide path creates a grant for a waived run, and the use path never reads the run's posture, so the execution-core gate is the only guard. Add a DB test for each.",
+     "apps/Model Plane/rust/services/session-core/migrations/0062_approval_scope_grants.sql + create_scope_grant: the partial unique index approval_scope_grants_live_idx (WHERE revoked_at IS NULL) still counts an expired, unrevoked grant. INSERT ... ON CONFLICT DO NOTHING then creates nothing. After the first expiry (default 3600 s), every new 'this thread' approval for the same action in that thread succeeds with no grant, and the next call pauses again. Fix: refresh expires_at with ON CONFLICT on the index predicate, or revoke/supersede expired rows before the insert. Add a DB test for re-granting after expiry.",
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs: the plan's named tests capability_deny_beats_a_grant and a_thread_grant_does_not_change_the_autonomy_rung do not exist anywhere in apps/Model Plane/rust (verified by grep and by a filtered cargo run that matched 0 of them). Both are listed in the row's test commands and the ZDR/regression-guard section.",
+     "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (owned): the row's GET /v1/orchestration/threads/:thread_id/approval-grants and DELETE /v1/orchestration/approval-grants/:id routes are missing. They must sit behind require_non_zdr_durable_mutation. The AppState ApprovalScopeGrantServiceClient in state.rs is a lead shared-edit.",
+     "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts and src/features/chat/components/ChatPanels.tsx (both owned): listApprovalGrants and revokeApprovalGrant are not written, and the 'Active approvals in this thread' list with Revoke is not built. The row's DoD needs revoke from the product. The BFF routes and the approvals.revoke_grant action contract (action-registry.ts) are lead shared-edits and come first.",
+     "N7 (row test command): every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs must cover UseApprovalScopeGrant and RevokeApprovalScopeGrant. Neither name appears in model-gateway/src/zdr_posture.rs (lead shared-edit) or in the owned api/contracts/zdr-posture-matrix.json and .sha256, which are unmodified.",
+     "Lead shared-edits without which the row's deliverable is inert or breaks binding rules: (a) session-core/src/grpc.rs must register ApprovalScopeGrantServiceServer, otherwise every use call is Unimplemented. (b) session-core/src/main.rs must refuse startup when APPROVAL_SCOPE_GRANTS_ENABLED=true without APPROVAL_AUDIT_EVENTS_ENABLED=true; this is Appendix B K3-2 and the flag spec, and today the rule is checked only per call. (c) execution-core runtime_loop/agent.rs pause_for_approval and execution-core/src/grpc.rs ExecuteStep pause must call for_call_with_class with the signed effect class; today no cause ever offers thread/run, so no grant can be created. (d) use-chat-controller.ts onApprovalDecision must forward scope to decideApproval; today a 'this thread' click is decided as once."
+    ],
+    "dod_gaps": [
+     "Live proof (docker): rebuild session-core, execution-core, model-gateway and the frontend with the switches off and then on. Run a Do chat under ask on an eligible read, approve 'this thread', and check that the second call runs, use_count=1, and audit-core shows approval_decided and approval_auto_released (STANDING_GRANT). Then revoke and check that the third call pauses, and that tickets.create still pauses with step-up.",
+     "Run the 11 DB-gated approval_scope_grant_db_tests with DATABASE_URL against a scratch Postgres (--ignored --test-threads=1). Apply migration 0062 through scripts/tests/session-core-db-tests.sh and run verify-durable-layer.sh. All three need docker.",
+     "buf generate for the Go bindings, plus buf lint and buf breaking against proto/baseline.binpb, in apps/Model Plane/proto. The S1 commands (cargo fmt --check, cargo check --workspace --all-targets) and zdr-contract-sync.test.sh were not run.",
+     "audit-core approval_auto_released wire fixture (.json + .sha256), and confirmation that audit-core accepts it before the switch goes on.",
+     "Control Plane plane-service-principals.json: give approval:grant_use to the execution-core principal only, and approval:grant_manage to the gateway principal."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof has been run. The row's evidence needs a rebuilt stack with the switches on: a Do chat under ask, the thread-scope second call, psql use_count=1, the audit rows, revoke and the third pause, and tickets.create still pausing for step-up."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The 11 DB-gated tests compile but have never run (no Postgres here). grants_are_erased_with_the_thread assumes deleting an approval cascades to approval_continuation_descriptors and approval_delivery_outbox; those foreign keys are unverified."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No grant can be created in production until the creator states the signed effect class (agent.rs:7343 and grpc.rs:1519 still call for_call). It fails closed, but the feature stays inert until the shared edit lands."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "A user cannot list or revoke a grant from the product: the gateway routes, BFF proxies and ChatPanels list are missing. Revocation exists only as the session-core RPC."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Waived runs: execution-core now refuses a standing release (this round), but grant creation on the decide path still does not refuse a waived run (only ZDR is refused). DEC-32 needs the waived refusal before the switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Release authority rests on the approval:grant_use service scope: any service principal given that scope can release a call for any owner and thread it names. Provision it to execution-core only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "NEW: session-core's use path does not check the run's ZDR or waived posture. orchestration_grpc.rs use_approval_scope_grant (about line 2587) refuses only the caller's ZDR continuation and requires service identity and approval:grant_use. orchestration_store.rs use_approval_scope_grant (about line 1366) takes the run_id but never looks up the run, then counts the use and writes the audit row. Today the execution-core gate (fixed this round) is the only guard. A run-posture refusal in the store path would hold for any caller. Not done here: it is outside the requested fix."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The gRPC service is not registered on session-core's server, so each grantable pause with the switch on makes a failing call and warns once before it pauses. Safe, but noisy until grpc.rs registers it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The K3-2 rule (grants require the audit flag) is enforced per call on the decide and use paths. The startup refusal in main.rs is not wired."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "audit-core must accept approval_auto_released (wire fixture plus sha256) before grants are switched on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Named tests not written: capability_deny_beats_a_grant (gate-level) and a_thread_grant_does_not_change_the_autonomy_rung. a_hook_ask_is_not_satisfied_by_a_grant is covered at the eligibility function, not through execute_step_inner."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "NEW: no test drives execute_step_inner for a ZDR or waived run with a live session channel to observe that no UseApprovalScopeGrant call is made. The guarantee rests on grantable_with_switch plus the covered short-circuit before released()."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "zdr-posture-matrix.json (not owned, untouched) lacks approval_scope_grant_under_zdr_refused and approval_grant_use_under_zdr_refused. S8 owns them, but this slice lists the file."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "external_write and every mcp__ tool are never offered a standing scope, which is narrower than D4. It waits on the K3-3 pinned-digest plumbing, which is not done."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner to confirm the thread-grant TTL: the plan row says default 28800 and max 604800, while K3-3 and the batch say 3600 and 28800. Built to the batch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, a permission Deny on a call that also has a deferred capability pause returns permission_denied where the capability pause was returned before. Flag-on grantable pauses only; flag-off is byte-identical."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, each grantable pause makes one RPC even where no grant can exist yet (creation has no class). The cost is one call per pause until for_call_with_class is wired."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The release audit row is written in the same transaction as the count, but the call runs later in the gate. If a later step fails, the use is still counted. This is consistent with the audit semantics; state it to the owner."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "rustfmt: orchestration_grpc.rs, orchestration_store.rs, gdpr.rs, runtime_loop/mod.rs and http_routes.rs were not rustfmt-clean at HEAD and were not formatted. The lines added to mod.rs follow rustfmt layout. A formatting pass belongs in its own commit."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "scope_options_for(code) is kept as the code-only once answer for the golden test. Move callers to for_call_with_class and eligible_scopes once the class is wired."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core UseApprovalScopeGrant trusts the request's user_id and thread_id for any service principal holding approval:grant_use. It never checks that the run_id named belongs to the calling service's own run context, so provisioning that scope beyond execution-core widens release authority."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "grants_are_erased_with_the_thread deletes the approval and the run by hand before the thread, so it never proves the thread-delete cascade the migration and the row claim."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With the switch off, the decide route now answers scope_not_offered (unknown scope such as 'forever' or 'Once') or scope_not_applicable (a scoped denial) where HEAD answered scope_not_enabled. The check also now runs after the prior-approval fetch. These are error-code-only changes on the flag-off path."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Thread TTL is built to K3-3 (default 3600, maximum 28800), which conflicts with the slice row (28800 / 604800). Appendix B wins, but the owner should confirm."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "external_write and every mcp__ tool are once-only until the WS05 pinned_digest reaches the cause. This is narrower than K3-3 allows; it fails closed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, a permission Deny on a call that also holds a deferred capability pause returns permission_denied where it used to return awaiting_approval. Flag-off behaviour was verified identical by reading the diff."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "None of the grant SQL (create in the decision transaction, atomic use, expiry, revoke, the child-agent exclusion, the subagent_edges join) has run against a real Postgres."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "execution-core --lib: a_standing_release_passes_only_the_exact_tool_and_operation, owner_effect_is_never_released_by_a_grant, a_provider_write_is_never_released_by_a_grant, a_hook_ask_is_not_satisfied_by_a_grant, standing_grant_gate_tests",
+      "outcome": "8 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "execution-core: capability_deny_beats_a_grant and a_thread_grant_does_not_change_the_autonomy_rung",
+      "outcome": "No test with either name exists anywhere in apps/Model Plane/rust. Plan test commands are not met.",
+      "passed": false
+     },
+     {
+      "command": "mp-contracts full cargo test (includes capability_high_risk_destructive_is_once_only)",
+      "outcome": "All suites ok (257 lib tests plus integration suites), 0 failed. This also compiles mp-contracts.",
+      "passed": true
+     },
+     {
+      "command": "model-gateway: decide_refuses_a_scope_the_server_did_not_offer and every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs",
+      "outcome": "2 passed, 0 failed. The crate compiles with its tests.",
+      "passed": true
+     },
+     {
+      "command": "N7: every_durable_mutation_refuses_a_zdr_or_waived_token_before_it_runs must cover UseApprovalScopeGrant and RevokeApprovalScopeGrant",
+      "outcome": "The test passes, but neither RPC name appears in zdr_posture.rs or in the zdr-posture-matrix.json contract. The matrix JSON and its .sha256 are not modified. The N7 coverage requirement is not met.",
+      "passed": false
+     },
+     {
+      "command": "session-core: grants_flag_requires_audit_flag (non-DB test)",
+      "outcome": "1 passed, 0 failed. session-core compiles with its tests.",
+      "passed": true
+     },
+     {
+      "command": "session-core DB-gated tests: a_thread_grant_is_created_in_the_decision_transaction, a_grant_is_refused_for_an_ineligible_cause, a_replayed_decision_creates_one_grant, a_grant_expires, a_revoked_grant_is_not_matched, a_grant_in_another_thread_or_for_another_user_is_not_matched, grants_are_erased_with_the_thread, a_child_agent_never_consumes_a_thread_grant (--ignored --test-threads=1)",
+      "outcome": "Not run. DATABASE_URL is not set in this environment and no database is reachable without docker, which the rules forbid. The tests exist in orchestration_store.rs. The migration 0062 was not applied or checked against a real database.",
+      "passed": false
+     },
+     {
+      "command": "bash apps/Model Plane/scripts/verify-durable-layer.sh",
+      "outcome": "Not run. The script needs docker (docker run of a throwaway Postgres), which is forbidden.",
+      "passed": false
+     },
+     {
+      "command": "pnpm vitest run src/features/chat/components/ChatMessages.scope.test.tsx (apps/Frontend Plane/verevonv3)",
+      "outcome": "Run with node_modules/.bin/vitest.CMD run --pool=threads because pnpm tried a workspace install and failed with ENOENT on a missing Ingestion Plane sdk path. 1 file, 5 tests passed.",
+      "passed": true
+     },
+     {
+      "command": "compile check: execution-core lib, model-gateway, session-core, mp-contracts",
+      "outcome": "All four compiled through their test builds, with no errors. Only warnings were seen.",
+      "passed": true
+     },
+     {
+      "command": "WS13-S1 cargo fmt/check, zdr-contract-sync and N2 tag-diff commands",
+      "outcome": "Not run. The command text for these is not in the slice entry. The zdr contract was not touched, and the N2 proto tag-diff was not verified.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "audit",
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "Required fix 1 is done. StandingCall now carries zdr and waived, set from execute_step_inner's own parameters at both construction sites (the Ask-branch gate and the deferred-pause gate). grantable() calls grantable_with_switch(approval_cause::scope_grants_enabled(), cause), and grantable_with_switch returns false when zdr or waived is set. Because covered short-circuits before released(), a ZDR or waived run never makes UseApprovalScopeGrant. Its pause is returned exactly as with the switch off, and the switch-off path is unchanged. The only execution-core call to the grant RPC is in released() (runtime_loop/mod.rs about line 430), reached only after grantable (about line 1118). The new test's control assertion (ordinary read, switch on) passes, so the zdr/waived term is the only reason for false. No other file changed this round, and the mp-contracts, session-core, model-gateway and frontend results from the earlier round were not re-run and stand as reported. The worktree still holds other sessions' uncommitted changes; stage only the twelve files listed."
+  }
+ ]
+}

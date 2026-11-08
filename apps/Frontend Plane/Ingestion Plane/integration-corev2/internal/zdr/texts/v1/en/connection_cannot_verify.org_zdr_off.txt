@@ -1,0 +1,7 @@
+title: We cannot confirm ZDR for this key
+continue: Understood
+cancel: Understood
+
+We cannot confirm ZDR for this key. Your organisation is not using ZDR now, so nothing changes.
+
+Chats with this key are handled by the provider under your agreement with them. If the organisation turns ZDR on later, we will ask you before you can use the key.

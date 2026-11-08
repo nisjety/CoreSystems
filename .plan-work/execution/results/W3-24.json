@@ -1,0 +1,211 @@
+{
+ "batchId": "W3-24",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-12-S7",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_a86673a0-a8b-1",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/agent_api_run.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/agent_api_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs"
+   ],
+   "notes": "The code and tests are written but nothing was compiled or run, per the code-first rule. The patch is at .plan-work/execution/patches/W3-24/EP-12-S7.patch in the lead tree (69 KB). Before writing it, HEAD was detached to model-plane f245cfb77.\n\n**What the new route does.** `POST /v1/agent/runs` lives in the new file `agent_api_run.rs`, and agent_api_routes' router adds it. The handler works in this order, and every step before the start is answered before anything is written:\n1. `admit` checks key, scope, ZDR and the session bearer. A ZDR key is refused first.\n2. The key's inference bearer must be present, or the answer is `api_key_invalid`.\n3. The body is checked against the closed allow-list. A tool-shaped field gets 422 `agent_api_feature_not_supported` with `details:{feature}`. Any other unknown field or bad value gets `invalid_request` with `{field}`.\n4. A per-key cap of 2 live runs applies per replica, held in memory under org plus key id. A third run gets 429 `rate_limited` with `{retry_after_seconds}`.\n5. The model policy is checked with `model_access::admit`.\n6. A continued thread is read first with ListConversation under the key's own bearer. A thread the key does not own returns `thread_not_found`, and the turns become the answer's history.\n7. The run is started with `session_flow::prepare_managed_run_with_token` (source GatewayDirect, zdr false, the key's session bearer), and the route returns 202 `{data:{run_id, thread_id, status:\"queued\"}}`.\n\nA detached task then sends a liveness heartbeat and makes one `infer` call with the key's inference bearer and a 10-minute timeout. That call carries a fixed system line, the history and the input, with no tools, schema, images or subscription. It publishes the usage envelope (transport `agent_api`, user = `apikey:<key_id>`). It then completes through `complete_direct_inference_run_with_message`, or records a Failed receipt through `terminalize_direct_inference_run_authenticated`. Both use the gateway's own service credential, so the key never holds a terminal RPC.\n\n**Cancel.** The task registers itself in `state.cancels` under the key principal. The S5 cancel route now calls `agent_api_run::stop_live_turn` after a durable cancel, so a running model call on this replica is dropped. This addresses D3-1196 for the local replica.\n\n**auth.rs.**\n- The new start route is added to `AGENT_API_KEY_ROUTES`.\n- A new `VerifiedApiKeyInferenceBearer` is accepted from `x-inference-authorization` on POST /v1/agent/runs only, with the switch on.\n- The session-bearer binding rules were moved into a shared `verify_delegated_api_key_agent_bearer`: exactly one header, the named audience, the same key/org/owner holding `agent:runs`, and the same ZDR posture.\n- The table test was updated (6 routes), and a new test covers the inference bearer.\n\n**Deviations from the design.**\n- I used the managed start, not `prepare_run_with_bearer`. Session Core's managed terminal path refuses a run started with legacy StartRun (\"run is not managed\"), and S4's decision D3-1169 puts terminals on the gateway's service token.\n- `session_flow.rs` is unchanged; the helpers it needs are already `pub(crate)`.\n- `metadata` is validated but not stored, because there is no Session Core field for it.\n\n**The route cannot complete a run live until Session Core changes.** See `needs_other_files`.",
+   "deviations": [
+    "The run is started through the managed path (`session_flow::prepare_managed_run_with_token`, GatewayDirect), not `prepare_run_with_bearer`. The slice requires completion through the managed terminal path, and Session Core's `record_terminal_outcome` refuses a run started with legacy StartRun ('run is not managed'). As a result `session_flow.rs` is unchanged.",
+    "Request `metadata` is checked against the contract's limits but not stored: neither StartManagedRunRequest nor Session Core has a field for it, and proto changes were out of scope.",
+    "Start errors use Missing::Thread. Without a named thread, a not-found, refused or invalid answer from Session Core returns internal_error instead of a misleading run_not_found or thread_not_found.",
+    "agent_api_routes.rs: six helpers became pub(crate) for reuse (admit, is_id, Missing, upstream_error, invalid_request, internal_error, envelope, api_key_invalid). The S5 test route table gains POST /v1/agent/runs."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/auth.rs: add (\"/model_plane.v1.ManagedRunLifecycle/StartManagedRun\", true) to API_KEY_METHODS. Use the exact service path from sessions.proto line 203's service and check that its server is wrapped in RpcPathStamp. Without it, a key's start is permission_denied and the route answers internal_error.",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs start_managed_run: replace `caller.user_id().ok_or_else(...)` with `caller.owner_id()`, so the key principal `apikey:<id>` owns the run, the same pattern start_run uses.",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs start_managed_run_with_wake_inner: stamp `runs.metadata` with `run_origin_stamp::origin_at_birth(user_id, inherited, ApiKeyStamp::of(caller))`. Today a managed start does not stamp `origin:api`, so `ApiKeyStamp` must be threaded from the handler.",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs or grpc.rs: confirm that complete_direct_run_with_message, record_terminal_outcome and heartbeat_managed_run (the gateway service token) accept a run whose owner is `apikey:<id>`."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs: in the CALL_SITES table of the inference-call inventory test (beside the (\"grpc.rs\", \"invoke\", ...) rows), add `(\"agent_api_run.rs\", \"run_ask_turn\", \"persistent only: a ZDR key is refused in admit before any call (EP-12 D6)\"),`. Without it, the test that names every `.infer(` site fails on agent_api_run.rs::run_ask_turn.",
+    "guard: run rustfmt on agent_api_run.rs, agent_api_routes.rs and auth.rs; lines were hand-wrapped at 100 columns and rustfmt was not run.",
+    "guard: cargo test -q -p model-gateway --lib agent_api_run; cargo test -q -p model-gateway --lib agent_api_routes; cargo test -q -p model-gateway --lib auth::tests; cargo test -q -p model-gateway --lib api_key_route_fence_tests; cargo test -q -p model-gateway --lib zdr_posture.",
+    "No zdr-posture-matrix row: the ZDR refusal for this route is a feature refusal (`agent_api`) given in admit, so per the rule no row is added."
+   ],
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The start cannot complete live until session-core admits StartManagedRun for an api_key caller (API_KEY_METHODS entry, owner_id in start_managed_run) and stamps origin:api on managed starts; today a key's start is permission_denied and the route answers internal_error."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No cost-core budget pre-check runs for a key turn (D3-517): the turn is metered after the fact through USAGE_ENVELOPE (transport agent_api, user apikey:<id>) and capped only by 2 live runs per key per replica and the ingress rate limit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "model_access::admit asks GetModelAccess with the key's inference bearer, which inference-core refuses for api_key (permission_denied, not a typed refusal); admission therefore reads 'unchecked' with a warn per turn, and the policy is enforced only at Infer, after the run row exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A key's cancel stops the model call only on the replica running the turn; another replica's turn is not reached through the run-control bus and sees the cancel only when complete_direct_inference_run_with_message reports AlreadyTerminal."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Request metadata (<=16 string pairs) is validated but not stored, because no Session Core field exists; the contract says 'stored with the run', so either a session-core field is added or the spec wording changes before switch-on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "run_is_stamped_api and run_completes_through_managed_terminal are unit-level (refusal of an origin field, terminal mapping, StartRunAccepted shape); no test drives the start and detached turn against a Session Core and inference-core double."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "If a named thread is deleted between the history read and prepare_managed_run_with_token, session_flow's missing-thread fallback creates a new key-owned thread with session_key = the old id instead of answering thread_not_found."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "With S2, S4 (plus the StartManagedRun edit), S6 and S7 on: a key POSTs /v1/agent/runs, gets 202, polls GET /v1/agent/runs/:id to completed with metadata.origin=api, reads the answer from /threads/:id/messages; a third concurrent run gets 429; a tools field gets 422; a ZDR key gets 412 with zero new rows."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-12-S12",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_a86673a0-a8b-2",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.thread-export.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ExportConversationAction.css",
+    "apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/replay/thread-export-schema.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.css"
+   ],
+   "notes": "EP-12-S12 built code-first in the isolated worktree (detached at model-plane f245cfb77); nothing run, no build, no docker, nothing committed. Patch staged and written to C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-24/EP-12-S12.patch (57,295 bytes, 11 files). Mount: ForkAction is mounted per answer in ChatMessages.tsx (AssistantMessage action row), so the export control sits beside it there, on the latest assistant answer only, gated by threadExportEnabled() (VITE_THREAD_EXPORT, strict 'true'). It is hidden for temporary chats, for Space-scoped threads (spaceScoped prop, fed by the ChatPage shared-edit) and for zero-retention callers (live isLocalRetentionAllowed). exportThread in chat-client.ts parses the S11 thread.export input (threadExportInput), reads the BFF export file as text (requestJson cannot read Markdown) and returns body, mediaType and fileName; refusals stay ApiError with code, details and feature. thread-export-schema.ts is the zod v4 reader for verevon.thread-export.v1: an unknown format or version returns unsupported before contents are read, and any malformed document returns invalid. ExportConversationAction.tsx has format and content radios with no default (Download stays off until both are picked), Download, and Replay, which reads the redacted JSON and opens the lazy ThreadReplayView in a Portal inside a Loading boundary (Solid 2 RC exports no Suspense). ThreadReplayView.tsx is a read-only stepper with run chips, a not-included notice, a truncation note and plain-text turns. Norwegian-first copy. Guard, with pnpm_config_verify_deps_before_run=false: from apps/Frontend Plane/verevonv3 run pnpm exec vitest run src/features/chat/components/ExportConversationAction.test.tsx src/features/chat/replay src/shared/api/chat-client.thread-export.test.ts, then node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (diff against HEAD), then lint the new files. No proto, migration, golden, prompt-tool manifest or zdr row changes; thread.export is already in the S11 admission golden.",
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: in the <MessageBlock> props of renderMessageRow, directly after the line `        temporaryChat={readAloudBlocked()}` (line 1286), add the line `        spaceScoped={spaceScoped()}` (8 leading spaces). spaceScoped is already destructured from useChatController() at line 166 of the same component."
+   ],
+   "needs_other_files": [],
+   "deviations": [
+    "Mount point: the design calls the mount file the thread header, but ForkAction is mounted per answer in ChatMessages.tsx; the export control is mounted there beside fork, on the latest assistant answer only, rather than on every answer.",
+    "Two companion stylesheets were added as new files beyond new_files (components/ExportConversationAction.css and replay/ThreadReplayView.css), following the DeckPresentMode.css precedent; they can move into global.css if preferred.",
+    "chat-client.thread-export.test.ts was added beside chat-client.ts for the new client function (a test file beside a changed file).",
+    "ThreadReplayView receives the already-read document as a prop: the menu fetches and validates it, so the lazy chunk is the pure viewer.",
+    "Space hiding depends on the ChatPage shared-edit; until it lands the server's space_thread refusal is what the person sees."
+   ],
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The four new Vitest files and the chat-client test were written code-first and never run; the guard must run them and the tsc6 typecheck before VITE_THREAD_EXPORT is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The export control appears only on the latest assistant answer, where fork appears on every answer, so a thread shows one export entry; the owner should confirm this placement or ask for a thread-level control."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Until the ChatPage shared-edit lands, the control also shows on Space-scoped threads, where the person then sees the server's space_thread refusal; the server remains the authority."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "exportThread omits the Authorization header that requestJson adds under VITE_ALLOW_DEV_AUTH_BYPASS, so an export in a dev-bypass build can be refused locally; the fix belongs in a shared raw-fetch helper in http.ts, which this slice does not own."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Still owed in the depth phase: the lazy replay inside a message row (Loading fallback, Portal overlay, focus and Escape) at 1280 and 375 px in both themes, with the Norwegian copy checked in the live UI."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Refusals with codes the menu does not name, such as thread_export_unavailable, show the server's English sentence; a Norwegian mapping for them is a copy follow-up."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Each replay open reads the whole redacted export again (bounded server-side at 2,000 messages and 8 MiB); a per-thread cache is a later choice if long threads feel slow."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn .plan-work/execution/patches/W3-24/EP-12-S7.patch",
+    "outcome": "applied cleanly (agent_api_run.rs new, agent_api_routes.rs, auth.rs, lib.rs)",
+    "clean": true
+   },
+   {
+    "command": "git apply --3way --whitespace=nowarn .plan-work/execution/patches/W3-24/EP-12-S12.patch",
+    "outcome": "applied cleanly (chat-client.ts, ChatMessages.tsx + new export/replay files)",
+    "clean": true
+   },
+   {
+    "command": "git reset -q; git diff --stat",
+    "outcome": "unstaged; both slices' tracked files show as modified, new files untracked",
+    "clean": true
+   },
+   {
+    "command": "rustfmt --edition 2021 (agent_api_run.rs full; --check on agent_api_routes.rs, auth.rs, zdr_posture.rs)",
+    "outcome": "agent_api_run.rs (new file) formatted; agent_api_routes.rs already clean; auth.rs's one new unformatted hunk (header() calls in the new test) formatted by hand; remaining 23 auth.rs and 17 zdr_posture.rs rustfmt hunks are pre-existing at HEAD and left alone (no whole-file reformat)",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets --message-format short (apps/Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+    "outcome": "Finished; no errors, no warnings in batch files (only pre-existing warnings elsewhere)",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit (apps/Frontend Plane/verevonv3)",
+    "outcome": "first run: 2 errors in ThreadReplayView.tsx (tabIndex, dateTime); after fix: 0 errors (the expected schedule-contract.test.ts baseline error did not appear)",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/features/chat/replay/ThreadReplayView.tsx",
+    "slice": "EP-12-S12",
+    "what": "Solid JSX attribute names: tabIndex={-1} -> tabindex={-1} (line 100) and <time dateTime=...> -> <time datetime=...> (line 142), matching repo idiom; fixes TS2322 x2"
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+    "slice": "EP-12-S7",
+    "what": "rustfmt-style wrap of the two new .header(\"x-inference-authorization\", ...) calls in the new test block (only new-code hunk; pre-existing unformatted code untouched)"
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/agent_api_run.rs",
+    "slice": "EP-12-S7",
+    "what": "rustfmt run on the new file (LF kept)"
+   }
+  ],
+  "still_broken": [],
+  "notes": "Shared edits applied by the guard: zdr_posture.rs CALL_SITES row for agent_api_run.rs::run_ask_turn (CRLF kept, multi-line tuple form), and ChatPage.tsx spaceScoped={spaceScoped()} after temporaryChat (LF kept). Not applicable: no .proto, action-registry, prompt/tool, SSE or zdr-posture-matrix change, so steps 2-4b skipped; no Go or verevonv3 gateway files touched, so 5b/5c skipped. Tests named in EP-12-S7's lead_todo (cargo test agent_api_run, agent_api_routes, auth::tests, api_key_route_fence_tests, zdr_posture) were NOT run per guard rules; the lead should run them. EP-12-S7 needs_other_files (session-core auth.rs API_KEY_METHODS for ManagedRunLifecycle/StartManagedRun, grpc.rs start_managed_run owner_id, terminalization.rs origin stamp, apikey-owned run acceptance) were not applied: they are design-bearing cross-slice changes for the lead; without them a key's managed start is permission_denied at session-core. Files: C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\zdr_posture.rs, C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPage.tsx.",
+  "regenerated": [],
+  "shared_edits_applied": [
+   "apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs: CALL_SITES row (\"agent_api_run.rs\", \"run_ask_turn\", \"persistent only: a ZDR key is refused in admit before any call (EP-12 D6)\") after the grpc.rs invoke_stream row",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx: spaceScoped={spaceScoped()} after temporaryChat={readAloudBlocked()} in renderMessageRow's <MessageBlock>"
+  ],
+  "shared_edits_skipped": [
+   "EP-12-S7 needs_other_files (session-core auth.rs, grpc.rs, terminalization.rs): not shared-edit items, left for the lead"
+  ]
+ }
+}

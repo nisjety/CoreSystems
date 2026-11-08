@@ -443,6 +443,7 @@ impl ProcessHost {
                 lease_id: Some(request.lease_id),
             },
         )?;
+        crate::executor::require_network_boundary(&policy, false, &wrapped)?;
         crate::executor::require_limits_applied_for(limits.as_ref(), &wrapped)?;
 
         let mut command = tokio::process::Command::new(&wrapped.program);

@@ -748,6 +748,19 @@
       "zdr_allowed": false
     },
     {
+      "actionId": "chat.open_computer_viewer",
+      "registry": true,
+      "access": "none",
+      "authority": "control_run_decision",
+      "sideEffectClass": "read",
+      "exemptReason": "ui_state_only",
+      "eligible": false,
+      "executor": {},
+      "hashBasis": "catalog_entry",
+      "schemaHash": "sha256:dba2370dd1fcd2370401709a2a35638ac34076863b5bb74b5babd6780cfc6ddd",
+      "zdr_allowed": false
+    },
+    {
       "actionId": "chat.open_deck_slide",
       "registry": true,
       "access": "none",

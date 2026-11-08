@@ -1,0 +1,352 @@
+{
+  "ws": "WS26",
+  "header_decisions": [
+    "DEC-31 (plan 2.1): the shared crate gates S2 (WS26-D1); the model-origin scope rule gates S4 (WS26-D5); skills gate S5 (WS26-D6); tighten default, opt-in enforce, fail-open, mode in config_json and spend gate S6 (WS26-D2, D3, D4, D7); WS26-D2 also gates S7.",
+    "WS26-D8 (local, agreed, one line): Do-goal PII redaction; gates S9. WS02 S6 consumes the predicate.",
+    "WS26-D9 (local): report-only retro scan of existing memory, no gate; delivered inside S4 as write_policy::audit_existing.",
+    "Recommended defaults in 7a.1 item 18: frame default; tighten per org only after the S8 thresholds and an ADR; enforce per org only; never for ThirdPartyMcp until WS05; the product owner confirms nobody relies on save_memory(topic=POLICY)."
+  ],
+  "notes": "Sources: WS26 section (plan lines 1399-1440, slice rows S1-S9) and Appendix B (binding, from line 2253). Appendix B rows applied: N2 (every proto-editing slice, S4 S5 S6 S7, takes WS12-S2; the WS07 extraction found baseline.binpb at 530476 bytes at HEAD from commit e45caa71, so the 0-byte premise looks stale and the integrator should confirm the edge is already satisfied); N4 (4.3 finals confirmed: IndexMemoryRequest.origin = 7 in memory.proto; LanguageAnalysisResult.injection_json = 14 in inference.proto; ScreenContent RPC and messages at the end of gateway.proto; UpsertAgentSkillResponse.skip_reason = 4 in sessions.proto, shared by name with WS07 S7); K1-7 (no WS07 to WS26 edge; WS26 consumes the WS07 gate; WS07.json agrees); K1-20 (WS26 blocks WS23 and WS24, recorded for those workstreams, not a WS26 slice dependency). No other Appendix B row names a WS26 slice, file, effort or test.\n\nDependencies beyond the slice rows: the 4.2 DAG attaches WS05 and WS06 to S7 (their Blocks cells name WS26.S7); WS12 (header: FE test wiring) is on S3. The header lists WS01-S0 for S4, S5, S6, S7 and S9 only, but S1 (edits live-modified tool_loop.rs) and S3 (edits live-modified ChatMessages.tsx) also edit live-modified files, so WS01-S0 is added to both by the header's own rule. The ChatMessages.tsx hunks belong to another session (B.1 N3): S3 must name that session and rebase onto its commit first. S4 takes WS07-S1 and S5 takes WS07-S7 from their rows. S6's row names an 'S8 baseline', but S8 depends on S6, so no edge is added (read it as the corpus baseline; S8 thresholds gate the default flip, not S6). DEC-31 gates S2, S4 (scope rule), S5, S6 and S7; S1, S3 and S9 are free now (2.2); S8 has no DEC gate.\n\nBuilt status at HEAD 12dd8cb7: none of S1-S9 is built. git log afb83928..HEAD has no WS26 commit, and the build ledger has no WS26 rows. Checked: nats.conf has no mp.v1.security grant and publishers_registry_test.go still carries the gap (S1); no mp-content-safety crate, and the scan_injection and TrustClass copies remain (S2); no safe-href.ts, and chat-media-markdown.tsx still renders raw href at lines 1275 and 1279 (S3); no origin in memory.proto and no write_policy.rs (S4); no skip_reason in sessions.proto (S5); no injection_json and no PromptInjection (S6); no ScreenContent and no screening_client.rs (S7); no eval script and no content_safety_eval.rs (S8); the agentic call still passes req.content.clone() at sse.rs (about line 1517) and no agentic_goal test exists (S9). Existing foundations: the semantic shadow pass in semantic_screening.rs (shadow_screen; CONTENT_SAFETY_SHADOW_SAMPLE_RATE is read at line 104 but not declared in compose), the ContentSafetyClassifier trait, redact_pii and pii_redaction_required in moderation.rs, and isSafeExportHref in ooxml.ts (not re-exported). The header calls S1, S3 and S9 FINISH-BUILT-BUT-DARK, but their specific changes are absent at HEAD, so they are recorded as not built.\n\nPaths: abbreviations expanded per the brief; EC/tests means execution-core/tests. EC agent.rs resolves to rust/services/execution-core/src/runtime_loop/agent.rs (there is no execution-core/src/agent.rs). browser_execution_to_step_outcome (S7) lives in runtime_loop/mod.rs. activities.go is go/services/orchestrator-core/cmd/activities/activities.go; registry_apis.go is go/services/capability-core/internal/api/registry_apis.go; memory_dedup.rs is rust/services/session-core/src/memory_dedup.rs. Every named existing path was checked on disk and every NEW path is absent, so new_files_already_present is empty throughout. Line numbers are dropped.\n\nfiles rule: paths named in the Change column are listed even when reference-only (reference-only entries: S1 sse.rs pattern; S4 scrub.rs read-only; S5 registry_apis.go not screened; S7 mcp_gateway.rs pattern; S7 grpc_auth.rs read first). Also listed: docker-compose.yml where the Flag column says the flag is declared there (S2, S4); NEW test files named only in the Tests column (S2 tests/corpus.rs and its corpus jsonl files; S3 safe-href.test.ts); existing test files the slice edits per its Tests column (S3 chat-markdown.test.ts; S7 compaction_parity_contract.rs). Not listed: generated Go and Python bindings from buf generate, and the S4 source-scan test (no path named). The S6 and S7 flags are not declared as compose entries in the plan, so docker-compose.yml is not listed for them.\n\nOther: section 4.5 lists mp-contracts/src/lib.rs as a WS26 hot file, but no WS26 row names an mp-contracts file, so none is added. S5 adds no flag of its own (it uses CONTENT_WRITE_POLICY from S4). Effort: the slice ranges sum to 25.5-34.5 days; the header's 26-35 is rounded. S8's promotion rule names MODEL_PLANE_RELEASE_EVIDENCE.md, which exists and is tracked.",
+  "slices": [
+    {
+      "id": "WS26-S1",
+      "title": "telemetry actually leaves the process",
+      "tag": "FINISH",
+      "summary": "Lets the security events leave the process: adds the mp.v1.security.* publish grant to model-gateway-runtime in nats.conf, removes the registry gap, and adds the tool-screening and semantic-screening counters, with CONTENT_SAFETY_SHADOW_SAMPLE_RATE declared in compose. Additive; rollback reverts the conf line.",
+      "files": [
+        "apps/Model Plane/deploy/nats.conf",
+        "apps/Model Plane/go/services/nats-provisioner/publishers_registry_test.go",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "NATS credential for the mp.v1.security capture step (no agent session holds one)",
+      "risk": ["audit", "zdr"],
+      "effort_days_low": 1,
+      "effort_days_high": 1,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/go/services/nats-provisioner\" && go test ./...",
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib security_events semantic_screening"
+      ]
+    },
+    {
+      "id": "WS26-S2",
+      "title": "shared crate: normaliser, scanner, trust table",
+      "tag": "BUILD",
+      "summary": "Creates the mp-content-safety crate (normaliser, scanner, trust table, rule ids) and points model-gateway and execution-core at it, deleting the two hand-synced scanner and TrustClass copies and adding flags to security events. Tighten-only behind CONTENT_SAFETY_NORMALIZE (default on; off restores the 16-phrase path), gated by a corpus test.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-content-safety/Cargo.toml",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/lib.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/normalize.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/scan.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/rules.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus/attacks.jsonl",
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus/benign.jsonl",
+        "apps/Model Plane/rust/Cargo.toml",
+        "apps/Model Plane/rust/Cargo.lock",
+        "apps/Model Plane/rust/services/model-gateway/Cargo.toml",
+        "apps/Model Plane/rust/services/execution-core/Cargo.toml",
+        "apps/Model Plane/rust/services/session-core/Cargo.toml",
+        "apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/security_events.rs",
+        "apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/compaction_parity_contract.rs",
+        "apps/Model Plane/deploy/docker-compose.yml",
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Model Plane/docs/ZDR.md"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-content-safety/Cargo.toml",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/lib.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/normalize.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/scan.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/src/rules.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus.rs",
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus/attacks.jsonl",
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus/benign.jsonl"
+      ],
+      "new_files_already_present": [],
+      "depends_on": [],
+      "needs_live_stack": true,
+      "needs_external": "public HTTPS fixture host for the indirect-injection evidence page (Quarry's fetch guard refuses private addresses); live inference route for the Do-run repeat",
+      "risk": ["policy", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": ["DEC-31 (WS26-D1)"],
+      "flag": "CONTENT_SAFETY_NORMALIZE",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p mp-content-safety && cargo test -p model-gateway --lib moderation && cargo test -p execution-core --lib provenance && cargo test -p execution-core --test compaction_parity_contract",
+        "tests/corpus.rs (NEW) over tests/corpus/attacks.jsonl (>=150) and tests/corpus/benign.jsonl (>=300): 100% deterministic attack hit, zero benign hits; existing moderation.rs and provenance.rs tests unchanged; 4 MiB benign payload under 250 ms in release"
+      ]
+    },
+    {
+      "id": "WS26-S3",
+      "title": "safe links on screen",
+      "tag": "FINISH",
+      "summary": "Adds one link-safety helper in safe-href.ts, shared with the chat export, and renders an inert span instead of an anchor for unsafe model-authored link targets at the listed chat render sites. A render guard only, with no action contract; rollback is a revert.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-export/ooxml.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-media-markdown.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-markdown.test.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/safe-href.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS12"],
+      "needs_live_stack": true,
+      "needs_external": "owner of the live ChatMessages.tsx hunks is another session (B.1 N3): name it and rebase onto its commit before editing",
+      "risk": ["policy"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/features/chat/components/chat-markdown.test.ts src/features/chat/lib/chat-export/ooxml.test.ts src/features/chat/lib/safe-href.test.ts",
+        "safe-href.test.ts (NEW) cases: javascript:, JaVaScRiPt:, java<tab>script:, control characters, data:text/html, file:, blob:, vbscript:, //evil and relative targets rejected; http, https and mailto accepted; negatives added beside the existing chat-markdown.test.ts negatives; compare failing sets to HEAD"
+      ]
+    },
+    {
+      "id": "WS26-S4",
+      "title": "one policy on every memory write",
+      "tag": "BUILD",
+      "summary": "Adds origin to IndexMemoryRequest and a shared write_policy::check that every memory writer runs (model tool, delegation, gateway, orchestrator, dreaming); refusals return a typed failed_precondition, write no row and mirror nothing. Behind CONTENT_WRITE_POLICY (off, report, enforce; ships report) with a report-only retro scan.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/memory.proto",
+        "apps/Model Plane/rust/services/session-core/src/write_policy.rs",
+        "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+        "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+        "apps/Model Plane/rust/services/session-core/src/memory_dedup.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/scrub.rs",
+        "apps/Model Plane/go/services/orchestrator-core/cmd/activities/activities.go",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/memory.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/session-core/src/write_policy.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS26-S2", "WS01-S0", "WS07-S1", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "live inference route (provider credential) for the Do-run evidence on the developer stack",
+      "risk": ["policy", "audit", "zdr"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "decisions": ["DEC-31 (WS26-D5)", "WS26-D9"],
+      "flag": "CONTENT_WRITE_POLICY",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": [
+        "cargo test -p session-core --lib write_policy",
+        "ignored PG tests (disposable DATABASE_URL, --ignored --test-threads=1): index_memory_refuses_injection_text, model_origin_cannot_write_org_scope, user_origin_can_write_org_scope, empty_origin_is_treated_as_model_tool, extractor_candidate_with_marker_is_skipped_not_fatal, refusal_writes_no_row_and_no_mirror",
+        "cargo test -p execution-core --lib save_memory_maps_policy_refusal",
+        "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+        "source-scan test: every memory writer sits behind the check"
+      ]
+    },
+    {
+      "id": "WS26-S5",
+      "title": "skill-write policy and promotion re-check",
+      "tag": "BUILD",
+      "summary": "Adds write_policy::check_skill to background-review skill upserts (a refusal returns the existing response shape with skip_reason and writes no row) and re-checks stored content when a learned skill is enabled; capability-core maps the skip to a counted skip with no retry. User-origin writes are report-only.",
+      "files": [
+        "apps/Model Plane/rust/services/session-core/src/write_policy.rs",
+        "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+        "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+        "apps/Model Plane/go/services/capability-core/internal/skillsink/sink.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+        "apps/Model Plane/scripts/verify-durable-layer.sh"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS26-S2", "WS26-S4", "WS01-S0", "WS07-S7", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["policy", "authority"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "decisions": ["DEC-31 (WS26-D6)"],
+      "flag": "",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cargo test -p session-core --lib write_policy",
+        "ignored PG tests: background_review_skill_with_marker_is_refused, enable_of_learned_skill_rechecks_policy, user_origin_skill_is_reported_not_refused; extend assert_upsert_skill_guards",
+        "cd \"apps/Model Plane/go/services/capability-core\" && go test ./internal/skillsink/... ./internal/learning/...",
+        "TestPersist_CountsPolicySkip"
+      ]
+    },
+    {
+      "id": "WS26-S6",
+      "title": "chat loop: tighten-only semantic injection pass, optional withhold",
+      "tag": "BUILD",
+      "summary": "Adds a prompt_injection language operation (injection_json on LanguageAnalysisResult) and a tighten-only semantic pass in model-gateway for external tool results: it can promote Clean to Flagged and never demote, runs under its own 2.5 s deadline with per-run caps, never runs on ZDR turns, and in enforce mode withholds external payloads. Mode comes from the org config_json with env defaults; adds docs/CONTENT_SAFETY.md.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/inference.proto",
+        "apps/Model Plane/rust/services/inference-core/src/provider/language.rs",
+        "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/security_events.rs",
+        "apps/Model Plane/docs/CONTENT_SAFETY.md"
+      ],
+      "new_files": [
+        "apps/Model Plane/docs/CONTENT_SAFETY.md"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS26-S1", "WS26-S2", "WS01-S0", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "live inference route with a classifier-capable provider credential, and a non-ZDR org, for the chat evidence",
+      "risk": ["policy", "zdr", "money"],
+      "effort_days_low": 6,
+      "effort_days_high": 8,
+      "decisions": ["DEC-31 (WS26-D2)", "DEC-31 (WS26-D3)", "DEC-31 (WS26-D4)", "DEC-31 (WS26-D7)"],
+      "flag": "CONTENT_SAFETY_MODE_DEFAULT, CONTENT_SAFETY_SEMANTIC_INLINE, CONTENT_SAFETY_SEMANTIC_DEADLINE_MS, CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN, CONTENT_SAFETY_INJECTION_MODEL",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cargo test -p model-gateway --lib semantic_screening moderation",
+        "model-gateway tests: semantic_flag_promotes_clean_to_flagged, semantic_clean_never_demotes_a_deterministic_flag, classifier_manipulation_cannot_loosen_a_verdict, timeout_keeps_deterministic_and_counts, fail_mode_degraded_sets_read_only, per_run_call_cap, partial_coverage_is_not_a_clean_claim, enforce_withholds_external_but_not_org_internal_or_mcp, config_json_parse_failure_falls_back_to_env_default, a_zdr_turn_never_calls_the_injection_classifier (modelled on the existing ZDR classifier test in semantic_screening.rs)",
+        "cargo test -p inference-core --lib language",
+        "inference-core tests: prompt_injection_prompt_lists_categories, parses_prompt_injection_aliases",
+        "e2e: model-gateway/tests/e2e_invoke_chain_test.rs"
+      ]
+    },
+    {
+      "id": "WS26-S7",
+      "title": "Do mode: same pass through the gateway",
+      "tag": "BUILD",
+      "summary": "Adds a ScreenContent RPC to model-gateway (verdict only, never content) and an execution-core screening client that Do-mode external and browser results call after the local scan, with a 3 s fail-open timeout; a withhold replaces the output before render and sets screening_taint for WS13 and WS05. Off by default behind CONTENT_SAFETY_SCREEN_RPC.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+        "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs",
+        "apps/Model Plane/rust/services/execution-core/src/screening_client.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+        "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/compaction_parity_contract.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/src/screening_client.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS26-S6", "WS01-S0", "WS05", "WS06", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "live inference route (provider credential) for the real Do run on the developer stack with org mode enforce",
+      "risk": ["auth", "policy", "zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 5,
+      "decisions": ["DEC-31 (WS26-D2)"],
+      "flag": "CONTENT_SAFETY_SCREEN_RPC",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cargo test -p execution-core --lib provenance screening_client",
+        "execution-core tests: rpc_failure_keeps_local_verdict, withhold_replaces_output_before_render, zdr_run_never_calls_the_rpc, taint_set_on_flag, no_dispatch_tool_symbol_in_screening_client",
+        "cargo test -p model-gateway --lib grpc::screen_content",
+        "extend compaction_parity_contract.rs so both seams name the same trust table",
+        "cargo test -p execution-core --test autonomy_ladder_contract (must stay green)"
+      ]
+    },
+    {
+      "id": "WS26-S8",
+      "title": "evaluation corpus, gate, live run",
+      "tag": "BUILD",
+      "summary": "Grows the mp-content-safety corpus to its final sets (direct, indirect-in-HTML, split or obfuscated, paraphrase-only semantic, multilingual, benign including documents about injection) and adds a live eval script plus an ignored model-gateway test that reports per-class recall and false-positive counts only. Thresholds go in CONTENT_SAFETY.md; any S6 default flip needs an archived run and a week of S1 counters.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus",
+        "apps/Model Plane/scripts/eval-content-safety.sh",
+        "apps/Model Plane/rust/services/model-gateway/tests/content_safety_eval.rs",
+        "apps/Model Plane/docs/CONTENT_SAFETY.md",
+        "apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md"
+      ],
+      "new_files": [
+        "apps/Model Plane/scripts/eval-content-safety.sh",
+        "apps/Model Plane/rust/services/model-gateway/tests/content_safety_eval.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS26-S2", "WS26-S6"],
+      "needs_live_stack": true,
+      "needs_external": "live classifier (provider credential) and a non-ZDR test org for the eval run; corpus stays synthetic or public",
+      "risk": ["policy"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cargo test -p mp-content-safety",
+        "cargo test -p model-gateway --test content_safety_eval -- --ignored (live classifier, non-ZDR test org)"
+      ]
+    },
+    {
+      "id": "WS26-S9",
+      "title": "redact PII-required goal on Do path",
+      "tag": "FINISH",
+      "summary": "Passes the redacted goal to agentic_run_stream when the org PII policy requires redaction (the one-line pattern the Ask path already uses), so stored run goals and executor input hold no raw email or national id. Adds one test beside the Ask redaction test; the policy opt-in already exists.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "live inference route (provider credential) for the Do run on the developer stack",
+      "risk": ["policy"],
+      "effort_days_low": 0.5,
+      "effort_days_high": 0.5,
+      "decisions": ["WS26-D8"],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cargo test -p model-gateway --lib sse::tests::agentic_goal_is_redacted_when_pii_policy_on"
+      ]
+    }
+  ]
+}

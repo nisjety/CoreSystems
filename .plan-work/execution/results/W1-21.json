@@ -1,0 +1,192 @@
+{
+ "batchId": "W1-21",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS08-S4.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/vision_parts.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/vision.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/vision_parts_chain_test.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib vision (CARGO_INCREMENTAL=0)",
+     "outcome": "49 passed, including the 9 new vision_parts unit tests"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test vision_parts_chain_test",
+     "outcome": "4 passed (two images ride every round at the user index, flag off keeps vision_stream, no vision model falls back to the diversion, Do plus image refused attachment_do_unsupported). Passed before the sibling breakage below; the only later edit to that file was a one-line clear_flag helper change, not re-run."
+    },
+    {
+     "command": "cargo check/test -p model-gateway (lib and tests), after the sibling slice's new file appeared",
+     "outcome": "BLOCKED, not mine: services/model-gateway/src/thread_search_routes.rs (untracked, a concurrent slice, registered in lib.rs) reads AppState.message_search_client, which state.rs does not have yet. The full --lib and --all-targets runs could not be repeated after that. cargo check of my own changes was clean before it appeared."
+    },
+    {
+     "command": "pnpm vitest run attachment-policy.test.ts, chat-normalizers.attachment-refusals.test.ts, chat-normalizers.sandbox-files.test.ts (--pool=threads)",
+     "outcome": "28 passed (attachment-policy.test.ts alone: 17, including the three new plan tests). The default forks pool timed out starting workers, so --pool=threads was used."
+    },
+    {
+     "command": "pnpm typecheck, filtered to the files I touched",
+     "outcome": "no errors in them; the remaining errors are in RemoteSupportPage.tsx, quarry-client.ts and schedule-contract.test.ts, none of which I touched"
+    },
+    {
+     "command": "eslint on the touched FE files",
+     "outcome": "attachment-policy.ts, its test and chat-client.ts are clean. chat-normalizers.ts has 43 errors against 40 at HEAD: three new Norwegian strings with a/o/aa characters in bare tr(), the same pattern the file's other errors have. DashboardComposer.tsx has pre-existing no-restricted-syntax errors."
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "87 passed, 22 failed. Every failure is a missing or mismatched golden or vendored copy in Quarry, Data Plane or the posture-matrix .sha256 files. None of those files is touched by this slice."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `CHAT_VISION_AS_PARTS_ENABLED: ${CHAT_VISION_AS_PARTS_ENABLED:-}` to the model-gateway environment block. The default must stay unset or off.",
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml and .env.example: add VITE_CHAT_VISION_AS_PARTS_ENABLED (default empty or false) beside VITE_PLAN_EXECUTE_ENABLED. It must be flipped together with the gateway switch.",
+    "Rebuild gate: the sibling slice's thread_search_routes.rs currently breaks `cargo check -p model-gateway` because AppState has no message_search_client. Once that is fixed or landed, re-run `cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib` and `--test vision_parts_chain_test --test context_recovery_contract --test zdr_feature_table --test zdr_posture_matrix --test attachment_policy_contract` (Windows: not --all-targets, which has pre-existing target failures) with CARGO_INCREMENTAL=0.",
+    "Live proof (not done): rebuild model-gateway, inference-core and the BFF with the switch on in staging. Run a 2-image Ask turn on verevon-balance and on an explicit Anthropic model with a tool follow-up. Confirm SSE chunk, usage and done, a text-only persisted user message, and a non-ZDR session-core run row. Confirm a Do turn with an image gets 4xx attachment_do_unsupported and a Temporary chat (ZDR) gets the typed refusal. Then flip the compose default.",
+    "The Go bindings and buf need no action: this slice has no proto change."
+   ],
+   "deviations": [
+    "vision_parts.rs is declared from vision.rs with #[path = \"vision_parts.rs\"] pub mod parts, so it is reached as crate::vision::parts, because lib.rs is not an owned file. The lead can replace it with pub mod vision_parts; in lib.rs and drop the three lines in vision.rs.",
+    "attach() takes (request, parts) and not (request, parts, user_index). ImageParts::bind(&messages) records the user index plus the carrier message, because the tool loop and the shed retry both need them and sse.rs only knows the index after render.",
+    "Images-as-parts is gated on route_reads_images() inside sse.rs, using sse.rs's own authenticated_inference_request, so vision_parts stays pure and unit-testable.",
+    "No rows were added to sse-event-taxonomy.md or zdr-posture-matrix.json. The taxonomy file is generated from ChatEvent variants and has no error-code section, and the posture matrix enumerates postures, not request features. zdr_feature_table.rs already pins (image, ZDR) and (file, waived) as refused. attachment_do_unsupported is a sixth code outside AttachmentCode, whose closed enum in attachment_policy.rs is not owned.",
+    "The model_no_vision sentence is worded inside attachment-policy.ts, in both languages and without a/o/aa characters so the lint rule passes, instead of in the no.ts and en.ts catalogues, which are not owned.",
+    "chat-normalizers.ts keeps its existing one-image-per-picker behaviour. The composer limit moves from 1 to the declared maxImages (4) only when the client switch is on."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs (optional: pub mod vision_parts; to replace the #[path] declaration in vision.rs)",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/no.ts and en.ts (optional: move the model_no_vision sentence into the attachments.refusal catalogue)",
+    "apps/Frontend Plane/verevonv3/.env.example, docker-compose.yml and src/vite-env.d.ts (document VITE_CHAT_VISION_AS_PARTS_ENABLED beside VITE_PLAN_EXECUTE_ENABLED)",
+    "apps/Model Plane/deploy/docker-compose.yml (pass-through env line for CHAT_VISION_AS_PARTS_ENABLED, default unset, in the model-gateway block)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not done (docker, lead only): rebuild model-gateway, inference-core and the BFF with CHAT_VISION_AS_PARTS_ENABLED=true and VITE_CHAT_VISION_AS_PARTS_ENABLED=true. Run a 2-image Ask turn on verevon-balance and on an explicit Anthropic model with a tool follow-up. Confirm SSE chunk/usage/done, a text-only persisted user message, and a non-ZDR session-core run row. Confirm a Do turn with an image gets attachment_do_unsupported, and a Temporary chat (ZDR) gets the typed refusal. Then flip the compose default.",
+     "Shared-file edits left to the lead: CHAT_VISION_AS_PARTS_ENABLED pass-through in Model Plane deploy/docker-compose.yml (default unset). Frontend docker-compose.yml, .env.example and vite-env.d.ts need VITE_CHAT_VISION_AS_PARTS_ENABLED. Optionally replace the #[path] module declaration in vision.rs with pub mod vision_parts; in lib.rs.",
+     "Plan's golden rows (Ask, image, ZDR/waived/persistent) in zdr_posture_matrix.rs and zdr-posture-matrix.json were not added. The implementer argues the matrix enumerates postures, not features, and zdr_feature_table.rs already pins image/ZDR refusal. The lead should accept or reject that.",
+     "sse-event-taxonomy.md rows for attachment_do_unsupported were not added. The file is generated from ChatEvent variants and has no error-code section."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needed before switch-on: the 2-image Ask turn through the real inference-core vision adapters (Azure/OpenAI and Anthropic) is unproven. The chain test only checks the InferRequest the gateway sends to a scripted provider."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The client gate is a build-time VITE switch that mirrors the server switch. If the two drift, either images are blocked that the diversion would serve, or images reach a server that falls back to AnalyzeImage. A server-declared attachment_policy.modes.vision_as_parts in /v1/models (http_routes.rs, WS10 shares it) would remove the drift."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The vision route check uses the unfiltered inference-core ListModels. It does not apply the org's model-access policy or the user's picked provider, so a vision model the org cannot use can make a Verevon mode look image-capable. inference-core's server-side vision_unsupported refusal is the safety net."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives the prompt-too-long shed retry with images present (rebase() is unit-tested only). No multi-turn chain test shows prior history and memory reaching the model with images, because the session mock has no history."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's golden rows (Ask, image, ZDR/waived/persistent) in zdr_posture_matrix.rs and api/contracts/zdr-posture-matrix.json were not added: the matrix enumerates postures, not features, and the fixture copy must stay byte-identical. zdr_feature_table.rs already covers the refusals. Add a (vision parts, ZDR) row if the feature table grows nested fields."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The too_many_images sentence in no.ts and en.ts still reads 'only N image can be analyzed' and does not read well for N=4."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "toStreamAttachments' per-turn budget error and the attachment_do_unsupported wording are bare Norwegian in chat-normalizers.ts (3 new no-restricted-syntax lint errors, the file's existing pattern). Move them into i18n.tr at render time."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "vision.rs select_image stays as the fallback per D5. The plan says delete it one release after the flag default flips (never for Do). Image token cost reaches the usage frame only through provider usage (WS27)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A hosted image URL with no bytes is refused (attachment_encoding_invalid) on the parts path, because inference-core takes bytes only. The diversion accepted URLs. Owner may want the URL case to fall back to the diversion instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before switch-on: the 2-image Ask turn through the real inference-core Azure/OpenAI and Anthropic vision adapters is unproven. The chain test only checks the InferRequest the gateway sends to a scripted provider."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The client gate is a build-time VITE switch mirroring the server switch, so drift is possible. If they disagree, either images the diversion would serve get blocked, or images reach a server that falls back to AnalyzeImage. Declare modes.vision_as_parts server-side in /v1/models."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "route_reads_images uses the unfiltered inference-core ListModels. It ignores org model-access policy and the user's provider pick, so a Verevon mode can look image-capable when the org cannot use any vision model. inference-core's vision_unsupported refusal is the only safety net and would fail the turn instead of falling back to the diversion."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The chain test asserts tools reach the model and the index holds across rounds, but not that prior history and memory reach it, which the plan row lists. The prompt-too-long shed retry with images is covered only by the rebase() unit test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "attach() has a debug_assert that the carrier message still sits at user_index. If bind() found no user-role message (carrier None), that assert fires in debug builds, and release builds send index 0. The prompt always ends with a user turn today, but it is untested."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ListModels call sits on the hot path before the run row, once per image turn when the switch is on. It has no cache and no timeout visible in the diff, so a slow inference-core delays the first byte. Failure falls back to the diversion, which is fine."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A hosted image URL with no bytes is refused (attachment_encoding_invalid) on the parts path, where the diversion accepted URLs. The owner may prefer fallback to the diversion for that case."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "attachment_policy_contract::the_real_stream_route_carries_the_body_limit fails on the current tree (a 400-char text window on http_routes.rs). It is not from this slice, but --all-targets stays red until the S2 owner fixes it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "vision_parts.rs is declared via #[path] from vision.rs because lib.rs is not owned. Move it to pub mod vision_parts; in lib.rs and drop the three lines in vision.rs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat-normalizers.ts adds three bare Norwegian strings (the per-turn budget error and the attachment_do_unsupported text), which gives 3 new no-restricted-syntax lint errors (43 vs 40 at HEAD). The model_no_vision sentence is worded in attachment-policy.ts rather than the i18n catalogues. Move both to the catalogues."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The too_many_images sentence in no.ts and en.ts still says 'only N image' and reads badly for N=4. vision.rs select_image stays as the fallback and should be deleted one release after the default flips, never for Do."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "What was built, all off by default.\n\nServer: CHAT_VISION_AS_PARTS_ENABLED (only the literal \"true\" enables it).\n- vision_parts.rs holds ImageParts, admit(), route_reads_images(), attach() and rebase().\n- sse.rs admits images before any run row exists:\n  - Do plus image is refused with attachment_do_unsupported.\n  - ZDR plus image is refused again, defence in depth.\n  - ListModels is asked only when the switch is on and the turn has images. The picked model answers for itself, and a Verevon mode follows \"some vision model exists\".\n  - If the catalogue call fails, or no model reads images, the vision_stream diversion serves the turn as before.\n- With parts, the diversion is skipped. The images are bound to the last user message right after the prompt is rendered.\n- tool_loop.rs: run_tool_rounds_for_model and run_tool_rounds_for_model_with_attachments take images as a last parameter, and every round's InferRequest carries them. A debug_assert pins that rounds only append.\n- The final answer's InferRequest carries the images too. On prompt-too-long shedding, rebase() re-finds the carrier message by role and content. If that message was itself shed, the turn fails like any too-long prompt.\n- Switch off: the admission code yields an empty ImageParts, nothing is attached and the diversion runs. The flag-off chain test shows the diversion called once and no image part sent.\n\nClient:\n- chat-client.ts: VISION_CAPABILITY and modelSupportsVision(model, policy, {verevonMode}).\n- attachment-policy.ts: new reason model_no_vision, with an optional imageParts context. When present, the model must read images and the declared maxImages applies. Absent, behaviour is unchanged.\n- The client gate is switched by VITE_CHAT_VISION_AS_PARTS_ENABLED, default off, to be flipped together with the server switch. This is needed because the declared policy cannot say whether the server flag is on, and an always-on gate would block images that work today through the diversion.\n- DashboardComposer.tsx feeds the context into evaluateAttachments.\n- chat-normalizers.ts: attachment_do_unsupported presentation in both switches, and a per-turn byte budget in toStreamAttachments (the declared maxTotalBytes, else 3,145,728)."
+  }
+ ]
+}

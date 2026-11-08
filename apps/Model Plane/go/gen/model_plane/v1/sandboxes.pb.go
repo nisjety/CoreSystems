@@ -2888,8 +2888,14 @@ type ReadProcessOutputRequest struct {
 	SpaceReadDecisionRef string `protobuf:"bytes,5,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
 	// The signed model.thread.read decision addressed to this service.
 	SpaceReadDecisionToken string `protobuf:"bytes,6,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// The run the caller names as the process's owner (the owner read path of the
+	// computer panel's terminal). Optional: empty reads a process of any run in the
+	// Space, as this read always has. When set, a process another run started is
+	// NotFound, the same answer as a process in another Space, so a caller learns
+	// nothing about ids outside its own run.
+	RunId         string `protobuf:"bytes,7,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReadProcessOutputRequest) Reset() {
@@ -2960,6 +2966,13 @@ func (x *ReadProcessOutputRequest) GetSpaceReadDecisionRef() string {
 func (x *ReadProcessOutputRequest) GetSpaceReadDecisionToken() string {
 	if x != nil {
 		return x.SpaceReadDecisionToken
+	}
+	return ""
+}
+
+func (x *ReadProcessOutputRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
 	}
 	return ""
 }
@@ -3945,7 +3958,7 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\x19space_read_decision_token\x18\x06 \x01(\tR\x16spaceReadDecisionToken\"i\n" +
 	"\x15ListProcessesResponse\x125\n" +
 	"\tprocesses\x18\x01 \x03(\v2\x17.model_plane.v1.ProcessR\tprocesses\x12\x19\n" +
-	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x80\x02\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x97\x02\n" +
 	"\x18ReadProcessOutputRequest\x12\x1d\n" +
 	"\n" +
 	"process_id\x18\x01 \x01(\tR\tprocessId\x12\x1b\n" +
@@ -3953,7 +3966,8 @@ const file_model_plane_v1_sandboxes_proto_rawDesc = "" +
 	"\tmax_bytes\x18\x03 \x01(\x03R\bmaxBytes\x12\x19\n" +
 	"\bspace_id\x18\x04 \x01(\tR\aspaceId\x125\n" +
 	"\x17space_read_decision_ref\x18\x05 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
-	"\x19space_read_decision_token\x18\x06 \x01(\tR\x16spaceReadDecisionToken\"\xe1\x02\n" +
+	"\x19space_read_decision_token\x18\x06 \x01(\tR\x16spaceReadDecisionToken\x12\x15\n" +
+	"\x06run_id\x18\a \x01(\tR\x05runId\"\xe1\x02\n" +
 	"\x19ReadProcessOutputResponse\x12:\n" +
 	"\x06chunks\x18\x01 \x03(\v2\".model_plane.v1.ProcessOutputChunkR\x06chunks\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\x03R\n" +

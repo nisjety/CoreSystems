@@ -2326,7 +2326,8 @@ type MessageTreeServiceClient interface {
 	// Make a branch of the thread the active one. A target on the active path is a
 	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
 	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
-	// branch shows its own continuation. Owner only, with `session:write`. Refused
+	// branch shows its own continuation. With `exact` set, the leaf is the target
+	// itself (an undo of a rewind). Owner only, with `session:write`. Refused
 	// for a Space thread, a thread that holds a waived run and a thread with a queued
 	// or running run. Refused with unavailable `message_versions_disabled` while
 	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
@@ -2362,7 +2363,8 @@ type MessageTreeServiceServer interface {
 	// Make a branch of the thread the active one. A target on the active path is a
 	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
 	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
-	// branch shows its own continuation. Owner only, with `session:write`. Refused
+	// branch shows its own continuation. With `exact` set, the leaf is the target
+	// itself (an undo of a rewind). Owner only, with `session:write`. Refused
 	// for a Space thread, a thread that holds a waived run and a thread with a queued
 	// or running run. Refused with unavailable `message_versions_disabled` while
 	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.

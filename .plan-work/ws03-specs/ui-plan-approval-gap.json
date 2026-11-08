@@ -1,0 +1,288 @@
+{
+ "slice": "WS14 S2a, \"Run the approved plan\": an interim slice that sits before the planned WS14 S2. The SPA sends the turn after a plan approval as agentic with plan_mode=false and execute_granted=true. model-gateway runs it under the thread's in-memory grant, or refuses it typed. It needs no WS04 S4 durable grant and no migration, and S2 (BindGrantToRun, approved_plan_id, execute_now) later replaces its carrier.",
+ "summary": "The gap is real and I confirmed it from the code. `buildChatWireBody` adds `agentic` only when `planMode` is true, and model-gateway pins `plan_mode` runs to ReadOnly. `approveTurnPlan` writes a thread-keyed, in-memory, 24 h grant, then calls `setPlanMode(false)`, which puts the composer back on Ask. Ask never reaches execution-core, so the grant is never read. The smallest safe fix has four parts. (1) The controller keeps a session-only `ThreadPlanGrant` and an `executeArmed` flag. Approving arms it, and the composer gets a third \"Kjør plan\" pill, selected by default, plus a prefilled draft. (2) The send path emits `execute_granted:true` with `agentic` and `plan_mode:false` only when the grant is armed and usable on that thread and route. (3) model-gateway makes execute turns fail closed. It resolves the rung only from a live thread grant and otherwise refuses with typed `plan_grant_unavailable`, with no RunAgent call. (4) The action contract is added first. This is needed because a chat-profile agentic run with no rung is the least constrained run possible. It runs under the Auto posture, and `check_autonomy_rung(Unspecified)` returns Ok. The UI must therefore never send an execute turn that falls back to that. The slice sits inside WS14 as S2a and does not need WS04 S4. It is not a new workstream, and it must not absorb the auto-send, durable-grant or plan-id parts of S2.",
+ "approach": "All paths are relative to the worktree root C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b. `MP` = \"apps/Model Plane\", `FE` = \"apps/Frontend Plane/verevonv3\".\n\n**Findings from the code.**\n- `FE/src/shared/api/chat-client.ts` `buildChatWireBody` (about 1085): `if (request.planMode && ...) features.add('agentic')`, and `plan_mode` is sent as `request.planMode`.\n- `MP/rust/services/model-gateway/src/sse.rs` `spawn_run_dispatch` (about 9027): `plan_mode` gives ReadOnly. Otherwise the rung is `state.plan_mode.granted_rung(org, run.thread_id)`, falling back to UNSPECIFIED.\n- `MP/rust/services/model-gateway/src/coordinator.rs`, `PlanModeStore`: the grant map is keyed by thread, in memory, with a hard TTL of `MAX_PLAN_TTL_SECS` = 86400 s. There is no revoke.\n- The only writers of a grant are `http_routes.rs` `plan_approval` (user bearer, run-owner check, `continuation_gate`, `AutonomyEscalation::request` with a justification of at least 12 characters) and the gRPC `exit_plan_mode`. Nothing in execution-core or Go calls the gRPC path; only `autonomy_ladder_contract.rs` does.\n- `execution-core permission::check_autonomy_rung` returns Ok for UNSPECIFIED, meaning \"no graded constraint\". An absent `profile` resolves to the Chat profile, which is the Auto posture (`profile.rs`, `http_routes.rs` docs). So an agentic run with plan_mode=false and no grant is unconstrained. That already holds for a hand-crafted request, but the UI would newly reach it after a gateway restart or when the grant expires. This is why execute turns must fail closed.\n- The plan state machine allows Proposed to Approved, Approved to Executing and Approved to Superseded only (`orchestration_grpc.rs` about 3920). An APPROVED plan cannot be re-approved. Recovery after a restart is therefore \"plan again\", not \"approve again\".\n- `normalize_stream` already refuses non-plan agentic runs on the subscription route unless `AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS` is on.\n- `/continue` (WS03 S3) takes its authority from the pause snapshot (`resume.rs` `offered_authority`, `authority_from_proto`). I read this at the `resume.rs` level only, not in the agent.rs resume branch.\n\n**Design.**\n\n1. *Client state.* In `use-chat-controller.ts` add `type ThreadPlanGrant = { threadId: string; rung: AutonomyRung; planId?: string; turnId: string; approvedAtMs: number; expiresAtMs?: number }`. Add `const [threadGrant, setThreadGrant] = createSignal<ThreadPlanGrant|null>(null)` and `const [executeArmed, setExecuteArmed] = createSignal(false)`. The grant is session-only. It is never persisted to localStorage, a thread snapshot or the server, and it has no authority. The gateway grant is the authority and the SPA is only a pointer to it.\n\n2. *Arming.*\n   - `approveTurnPlan` keeps calling `approvePlan` and keeps turning plan mode off through the raw setter. Existing tests expecting `planMode()===false` after approve still pass.\n   - After success it calls `setThreadGrant({threadId: state.threadId, rung: result.grantedRung, planId, turnId, approvedAtMs: Date.now(), expiresAtMs: result.grantExpiresAtMs})` and `setExecuteArmed(true)`.\n   - If the composer draft is empty (`input().trim()===''`) it calls `setInput(i18n.tr('Kjør den godkjente planen','Run the approved plan'))`. It never overwrites typed text.\n   - It does not auto-send. Auto-send on approve (\"execute_now\") stays in S2, together with its idle-state handling and retry state.\n\n3. *When an execute turn is sent.*\n   - `handleComposerSubmit` sets only `options.executeGranted = executeArmed()`.\n   - `sendContent` is the authority boundary. It checks `options.executeGranted === true` against all of these: grant present; `grant.threadId === state.threadId` and the thread id is non-null (not a new thread); not expired by `expiresAtMs`; not `isTemporaryThread`; not `isForeignOriginThread`; `!options.zdr`; `options.provider !== 'openai-codex-subscription'`; `options.sourceScope !== 'conversation'`; `(options.retrievalScope ?? 'auto') === 'auto'`; and `state.status !== 'streaming'`. The streaming check sits after the existing mid-run branch, so a mid-run message is never an execute turn.\n   - If any check fails, the turn is sent as an ordinary Ask turn and the grant is disarmed (`setExecuteArmed(false)`). The pill stays selectable but is no longer selected, so a later send cannot run it unexpectedly.\n   - Exception: if the failure is expiry, the send is aborted instead. The draft is kept, the grant is dropped, and the grant's turn gets a `planApprovalError`: \"Fullmakten har utløpt. Be agenten lage planen på nytt (Utfør), og godkjenn den.\"\n   - Regenerate, edit-resubmit, continue-generation and retry never set `executeGranted`, so they cannot execute. This preserves the effectful-turn lock.\n   - `planMode()` is false for an execute turn. The assistant turn gets a new `executeGranted: true` flag. `isWorkSurfaceTurn` also accepts it, so the Work surface, run id tracking and effect-class hydration treat the turn as a run.\n\n4. *Disarm and spend.*\n   - The exported `setPlanMode` becomes a wrapper `(v)=>{ setPlanModeRaw(v); setExecuteArmed(false) }`. Every composer path that calls `onPlanModeChange`, including the conflict resets for retrieval scope, conversation-only and stale-subscription, therefore also disarms execute.\n   - A new `selectExecute()` sets plan mode off through the raw setter and sets `executeArmed(true)`.\n   - The grant is spent, meaning `setThreadGrant(null)` and `setExecuteArmed(false)`, in `onConnected` of an execute turn and in `cancelOnceConnected`. It is also dropped in `settleServerFailure` when `failure.code==='plan_grant_unavailable'`.\n   - A pre-connect network failure keeps the grant and the armed state, so retrying works.\n\n5. *Composer.* `DashboardComposer` gets `approvedPlan?: { rungLabel: string; selected: boolean }` and `onApprovedPlanSelect?: () => void`.\n   - In the `appearance===\"chat\"` Ask/Do segment, a third button \"Kjør plan\" / \"Run plan\" shows only when `approvedPlan` is set. Its title is \"Kjør den godkjente planen – agenten kan nå {rungLabel}\".\n   - It carries `aria-pressed`. It is disabled with a reason when `subscriptionBacked()`, `temporaryChat()`, `conversationOnly()` or `retrievalScope()!=='auto'`. A disabled pill is never shown as selected.\n   - Ask and Do are `is-active` only when execute is not selected.\n   - The non-chat chip variant is unchanged.\n   - `ChatPage.tsx` wires `approvedPlan={controller.approvedPlanView()}` and `onApprovedPlanSelect={selectExecute}`.\n   - `approvedPlanView` is a memo that returns the grant only for the current, non-temporary, non-foreign thread and only if not expired. It carries `selected: executeArmed()`.\n   - `RUNG_LABEL` in `ChatMessages.tsx` is exported for the label. The plan card's existing text \"Godkjent: agenten kan nå X\" is the durable display of the rung.\n\n6. *Rung.* The card already offers `workspace_write` (default) and `danger_full_access`, never `read_only`, and requires a reason of at least 12 characters. That is unchanged. The execute turn carries no rung. The gateway reads the thread grant, and a rung supplied by the client is never accepted.\n\n7. *Wire.* `ChatInvokeRequest.executeGranted?: boolean`. In `buildChatWireBody`:\n   - `executeGranted = request.executeGranted===true && !request.planMode && !conversationOnly && !supportReadOnly && !subscriptionBacked && !request.zdr && Boolean(threadId)`.\n   - `features.add('agentic')` when `planMode || executeGranted`.\n   - For an execute turn, force `retrieval_scope` out of the body, because the gateway refuses agentic with a non-auto scope.\n   - `plan_mode` keeps its current expression, which is false for an execute turn.\n   - Add `...(executeGranted ? { execute_granted: true } : {})`. The key is absent otherwise, so ordinary bodies are byte-identical.\n\n8. *Gateway.*\n   - **Field.** `InvokeRequest.execute_granted: bool` with `#[serde(default, alias=\"executeGranted\")]`.\n   - **Wire invariants.** A pure `execute_request_problem(req, agentic) -> Option<&'static str>`. It yields a problem when `execute_granted` is set and any of these hold: there is no `agentic` feature, `plan_mode` is set, or `thread_id` is blank. `invoke_stream_sse` maps a problem to `error_stream(\"invalid_request\", ..)` before any durable run exists.\n   - **ZDR.** `zdr_features.rs` gets the destructure and name entry, `(\"execute_granted\", refused_feature(\"agentic\"))` in `FIELD_TREATMENTS`, and a branch in `refusal()` that returns `feature(\"agentic\")`. No new refusal key is needed, so `zdr-refusals.json` and its sha are unchanged.\n   - **Single enforcement point.** Extract the pure `resolve_autonomy_rung(store, org_id, thread_id, plan_mode, execute_granted) -> Result<i32, tonic::Status>`.\n     - `plan_mode` gives ReadOnly.\n     - `execute_granted` gives the rung from `store.granted_rung(org, thread)`, else `Err(Status::failed_precondition(\"plan_grant_unavailable\"))`.\n     - Anything else gives the legacy value (grant, else Unspecified), which is unchanged.\n     - `spawn_run_dispatch` takes a new `execute_granted: bool` and calls it.\n     - It uses the authoritative `run.thread_id`, resolved and owner-verified by session-core, never the request's thread id. That avoids both a thread-existence oracle and a time-of-check gap.\n     - The existing rejection branch in `agentic_run_stream` already terminalizes the run with the allowlisted `dispatch_rejected` failure code, so no session-core change is needed. It is extended to emit `ChatEvent::Error{code:\"plan_grant_unavailable\", retryable:false}` instead of the generic `agent_dispatch_rejected` when the status carries that message. RunAgent is never called.\n     - `agentic_run_stream` gets an `execute_granted` parameter. `invoke_stream_sse` passes `req.execute_granted`, and `continue_run` passes `false`.\n   - **Grant expiry.** `PlanModeStore::grant_expires_at(org, thread) -> Option<i64>`. `plan_approval` clones the thread id and adds `\"grant_expires_at_unix\"` to its response. The BFF proxies this unchanged.\n\n9. *BFF.* Strip `execute_granted` wherever `plan_mode` and `agentic` are already forced off: `strip_support_thread_capabilities` (`FE/apps/gateway/src/domains/chat/history.rs`) and the `_ =>` arm of `apply_mention_binding_policy` (`FE/apps/gateway/src/domains/spaces.rs`). The AG-UI normalizer builds its outbound body key by key (`ag_ui.rs`), so the new field cannot ride through it and needs no change. The generic chat stream proxy forwards unknown keys, which is what we want.\n\n10. *Failure behaviours.*\n    - **Gateway restart or expiry.** The grant is gone, so the execute turn is refused typed, nothing runs, and the user message plus a failed turn remain. The SPA drops the grant and shows, on both the failed turn and the plan card: \"Fullmakten er ikke lenger aktiv (utløpt eller tjenesten ble startet på nytt). Velg Utfør, be agenten lage planen på nytt, og godkjenn den.\" The old plan row stays APPROVED, stranded, until WS04 S4 or S2. This is a stated limitation.\n    - **Reject.** Unchanged. It grants nothing and records no grant. `rejectTurnPlan` still turns plan mode off, and an armed grant for another plan is not touched.\n    - **Reload.** The armed state is lost. `hydratablePlan` returns null for an APPROVED plan, so the card reverts to the rung-only control. A re-approve then produces a plan-less grant.\n\n11. *ZDR and subscription.*\n    - ZDR: `continuation_gate` already refuses `plan-approval`, and `execute_granted` is refused through the `agentic` key. The SPA never arms for temporary or ZDR threads, and nothing is persisted.\n    - Subscription: the SPA never sends it, and the pill is disabled with the reason \"Kjøring av godkjent plan er ikke tilgjengelig for ChatGPT-abonnementet ennå\". `normalize_stream` would refuse it anyway while `AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS` is off. Enabling it later needs an `agentic_effects` capability in the catalogue, because today only `agentic` is advertised.\n\n**Placement.** This is WS14 S2a, a new row ahead of S2 in the plan table, plus a ledger entry in `MP/docs/decisions/ledger.md`. Suggested wording: \"Plan approval starts a new Do run; a grant never widens a run in flight; interim in-memory carrier accepted again; execute turns fail closed\". It honours DEC-04 as written. It replaces the ledger C7 accepted fail-open (\"restart drops the grant to UNSPECIFIED\") only for runs that declare `execute_granted`.",
+ "file_changes": [
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+   "change": "Do this FIRST (repo rule). (a) Extend `chatApprovePlanInput` (about line 1024) with optional `planId: z.string().min(1)` and optional `editedSteps` (array of {stepId?, title, operation?, removed}); fix the stale description at about 2838. (b) Add `chatExecuteApprovedPlanInput = z.object({ threadId: z.string().min(1), planId: z.string().min(1).optional() }).strict()`. It is strict on purpose: a client-supplied `grantedRung` must fail to parse. (c) Register `chat.execute_approved_plan` next to `chat.run.continue`: ownerPlane 'model', risk 'high', requiresApproval false (the approval click and the grant are the human decision), reversible false, outputSchema `envelopeStatusOutput`. The description says it starts a NEW executing run on a thread whose plan the person approved, under the rung the server holds, and is never model-executable. Do not add it to MODEL_EXECUTABLE_ACTION_IDS in model-eligibility.ts, and do not touch that file."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+   "change": "Add a test next to the 'chat.run.continue' one (about line 75). It checks the metadata and that `isModelExecutableAction('chat.execute_approved_plan')` and `isModelExecutableAction('chat.approve_plan')` are false. It also checks that the input parses with {threadId} and fails with {threadId, grantedRung:'danger_full_access'} and with a blank threadId."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "change": "(1) `ChatInvokeRequest.executeGranted?: boolean`, documented: only the controller sets it, and it carries no rung. (2) `buildChatWireBody`: compute `executeGranted` as specified. `features.add('agentic')` when `request.planMode || executeGranted`. For an execute turn set the local `retrievalScope` to 'auto' so `retrieval_scope` is not sent. Spread `execute_granted: true` only when executing. `plan_mode` and every other key stay exactly as they are. (3) `PlanApprovalResult.grantExpiresAtMs?: number`, parsed in `approvePlan` from `raw.grant_expires_at_unix` (seconds, finite, positive; absent for an older gateway). Add-only hunks (WS09 and WS14 edit-first rule). Many existing files here use CRLF; edit with the Edit tool."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+   "change": "Add cases to 'chat-client tool wiring' (existing cases at about lines 493-693 must pass untouched). Cases: execute turn on a thread gives agentic+tools, plan_mode false, execute_granted true; the key is absent for every ordinary and plan turn (`toEqual` on `Object.keys`); executeGranted is dropped for planMode true, a missing threadId, sourceScope 'conversation', a support thread, zdr true, and the subscription provider (agentic absent and plan_mode false in each); a web_only retrievalScope plus execute sends no retrieval_scope. Add an `approvePlan` test using the existing `jsonResponse` fetch stub: `grant_expires_at_unix` becomes `grantExpiresAtMs`, and its absence leaves it undefined."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+   "change": "`SendOptions.executeGranted?: boolean` (documented as a request that the controller re-validates). `ChatTurn.executeGranted?: boolean` (session-only, like `planMode`, never spread from server metadata). Define or export `ThreadPlanGrant` here if the controller file should not own the type."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+   "change": "(a) Rename the signal at line 277 to `[planMode, setPlanModeRaw]` and export a wrapper `setPlanMode` that sets the raw value and disarms execute. It must accept a value or an updater, because the existing tests call `controller.setPlanMode(true)`. (b) Add the `threadGrant` and `executeArmed` signals and `approvedPlanView` memo, and `selectExecute()`. (c) `approveTurnPlan` (about 2040-2095): keep the raw plan-mode-off call; on success set the grant and arm it, and prefill the draft only if it is empty. (d) `isWorkSurfaceTurn` (about 403) also accepts `turn.executeGranted===true`. (e) `handleComposerSubmit` (about 2876) passes `executeGranted: executeArmed()`. (f) `sendContent` (about 2246) validates the checks listed in the approach after the streaming branch. It disarms or aborts as described, sets `executeGranted` on the assistant turn, and passes `executeGranted` to `streamChat` at about 2550. Regenerate, edit, continue and retry callers are left alone. (g) Spend or drop the grant in `onConnected` (about 2568), `cancelOnceConnected` (about 2486) and `settleServerFailure` (about 3292, on code 'plan_grant_unavailable', which also writes `planApprovalError` for `grant.turnId`). (h) Export `approvedPlanView` and `selectExecute` from the return object (about 3877)."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+   "change": "In `streamFailurePresentation` (about 422), add `case 'plan_grant_unavailable'`. It returns the Norwegian and English message from the approach, `unsaved:true, unavailable:false, action:'none'`. The server's English text is never shown, and retry is not offered because it cannot help."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.wave2.test.ts",
+   "change": "Add a describe or it for `plan_grant_unavailable`: both languages, action 'none', and the server text not echoed."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+   "change": "Props `approvedPlan?: {rungLabel: string; selected: boolean}` and `onApprovedPlanSelect?: () => void`. Third button in the `appearance==='chat'` segment (about line 3026-3046). Add a memo `executeBlockedReason()` built from `subscriptionBacked()`, `temporaryChat()`, `conversationOnly()` and `retrievalScope()!=='auto'`. A blocked pill is disabled, has a `title` with the reason, and is never `is-active`. Ask and Do `is-active` become `!planMode() && !executeSelected()` and `planMode() && !executeSelected()`. The non-chat chip variant (about 2999) is untouched."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.approved-plan.test.tsx",
+   "change": "NEW. Copy the harness of DashboardComposer.subscription.test.tsx. Cases: the pill is absent without the prop and in the default appearance; it is present and selected with `selected:true` while Ask and Do are not active; clicking calls `onApprovedPlanSelect`; clicking Ask or Do calls `onPlanModeChange` and not the select handler; it is disabled with the reason for the subscription provider, temporary chat, conversation-only and a web_only retrieval scope; aria-pressed matches the state."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+   "change": "Destructure `approvedPlanView` and `selectExecute` from the controller (about lines 117-122). Pass `approvedPlan={approvedPlanView() ? {rungLabel: RUNG_LABEL[approvedPlanView()!.rung], selected: approvedPlanView()!.selected} : undefined}` and `onApprovedPlanSelect={selectExecute}` to `<DashboardComposer>` (about 223-254)."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+   "change": "Export `RUNG_LABEL` (about line 2536); no other edit. The granted text 'Godkjent: agenten kan nå {rung}' stays as the durable display of the rung. WS12 and WS13 also edit this file, so the hunk is add-only."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.plan-gate.test.ts",
+   "change": "Keep the existing cases at about lines 159, 197, 229 and 255 unchanged; they must pass. Add the controller tests listed in `tests`, using the same `streams`, `mockApprovePlan` and `withController` helpers. Extend the `CapturedStream.request` type with `executeGranted?: boolean`."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+   "change": "In `strip_support_thread_capabilities` (about line 741), also `object.remove(\"execute_granted\")`. Extend the support-thread test near line 1007 with `\"execute_granted\": true` and assert the key is gone."
+  },
+  {
+   "path": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+   "change": "In `apply_mention_binding_policy` (about 4534), in the `_ =>` arm remove `execute_granted` next to the `plan_mode=false` and `agentic` strip. Extend the existing binding-policy test near 8931-8949 to assert it."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "change": "(1) `InvokeRequest` (about 6679): `#[serde(default, alias = \"executeGranted\")] pub execute_granted: bool`, with a doc comment: run this turn as an executing run under the thread's live plan grant, fail closed without one, never carries a rung. (2) `plan_approval` (about 7343): pass `session_id: thread_id.clone()`, and add `\"grant_expires_at_unix\": state.plan_mode.grant_expires_at(&claims.org_id, &thread_id)` to the approve response."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs",
+   "change": "Add `pub fn grant_expires_at(&self, org_id: &str, thread_id: &str) -> Option<i64>`, org-checked and expiry-checked like `granted_rung`. Add the unit test `a_grant_reports_when_it_expires`. Do not change `record_grant`, `take_approved_plan` or the TTL."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "change": "(1) `const PLAN_GRANT_UNAVAILABLE: &str = \"plan_grant_unavailable\"`. (2) Pure `resolve_autonomy_rung` and `execute_request_problem` as specified. (3) `spawn_run_dispatch` (about 8986): new `execute_granted: bool` parameter, and the rung is resolved by `resolve_autonomy_rung(...)?` instead of the inline `if`. (4) `agentic_run_stream` (about 9543): new `execute_granted` parameter after `plan_mode`, passed through to `spawn_run_dispatch`. In the existing `Err(error)` rejection branch (about 9631) emit code `plan_grant_unavailable` with an English operator message when the status is failed_precondition with that message, else keep `agent_dispatch_rejected`. (5) `invoke_stream_sse`: after the agentic credential preflight (about 1308) return `error_stream(&request_id,\"invalid_request\",msg,false)` when `execute_request_problem` fires; pass `req.execute_granted` at about 1506. (6) `continue_run` (about 13493) passes `false`. Unit tests in the `sse.rs` test module."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+   "change": "Add `execute_granted: _` to the destructure in `invoke_field_names` (about line 204) and the name to the returned vec, which are compile-forced. Add `(\"execute_granted\", refused_feature(\"agentic\"))` to `FIELD_TREATMENTS` (about line 130). In `refusal()` (about 305), after the agentic-feature branch, add `if request.execute_granted { return feature(\"agentic\"); }`. The existing key is reused, so `zdr-refusals.json`, `mp-contracts` `zdr_refusal.rs` and the FE `zdr-refusals.json` are unchanged."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+   "change": "Add `(\"execute_granted\", with(\"execute_granted\", json!(true)), refused(\"agentic\"))` and the `false` default row returning `None` to `cases()`. `every_field_has_a_row_that_matches_its_treatment` then covers the new field."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+   "change": "`make_request` (about line 4221): add `execute_granted: false` to the `InvokeRequest` literal."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+   "change": "Test helper `make_request` (about line 447): add `execute_granted: false` to the literal. No behaviour change. Leave `an_agentic_subscription_run_must_be_read_only_until_effects_are_allowed` and its 'no stable code' pin alone."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+   "change": "Add three tests beside `invoke_stream_agentic_reuses_the_prepared_session_run` (about 4141), using `spawn_capturing_execution_mock` and `make_state`. Keep a clone of `state.plan_mode` before `build_router` to seed grants."
+  },
+  {
+   "path": "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+   "change": "In `approving_a_plan_checks_it_decides_it_with_the_edits_and_only_then_grants` (about line 1763) assert `body[\"grant_expires_at_unix\"]` is an integer greater than now, and no larger than now plus 86400. It is exactly what the store holds for ('org-owner','thread-1')."
+  },
+  {
+   "path": "apps/Model Plane/docs/decisions/ledger.md",
+   "change": "New entry, newest first: WS14 S2a. Record the interim in-memory carrier, the fail-closed rule for execute turns (this reverses C7's accepted fail-open only for runs that declare execute_granted), the 24 h TTL, no revoke, and the deferred items. Update the plan table WS14 with an S2a row (docs/plans/model-plane-chat-build-plan-2026-10-14.md, about line 899). Update MODEL_PLANE_STATUS.md only from captured live evidence."
+  }
+ ],
+ "interfaces": "**Wire (SPA to BFF to model-gateway `POST /v1/invoke/stream` body), added key:** `execute_granted: true` (the alias `executeGranted` is accepted by the gateway). It is present only on an execute turn, together with `features` containing `agentic`, `plan_mode:false`, and a non-empty `thread_id` of an existing thread. No rung, plan id or grant data is on the wire.\n\n**Typed refusal (SSE `error` event):** `{code:\"plan_grant_unavailable\", retryable:false}`. It is emitted when no live grant exists for (verified org, `run.thread_id`). The run is terminalized with failure code `dispatch_rejected` (already allowlisted) and execution-core is never called. A malformed combination returns `{code:\"invalid_request\"}` before any run exists. A ZDR token returns the existing `zdr_feature_not_supported` with feature `agentic`.\n\n**Plan-approval response (additive):** `\"grant_expires_at_unix\": <i64>|null`, proxied by the BFF unchanged.\n\n**Rust:**\n```rust\n// http_routes.rs\n#[serde(default, alias = \"executeGranted\")] pub execute_granted: bool,\n// coordinator.rs\nimpl PlanModeStore { pub fn grant_expires_at(&self, org_id: &str, thread_id: &str) -> Option<i64>; }\n// sse.rs\nconst PLAN_GRANT_UNAVAILABLE: &str = \"plan_grant_unavailable\";\nfn resolve_autonomy_rung(store: &PlanModeStore, org_id: &str, thread_id: &str, plan_mode: bool, execute_granted: bool) -> Result<i32, tonic::Status>;\nfn execute_request_problem(req: &InvokeRequest, agentic: bool) -> Option<&'static str>;\nfn spawn_run_dispatch(.., plan_mode: bool, execute_granted: bool, ..);   // new bool after plan_mode\nfn agentic_run_stream(.., plan_mode: bool, execute_granted: bool, ..);   // continue_run passes false\n// zdr_features.rs: FIELD_TREATMENTS += (\"execute_granted\", refused_feature(\"agentic\"))\n```\n\n**TypeScript:**\n```ts\n// chat-client.ts\nChatInvokeRequest.executeGranted?: boolean\nPlanApprovalResult.grantExpiresAtMs?: number\n// chat-types.ts\nSendOptions.executeGranted?: boolean;  ChatTurn.executeGranted?: boolean\ntype ThreadPlanGrant = { threadId: string; rung: AutonomyRung; planId?: string; turnId: string; approvedAtMs: number; expiresAtMs?: number }\n// use-chat-controller.ts return object\napprovedPlanView: () => { rung: AutonomyRung; selected: boolean } | null\nselectExecute: () => void\nsetPlanMode: (v: boolean | ((p: boolean) => boolean)) => void   // now also disarms execute\n// DashboardComposer props\napprovedPlan?: { rungLabel: string; selected: boolean };  onApprovedPlanSelect?: () => void\n```\n\n**Action contract:** `chat.approve_plan` input gains `planId?` and `editedSteps?`. New `chat.execute_approved_plan` with `z.object({threadId, planId?}).strict()`: ownerPlane model, risk high, requiresApproval false, reversible false, not model-executable. Out of scope here: a `chat.reject_plan` contract (the audit says it is missing).",
+ "tests": [
+  {
+   "name": "chat-client.test.ts: execute turn wire shape",
+   "proves": "With executeGranted on an existing thread, the body has features containing agentic and tools, plan_mode false, and execute_granted true. With it absent, `execute_granted` is not a key of any ordinary or plan body, so every other body is byte-identical."
+  },
+  {
+   "name": "chat-client.test.ts: executeGranted is dropped when unsafe",
+   "proves": "For planMode true, no threadId, conversation-only, a support thread, zdr true and the subscription provider, the body has no execute_granted and no agentic from it. Plan mode wins, and the subscription case sends plan_mode false with no agentic."
+  },
+  {
+   "name": "chat-client.test.ts: execute turn clears the retrieval filter",
+   "proves": "A web_only or knowledge_only retrievalScope on an execute turn produces no retrieval_scope key, so the gateway's agentic plus non-auto-scope conflict cannot fire."
+  },
+  {
+   "name": "chat-client.test.ts: approvePlan parses the grant expiry",
+   "proves": "`grant_expires_at_unix` becomes `grantExpiresAtMs`, and an older gateway without it leaves it undefined."
+  },
+  {
+   "name": "existing chat-client.test.ts lines 493-693 (all of them)",
+   "proves": "The legacy cases still pass untouched: conversation-only strips agentic, the subscription Do case sends agentic with plan_mode true, `leaves Do on a non-subscription turn exactly as it was`, and the Support thread case."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: approve arms the next turn",
+   "proves": "After a successful approve, `planMode()` is false (the existing assertion at about line 193 still holds), `approvedPlanView()` reports the rung with selected true, and an empty draft is prefilled with the localized execute sentence. A non-empty draft is not overwritten."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: next send is an execute turn",
+   "proves": "The next send's `streamChat` request has `executeGranted:true` and `planMode:false`. After `onConnected` the grant is spent, so the send after that is an ordinary Ask request with no executeGranted."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: disarm paths",
+   "proves": "Toggling Ask or Do, a non-auto retrieval scope, and `setPlanMode(true)` disarm execute while the pill stays selectable. `selectExecute()` re-arms it and forces plan mode off."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: blocked sends never execute",
+   "proves": "Sends with zdr, the subscription provider, conversation scope, a temporary thread, a different thread id, or while streaming (the mid-run path) never carry executeGranted. They disarm, and the grant remains for later."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: expiry",
+   "proves": "With `expiresAtMs` in the past, the send is aborted, the draft is kept, the grant is dropped, and `planApprovalError` carries the expiry message on the grant's turn."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: plan_grant_unavailable",
+   "proves": "After the refusal arrives, the grant is cleared, the failed turn shows the typed presentation with no retry, and the card message is set. This is the gateway-restart path."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: no replay paths",
+   "proves": "`editAndResubmit`, `rerunAsNewTurn` and retry of an execute turn call `streamChat` without `executeGranted`, so an executed turn cannot be executed again from the transcript."
+  },
+  {
+   "name": "use-chat-controller.plan-gate.test.ts: reject path",
+   "proves": "Reject still turns plan mode off, grants and arms nothing, and leaves an armed grant for another plan untouched (existing cases at about lines 197 and 229)."
+  },
+  {
+   "name": "DashboardComposer.approved-plan.test.tsx",
+   "proves": "The third pill appears only with the prop in chat appearance, shows selection and aria-pressed correctly, calls the select handler, and is disabled with a stated reason on the subscription, temporary, conversation-only and filtered paths."
+  },
+  {
+   "name": "action-registry.test.ts: chat.execute_approved_plan",
+   "proves": "The contract exists with ownerPlane model, risk high, requiresApproval false and reversible false. It is not model-executable, `chat.approve_plan` is not either, and the strict schema rejects a client-supplied rung."
+  },
+  {
+   "name": "chat-normalizers.wave2.test.ts: plan_grant_unavailable",
+   "proves": "Typed presentation in both languages with action 'none', and the server text is not shown."
+  },
+  {
+   "name": "sse.rs resolve_autonomy_rung: plan mode wins",
+   "proves": "plan_mode gives ReadOnly even when a grant exists and execute_granted is also set."
+  },
+  {
+   "name": "sse.rs resolve_autonomy_rung: legacy path unchanged",
+   "proves": "With neither flag, a grant gives its rung and no grant gives UNSPECIFIED, exactly as before. This is the compatibility pin for eval-lab and the existing agentic e2e tests."
+  },
+  {
+   "name": "sse.rs resolve_autonomy_rung: execute fails closed",
+   "proves": "With execute_granted and no grant, an expired grant, another org, or another thread, the result is Err(failed_precondition 'plan_grant_unavailable') and never UNSPECIFIED. With a live grant it gives that grant's rung."
+  },
+  {
+   "name": "sse.rs execute_request_problem table",
+   "proves": "execute_granted without agentic, with plan_mode, or with a blank thread_id yields a problem. A valid combination and the default (false) yield none."
+  },
+  {
+   "name": "e2e_invoke_chain_test.rs: invoke_stream_execute_granted_without_a_grant_is_refused_before_execution_core",
+   "proves": "With no grant, the body contains `plan_grant_unavailable`, the capturing execution mock saw zero RunAgent calls, and `terminal_outcome_captures` records `dispatch_rejected`. Confirm that the mock's `start_managed_run` echoes the request's thread_id before choosing the thread id used for seeding."
+  },
+  {
+   "name": "e2e_invoke_chain_test.rs: invoke_stream_execute_granted_with_a_grant_sends_the_granted_rung",
+   "proves": "After `plan_mode.record_grant(\"org_placeholder\",\"thread-1\",WorkspaceWrite,\"\")` the captured RunAgentRequest has autonomy_rung = WorkspaceWrite and plan_mode = false."
+  },
+  {
+   "name": "e2e_invoke_chain_test.rs: invoke_stream_execute_granted_invalid_combinations_never_prepare_a_run",
+   "proves": "Missing thread_id, plan_mode true, or missing agentic returns `invalid_request` and `create_thread_count`/`managed_start_count` stay 0."
+  },
+  {
+   "name": "zdr_feature_table.rs rows for execute_granted",
+   "proves": "A ZDR turn with execute_granted:true is refused as `zdr_feature_not_supported` with feature agentic, and false is not refused. `every_field_has_a_row_that_matches_its_treatment` fails to build or run if the field is left unclassified."
+  },
+  {
+   "name": "coordinator.rs: a_grant_reports_when_it_expires",
+   "proves": "`grant_expires_at` gives a value between now and now plus 86400 for the owning org and thread, and None for another org, another thread, or an expired entry."
+  },
+  {
+   "name": "orchestration_http_test.rs plan approval, grant_expires_at_unix",
+   "proves": "The approve response carries the expiry of the grant it just recorded."
+  },
+  {
+   "name": "autonomy_ladder_contract.rs (existing, must still pass)",
+   "proves": "The rung gate and its UNSPECIFIED semantics are untouched. Run `cargo test -p execution-core --test autonomy_ladder_contract`."
+  },
+  {
+   "name": "BFF history.rs and spaces.rs strip tests",
+   "proves": "A support thread or a Space mention under require_confirmation can never forward execute_granted, the same posture as plan_mode and agentic."
+  }
+ ],
+ "steps": [
+  "1. Gateway first (it must be deployed before any SPA that sends the field). In `zdr_features.rs`, `http_routes.rs` and the two `InvokeRequest` literals add the field, the ZDR treatment and the table rows. `cargo test -p model-gateway --test zdr_feature_table` plus `bash scripts/tests/zdr-contract-sync.test.sh` from apps/Model Plane.",
+  "2. `coordinator.rs`: add `grant_expires_at` and its test. `http_routes.rs`: add the `grant_expires_at_unix` response key and extend the orchestration_http_test assertion.",
+  "3. `sse.rs`: add the pure functions `resolve_autonomy_rung` and `execute_request_problem` with their unit tests. Then thread `execute_granted` through `invoke_stream_sse`, `agentic_run_stream`, `spawn_run_dispatch` and `continue_run`, and map the typed refusal in the rejection branch. Then add the three e2e tests. Run `cargo test -p model-gateway --lib`, then the specific tests one at a time (cargo serialises on the target lock; no docker).",
+  "4. BFF: strip `execute_granted` in `history.rs` and `spaces.rs` with test extensions. Run the gateway crate tests with filters.",
+  "5. Action contract first on the SPA side: `action-registry.ts` and its test.",
+  "6. `chat-client.ts` wire builder, `approvePlan` parse and tests.",
+  "7. `chat-types.ts`, then `chat-normalizers.ts` with its test, then the controller edits and the new controller tests.",
+  "8. `DashboardComposer.tsx` pill, its new test, the `RUNG_LABEL` export and the `ChatPage.tsx` wiring.",
+  "9. Docs: ledger entry and the WS14 S2a plan row. Update MODEL_PLANE_STATUS.md only after the live proof below.",
+  "10. Live proof (lead, not teammates; needs docker): rebuild model-gateway and the Frontend BFF via `apps/Model Plane/scripts/compose.sh`, run a second Vite dev server (:5173 is the main checkout). Evidence to capture: (a) Do-mode chat, approve at workspace_write, send, and check the request body, the executing run's `runs.metadata`, the plan going EXECUTING and the model-gateway log showing the rung; (b) approve, `docker restart model-gateway`, send, see `plan_grant_unavailable` with no execution-core call; (c) a ZDR or temporary thread cannot arm; (d) a subscription model shows the pill disabled."
+ ],
+ "risks": [
+  "IN-MEMORY GRANT: a gateway restart or the 24 h TTL drops it. The execute turn then fails closed with a typed message, but an already-APPROVED structured plan is stranded (APPROVED cannot be re-approved) and the user must plan again. Real fix: WS04 S4 durable carrier plus WS14 S2. The ledger entry must say this plainly. There is also no revoke; a grant stays for 24 h.",
+  "POSTURE: the chat profile is the Auto posture. At `danger_full_access` an execute run can take outbound actions with no per-call approval, relying on the human's rung choice and reason. At `workspace_write` risky calls are refused by the rung check, not paused. I did not add a posture ratchet, because the approval-resume path for chat-profile runs has not been exercised here. See the open question.",
+  "LEGACY HOLE NOT CLOSED: any authenticated user can still send agentic with plan_mode=false and no `execute_granted`. That runs with no rung (UNSPECIFIED) under Auto. This slice makes the UI path fail closed, but it does not close the hand-crafted path. Closing it means requiring a grant for chat-profile non-plan agentic runs. That breaks the agentic e2e tests in e2e_invoke_chain_test.rs (about lines 4164, 4395, 4428, 4702, 4812, 4867, 4947, 4995, 5058) and the eval-lab python runs, so it must be its own slice with those callers migrated.",
+  "SINGLE-USE ONLY FOR THE PLAN: the plan is claimed once (`take_approved_plan` plus the APPROVED to EXECUTING compare-and-swap), but the rung lingers for the grant's TTL. A second tab, or a stale armed tab, can run a second execute turn under the same rung without the plan block. The SPA spends its own pointer on connect, but the server does not. WS14 S2's `approved_plan_id` equality check and BindGrantToRun close this.",
+  "RELOAD: the armed state is session-only, and `hydratablePlan` returns null for an APPROVED plan, so after a reload the card shows the rung-only control. Re-approving makes a plan-less grant and the run then lacks the plan block. An executed turn is also not recovered as a Work surface (`hydrateLatestPlanRun` matches only mode 'plan'). Safe, but it is a visible gap.",
+  "ROLLOUT ORDER: if the SPA ships first, an older gateway ignores the unknown field (there is no deny_unknown_fields) and runs the turn as a legacy non-plan agentic run under whatever grant exists. That is the fail-open path, so the gateway must deploy first.",
+  "SUBSCRIPTION ROUTE: execute is unavailable there until an `agentic_effects` capability is advertised and `AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS` is on. The pill says so. The effects refusal in normalize.rs has no stable code and an existing test pins that, so I left it alone.",
+  "gRPC `ExitPlanMode` (grpc.rs about 1335) takes `org_id` and `session_id` from the request body and checks only run ownership. The HTTP route resolves the thread server-side. Nothing in execution-core or Go calls it, so there is no model path, but a service-principal caller could record a grant against a thread of its choosing. Record it as a hardening item. I did not change it.",
+  "The refusal arrives after `connected` is sent, because the rung is resolved in `spawn_run_dispatch`. The SPA handles this: it spends or drops the grant on either signal, and the failed turn shows the typed text.",
+  "HOT FILES: use-chat-controller.ts, chat-client.ts, sse.rs and http_routes.rs are shared with WS02, WS04, WS09 and WS15 (edit-first order). Keep every hunk add-only. Many files use CRLF, so use the Edit tool and no whole-file rewrites.",
+  "Not verified by me: the exact thread id the e2e mock returns for an existing `thread_id`; the agent.rs resume branch (I only read the `resume.rs` snapshot types, which say authority comes from the pause snapshot); the existing DashboardComposer test harness shape; and whether the approval-resume path works for chat-profile runs."
+ ],
+ "invariants": [
+  "A grant never widens a run in flight: the execute turn is a NEW run (`prepare_managed_run` makes a new run id). The plan run stays plan_mode with the ReadOnly rung. This matches DEC-04.",
+  "A human grant is required. The rung comes only from `PlanModeStore`, written by `plan_approval` (user bearer, run-owner check, `continuation_gate`, `AutonomyEscalation::request` with a justification of at least 12 characters). The client never sends a rung. The execute turn text is SPA-authored, not model-authored.",
+  "There is no escalation path from model output. `chat.approve_plan` and `chat.execute_approved_plan` are not in MODEL_EXECUTABLE_ACTION_IDS. No tool in execution-core or Go calls plan-approval or ExitPlanMode. The plan summary and step titles that enter the execute prompt stay one-line sanitised (`format_approved_plan_block`).",
+  "An execute turn without a live grant fails closed: typed `plan_grant_unavailable`, the run terminalized as `dispatch_rejected`, and no RunAgent call. It is never run as UNSPECIFIED.",
+  "Scoping: the grant key is (verified org from claims, thread id resolved by session-core for the owner-verified run). The thread id in the request body is never the key and never an existence oracle.",
+  "`plan_mode` and `execute_granted` are mutually exclusive. Plan mode always means ReadOnly, and plan mode wins in the wire builder and in `resolve_autonomy_rung`.",
+  "ZDR and waived tokens: no plan, no grant, no execute turn. `execute_granted` is refused through the existing `agentic` refusal key, and `plan-approval` is already behind `continuation_gate`. The SPA never arms for a temporary thread.",
+  "The subscription route never sends `execute_granted`, and the gateway's `normalize_stream` still refuses non-plan agentic runs there unless ALLOW_EFFECTS is on.",
+  "Support threads and Space mention bindings under require_confirmation cannot forward `execute_granted` (BFF strip), the same as plan_mode and agentic.",
+  "Regenerate, edit-resubmit, continue-generation and retry never carry `execute_granted`, so an effectful turn cannot be re-executed from the transcript.",
+  "An ordinary turn's wire body is byte-identical to before: `execute_granted` is omitted when not executing.",
+  "The legacy path (`resolve_autonomy_rung` without execute_granted) is unchanged: grant gives its rung, no grant gives UNSPECIFIED. eval-lab and the existing agentic tests are unaffected.",
+  "The grant is session-only on the client: no localStorage, snapshot or server persistence, and no credentials, tokens or bearers in anything logged or persisted.",
+  "The action contract (`chat.approve_plan` extension and `chat.execute_approved_plan`) lands before any UI wiring."
+ ],
+ "open_questions": [
+  "POSTURE RATCHET: should execute turns force the Ask posture when the grant is `danger_full_access`? That would pause every risky call for a per-call approval (defence in depth). It is one line in `invoke_stream_sse` plus a test, but it depends on the approval-resume path being live for chat-profile runs (WS03 flags AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and EXECUTION_LOOP_RESUME_ENABLED). I recommend adding it once those are on. Until then, consider hiding `danger_full_access` from the plan card for executable runs, or accepting it because the card's own text says 'utføre alt, også utgående handlinger'.",
+  "FLAG: I added no gateway flag, because the field is opt-in per request and rollback is reverting the SPA. If the repo convention requires a kill switch (like MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE in S2), the cost is a typed `plan_execute_disabled` refusal. Decide whether you want that, accepting that the SPA would then show a pill that always refuses.",
+  "AUTO-SEND: should approval send the execute turn at once (S2 `execute_now`)? I recommend the armed pill plus prefilled draft now, because auto-send needs idle-state handling (a stream may still be open, and a mid-run send would be queued input) and a retry state. Auto-send stays in S2.",
+  "Follow-up turns after an execute run: I made one approval one execute turn on the client (spent on connect), even though the server keeps the rung for 24 h. If the product wants follow-up Do turns under the same grant, say so; the client would then stay armed and the gateway would need a thread-level execute window.",
+  "Close the legacy hole (agentic with no execute_granted) in this slice or the next? It needs the eval-lab and e2e callers migrated first (listed in risks).",
+  "Add `chat.reject_plan` to the action contract now? The audit flags it as missing. I left it out as scope creep, but it is a small, safe addition.",
+  "Which decision register entry authorises an interim in-memory carrier? C7's accepted fail-open covers the legacy path only. Confirm that a ledger entry in this slice is enough or whether DEC-04 recording is required first.",
+  "`PlanModeStore::grants` has no revoke and the response has no revoke affordance. Is a 'Trekk tilbake fullmakt' action wanted before shipping, or does it wait for WS04 S4?"
+ ],
+ "verification_commands": [
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib coordinator::",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib resolve_autonomy_rung",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib execute_request_problem",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --test zdr_feature_table",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --test orchestration_http_test plan",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --test e2e_invoke_chain_test execute_granted",
+  "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --lib normalize::",
+  "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --test autonomy_ladder_contract",
+  "cd \"apps/Model Plane\" && bash scripts/tests/zdr-contract-sync.test.sh",
+  "cd \"apps/Frontend Plane/verevonv3\" && cargo test --manifest-path apps/gateway/Cargo.toml --all-targets support_thread",
+  "cd \"apps/Frontend Plane/verevonv3\" && cargo test --manifest-path apps/gateway/Cargo.toml --all-targets mention_binding",
+  "cd \"apps/Frontend Plane/verevonv3\" && pnpm exec vitest run src/shared/api/chat-client.test.ts src/shared/actions src/features/chat src/features/dashboard/home/DashboardComposer",
+  "cd \"apps/Frontend Plane/verevonv3\" && pnpm typecheck && pnpm lint   # compare failing sets against HEAD; typecheck, lint and vitest have pre-existing failures"
+ ]
+}

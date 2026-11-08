@@ -1,7 +1,7 @@
 {
   "contract": "org-agent-policy-schema",
   "version": 1,
-  "description": "The closed key schema of the org agent policy registry (WS25-S7, DEC-14). Read by mp-contracts org_agent_policy and by capability-core internal/api org_agent_policy; each consumer tests its own table against this file. A key with status reserved accepts only its default; a write of anything else is refused not_enforced. A row may also list reserved_values: tokens of its order refused not_enforced while the key itself is enforced (web.mode's cached_only, until Quarry ships it). Values run from the strictest to the loosest; a write looser than the platform ceiling is refused exceeds_platform_ceiling.",
+  "description": "The closed key schema of the org agent policy registry (WS25-S7, DEC-14). Read by mp-contracts org_agent_policy and by capability-core internal/api org_agent_policy; each consumer tests its own table against this file. A key with status reserved accepts only its default; a write of anything else is refused not_enforced. A row may also list reserved_values: tokens of its order refused not_enforced while the key itself is enforced (web.mode's cached_only, until Quarry ships it). Values run from the strictest to the loosest; a write looser than the platform ceiling is refused exceeds_platform_ceiling. An origin_allow_list is an allow_list whose ids are canonical https origins (https://host[:port], lowercase, no path); only approved_only names them.",
   "settings": [
     {
       "key": "mode_cap",
@@ -99,6 +99,14 @@
       "default": "on",
       "fail_closed_value": "off",
       "status": "enforced"
+    },
+    {
+      "key": "mcp_apps.network_origins",
+      "kind": "origin_allow_list",
+      "strictness_order": ["none", "approved_only"],
+      "default": "none",
+      "fail_closed_value": "none",
+      "status": "reserved"
     }
   ],
   "refusals": ["unknown_key", "invalid_value", "not_enforced", "exceeds_platform_ceiling"]

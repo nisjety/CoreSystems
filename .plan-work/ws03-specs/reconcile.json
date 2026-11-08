@@ -1,0 +1,335 @@
+{
+ "build_order": [
+  "0. hygiene: docs, scripts and ledger only, no Rust hot files. Can start at once and run alongside unit 1.",
+  "1. s3-corrections. This is a NEW unit carved out of the s7, s9 and redteam specs: the S2/S3 defects that go live as soon as AGENT_CONTINUE_AFTER_APPROVAL_ENABLED is on. It must land before S6/S7, which build on it. (a) mp-contracts: continuation_mode_for(persistent, enabled), with callers passing !req.zdr && !ctx.route.is_waived(); Authority::narrows gains a mode rank (deny<ask<auto, unknown widest) and rung_rank ranks unspecified/unknown as 3 (widest); new src/durable_gate.rs holds DurableStore, refuse_unless_persistent and refuse_unless_persistent_class. (b) execution-core effect.rs: reserve returns ReserveOutcome{Created, AlreadyReserved}; agent.rs phase 2 never dispatches on AlreadyReserved and closes the call as closer_text(UnknownOutcome). (c) resume.rs: effective_authority, apply_authority, next_segment_no and resumed_step_id, applied in prepare_resume so stage 1 runs under the snapshot authority; the segment number is derived by the executor and AgentResume.segment_no is ignored, not refused. (d) agent.rs pause sites ~2215 and ~4646: cold mode \"\" when the run is waived or !resume::releasable(tool). (e) model-gateway sse.rs: continue_preflight refuses an approval with consumed_at set (409 continuation_already_consumed) and a non-persistent turn (409 not_resumable); continue_run sends segment_no 0; zdr_posture.rs DURABLE_MUTATIONS lists continue_run. (f) session-core orchestration_store.rs: CONSUME_APPROVAL_SQL joins runs and requires retention_class='persistent' and status NOT IN (completed, failed, cancelled). (g) deploy/docker-compose.yml: model-gateway gets AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (verified: only execution-core has it, at line 1042).",
+  "2. s4-leftovers: runs.proto RunDetail resumable=17 and park_reason=18; the run_service_grpc read path; loop_checkpoint.rs ended-run guard on save/claim; park_reason validation; removal of the stale-active claim branch; claim_held; purge-path DB tests; the CI loop_checkpoint step. It also owns ParkReason::as_str/parse/ALL in mp-contracts. Can run in parallel with unit 1 on the conditions in parallel_groups.",
+  "3. s9-proofs, static part only: execution-core tests/loop_fold_zdr_matrix.rs and tests/durable_loop_contract.rs, the vendored zdr-posture-matrix.json with its .sha256 and zdr-contract-sync rows, and the model-gateway tests/zdr_posture_matrix.rs /continue case. Starts after unit 1; can run in parallel with unit 4.",
+  "4. s6-fold-writer: execution-core runtime_loop/fold.rs, scrub.rs scrub_fold, agent.rs E1-E6, and the mp-contracts loop_fold.rs additions (tombstone, is_resumable, contains_credential_shape, FoldCompleted.call_id, prompt_digest).",
+  "5. s7a: session-core ListToolActions (sessions.proto add-only, tool_ledger.rs list_actions, grpc.rs handler, plus stubs in every sessions-trait double) and execution-core effect.rs list_actions. Can start once unit 2 is merged; it touches no execution-core loop file.",
+  "6. s7b: execution-core resume.rs restore and restore_in_place; agent.rs RoundSeed::InPlace; consume_for_resume/build_segment split; closers.rs dead_code removal. Must follow unit 4.",
+  "7. s7c: model-gateway continue_run pre-consume plus resume_mode_for (needs RunDetail.resumable from unit 2), and the BFF orchestration.rs error-code passthrough. Must follow units 1 and 6.",
+  "8. ui-plan-approval-gap (WS14 S2a), only after human sign-off. It touches model-gateway sse.rs spawn_run_dispatch/agentic_run_stream and the SPA; serialize it after unit 7 because both edit sse.rs.",
+  "9. s8-parking: NO-GO until amended (see go_no_go). When amended it goes last: mp-contracts consts, protos, then session-core worker, then execution-core park.rs.",
+  "10. s9 live proofs (durable-loop-live-proof.sh stages s3/s5): lead only, after unit 1 and the human decisions; s7/s8 stages after their units."
+ ],
+ "parallel_groups": [
+  "Group A, runs at once: hygiene (new scripts under apps/Model Plane/scripts, the docs runbook, the plan doc tail, the ledger.md entry) in parallel with everything. Its only shared file is apps/Model Plane/docs/decisions/ledger.md: hygiene inserts its entry above the 2026-10-16 heading first, and every later unit appends below it, never in parallel edits.",
+  "Group B: s3-corrections in parallel with s4-leftovers, on three conditions. (1) mp-contracts src/loop_fold.rs is edited by s4-leftovers first (the ParkReason impl block) and by s3-corrections second (continuation_mode_for, narrows, rung_rank), sequentially, in non-overlapping hunks. (2) s4-leftovers does not touch session-core orchestration_store.rs, which s3-corrections owns. (3) s4-leftovers' grpc.rs edit is limited to the test-only raw cancel at ~13402 and new DB tests. Cargo serializes on the target lock regardless, so run tests one crate at a time.",
+  "Group C: s9 static (new test files plus the repo-root scripts/tests/zdr-contract-sync.test.sh) in parallel with s6. Disjoint as long as the s9 crate-internal waived call-site test in agent.rs moves into s3-corrections (amended) and S9 adds no agent.rs or sse.rs edits.",
+  "Group D: s7a (session-core tool_ledger.rs, grpc.rs, sessions.proto, the trait doubles) can run in parallel with s6, provided the execution-core MockSession stub for list_tool_actions is added by whichever unit lands second, as one small hunk next to claim_loop_checkpoint (~agent.rs 6394). Otherwise s7a's MockSession hunk waits for s6.",
+  "Strictly sequential, never in parallel: every unit that edits execution-core runtime_loop/agent.rs (s3-corrections, then s6, then s7b, then s8) and every unit that edits model-gateway src/sse.rs (s3-corrections, then s7c, then ui-plan-approval-gap, then s8)."
+ ],
+ "shared_interfaces": [
+  {
+   "name": "pause_ref for an approval pause",
+   "owner": "s6-fold-writer",
+   "definition": "pause_ref = format!(\"{}:{}\", run_id, step_id), the approval's existing idempotency key (verified at agent.rs:4669; client_approval_id is empty at :4665, so session-core mints the approval id). The pause fold is saved BEFORE CreateApproval. S7 claims with format!(\"{run_id}:{consumed.step_id}\"), never with the approval_id. S7 spec section F, 'save after create_approval / pause_ref = approval id', is overruled."
+  },
+  {
+   "name": "Approval continuation_mode values",
+   "owner": "s3-corrections",
+   "definition": "Only \"\" (cold) and \"loop\" are ever minted. \"loop\" requires persistent (not zdr, not waived) and releasable(tool) and continue_enabled(). The S6 'segment' approval mode and S6's widening of continue_preflight to accept \"segment\" are DROPPED. A pause whose fold failed to save stays \"loop\", and /continue then falls back to stage 1 (claim not_claimable). The stage is chosen only by AgentResume.mode."
+  },
+  {
+   "name": "LoopFoldV1 writer contract",
+   "owner": "s6-fold-writer",
+   "definition": "rounds_executed counts rounds STARTED, including the open round when round_in_flight is Some. round_in_flight.calls lists every model call in original order; step_id is \"\" for a call rejected in phase 1, with FoldCompleted.call_id (new, serde default, skip if empty) used for matching; the S6 synthetic 'rejected_{i}' step ids are dropped. completed excludes the pending call. extensions{effect_ledger:true} (EXT_EFFECT_LEDGER); a tombstone carries extensions.not_resumable (EXT_NOT_RESUMABLE). authority = resume::offered_authority(..). prompt_digest = mp_contracts::loop_fold::prompt_digest(compose_system_prompt(allowlist), tools as (name, description, parameters_json)) as S7 defines it: blake3, domain tag mp.prompt.v1, length-prefixed, tools sorted. This replaces S6's 'first system message' digest. A golden fixture pinning this shape goes in mp-contracts tests/loop_fold_golden.rs."
+  },
+  {
+   "name": "fold::Snapshot / build_fold / FoldWriter",
+   "owner": "s6-fold-writer",
+   "definition": "As in the S6 interfaces block (pub(crate) in execution-core runtime_loop/fold.rs). There is no LoopState refactor: S7's references to 'S6 LoopState' and S8's LoopState::to_fold / LoopSnapshot are replaced by fold::Snapshot plus build_fold(&Snapshot, Option<RoundInFlight>, Option<PendingPause>). S7 adds FoldWriter::seeded(channel, bearer, run_id, expected_seq: u64, segment_no: u32); S8 adds FoldWriter::save_park(fold, park_ref, ParkReason, park_until) -> Result<u64, SaveError>."
+  },
+  {
+   "name": "SaveError classification of loop_checkpoint_run_ended",
+   "owner": "s6-fold-writer",
+   "definition": "s4-leftovers adds FailedPrecondition 'loop_checkpoint_run_ended' on save and claim. S6 classify_status maps it like Closed (writer Failed, no retry, effects held). Add it to the session_core_refusals_are_classified table."
+  },
+  {
+   "name": "ReserveOutcome",
+   "owner": "s3-corrections",
+   "definition": "execution-core effect.rs: pub(crate) enum ReserveOutcome { Created, AlreadyReserved }, built from ReserveToolActionResponse.created, which reserve() currently discards (verified at effect.rs ~142, .map(|_| ())). On AlreadyReserved an effectful call is never dispatched; its outcome is failed with closer_text(CloserKind::UnknownOutcome, tool)."
+  },
+  {
+   "name": "effective_authority / apply_authority / segment numbering",
+   "owner": "s3-corrections",
+   "definition": "resume.rs: effective_authority(paused:&Authority, req:&pb::RunAgentRequest)->Result<Authority, Refusal> and apply_authority(&mut req, &Authority), per the S7 table C. They apply to stage 1 now and stage 2 later. next_segment_no(paused_step_id)->u32 (leading s{n}. then n+1, else 2) and resumed_step_id(n, original)='s{n}.'+original. The gateway sends segment_no 0; the executor ignores the field (it does not refuse non-zero) so a rolling deploy with an old gateway keeps working. S9 validate_continue_resume must NOT refuse a non-zero segment_no."
+  },
+  {
+   "name": "Authority::narrows",
+   "owner": "s3-corrections",
+   "definition": "mp-contracts loop_fold.rs: mode_rank(deny 0, ask 1, auto 2, other 3) is checked; rung_rank(danger_full_access 2, workspace_write 1, read_only 0, unspecified/empty/unknown 3). Tests: an_unspecified_or_unknown_rung_is_never_narrower_than_a_graded_one and a_resume_may_not_widen_the_permission_mode."
+  },
+  {
+   "name": "durable_gate (DurableStore)",
+   "owner": "s3-corrections",
+   "definition": "NEW mp-contracts src/durable_gate.rs: enum DurableStore{Fold, Consume, Continue, Park}; refuse_unless_persistent(store, &Resolution); refuse_unless_persistent_class(store, &str); continuation_mode_for(persistent, enabled). Placed in its own file so it does not collide with loop_fold.rs hunks. S9 static tests consume it."
+  },
+  {
+   "name": "RunDetail.resumable=17, park_reason=18",
+   "owner": "s4-leftovers",
+   "definition": "runs.proto (verified: the highest tag is metadata=16). resumable = store switch on && retention persistent && run not ended && fold state in (paused, parked) or (resuming with an expired lease). park_reason is set only when resumable and parked. The projection lives in run_service_grpc RUN_SELECT via LEFT JOIN, with no content columns. S7c's resume_mode_for and S8 consume it; S8 must NOT re-add the projection."
+  },
+  {
+   "name": "ParkReason wire strings",
+   "owner": "s4-leftovers",
+   "definition": "mp-contracts loop_fold.rs: impl ParkReason { pub const ALL:[Self;5]; pub const fn as_str(self)->&'static str; pub fn parse(&str)->Option<Self> }, with credential_window, provider_exhausted, upstream_unavailable, crash_interrupted and reauth_required equal to the serde snake_case names. S8 consumes it and adds only MAX_PARKS_PER_RUN, PARKS_EXTENSION_KEY and parks_in."
+  },
+  {
+   "name": "ClaimLoopCheckpoint status contract",
+   "owner": "s4-leftovers",
+   "definition": "Aborted 'loop_checkpoint_claim_held' when state=resuming, the claim hash matches this token and the lease is live. FailedPrecondition 'loop_checkpoint_not_claimable' | 'loop_checkpoint_run_ended' | 'loop_checkpoint_disabled'; DURABLE_MUTATION_FORBIDDEN. The stale-active branch (active and not written for 900 s, any pause_ref) is REMOVED: claimable states are paused, parked, and resuming with an expired lease. A crashed active fold becomes claimable only after S8's worker crash-parks it."
+  },
+  {
+   "name": "Fencing after a claim",
+   "owner": "s7b",
+   "definition": "There is no claim_token field on Save. The fence is the seq compare-and-set plus this rule: an in-place resume saves a fold (kind pre_effect, expected_seq = claimed seq) BEFORE dispatching ANY call of the resumed round, the read-only release included. Of two claimants holding the same seq, only one save can win; the loser gets loop_checkpoint_stale and is refused with resume_checkpoint_unavailable before any dispatch."
+  },
+  {
+   "name": "ListToolActions RPC",
+   "owner": "s7a",
+   "definition": "sessions.proto add-only: rpc ListToolActions(ListToolActionsRequest{string run_id=1; repeated string action_ids=2;}) returns (ListToolActionsResponse{repeated ToolActionState actions=1;}); ToolActionState{action_id=1, tool=2, status=3, effect_class=4, args_digest=5, closed_by=6}. At most 64 ids. Authorization is session:read + authorize_run_owner(Read) + refuse_zdr_continuation; zdr rows are omitted; digest only."
+  },
+  {
+   "name": "Gateway /continue pre-consume",
+   "owner": "s7c",
+   "definition": "continue_run calls ConsumeApproval with the user bearer BEFORE agentic_run_stream: 409 continuation_already_consumed (another claim), 404 approval_not_found, 409 for approval_not_granted, approval_expired and approval_not_resumable. Until s7c lands, s3-corrections' consumed_at check in continue_preflight is the gate. The BFF passes the closed upstream codes through instead of model_error."
+  },
+  {
+   "name": "Switches",
+   "owner": "each unit as listed",
+   "definition": "EXECUTION_LOOP_CHECKPOINT_ENABLED (s6; requires EXECUTION_EFFECT_LEDGER_ENABLED and SESSION_CORE_LOOP_CHECKPOINT_ENABLED). EXECUTION_LOOP_RESUME_ENABLED (s7; execution-core and model-gateway; requires the S6 switch, otherwise 'loop' is downgraded to segment). EXECUTION_LOOP_PARKING_ENABLED and SESSION_CORE_PARK_TTL_SECONDS (s8). All default false in compose. Parsing: one shared strict parser, mp_contracts::loop_fold::switch_from(Option<&str>), accepting case-insensitive 'true' only, owned by s6 and used by every new switch. The existing continue_after_approval_from (1/true/on/yes) stays as it is, and is recorded as a known inconsistency."
+  }
+ ],
+ "conflicts_resolved": [
+  {
+   "between": "s6 vs s7",
+   "issue": "pause_ref and save order: S6 wants the idempotency key and a save before CreateApproval; S7 wants the approval id and a save after CreateApproval.",
+   "decision": "S6 wins. The fold is durable before the approval is visible, and the key {run_id}:{step_id} is already sent (agent.rs:4669). S7 derives the ref from ConsumeApprovalResponse.step_id. If CreateApproval fails after the fold saved, S6 closes the fold with CloseLoopCheckpoint(..,'approval_not_created')."
+  },
+  {
+   "between": "s6 vs s7",
+   "issue": "A 'segment' approval mode for a failed pause fold, and widening continue_preflight to accept 'segment'.",
+   "decision": "Dropped. The approval stays 'loop' and the fallback happens at claim time (stage 1). This removes the gateway preflight change and a third approval mode."
+  },
+  {
+   "between": "s6 vs s7",
+   "issue": "prompt_digest definition: S6 uses the first system message text; S7 recomputes it from compose_system_prompt plus the tool definitions.",
+   "decision": "S7's definition, via the shared mp-contracts prompt_digest(system_prompt, tools). S6 computes it at save time from the same inputs. Its implementation lands with S6 in mp-contracts."
+  },
+  {
+   "between": "s6 vs s7",
+   "issue": "Matching rejected calls: S6 uses synthetic 'rejected_{i}' step ids; S7 adds FoldCompleted.call_id.",
+   "decision": "FoldCompleted.call_id (additive, serde default), with an empty step_id for rejected calls. S6 owns the mp-contracts edit."
+  },
+  {
+   "between": "s7 vs s6",
+   "issue": "S7 assumes an S6 LoopState refactor.",
+   "decision": "No LoopState. S6 option (b) stands. S7b restores the locals from resume::Restored inside run_rounds' RoundSeed::InPlace init block, next to the existing seeded_round handling."
+  },
+  {
+   "between": "s8 vs s6",
+   "issue": "S8 assumed FoldWriter::save_park and LoopState::to_fold, and defined its own LoopSnapshot.",
+   "decision": "S8 uses fold::Snapshot and build_fold, and adds save_park to fold.rs itself, after S6 is merged. LoopSnapshot is deleted from the S8 design."
+  },
+  {
+   "between": "s8 vs s4-leftovers",
+   "issue": "Both own RunDetail resumable=17/park_reason=18 and the RUN_SELECT projection, and both validate park_reason on save.",
+   "decision": "s4-leftovers owns the proto fields, the projection and the closed-token park_reason validation, plus ParkReason::parse/as_str. S8 adds only the TTL (park_until_beyond_ttl) and the cap (park_limit_reached) checks in save."
+  },
+  {
+   "between": "s7 vs s4-leftovers",
+   "issue": "claim_held distinction and the stale-active claim branch in loop_checkpoint::claim; resumable semantics.",
+   "decision": "s4-leftovers implements claim_held and removes the stale-active branch, which is a hijack today (any pause_ref after 900 s). The resumable definition is s4's: paused, parked, or resuming with an expired lease."
+  },
+  {
+   "between": "s9 vs s7 vs redteam",
+   "issue": "Segment numbering: S9 has the builder send 0 and the validator refuse non-zero; S7 has the executor derive it.",
+   "decision": "The executor derives it from the paused step-id prefix. The validator ignores segment_no, so an old gateway sending 2 still works. This lands in s3-corrections."
+  },
+  {
+   "between": "s9 vs s7",
+   "issue": "Second /continue: S9 refuses a consumed approval in preflight (409); S7 relies on a same-claim retry to recover from crashes and puts consume in the gateway.",
+   "decision": "s3-corrections: preflight refuses consumed_at set, for every caller including a same-token retry, because a same-claim replay on stage 1 can re-execute when the ledger is off. S7c then adds pre-consume, which also closes the simultaneous race. S7's matrix rows 6/7 ('same-token retry works') are amended: recovery after a crash post-consume is S8 park TTL / outcome_unknown. This needs a human confirmation (see human_decisions)."
+  },
+  {
+   "between": "s7 vs s9 vs redteam",
+   "issue": "Stage-1 authority gap (rung from the per-replica grant store, floor 0, plan false) and the fail-open narrows(): S7 fixes them inside S7.",
+   "decision": "Moved into s3-corrections. This is a live widening as soon as the continue flag is on, independent of folds."
+  },
+  {
+   "between": "s6 vs s7 vs s9",
+   "issue": "Non-releasable tools get loop-mode approvals and are stranded after consume (found independently by all three specs).",
+   "decision": "Fixed once, in s3-corrections: cold mode \"\" when !resume::releasable(tool) (make releasable pub(crate)), at both agent.rs sites (~2215 offered snapshot, ~4646 CreateApproval)."
+  },
+  {
+   "between": "s9 vs hygiene",
+   "issue": "Two disposable-Postgres runners: durable-loop-proof.sh (S9) and session-core-db-tests.sh (hygiene).",
+   "decision": "One runner: hygiene's session-core-db-tests.sh. S9's anti-skip checks are merged into it: a grep that fails on 'skipping: DATABASE_URL unset' (verified: loop_checkpoint.rs:465 prints it and returns early) and a per-filter minimum pass count. durable-loop-proof.sh and its -test.sh are dropped. S9 keeps only the live-proof runner (gated) and the static tests."
+  },
+  {
+   "between": "s9 vs s4-leftovers",
+   "issue": "Purge-path DB tests are specified in both.",
+   "decision": "s4-leftovers owns them (loop_checkpoint_* names). S9's every_purge_path_removes_the_fold is dropped."
+  },
+  {
+   "between": "s9 vs s3-corrections",
+   "issue": "S9 places the fixes (F1-F7), the waived consume DB test and the agent.rs waived call-site test inside S9.",
+   "decision": "All of them move to s3-corrections, test first. S9 keeps only new test files that turn green after s3-corrections."
+  },
+  {
+   "between": "ui-plan-approval-gap vs s7c",
+   "issue": "Both change model-gateway sse.rs agentic_run_stream/continue_run signatures.",
+   "decision": "Serialized: s7c first. The UI gap adds the execute_granted parameter afterwards, and continue_run passes false."
+  },
+  {
+   "between": "hygiene vs repo state",
+   "issue": "The Build ledger and the S5 note say no live-proof artifact exists.",
+   "decision": "Wrong. docs/compliance/evidence/live-proof-ws03-s5-effect-ledger-2026-10-17.txt exists, untracked, per git status. The ledger links that file, and the lead commits it with hygiene."
+  }
+ ],
+ "amendments": [
+  {
+   "slice": "hygiene",
+   "items": [
+    "Link the existing evidence file docs/compliance/evidence/live-proof-ws03-s5-effect-ledger-2026-10-17.txt from the Build ledger S5 row; remove 'not saved in the repository yet'.",
+    "session-core-db-tests.sh: after cargo, fail when the log contains 'skipping: DATABASE_URL unset' or 'panicked'. Accept an optional MIN_PASSED per filter and check that 'test result: ok. N passed' has N >= MIN_PASSED. Add both to the contract test's required text.",
+    "The commit hashes in the Build ledger were checked with git log (eb131970..20df3dcb all match their S1-S3 subjects). Keep them.",
+    "The runbook must say that agents never run the -Apply path or any docker command. The recovery script and the harness are for the human or the lead only (hard rule 3).",
+    "Drop the runbook sentence that allows Linux-only tests in a foreground container. Replace it with: cargo on the host only; containers need the lead's explicit go-ahead.",
+    "The ledger.md gap entry stays 'proposed'. Its date is the discovery date, 2026-10-17."
+   ]
+  },
+  {
+   "slice": "s3-corrections",
+   "items": [
+    "Test first, per the S9 F1-F7 list: a_waived_run_never_offers_a_loop_approval (agent.rs, AuthenticatedUser::for_test_with_waiver); a_non_releasable_tool_pause_is_cold; a_second_reserve_of_the_same_action_is_never_dispatched (double returns created=false); a_same_claim_replay_after_dispatch_does_not_run_the_call_again; stage_one_applies_the_paused_authority_not_the_requests; two_continuations_of_one_run_use_distinct_step_ids; continue_run_tests::a_consumed_approval_is_refused_with_409 and a_non_persistent_turn_is_refused_before_any_work; #[ignore] approval_consume_refuses_a_waived_run_and_a_zdr_run and consume_refuses_a_terminal_run.",
+    "Do not change zdr_posture.rs continuation_gate, which decide_approval and approve_plan share. Put the refusal in continue_preflight only.",
+    "Keep the closed refusal tokens existing tests pin (approval_snapshot_mismatch, not_releasable, continuation_already_consumed). New tokens: authority_widened, authority_space_mismatch, authority_route_mismatch.",
+    "With every flag off, behaviour must be byte-identical. Every edit is either inside a flag-on path or a pure refusal the flag-off path cannot reach. effect.rs AlreadyReserved runs only when EXECUTION_EFFECT_LEDGER_ENABLED is on."
+   ]
+  },
+  {
+   "slice": "s4-leftovers",
+   "items": [
+    "Also own: ParkReason::ALL/as_str/parse; the claim_held Aborted status; removal of the stale-active claim branch (with a DB test that a stale active row is not claimable).",
+    "loop_checkpoint_run_ended must be a closed token that execution-core S6 classifies (tell S6).",
+    "The lock-order inversion (gdpr.rs 236 before 370, grpc.rs 490 before 493) is NOT fixed in this unit. Record it as a follow-up; Postgres aborts one side, so it is safe.",
+    "Do not regenerate the Go bindings from this worktree unless buf and BSR are available on the host. Otherwise list runs.pb.go regeneration as a lead step. Rust bindings are built by mp-contracts build.rs."
+   ]
+  },
+  {
+   "slice": "s6-fold-writer",
+   "items": [
+    "DROP: the 'segment' approval mode, the continue_preflight change in model-gateway sse.rs, the tombstone-on-failed-pause step, and the mode-selection logic in pause_for_approval. The approval mode stays the s3-corrections continuation_mode_for result. The pause fold is still saved before CreateApproval, and closed with 'approval_not_created' if CreateApproval fails.",
+    "Use FoldCompleted.call_id and an empty step_id for rejected calls, not rejected_{i}. Use mp_contracts::loop_fold::prompt_digest(compose_system_prompt(allowlist), tools) (add it to mp-contracts with the S7 test the_prompt_digest_covers_the_system_prompt_and_tool_definitions_and_nothing_else).",
+    "Pin the writer contract with a golden fixture in mp-contracts tests/loop_fold_golden.rs (round, pre_effect and pause shapes), so S7 tests against a fixed shape.",
+    "Classify loop_checkpoint_run_ended like Closed (writer Failed).",
+    "The new switch uses one shared strict parser, mp_contracts::loop_fold::switch_from, accepting 'true' only.",
+    "Keep the switch-off identity test loop_fold_switch_off_makes_no_fold_call_and_the_model_sees_the_same_conversation as the merge gate. Also require that every existing runtime_loop::agent test passes unchanged, apart from the two pause_for_approval callers that gain None.",
+    "The 'try again' held-back text names only the tool (closer-style); add a test."
+   ]
+  },
+  {
+   "slice": "s7-in-place-resume",
+   "items": [
+    "Split into s7a (ListToolActions plus effect.rs list_actions), s7b (resume.rs restore/restore_in_place, agent.rs RoundSeed and the consume_for_resume/build_segment split) and s7c (gateway pre-consume, resume_mode_for, BFF error passthrough). Each is reviewed separately.",
+    "Remove from S7 everything moved to s3-corrections: narrows fix, effective_authority/apply_authority, next_segment_no, releasable guard, ReserveOutcome.",
+    "Claim with pause_ref = format!(\"{run_id}:{consumed.step_id}\"), not the approval id.",
+    "Fencing: the in-place resume saves a pre_effect fold before dispatching ANY call of the resumed round, whatever its effect class. A failure is Refusal::CheckpointUnavailable.",
+    "Same-token retry after a won consume now gets 409 at the gateway (s3-corrections). Update failure-matrix rows 6/7 and the test list; recovery is S8 or outcome_unknown.",
+    "Use mp_contracts::effect_ledger::args_digest everywhere for the pending-call cross-check, not resume.rs args_digest (redteam: two digests disagree).",
+    "closers.rs decision table fixes before wiring it in: has_output + Reserved returns Keep; has_output + None returns Keep; NotRun on the ORIGINAL paused step is never consulted, because the release runs under a new step id. Add tests fold_output_is_authoritative_over_an_open_reservation and a_recorded_read_is_not_rerun.",
+    "Space runs: refuse in-place resume when req.space_id is non-empty (closed token continue_space_scope_unsupported). Do not compute workspace_available."
+   ]
+  },
+  {
+   "slice": "s8-parking",
+   "items": [
+    "Design the resume-of-park path before any code. ClaimLoopCheckpoint with an empty pause_ref meaning 'the current parked fold', OR a park_ref exposed on RunDetail. A /continue body without approval_id, with an action-contract update for chat.run.continue first (CLAUDE.md rule). Route re-pinning from the fold (model and connection id in extensions, identifiers only).",
+    "Drop the RunDetail projection and the park_reason closed-token validation (owned by s4-leftovers). Use fold::Snapshot, not LoopSnapshot.",
+    "Recovery-worker changes stay dormant unless SESSION_CORE_LOOP_CHECKPOINT_ENABLED and a new SESSION_CORE_PARK_RECOVERY_ENABLED are both on. Crash-parking must not delay terminalization of runs that nothing can resume.",
+    "Fix the existing stranding found by redteam: has_pending_approval ignores expires_at. An expired, never-consumed approval must not spare a run forever. Separate small commit, before the park logic.",
+    "Confirm RunAgentResponse.park_reason tag with the integrator. Verified: RunAgentResponse currently ends at resets_at = 8, so 9/10 are free in the tree; the Appendix B reservations for WS02/WS25 are unverified. OrchestrationEvent 24/25 are free (highest is 23).",
+    "The unpinned credential-guard widening and the inference-core trailer are out of scope for the first S8 merge."
+   ]
+  },
+  {
+   "slice": "s9-proofs",
+   "items": [
+    "Drop durable-loop-proof.sh and its -test.sh (merged into the hygiene harness).",
+    "Drop the S2/S3 fixes, the agent.rs waived test, the consume waived DB test and the purge-path DB test; their owners are s3-corrections and s4-leftovers.",
+    "validate_continue_resume must not refuse a non-zero segment_no; it is ignored instead.",
+    "Put DurableStore/refuse_unless_persistent in mp-contracts src/durable_gate.rs (owned by s3-corrections), not loop_fold.rs.",
+    "durable-loop-live-proof.sh: write it only with --dry-run as the default behaviour. Its temporary trigger on the dev session_tool_audit_intents table and its docker kill/restart need human approval (Q7). Agents never execute it.",
+    "MODEL_PLANE_STATUS.md and the ledger.md state flip happen only from captured live evidence, by the lead."
+   ]
+  },
+  {
+   "slice": "ui-plan-approval-gap",
+   "items": [
+    "Reclassify as WS14 S2a, outside WS03. Its own ledger entry builds on the hygiene 2026-10-17 gap entry.",
+    "Add the posture ratchet now: an execute turn with rung danger_full_access runs under the Ask posture (every risky call pauses), or danger_full_access is hidden for execute until AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and EXECUTION_LOOP_RESUME_ENABLED are live. Pick one before the build.",
+    "Add a gateway kill switch MODEL_GATEWAY_PLAN_EXECUTE_ENABLED (default false, typed refusal plan_execute_disabled). The SPA hides the pill when the plan-approval response carries no grant_expires_at_unix or execute is disabled.",
+    "Deploy order: gateway before the SPA (already stated). An older gateway silently fails open, so the SPA also requires grant_expires_at_unix to be present before arming."
+   ]
+  }
+ ],
+ "go_no_go": [
+  {
+   "unit": "hygiene",
+   "go": true,
+   "why": "Docs and scripts only, with exact text, grounded in code and verified commit hashes. Amendments: link the existing S5 evidence file, add the anti-skip and count checks, mark the -Apply and harness paths as human or lead only. No hot files, so the 13k-line agent.rs is not at risk."
+  },
+  {
+   "unit": "s3-corrections",
+   "go": true,
+   "why": "Concrete, verified defects that go live when the continue flag is on. reserve drops created (effect.rs .map(|_| ())); segment_no is hard-coded to 2 (sse.rs:13490); segment_no.max(2) (agent.rs:5162); continuation_mode_for uses req.zdr only (agent.rs:2215, 4646); the model-gateway compose block lacks the flag. Every fix is small, test-first, and flag-gated or refusal-only, so switch-off behaviour is preserved."
+  },
+  {
+   "unit": "s4-leftovers",
+   "go": true,
+   "why": "Well grounded: tags 17/18 are free (runs.proto metadata=16), and run_owner_tx lacks a status check (verified at loop_checkpoint.rs:82-98, retention only). It is additive with no migration, and adds the claim_held and stale-branch removal it now owns."
+  },
+  {
+   "unit": "s6-fold-writer",
+   "go": true,
+   "why": "Go with amendments. Option (b) is additive and every line is inert or behind folds.is_active(); there is a switch-off identity test. The segment-mode and preflight parts are dropped, and call_id, the shared prompt_digest and the golden fixture are added. It must follow s3-corrections because the writer requires the ledger fence (ReserveOutcome)."
+  },
+  {
+   "unit": "s7-in-place-resume",
+   "go": false,
+   "why": "No-go as one unit. Its interface choices conflict with S6 (pause_ref, segment mode, LoopState) and it duplicates s3-corrections. Its closers table has wrong Keep rules (redteam INV-10). It assumed same-token retry recovery that is now refused. Go for s7a (ListToolActions) once s4-leftovers lands. Go for s7b and s7c only after re-issuing the spec with these amendments, against the merged S6 fold contract."
+  },
+  {
+   "unit": "s8-parking",
+   "go": false,
+   "why": "No resume path for a parked run exists or is designed: no claim by park, no approval-less /continue, no action contract. The recovery-worker changes would delay terminalization of runs nothing can resume. The tag 11 claim is unconfirmed. It changes safety-critical terminalization code. Keep it until S7 is merged and the park-resume design is approved."
+  },
+  {
+   "unit": "s9-proofs",
+   "go": true,
+   "why": "Go for the static part only, re-scoped: the matrix test, the contract test, the vendored golden with its sync rows, and the gateway matrix case. These are new files with no hot-file edits once the fixes move to s3-corrections. No-go for the live-proof runner and its DDL trigger until a human decides Q7; the duplicate DB runner is dropped."
+  },
+  {
+   "unit": "ui-plan-approval-gap",
+   "go": false,
+   "why": "The design is solid, but it opens the first UI path to effectful runs under the chat Auto posture: danger_full_access with no per-call approval, an in-memory grant with no revoke and a 24 h TTL. That is a product and security decision (DEC-04 interim carrier, posture ratchet, kill switch) for the human. It also edits sse.rs, which s7c changes, so it must be serialized after s7c."
+  }
+ ],
+ "human_decisions": [
+  "Same-claim /continue replay: refuse every consumed approval with 409, so crash recovery after consume goes through S8 or outcome_unknown (the proposal), or allow a same-token replay only when EXECUTION_EFFECT_LEDGER_ENABLED is on and the ledger row exists?",
+  "DEC-32 / ZDR.md 5.5: waived runs keep cold approvals but never get loop mode, consume or continue (the proposal). Is that the ruling, and is a waived claim refusal (DURABLE_MUTATION_FORBIDDEN) fatal, not a stage-1 fallback?",
+  "Should service principals stay exempt from the ZDR refusal on consume (retention_receipt.rs refuse_zdr_continuation)? The proposal is no for loop continuation.",
+  "A widened /continue request (wider rung, lower floor, other space or route): refuse it (the proposal) or silently narrow it to the paused authority?",
+  "EXECUTION_LOOP_CHECKPOINT_ENABLED requires EXECUTION_EFFECT_LEDGER_ENABLED (the proposal). Do you accept that a transient pre_effect save failure holds that round's effectful calls (fail closed)?",
+  "S8 park resume design: claim by an empty pause_ref for the parked fold, or park_ref exposed on RunDetail; storing the route model and connection id in fold extensions; MAX_PARKS_PER_RUN=5 and the default park_until values; whether to extend the credential guard to unpinned runs.",
+  "Integrator: confirm RunAgentResponse.park_reason tag (11 in the S8 claim; 9/10 are free in the tree but reportedly reserved for WS02/WS25) and OrchestrationEvent 24/25.",
+  "S9 live proof: may the developer stack carry a temporary bounded finalize-delay trigger on session_tool_audit_intents plus docker kill/restart of execution-core (lead-run only), or should an execution-core debug-only delay knob be added instead?",
+  "The 2026-10-17 proof left a save_memory note in your memory store. Delete it or keep it? That is your call; agents will not delete user data.",
+  "WS14 S2a (UI plan-approval gap): approve the interim in-memory grant carrier; choose the posture ratchet (force Ask for danger_full_access, or hide it); add a kill switch; one approval equals one execute turn.",
+  "D1 owner ruling and the flip trigger: does the 2026-10-16 durable-loop ledger entry flip to implemented after the stage-1 live proof plus D1, or after the S9 bundle?",
+  "Should the session-core DB-gated loop tests join the CI session-core-receipts job (s4-leftovers proposes adding a loop_checkpoint step) now?",
+  "Which launcher is canonical for the dev stack: scripts/compose.sh (CLAUDE.md, memory) or ./build-verevon-services.sh named in the compose header, which is absent from the worktree?"
+ ]
+}

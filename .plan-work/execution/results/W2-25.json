@@ -1,0 +1,706 @@
+{
+ "batchId": "W2-25",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS23-S5.code",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/provider_reads.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/citation_anchors.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/provider_read_contract.rs (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib",
+     "outcome": "235 passed, 0 failed (includes the 7 new provider_reads unit tests)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --test provider_read_operations",
+     "outcome": "2 passed, 0 failed (golden table unchanged)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib connector",
+     "outcome": "21 passed, 0 failed (named connector tests: not_offered_without_scope, _in_space, _in_zdr, _on_web_only_turn, dispatch_screens_and_frames_poisoned_mail, citation_has_no_body_text, plus the citation-anchor and sink tests)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "2493 passed, 0 failed, 4 ignored (full lib suite, includes inline_loop_still_denies_mcp_and_writes and the counts-only stream test)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test provider_read_contract",
+     "outcome": "3 passed, 0 failed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test context_recovery_contract",
+     "outcome": "3 passed, 0 failed (source-text contract over tool_loop.rs still holds)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test zdr_feature_table",
+     "outcome": "8 passed, 2 FAILED: every_refusal_the_spec_names_is_a_catalogue_refusal and every_field_row_decides_what_its_treatment_says, both on the message_versions refusal key. That key comes from another session's uncommitted edits to src/zdr_features.rs and tests/zdr_feature_table.rs; the ZDR catalogue is untouched and this slice does not edit those files"
+    },
+    {
+     "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+     "outcome": "sse taxonomy up to date (27 events); no new SSE variant"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: in invoke_stream_sse, on the sink chain that starts at `let sink = crate::sse_events::RichEventSink::staging_artifacts(` (about line 3079), add after `        .with_timing(timing.clone())`: `        .with_connector_turn(crate::tool_loop::connector_reads::ConnectorTurn::new(connector_ids.clone(), retrieval_scope.is_auto() && !conversation_only))`. connector_ids (about line 1403) is moved only in the early agentic return (about line 2232), so it is still in scope here; if the borrow checker objects, clone it at that return. Without this line CONNECTOR_ASK_READS_ENABLED changes nothing, because no selection reaches the Ask loop.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment (the service starts at line 191), after the line `      SHIPPING_CORE_URL: ${SHIPPING_CORE_URL:-http://shipping-core:8080}` (about line 740), add at six-space indent: `      CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}` and `      INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}`.",
+    "After both shared edits: rebuild the model-gateway image through the lead's build path. On the proof stack only, with CONNECTOR_ASK_READS_ENABLED=true, run one Ask turn with a connected Gmail or Microsoft chip selected. Capture: tool_call and tool_result (the result is the counts-only summary), citation frames with origin connector and no body text, a history reload that shows the source without body text, an audit row with data_category personal, and a turn with no chip where the tool is absent. Not run here: no docker and no live proof."
+   ],
+   "deviations": [
+    "The read is injected per turn by tools_for_connector_scope in run_tool_rounds_for_model_with_attachments, not added to builtin_tool_defs. Builtin defs feed the excluded-tool receipt and the prompt, so an always-present entry would change switch-off turns.",
+    "The turn's connector selection rides on RichEventSink, as the turn's clock already does, so run_tool_rounds_for_model_with_attachments keeps its signature. The sse.rs wiring is a lead shared edit.",
+    "The shaping, clamps, render, schema and description live in mp-contracts::provider_reads as copies of execution-core's S3 code. execution-core is not switched over yet.",
+    "Connector results are screened with ToolProvenance::assess only: no semantic shadow classifier and no withholding. A flagged result is framed, so the model sees the warning with the data. Reason: the shadow classifier would send personal mail text to a model.",
+    "Parking happens after the sources are taken, through settle, and never off ZDR (handle_or_inline_output enforces the ZDR check).",
+    "The stream's tool_result for a read is a counts-only summary (operation, status, items, omitted), not the items.",
+    "execute_provider_action is now denied by inline_tool_allowed, although the plan says that function is unchanged. With the switch off, only a client that declares a tool with that name sees a different refusal.",
+    "No lib.rs edit. connector_reads is declared from tool_loop.rs with #[path], the pattern sse.rs and skills.rs already use.",
+    "audit.rs is unchanged: read_provider_action already maps to personal (landed in WS23-S1).",
+    "A client-declared tool named read_provider_action is dropped from every turn, switch on or off. No legitimate client declares that name."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs: the one-line sink wiring in lead_todo item 1. The slice cannot function without it.",
+    "apps/Model Plane/deploy/docker-compose.yml: the two model-gateway env lines in lead_todo item 2.",
+    "apps/Model Plane/rust/services/execution-core/src/integration_tools.rs and src/runtime_loop/agent.rs: follow-up to switch read_provider_action_def() and the read shaping, render and status copies to mp_contracts::provider_reads. Not required for this slice's definition of done, but both loops must share one definition before the flags are enabled together.",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs and tests/zdr_feature_table.rs: not mine. Two tests in zdr_feature_table fail on another session's uncommitted message_versions refusal key; I did not edit them."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The shared edit in sse.rs is not applied. The `.with_connector_turn(crate::tool_loop::connector_reads::ConnectorTurn::new(connector_ids.clone(), retrieval_scope.is_auto() && !conversation_only))` line goes on the `RichEventSink::staging_artifacts(` chain, after `.with_timing(timing.clone())` (line 3084). I checked the anchors: `connector_ids` is at line 1403 and moved at line 2232, `conversation_only` is at line 1352. Until this line lands, no selection reaches the Ask loop and the switch does nothing.",
+     "The shared edit in apps/Model Plane/deploy/docker-compose.yml is not applied: `CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}` and `INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}` in the model-gateway environment.",
+     "The model-gateway image has not been rebuilt and there is no live proof. The proof stack needs the flag on and, for each provider, one Ask turn with a chip. Capture tool_call, tool_result (counts only), citation frames with origin=connector and no body text, a history reload without body text, an audit row with data_category=personal, and a turn with no chip where the tool is absent.",
+     "The plan names `EC/tests/provider_read_contract.rs` (the same name, schema and enum in both loops). The test was built in model-gateway and compares only the Ask loop with mp-contracts. execution-core's Do-loop copy stays unchecked until execution-core is switched to mp_contracts::provider_reads. Those files are outside this slice's ownership."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The Do loop in execution-core still has its own copies of the read schema, description, field whitelist, shaping and render (integration_tools.rs; agent.rs read_provider_action_def). Both loops must use mp_contracts::provider_reads before the flags are enabled together, or the two tools can drift."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No live proof was run (no docker). The S5 evidence (an Ask turn per provider with a chip, SSE frames, a history reload without bodies, an audit row with data_category personal) belongs to the lead after the sse.rs and compose lines are applied."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "source_group_label is the provider brand (Google, Microsoft 365), not the connection display name. A display name needs a connection lookup or the route supplying names (WS23-S6)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Connector sources carry no number and the model is not given labels to cite them, so an answer can mention a mail or file with no linked source. Decide the labelling together with the turn-level number allocator."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "One read can list up to 25 items, so one call can add up to 25 Sources. WS23-S6 must group them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A connector source without a provider link has an empty url. WS23-S6 must not render an empty link."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Subject lines and file names become citation titles and persist with the turn's evidence on non-ZDR turns. This follows the plan's title rule, but the owner should decide before the flag goes on for customer orgs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "An oversized read result is parked through handle_or_inline_output under the key read_provider_action, after its sources are taken. Confirm the handle store's retention, and whether result_query may read a parked connector result from a later turn."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No cross-crate test compares the Ask and Do definitions. The mp-contracts test pins the builder and the contract test pins its use, so execution-core's copy is unchecked until the follow-up lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The model's context still holds up to 12000 characters of item text per read, while the stream carries only the summary. The live proof must confirm thread history stores neither."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The unit tests mock integration-corev2 and capability-core. The response shape (data.action.providerKey and result) comes from the Go handler and has not been captured from a live response."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The non-streaming JSON route never attaches a connector selection, so it never offers the read. Confirm no client needs the read there."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "execution-core (integration_tools.rs, agent.rs read_provider_action_def) still keeps its own copies of the read schema, description, field list, shaping and render. Both loops must use mp_contracts::provider_reads before CONNECTOR_ASK_READS_ENABLED and PROVIDER_READ_TOOL_ENABLED are switched on together."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "In the Ask loop, a connector read that comes back Flagged is framed but does not taint the rest of the turn, so web_fetch and web_search stay available to a model that has just read injected mail. Appendix B K3-15 / F8b gates egress after a flagged read only for the Do loop. Decide the Ask-loop equivalent before the flag goes on for customer orgs."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing has been proven live. The response shape (data.action.providerKey and data.action.result) and the error codes (reconnect_required, capability_not_granted/capability_required) come from mocks, not from captured integration-corev2 responses."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The plan says `inline_tool_allowed` stays unchanged, but the slice adds `execute_provider_action` to its deny list. This is stricter, not looser, and only changes the refusal a client-declared tool with that name receives. The lead should accept it or revert it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "source_group_label is the provider brand (Google, Microsoft 365). The plan says it should be the connection display name, which needs the route to supply names (WS23-S6) or a connection lookup."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The citation id is `conn-<16 hex>`. The plan specifies `conn-<n>-<hash(connection,item)>`. The id is stable and unnumbered, so nothing breaks, but the format differs from the spec that WS23-S6 will read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Connector sources are unnumbered and the model gets no labels to cite them by. An answer can therefore mention a mail or file without a linked source, and one read can add up to 25 sources. Both must be handled in WS23-S6: grouping, and not rendering an empty-url link."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Mail subjects and file names become citation titles and are kept with the turn's evidence on non-ZDR turns. This follows the plan's title rule, but the owner should confirm it before the flag is enabled for customer orgs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A large read is parked through handle_or_inline_output under read_provider_action, off ZDR only. Confirm the handle store's retention, and whether result_query may read a parked connector result from a later turn."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In the ZDR case, dispatch returns a generic 'not available on this turn' error, not the typed `connector_read` catalogue refusal. The typed refusal exists only at the route level (zdr_features connector_scope from WS23-S4). Dispatch still refuses before any call, so ZDR is held."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test runs the whole dispatch arm (read_outcome) with a mocked AppState. The offer, selection and parse refusals and fetch/screen are each tested, but their order inside read_outcome is pinned only by reading the source text."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The non-streaming JSON route never attaches a connector selection, so the read is never offered there. Confirm that no client needs it on that route."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The flag and INTEGRATION_COREV2_URL are read with std::env::var on every offer and every dispatch, not from AppState. That works, but env reads can race under parallel tests, as the earlier gateway env race showed."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --all-targets --no-fail-fast (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "Compiles. lib: 2493 passed, 0 failed, 4 ignored. Every other test binary passes except 3 tests. zdr_feature_table: 8 passed, 2 FAILED (every_refusal_the_spec_names_is_a_catalogue_refusal at tests/zdr_feature_table.rs:365; every_field_row_decides_what_its_treatment_says at mp-contracts zdr_refusal.rs:397). The implementer attributes these to the message_versions key from another session's uncommitted edits to zdr_features.rs and zdr_feature_table.rs, which this slice does not own. zdr_refusal_inventory: 1 FAILED (every_zdr_refusal_in_the_gateway_carries_a_catalogue_kind), reporting an untyped ZDR refusal at browser_run.rs:802. browser_run.rs is unmodified in git (clean), so this is not from this slice. The first plain run also hit one transient E0786 'invalid metadata files for crate model_gateway', probably from a concurrent build; it did not reproduce on rerun.",
+      "passed": false
+     },
+     {
+      "command": "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+      "outcome": "sse taxonomy up to date (27 events); no new SSE variant",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p mp-contracts --all-targets (compile check of touched crate)",
+      "outcome": "All binaries pass: lib 235 passed, 0 failed, plus 12 integration binaries all ok (includes provider_read_operations)",
+      "passed": true
+     },
+     {
+      "command": "named tests: connector_tool_not_offered_without_scope / _in_space / _in_zdr / _on_web_only_turn, connector_dispatch_screens_and_frames_poisoned_mail, connector_citation_has_no_body_text, inline_loop_still_denies_mcp_and_writes (within the model-gateway lib run)",
+      "outcome": "Lib suite passes in full (2493 passed, 0 failed), so every named test that lives in the lib passed. I did not run each name separately.",
+      "passed": true
+     },
+     {
+      "command": "file test tests/provider_read_contract.rs (same name, schema and operation enum in both loops)",
+      "outcome": "The integration binary ran within --all-targets and passed; no failure reported for it. I did not read its pass count in isolation.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "audit",
+    "policy"
+   ],
+   "notes": "Built the Ask-loop half of connected-app reads, off by default. CONNECTOR_ASK_READS_ENABLED (strict literal true) plus a per-turn selection of connected accounts. The tool is offered only when the switch is on, the turn is not ZDR, not in a Space, reads every source, and at least one account is selected. A refusal in the arm comes before any call. The read goes to integration-corev2 with the verified ingestion user bearer, POST {base}/api/v1/connections/{id}/actions, body always {}, params cut to the contract list, maxResults clamped to 25, a non-read operation refused before any call. The result is screened with ToolProvenance::assess (trust ConnectorContent, framed, not withheld; no semantic classifier). Sources: origin connector, unnumbered, id conn-<16 hex>, metadata-only snippet, provider-host link allowlist, no citation for profile reads. The stream's tool_result carries a counts-only summary. Shared table, shaping, render and schema are in mp-contracts. Named tests all pass. Not done: the live proof, the image rebuild, and the two lead shared edits below, so the switch changes nothing until they land. Concurrency: another session runs model-gateway cargo tests in this worktree and holds the target lock at times; the lead should run builds serially. Nothing committed."
+  },
+  {
+   "id": "WS24-S4",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0019_workspace_write_capability.up.sql",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\migrations\\0019_workspace_write_capability.down.sql",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\registry\\migration_security_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\registry\\migration_security_integration_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\services\\capability-core\\internal\\registry\\capability_tools_seed_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\workspace_tools.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\permission\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\capability_policy.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\health_attest.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\tool_class_registry_parity.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --lib -- --skip a_hung_child_is_killed_at_the_timeout --skip loop_park_a_structurally_unrestorable_park_is_closed_and_refused (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0, cwd apps/Model Plane/rust)",
+     "outcome": "exit 101. 1487 passed, 1 failed, 2 filtered out, 39.45 s. The only failure is health_attest::tests::every_attested_capability_is_allowlisted_by_capability_core, panicking at health_attest.rs:1235 with attests [\"cap.workspace.write\"]. Every other lib test passed, including the workspace write, permission, plan-mode, leaf-subagent and health_attest write-attestation tests."
+    },
+    {
+     "command": "cargo test -q -p execution-core --test tool_class_registry_parity --test tool_catalogue_characterisation --test autonomy_ladder_contract --test workspace_edit_contract (same env)",
+     "outcome": "exit 0. 24 tests passed across the four targets, 0 failed."
+    },
+    {
+     "command": "env -u GOFLAGS go test ./... (apps/Model Plane/go/services/capability-core, no -tags integration)",
+     "outcome": "exit 0. Every package ok or has no test files. Results were cached because the inputs are unchanged."
+    },
+    {
+     "command": "env -u GOFLAGS go vet ./... (apps/Model Plane/go/services/capability-core)",
+     "outcome": "exit 0."
+    },
+    {
+     "command": "execution_core-0a3e3d6dbe8804a3.exe --exact runtime_loop::agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused (built lib test binary, run alone under a 15 minute cap)",
+     "outcome": "ok, 1 passed, 76.65 s. It is slow on this host, not hung."
+    },
+    {
+     "command": "execution_core-0a3e3d6dbe8804a3.exe --exact executor::tests::a_hung_child_is_killed_at_the_timeout (run alone under a 7 minute cap)",
+     "outcome": "ok, 1 passed, 300.21 s. The assertions pass, and the 300 s is most likely runtime teardown waiting on the pipe that the orphaned sleep 300 holds open. executor.rs is not in this slice's diff."
+    },
+    {
+     "command": "python3 -I simulation of the Rust allowlist check and the Go exact-set test, on scratch copies only (no repo edit)",
+     "outcome": "Current files: 9 allowlist entries, and the Rust-required id missing is only cap.workspace.write, which matches the real failure. Go sets are equal. With the hand-back lines applied to scratch copies: 10 entries, nothing missing, Go sets equal. This verifies the hand-back text only, not a Go test run on the edited files."
+    },
+    {
+     "command": "gofmt -l on LF-normalised copies (availability.go, availability_test.go)",
+     "outcome": "availability_test.go is clean before and after the hand-back lines. availability.go was already listed at HEAD, before this round, because the doc-comment block above the var is space-indented. The hand-back paragraph uses the same style and adds no new kind of diff. Do not reformat that block in this change."
+    }
+   ],
+   "db_tests_written": [
+    "TestWorkspaceWriteCapabilityMigrationSeedsAnUnattestedContextWriteRow"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/internal/api/availability.go: (1) inside var genericGlobalHealthCapabilityIDs, directly after the line with one tab then \"cap.workspace.read\":  {}, (two spaces before {}), add one tab then \"cap.workspace.write\": {}, (one space before {}). (2) Documentation the allowlist's own rule asks for: directly after the comment line `//       not offer the tools cannot report that it does.` insert these six comment lines, with the blank `//` first. Each line starts with //: `//`, then `//   cap.workspace.write` followed by 22 spaces and `the WS24-S4 per-run overlay write tools`, then `//       (`workspace_edit`, `workspace_put`) change the run's own copy of the Space`, then `//       tree, and no other run sees the change. Added 2026-10-29. The reporter`, then `//       attests it only while WORKSPACE_TOOLS is `all` and the stores are configured,`, then `//       so an instance that does not offer the writes cannot report that it does.`. Keep the file's CRLF endings.",
+    "shared-edit apps/Model Plane/go/services/capability-core/internal/api/availability_test.go: in TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes, inside the want map, directly after the line with two tabs then \"cap.workspace.read\":     {}, (5 spaces before {}), add two tabs then \"cap.workspace.write\":    {}, (4 spaces before {}). Keep the file's CRLF endings. Land this together with the availability.go edit above: alone, either the Go exact-set test or the Rust allowlist test fails.",
+    "After both shared edits land, check: gofmt -l on availability_test.go should print nothing. availability.go already appears in gofmt -l at HEAD (doc-comment indentation), so compare against that baseline rather than expecting an empty result. Then run cd apps/Model Plane/go/services/capability-core && go test ./internal/api/ and cd apps/Model Plane/rust && cargo test -q -p execution-core --lib -- health_attest::tests::every_attested_capability_is_allowlisted_by_capability_core. Both should pass.",
+    "DB test, not run by me: CAPABILITY_CORE_MIGRATION_TEST_DATABASE_URL=<isolated postgres> go test -count=1 -tags integration -run TestWorkspaceWriteCapabilityMigrationSeedsAnUnattestedContextWriteRow ./internal/registry/ (the function is in migration_security_integration_test.go:166).",
+    "Docker and live steps, not run by me: rebuild capability-core and execution-core per the Model Plane compose recipe. Migration 0019 applies at boot. On the proof stack only, switch WORKSPACE_TOOLS to read, then all. Check that cap.workspace.write is attested. In a Space Do run, workspace_edit changes a file. Then SELECT path, content_hash, base_hash FROM workspace_files WHERE run_id=... . A second run in the same Space must not see the overlay, a plan-mode run must refuse workspace_edit, and a ZDR run must be refused. Do not turn all on for customers until the depth P1 items are closed or accepted.",
+    "Ledger and depth register entries for the depth findings below. The lead commits docs.",
+    "Lead should confirm no testcontainers Postgres containers were left behind by my accidental run of the four seed tests in an earlier round (-tags integration). I did not run docker this round."
+   ],
+   "deviations": [
+    "No code change this round. The required fix is a shared Go edit outside my ownership, so I handed it back as lead_todo entries rather than applying it.",
+    "Renamed restricted_context_writes_are_exactly_the_memory_write to restricted_context_writes_are_exactly_the_memory_and_workspace_writes, because the set now includes the two workspace writes. The body is extended to the exact set.",
+    "The planned edit_then_code_interpreter_sees_the_change is replaced by an_edit_is_visible_to_the_next_read_of_the_same_root. code_interpreter needs bwrap, which this Windows host does not have; the code path is a proof-stack item.",
+    "workspace_tools::tool_defs now takes a Mode. New public helpers: is_workspace_read, is_workspace_write and admits (the dispatch check). workspace_attestations now takes a Mode. Call sites and tests were updated.",
+    "The process-tool arm holds the exclusive lock for every process tool, not only process_*, matching the plan's wording.",
+    "The write attestation requires two Go allowlist entries that the plan row did not list. They are needs_other_files and lead_todo.",
+    "With every switch off, the two new names workspace_edit and workspace_put are refused at the workspace gate before the capability gate. They were unbound before, so both paths refuse them. Only the refusal text differs, and only for those two names.",
+    "Migration 0019 is used as the batch instructs; the plan row said next-free."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/go/services/capability-core/internal/api/availability.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/availability_test.go"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Shared edit, lead only (outside the slice's files): apps/Model Plane/go/services/capability-core/internal/api/availability.go needs \"cap.workspace.write\" added to genericGlobalHealthCapabilityIDs, plus the doc-comment paragraph for it. apps/Model Plane/go/services/capability-core/internal/api/availability_test.go needs the same id in the want map of TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes. Land both edits together and keep CRLF, using the implementer's lead_todo text. Why: the plan's command `cargo test -q -p execution-core --lib` fails today on health_attest::tests::every_attested_capability_is_allowlisted_by_capability_core (health_attest.rs:1235). execution-core now attests cap.workspace.write under WORKSPACE_TOOLS=all, and capability-core would refuse that attestation with 403. The write tools would then stay denied at the policy gate even with the switch on. The slice code itself needs no change."
+    ],
+    "dod_gaps": [
+     "The shared Go allowlist edit to availability.go and availability_test.go, as in required_fixes. Afterwards, re-run `go test ./internal/api/` and the Rust health_attest allowlist test.",
+     "Run the DB-backed integration test against a real Postgres with CAPABILITY_CORE_MIGRATION_TEST_DATABASE_URL set. TestWorkspaceWriteCapabilityMigrationSeedsAnUnattestedContextWriteRow skipped here because no database URL was set.",
+     "Live proof on rebuilt capability-core and execution-core images on the proof stack. With WORKSPACE_TOOLS=all: cap.workspace.write is attested and available; a Space Do run's workspace_edit changes a file; `SELECT path, content_hash, base_hash FROM workspace_files WHERE run_id=...` shows the overlay row with base_hash equal to the version token; a second run in the same Space does not see the overlay; plan mode refuses the edit; ZDR refuses it. Also run the edit, process_start, edit loop.",
+     "edit_then_code_interpreter_sees_the_change needs bwrap, which this Windows host lacks. Prove it on the Linux proof stack.",
+     "DEC-24 D1/D2 and DEC-10 owner acceptance before WORKSPACE_TOOLS=all reaches the product route."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Concurrent first Space-workspace calls race: ensure_sandbox_lease and ensure_hydrated_workspace (sandbox_lease.rs, about lines 106-130 and 183) check the cache, then create with no per-run guard. cache_sandbox_lease and cache_hydrated_workspace (state.rs, about lines 283 and 307) are unconditional inserts, and release uploads only the cached tree. Two calls in one round can orphan a second lease and directory, and a write that lands there is never uploaded although the tool said it was saved. This blocks switching WORKSPACE_TOOLS to all. Fix: serialise per-run first-call setup (per-run mutex or OnceCell in StateStore)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "To verify: a parked Do run keeps its hydrated tree and lease only in process memory. The upload runs only at terminal finalisation (agent.rs about line 1861, release_sandbox_lease_if_any). A run parked after a workspace_edit and resumed on another replica, or after a restart, re-hydrates from the Space base and loses the overlay, though the earlier result said it was saved. Verify with a park-resume test that crosses a fresh StateStore. This blocks all."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The direct ExecuteStep RPC (grpc.rs, about line 1367, then execute_step_inner) applies no plan-mode, leaf or autonomy-rung refusal. Those checks live only in the agent loop (agent.rs about lines 3376, 3423 and 3566). save_memory already has this gap. Add the refusal to execute_step_inner, or a guard test, before any caller can name a write tool."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The planned edit_then_code_interpreter_sees_the_change is not tested. It needs Linux bwrap. Read-after-edit is covered in-process only. Cover it on the proof stack."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Background processes started by process_start keep writing into the Space tree after the call returns. The write lock covers only each call's own execution, so a later process write can overwrite an edit and the model is not told."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "To verify: workspace_read returns raw file text, including secret-shaped text the run's own code wrote into the tree (uploads are redacted; the local tree is not). I found no output scrub on this path. Check whether the transcript scrub covers tool results."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The dispatch gate in execute_step_inner (zdr, waived, admits) has no direct test. admits() is only unit-tested. Add a test that a workspace_edit under read or under zdr is refused before the capability gate."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The process-tool arm holds the exclusive lock for read, list, signal and stdin too. Narrowing it to start and stdin would keep reads concurrent."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "state.rs take_hydrated_workspace removes the run's workspace lock entry (state.rs:316). A call that started before keeps its Arc, but a call that starts after gets a new lock and loses exclusion. Confirm no workspace or process call can run after the run's terminal release."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The legacy classification golden does not list the six workspace tool names, because offerable_tool_names excludes them. Coverage comes from tool_class_registry_parity over the seeded rows and from the exact-set restricted-write test."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-24 D1: the product owner must explicitly accept overlay-only durability (no promote caller) before writes reach the product route. This is already gating exposure."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The whole slice needs a live proof on rebuilt images, with the steps in lead_todo. Nothing live has been run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "After switching all back to read, the cap.workspace.write row stays available until capability-core's health staleness expires. Dispatch still refuses writes through admits(), so there is no authority leak. Confirm the staleness policy."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "There is no per-run guard on the first workspace setup. ensure_sandbox_lease and ensure_hydrated_workspace check the cache and then create, and the state.rs cache_* calls insert unconditionally. Two first workspace calls in one round can each create a lease and a tree. An edit that lands in the orphaned tree is never uploaded, although the tool reported it as saved. This must be serialised before WORKSPACE_TOOLS=all."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A parked Do run keeps its hydrated overlay only in process memory, and the upload runs only at terminal release. A park and resume on another replica, or after a restart, re-hydrates from the Space base and silently loses a workspace_edit that already reported durability run_overlay. Needs a park-resume test across a fresh StateStore before all."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The direct ExecuteStep RPC path (execute_step_inner) applies no plan-mode, leaf or rung refusal. Those checks live only in the agent loop. A caller of ExecuteStep can therefore run workspace_edit outside those checks, the same existing gap as save_memory. The switch, ZDR refusal and capability gate still apply."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives a workspace_edit or workspace_put through execute_step_inner under WORKSPACE_TOOLS=read, or under zdr or waived, and asserts the refusal before the capability gate. Only admits() is unit-tested."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The exclusive lock covers only each call's own execution. A background process started by process_start keeps writing the Space tree afterwards and can overwrite an edit without the model being told."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Once the switch is all but before the shared allowlist edit lands, capability-core rejects the write attestation with 403. Check whether a rejected id in the heartbeat batch also blocks the cap.workspace.read attestation, which would make the reads unavailable too."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Migration 0019 fills a gap below the already-present 0020-0025. That is safe only because docker-entrypoint.sh re-applies every *.up.sql idempotently on each boot. A version-tracking migrator would skip it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "execute_process_tool holds the run's workspace lock exclusively for every process tool, including read, list and signal. Narrowing it to start and stdin would keep reads concurrent."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "state.rs take_hydrated_workspace removes the run's lock entry, so a workspace or process call that starts after the terminal release gets a fresh lock and loses exclusion. Confirm that no such call can run after release."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "`go test -tags integration ./internal/registry/...`, as the plan writes it, starts testcontainers Postgres for several seed tests. That uses Docker implicitly even though this verifier ran no docker command. The lead should check for leftover containers."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=C:/dev/mp-target-w2 cargo test -q -p execution-core --lib",
+      "outcome": "exit 101. 1489 passed, 1 failed, 302.76 s (the two slow tests, a_hung_child_is_killed_at_the_timeout and loop_park_a_structurally_unrestorable_park_is_closed_and_refused, finish and pass). The one failure is health_attest::tests::every_attested_capability_is_allowlisted_by_capability_core, panicking at health_attest.rs:1235: this reporter attests [\"cap.workspace.write\"], which capability-core's genericGlobalHealthCapabilityIDs does not allow.",
+      "passed": false
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go test ./...",
+      "outcome": "exit 0. Every package ok (results cached) or has no test files. The scan for non-ok lines found none.",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go vet ./...",
+      "outcome": "exit 0, no output.",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go test -tags integration ./internal/registry/...",
+      "outcome": "ok, 114.979 s. A -v rerun filtered to Workspace|Migration showed 3 SKIP lines, so some DB-backed integration tests may have skipped (I did not confirm why).",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "data-loss",
+    "zdr",
+    "authority",
+    "policy"
+   ],
+   "notes": "Round result: no code change this round. The reviewer's required fix is a two-file Go shared edit (availability.go and availability_test.go), which is outside my ownership, so I did not apply it. The exact lines are in lead_todo. Until the lead lands both edits together, health_attest::tests::every_attested_capability_is_allowlisted_by_capability_core fails, exactly as the reviewer described. Everything else in the plan's lib command passes. The two tests that hung last round now finish when run alone (77 s and 300 s). On this host the plain lib command therefore takes about five minutes longer than the skip run.\n\nFunctional claim checked: workspace_attestations (health_attest.rs:428-450) emits cap.workspace.write only under WORKSPACE_TOOLS=all with both stores configured. capability-core refuses an unlisted generic-global attestation with 403 (availability.go:261-262). So the reviewer's description holds. Nothing has been run live.\n\nLock check: the run's workspace lock is acquired at exactly three sites: mod.rs:959-961 (code_interpreter), mod.rs:1398-1400 (process tools) and workspace_tools.rs:308 or 311 (workspace tools). mod.rs:1454 only fetches the handle. Each call takes the lock once and no path nests it, so the lock cannot deadlock through these arms.\n\nLine endings: availability.go (423 lines) and availability_test.go (711 lines) are CRLF throughout. Keep CRLF on the inserted lines. I edited nothing in the repo this round; the scratch copies used for checking are deleted. Run the DB test and docker steps only on the lead's side."
+  },
+  {
+   "id": "WS17-S9",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.f12.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions-server.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-versions-server.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run --pool=forks src/features/chat/components/use-chat-controller.f12.test.ts (apps/Frontend Plane/verevonv3)",
+     "outcome": "13 passed, 0 failed. Includes the four new WS17 S9 cases: names the saved answer on each regenerate (one answer per version); stop -> regenerate -> one answer per version (unsaved stop refused, no second stream); edit names the question it replaces; regenerate unchanged without the server switch"
+    },
+    {
+     "command": "pnpm typecheck (tsc -b) in apps/Frontend Plane/verevonv3",
+     "outcome": "exit 1 with 22 errors, all pre-existing and unchanged: 21 in src/shared/api/quarry-client.ts, 1 in src/shared/api/schedule-contract.test.ts. My first run added 2 type errors in my test file (overloaded getThreadMessages mock); fixed, none left from this slice"
+    },
+    {
+     "command": "pnpm exec eslint use-chat-controller.ts use-chat-controller.f12.test.ts chat-client.ts",
+     "outcome": "0 errors, 12 warnings (solid/reactivity); none on lines this round added"
+    },
+    {
+     "command": "pnpm exec vitest run --pool=forks src/features/chat src/shared/api/chat-client src/shared/actions",
+     "outcome": "117 files passed, 1773 tests passed, 0 failed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test zdr_feature_table",
+     "outcome": "8 passed, 2 FAILED: every_field_row_decides_what_its_treatment_says (unknown ZDR feature key message_versions) and every_refusal_the_spec_names_is_a_catalogue_refusal. Both need the lead's mp-contracts vocabulary edit (required fix 1). No Rust changed this round, so no other Rust test was re-run"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: in pub const FEATURES (line 215), after the connector_read entry (lines 336-339), add Feature { key: \"message_versions\", label: \"message versions\" }. Then MP_UPDATE_GOLDEN=1 cargo test -p mp-contracts zdr_refusal to regenerate apps/Model Plane/api/contracts/zdr-refusals.json and its .sha256; re-vendor both into apps/Frontend Plane/verevonv3/src/shared/api/contracts/; update the digest pin for apps/Model Plane/api/contracts/zdr-refusals.json in scripts/tests/zdr-contract-sync.test.sh (line 109) and run that script. Then cargo test -q -p model-gateway --test zdr_feature_table must report 10 passed (now 8 passed, 2 failed).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs, stream turn near the prepare_managed_run_authenticated_with_receipt call (about line 2007; carried from the previous report, unchanged): (a) when crate::normalize::version_turn(&req) is Some and !crate::http_routes::message_versions_enabled(), refuse 503 history_versions_disabled; (b) call crate::session_flow::move_active_leaf(&state, &org_id, thread_id, &turn, &model_bearer) and map its Err with crate::http_routes::branch_thread_error; (c) take the goal from VersionMove.goal when Some; (d) start the run with crate::session_flow::prepare_version_run_authenticated(&state, thread_id, &org_id, &user_id, goal, &turn, &managed_start_key, &model_bearer) in place of prepare_managed_run_authenticated_with_receipt. Remove the normalize_with stream guard (history_versions_unavailable) and update the_streaming_endpoint_refuses_a_version_turn_until_it_moves_branches.",
+    "NEW shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs, the connected payload built at line 2954 (serde_json::json!): add \"versions_enabled\": true when crate::http_routes::message_versions_enabled(), and leave the key out otherwise so flag-off bytes do not change. The BFF stream is a raw SSE byte proxy, so the field reaches the SPA unchanged. Check the second connected construction (connected_payload, about line 11565) if that path can start a versioned turn.",
+    "WITHDRAWN (earlier hand-back for apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs): not needed for the SPA chat stream, which uses /api/v1/chat/stream. Do not edit unless the AG-UI route must carry version fields.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts: ChatTurn add version?: ChatMessageVersion (import the type from chat-client). Needed for the switcher and for turn.version; also add regenerateOfMessageId?/editOfMessageId? to SendOptions if the ServerVersionTarget intersection is to go.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts: messageToTurn (line 78) carries the message's version: ...(msg.version ? { version: msg.version } : {}). Without it the server version never reaches a turn.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (about lines 320 and 958), per turn: serverVersion = serverVersionBadge(turn.version); onSwitchServerVersion = id => switchChatVersion(threadId, id, index, activeLeafId(turns)) followed by a reload; rewindHiddenTurns = rewindPlan(turns, id)?.hiddenTurns; onRewind = () => rewindChatThread(threadId, id, plan.expectedLeafMessageId) followed by a reload.",
+    "Proof order: keep MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED and SESSION_CORE_MESSAGE_VERSIONS_ENABLED off until the sse.rs edits (the stream refusal/move and the connected flag) and the zdr_refusal.rs vocabulary edit have landed. Then rebuild session-core and model-gateway with bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build session-core model-gateway, and the gateway with docker compose -f \"apps/Frontend Plane/verevonv3/docker-compose.yml\" up -d --no-deps --build gateway."
+   ],
+   "deviations": [
+    "Required fix 2 asks for a transcript reload after each versioned stream. Implemented instead as a targeted read of the newest page that records only the server ids for the send's own turns; a full reload would replace the streamed turns and their live metadata.",
+    "The controller learns the server switch from a new additive connected-frame field versions_enabled (chat-client parses it as versionsEnabled). This is a new cross-file contract that needs the lead's sse.rs edit. Without it a brand-new thread's first regenerate is not recognised as versioned and, with the flag on, sends the legacy regenerate (duplicate question). Loaded threads are covered by transcript version presence without it.",
+    "A stopped or unsaved answer on a versioned thread has no server id to name, so regenerate or edit is refused with a notice (no stream, no client id sent, no legacy regenerate). The row's contract only names an answer that the server holds.",
+    "Continue (Fortsett) is refused with a notice on a versioned thread, because its request resends the question and the server would append it again.",
+    "SendOptions lives in chat-types.ts (not owned), so the controller types sendContent as SendOptions & ServerVersionTarget, a Pick of ChatInvokeRequest. The fields could move into SendOptions later with a chat-types.ts shared edit.",
+    "The earlier hand-back for ag_ui.rs is withdrawn: the SPA chat stream is /api/v1/chat/stream (chat/streams.rs), a raw SSE proxy that passes the body through normalized_model_body without dropping keys. ag_ui.rs is the AG-UI adapter, which nothing in the app calls (ag-ui-client.ts says so).",
+    "An earlier-turn edit on a versioned thread still shows the existing discard confirm ('forkastes ... kan ikke angres'). The copy is inaccurate there because the server keeps the branch; left as is so the change is not widened."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs (stream version refusal and move; connected versions_enabled field)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs (message_versions vocabulary key), plus apps/Model Plane/api/contracts/zdr-refusals.json and .sha256, the SPA vendored copy under src/shared/api/contracts/, and the digest pin in scripts/tests/zdr-contract-sync.test.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts (ChatTurn.version)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts (messageToTurn carries version)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx (switcher and rewind props per turn)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Lead shared edit to apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs (outside this slice's files): add Feature { key: \"message_versions\", label: \"message versions\" } to FEATURES after connector_read. Then regenerate apps/Model Plane/api/contracts/zdr-refusals.json and its .sha256, re-vendor both into the SPA's src/shared/api/contracts/, update the digest pin in scripts/tests/zdr-contract-sync.test.sh and run it. Why: the slice's new ZDR rows in zdr_features.rs and tests/zdr_feature_table.rs refuse with feature message_versions, which the catalogue does not define, so `cargo test -p model-gateway --test zdr_feature_table` fails 2 of 10 (every_field_row_decides_what_its_treatment_says panics at zdr_refusal.rs:397 with an unknown key; every_refusal_the_spec_names_is_a_catalogue_refusal panics at zdr_feature_table.rs:365). This is a blocking unit-test failure."
+    ],
+    "dod_gaps": [
+     "sse.rs (lead shared edit): the SPA sends every chat turn through the streaming endpoint. normalize_stream refuses any version turn with 501 history_versions_unavailable, so with the flag on, regenerate and edit fail in the app until sse.rs calls move_active_leaf and prepare_version_run_authenticated and emits connected.versions_enabled. The exact lines are in the implementer's lead_todo.",
+     "chat-types.ts, chat-normalizers.ts and ChatPage.tsx (lead shared edits): ChatTurn.version, messageToTurn carrying version, and wiring the per-turn serverVersion, onSwitchServerVersion, rewindHiddenTurns and onRewind props. Until these land, the switcher, the rewind dialog, switchChatVersion and rewindChatThread are unreachable in the UI.",
+     "tests/e2e/chat-history.spec.ts not extended (regenerate twice, reload, switch 1/3 to 3/3, rewind with confirm, fork from a version). pnpm test:e2e -- chat-history was not run because it needs a running stack.",
+     "Live proof not done: rebuild session-core, model-gateway, the BFF and the FE with both MESSAGE_VERSIONS switches on; ListConversation before and after; the Infer request log showing the prompt equals the active path; no duplicate user turns after reload."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Do not enable the server flag until sse.rs lands. Today a loaded versioned thread's regenerate reaches the stream endpoint, which refuses version turns with 501 history_versions_unavailable (an error, not a duplicate). A brand-new thread's first regenerate still goes out as the legacy regenerate until the connected flag reaches the controller."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Stop -> regenerate on a versioned thread is refused, because the stopped answer was never saved and has no server id to name. The row's contract only names saved answers. Owner or contract decision needed: name the question (regenerate of the leaf) or accept the refusal."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Not written or run: tests/e2e/chat-history.spec.ts (regenerate twice, reload, switch 1/3 to 3/3, rewind with confirm, fork from a version) and the live proof (ListConversation before and after, Infer prompt equal to the active path). ChatMessages version props are unit-tested only in chat-versions-server.test.ts, and the switcher stays inert until ChatPage is wired."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Continue (Fortsett) is refused on versioned threads with a notice. A versioned continuation needs a server contract that does not exist yet."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "An earlier-turn edit on a versioned thread still shows the discard confirm, which says the messages below are discarded and cannot be undone. On a versioned thread the server keeps the branch. Owner to decide the copy or skip the confirm there."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each versioned send adds one newest-page read (reconcileSentTurns). Cost is one small read per versioned send, not growing with thread length. Revisit if the page size grows."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "serverMessageIds gains two entries per send for the controller's lifetime (small, unbounded). Clear it on thread switch if it ever shows in a profile."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Correction to the earlier report: the ag_ui.rs hand-back is withdrawn. The SPA chat stream is /api/v1/chat/stream (chat/streams.rs, raw SSE proxy; normalized_model_body passes regenerate/edit keys through). The AG-UI adapter is intentionally unwired (ag-ui-client.ts)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session_flow::move_active_leaf refuses an edit of the thread's first user turn with history_branch_refused: its parent is empty and index 0, so checked_sub(1) gives None, and SetActiveLeaf requires a non-empty target. On a versioned thread, editing the first question (the most common edit) therefore fails with no fallback."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Keep MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED and SESSION_CORE_MESSAGE_VERSIONS_ENABLED off until the sse.rs stream move and the connected versions_enabled field land. Today, a loaded versioned thread's regenerate gets 501 on the stream, and a new thread's first regenerate goes out as the legacy duplicate-question regenerate."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Stop then regenerate on a versioned thread is refused client-side: the stopped answer has no server id. The plan's named test case 'stop -> regenerate -> one answer per version' is satisfied only by refusing, not by producing a new version. This needs an owner or contract decision."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The server version switcher and the rewind confirm are rendered only on AssistantMessage. The row asks for prev/next on any message, so edit versions (siblings of a user turn) have no switcher, and the row's ChatMessages component tests were not written."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "In invoke, the branch is moved (SetActiveLeaf) before prepare_version_run_authenticated starts. If the run start then fails, the thread's active leaf stays on the question with no answer shown (the old answer survives as an inactive sibling). Nothing is lost, but the move is not undone."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "reconcileSentTurns reads the newest page right after onDone and maps .at(-1) and .at(-2) by role only. If the answer is not yet persisted, or a concurrent send interleaves, the ids stay unknown (the later regenerate is refused) or point at the wrong turn."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "On a versioned thread, an earlier-turn edit still shows the discard confirm ('cannot be undone'), although the server keeps the branch. Continue (Fortsett) is refused with a notice there."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat-versions-server.ts helpers, the new ChatMessages props, and switchChatVersion/rewindChatThread have no production caller until the ChatPage shared edit lands. They are dead code in this tree."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The rewind confirm is role=dialog aria-modal=true but has no focus trap or initial focus. The serverMessageIds map grows for the controller's lifetime."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "zdr_refusal_inventory fails at browser_run.rs:802 (untyped ZDR refusal). browser_run.rs is unmodified in the tree, so this is not from this slice, but the model-gateway --all-targets suite is not green regardless."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -p model-gateway --all-targets --no-fail-fast (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "Compiles. Lib 2494 passed; most other targets pass. 3 FAIL in 2 targets. zdr_feature_table: 8 passed, 2 failed. (a) every_field_row_decides_what_its_treatment_says panics at mp-contracts zdr_refusal.rs:397, 'unknown ZDR feature key message_versions'. (b) every_refusal_the_spec_names_is_a_catalogue_refusal panics at tests/zdr_feature_table.rs:365, 'regenerate_of_message_id refuses with zdr_feature_not_supported Some(\"message_versions\"), which the catalogue does not define'. Both are the lead's pending shared edit to mp-contracts zdr_refusal.rs. zdr_refusal_inventory: 1 failed, every_zdr_refusal_in_the_gateway_carries_a_catalogue_kind, 'untyped zero-data-retention refusals: browser_run.rs:802'. browser_run.rs is not in the slice's file list and has no diff, so this is not from this slice (not caused by it, not confirmed pre-existing).",
+      "passed": false
+     },
+     {
+      "command": "cargo test --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --all-targets",
+      "outcome": "All pass, 0 failed: 754 + 7 + 3 + 1 (1 ignored).",
+      "passed": true
+     },
+     {
+      "command": "pnpm vitest run --pool=forks src/features/chat/lib/chat-versions-server.test.ts src/features/chat/components/use-chat-controller.f12.test.ts",
+      "outcome": "2 files passed, 20 tests passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "pnpm typecheck (tsc -b) in apps/Frontend Plane/verevonv3",
+      "outcome": "Fails with 22 errors, all outside the slice's files: 21 in src/shared/api/quarry-client.ts and 1 in src/shared/api/schedule-contract.test.ts. Zero errors in the slice's files, matching the implementer's 'pre-existing' claim.",
+      "passed": false
+     },
+     {
+      "command": "pnpm lint (whole project)",
+      "outcome": "Exit 1 with 246 problems (43 errors, 203 warnings) project-wide. eslint on the slice's six frontend files (ChatMessages.tsx, use-chat-controller.ts, the f12 test, chat-versions-server.ts and its test, chat-client.ts): 0 errors, 22 warnings. The 43 errors are in other files.",
+      "passed": false
+     },
+     {
+      "command": "pnpm test:e2e -- chat-history",
+      "outcome": "NOT RUN. tests/e2e/chat-history.spec.ts exists but the e2e needs a running stack (no docker allowed) and the implementer reports the spec is not done for this slice.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "Required fix 2 (controller): done. On a versioned thread, regenerate sends regenerate_of_message_id = the answer's server id with no client-only version snapshot; edit sends edit_of_message_id = the question's server id; a temporary chat, a Space thread, or a thread without the server switch keeps the old path. A send's turns get server ids from a targeted read of the newest page after the send (reconcileSentTurns), not a full transcript reload. The server switch is learnt from the connected frame (versions_enabled, needs the sse.rs edit below) or from a transcript turn carrying version. Continue is refused on a versioned thread (it would resend the question). Required fix 1 (zdr_refusal.rs) is a lead shared edit: not applied here, exact lines in lead_todo. Flag-off: no version on transcript turns and no versions_enabled in connected, so the controller takes the old path; the only new wire key is regenerate_of_message_id/edit_of_message_id, omitted when undefined. Nothing committed, pushed, or run under docker. The chat-history e2e spec, ChatPage wiring and the live proof are still not done."
+  }
+ ]
+}

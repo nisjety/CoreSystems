@@ -1,0 +1,466 @@
+{
+ "batchId": "W3-03b",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-13-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/metrics.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/deep_research.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/result_validation.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/source_validation.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/usage_meter.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/infer_purpose_inventory.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/llm_planner.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/dream_extractor.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/memory_grounding.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p inference-core --lib metrics (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "ok, 11 passed. Includes metrics::tests::purpose_label_is_bounded and unknown_purpose_counts_as_unspecified, both re-run by name: ok."
+    },
+    {
+     "command": "cargo test -q -p inference-core --test span_attribution_test",
+     "outcome": "ok, 1 passed. Existing test, not extended (see deviations)."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test infer_purpose_inventory",
+     "outcome": "ok, 1 passed, before and after the source_validation test fix. Mutation check: one purpose line removed from execution-core/src/grpc.rs:831 made it FAIL and name that file and line; the file was restored and byte-compared (git diff shows its one added line again)."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (covers the sse:: and usage_meter tests)",
+     "outcome": "First run: 2752 passed, 5 failed. After the request_digest fix: 2754 passed, 3 failed. Remaining failures: room_metadata::tests::the_allowlist_is_artifacts_and_the_retrieval_decline_until_a_later_slice_adds_work; zdr_posture::tests::every_non_get_route_is_classified; zdr_posture::tests::no_raw_retention_claim_is_read_outside_the_named_inventory. None of those files is in this slice's diff; not measured at HEAD (no HEAD build allowed)."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib -- subscription_route_still_overrides title_request_inherits judge_request_inherits each_call_phase_names proposal_rule_off_sends proposal_rule_never_reaches",
+     "outcome": "ok, 6 passed: sse::subscription_route_tests::{subscription_route_still_overrides_model_and_hint, title_request_inherits_the_turn_privacy_floor, judge_request_inherits_residency_floor}; usage_meter::tests::each_call_phase_names_the_purpose_it_is_counted_under; source_validation::tests::{proposal_rule_off_sends_todays_reviews_byte_for_byte, proposal_rule_never_reaches_the_author_repair}."
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib",
+     "outcome": "1664 passed, 12 failed. 10 are executor::tests (spawn refused: 'sandbox egress is not available' on this Windows host); 2 are runtime_loop::fold::tests (posture-matrix row counts 9 vs 7 and 6 vs 5). executor.rs and fold.rs are not in this slice's diff; not measured at HEAD. No failure in runtime_loop::agent."
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core (session-core is a bin crate; no --lib target)",
+     "outcome": "863 passed, 0 failed, 374 ignored."
+    },
+    {
+     "command": "buf lint (run in apps/Model Plane/proto)",
+     "outcome": "Exit 100 with 1899 findings. Same multiset of (path, type, message) as an export of HEAD's proto tree: 0 added, 0 removed. Pre-existing debt; the checked-in buf-lint-baseline.json lists 1013 and does not match this tree. The ratchet script named in memory was not found under apps/Model Plane/scripts, so the A/B comparison against HEAD was used instead."
+    },
+    {
+     "command": "buf breaking --against baseline.binpb (run in apps/Model Plane/proto)",
+     "outcome": "Exit 0, no findings."
+    },
+    {
+     "command": "Native Go regen (local protoc-gen-go v1.36.12) into scratch, then go vet ./... and go test ./... in a scratch copy of go/gen with GOWORK=off GOPROXY=off",
+     "outcome": "vet exit 0; test ok (model_plane/v1). Regeneration changes only inference.pb.go; browser.pb.go, memory.pb.go and space_events.pb.go differ from the checked-in files only by CRLF."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "needs_other_files, inference-core/src/metered.rs (required for the label to carry a purpose): (1) add `purpose: i32` to `struct Call` and `purpose: 0` in `Call::begin`; (2) add `fn with_purpose(mut self, purpose: i32) -> Self { self.purpose = purpose; self }`; (3) in `answered`, call `metrics::record_request_with_purpose(self.rpc, self.purpose, ...)` in both arms and `metrics::record_tokens_with_purpose(service, self.purpose, ...)`; (4) in `ended`, call `metrics::record_request_with_purpose(self.rpc, self.purpose, ...)`; (5) in `MeteredCore::infer` and `infer_stream`, right after `Call::begin`, add `let call = call.with_purpose(request.get_ref().purpose);` before the request moves into the inner service. Add one metered test that an Answer call is counted under 'answer'. Afterwards record_tokens and the purpose-less record_request keep only test callers.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (insert above the first '## ' entry, newest first): heading '## 2026-11-03 - Every inference call names its purpose; side tasks inherit the turn's floors (EP-13 S3)'; status line 'implemented, metrics label only; floor inheritance ungated (D8)'; body: InferRequest.purpose (field 21, enum InferPurpose, 17 closed values) labels inference_requests_total and inference_tokens_total; unset and unknown values count as unspecified; no cost-ledger column (D9, DEC-18); every production InferRequest literal in model-gateway, execution-core and session-core names a purpose (model-gateway/tests/infer_purpose_inventory.rs); title, follow-ups and the verification judge inherit the turn's min_privacy_tier and min_residency on every route (inherit_turn_floors); a title with no eligible model is skipped; the owner may veto D8.",
+    "Go bindings (verified in scratch, not applied): from apps/Model Plane/proto run `buf generate --template C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/regen/buf.gen.go-native.yaml --path model_plane` (output goes to the scratch folder), then copy only `.../scratchpad/regen/out/model_plane/v1/inference.pb.go` over apps/Model Plane/go/gen/model_plane/v1/inference.pb.go. Both files are LF. Do not copy browser.pb.go, memory.pb.go or space_events.pb.go: they differ from the checked-in files only by CRLF.",
+    "The Python and TypeScript generated outputs for inference.proto are stale until regenerated: apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/ (inference_pb2.py) and apps/Frontend Plane/verevon/src/lib/model-plane/gen/model_plane/v1/ (inference_pb.ts, inference_connect.ts). The full buf.gen.yaml needs remote plugins (buf.build), which were not run here; decide whether to regenerate them in this commit. proto3 readers ignore field 21 until regenerated.",
+    "Commit train (lead): proto and inference-core first (after item 1), then model-gateway, execution-core and session-core, one commit per crate as the row asks. Do not commit the untracked model-gateway/tests/replay_sessions.rs or the model-gateway and execution-core Cargo.toml dev-dependency lines; they belong to EP-14-S9.",
+    "Live proof (depth, lead): rebuild inference-core, model-gateway, execution-core and session-core; one chat turn on claude-sonnet-5-5; :8082/metrics shows purpose=answer, purpose=title and purpose=follow_ups series moving; evidence file ep13-s3-purpose-<date>.txt.",
+    "Confirm the 15 failing lib tests outside this slice on Linux CI or a clean HEAD export. Their panic messages do not involve InferRequest."
+   ],
+   "deviations": [
+    "inference-core/src/grpc.rs was not edited: the purpose is read by the metering decorator from the same request before the handler consumes it, and that decorator (metered.rs) is not owned.",
+    "span_attribution_test.rs was not extended: provider::InferRequest (provider/mod.rs) has no purpose field and the spans are created in provider/fallback.rs; both are outside this slice's ownership.",
+    "The test is named every_non_test_infer_request_names_a_purpose, as the design names it. File detection now reads file-name words, so attestation.rs is scanned; the substring rule had skipped it.",
+    "source_validation.rs: request_digest clears the purpose label before hashing (test-only). The pins were recorded before the label existed, so clearing it keeps them guarding the review content.",
+    "model-gateway/tests/support/offline_downstreams.rs: an import reorder from the earlier attempt is reverted and the file is byte-identical to HEAD now. git status still lists it as modified, from the index stat only; it has no content diff.",
+    "Reviewed and left unchanged: semantic_screening.rs (its request is AnalyzeLanguage, a different RPC), vision_parts.rs and review_proposal_rule.rs (InferRequest literals only in tests; they change requests through helpers), and execution-core scheduled_agent.rs (scheduled rounds get ScheduledRound through agent.rs).",
+    "Not edited by design: apps/Model Plane/docs/decisions/ledger.md (shared), inference.pb.go (regen in lead_todo), and the model-gateway and execution-core Cargo.toml dev-dependency lines (EP-14-S9's)."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/metered.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Apply the metered.rs wiring (the implementer's lead_todo item 1: Call.purpose, with_purpose, and the record_*_with_purpose calls in answered/ended, plus one metered test that an Answer call counts under 'answer'). Until then every series reads purpose=unspecified. The design wrongly named IC/grpc.rs as the reader; the recorder is inference-core/src/metered.rs, which this slice does not own.",
+     "Regenerate go/gen/model_plane/v1/inference.pb.go (owned, left as a lead_todo). Decide whether to regenerate the Python (inference_pb2.py) and TS (inference_pb.ts / inference_connect.ts) outputs in the same train.",
+     "Shared-edit the docs/decisions/ledger.md entry for EP-13 S3 / D8 (ungated floor tightening).",
+     "Live proof: rebuild inference-core, model-gateway, execution-core and session-core, then run one chat turn on claude-sonnet-5-5. :8082/metrics must show purpose=answer, title and follow_ups series moving. Save the evidence as ep13-s3-purpose-<date>.txt.",
+     "Confirm the 15 failing lib tests outside this slice's files at a clean HEAD or on Linux CI: model-gateway room_metadata and two zdr_posture tests; execution-core 10 executor and 2 fold posture-matrix tests.",
+     "Commit train: one commit per crate. Keep out EP-14-S9's Cargo.toml dev-dependency lines, mp-inference-replay/ and tests/replay_sessions.rs."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Until metered.rs passes the request purpose (lead_todo item 1), inference_requests_total and inference_tokens_total carry only purpose=unspecified, so the slice's observable deliverable is not yet delivered."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "span_attribution_test is not extended: provider-attempt spans in provider/fallback.rs (info_span! near lines 1736, 2134 and 2295) cannot carry purpose because provider::InferRequest has no purpose field."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The inventory scans literals only. Clone-derived requests inherit the parent's purpose, and the Validation purposes set on review, repair and source-check clones (source_validation.rs near 2217 and 2872, result_validation.rs near 572) have no unit test that asserts them."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "D8 is an ungated tightening: on floored turns the title, follow-ups and judge now reach only providers that meet the turn's floors, so a title can be skipped where it used to be sent. The owner may veto it; the byte-identical-with-switches-off rule does not apply because this slice has no switch."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The purpose field changes the protobuf bytes of every InferRequest. The two byte-for-byte pins were kept by clearing purpose in request_digest (test-only); re-pinning is the alternative if the owner prefers it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Cardinality: 17 purpose values multiply both counters' series per rpc, service, model, provider and outcome. Measure the series count on the live stack once metered.rs is wired."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "No live proof was run; docker and live stacks belong to the lead. The design's :8082/metrics check and its evidence file remain open."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "inference-core's own provider and analysis calls build internal requests with no purpose, so 'every inference call names a purpose' holds only for the gateway, execution-core and session-core callers in scope."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Integration targets were not built, per the batch rule: model-gateway usage_meter_contract, vision_parts_chain_test, tool_retry_contract, skill_budget_contract, zdr_refusal_inventory and zdr_posture_matrix; execution-core scrub_checkpoint_test, provider_write_contract, cross_service_loop_contract and compaction_parity_contract."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Fifteen lib tests fail in files this slice did not change (3 in model-gateway, 12 in execution-core). They were not measured at HEAD on this host and need a Linux CI or clean-export check."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "extract_structured (model-gateway grpc.rs near line 2944) is tagged ToolRound because the closed enum has no extraction value; a dedicated value would be an additive proto change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CallPhase::purpose() has no production caller yet, and CallPhase::Overhead maps to Unspecified although the validation calls metered under it name Validation. The meter does not read purpose, so this is harmless."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "record_request and record_tokens (the purpose-less wrappers) keep production callers only until metered.rs moves to the _with_purpose recorders; after that they are test-only and can be removed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "inference-core/src/metered.rs still calls the purpose-less record_request/record_tokens (lines ~293, 301, 310, 322), so the row's observable deliverable, a purpose label that tells an answer from a title, emits only 'unspecified' until the lead applies the handed-back metered.rs lines."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "span_attribution_test.rs is not extended to record purpose on the span as the design asks; provider::InferRequest carries no purpose, so the provider-attempt spans in provider/fallback.rs cannot record it without edits outside the slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Purpose set on cloned requests (source_validation.rs check and repair, result_validation.rs next) has no unit assertion; the source-text inventory covers only struct literals."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "D8 floor inheritance (inherit_turn_floors) is an ungated tightening: on floored ordinary routes, title, follow-ups, judge and resample now reach only floor-eligible providers and may be skipped. This is per decisions_defaults but must be stated in the PR and the ledger."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "source_validation.rs request_digest (test-only) now clears purpose before hashing to keep the existing byte pins; this means the pins no longer guard the purpose field of review requests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Up to 17 purpose values multiply inference_requests_total and inference_tokens_total series per rpc, service, model, provider and outcome; measure the series count live once metered.rs is wired."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's command 'cargo test -p session-core --lib' is invalid because session-core is a bin crate; I ran '--bin session-core' instead (863 passed). The plan row should be corrected."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "CallPhase::purpose() has no production caller, and Overhead maps to Unspecified although resample, judge and validation calls metered as Overhead name Validation or VerificationJudge on the wire."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "model-gateway grpc.rs extract_structured is tagged ToolRound for lack of an extraction purpose; a dedicated enum value would be an additive proto change later."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib sse::",
+      "outcome": "330 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test infer_purpose_inventory",
+      "outcome": "1 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib metrics",
+      "outcome": "11 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --test span_attribution_test",
+      "outcome": "1 passed, 0 failed (dead_code warning only)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib",
+      "outcome": "1664 passed, 12 failed. 10 are executor::tests (spawn refused, sandbox egress is not available on Windows). 2 are runtime_loop::fold::tests::{a_seeded_writer_follows_the_posture_matrix_row_by_row, the_writer_gate_and_the_pause_mint_follow_the_posture_matrix_row_by_row} (served row count assertion). None are in files this slice changed (executor.rs, fold.rs). Not compared against HEAD.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p session-core --lib",
+      "outcome": "error: no library targets found in package session-core. The command as written cannot run. Run as --bin session-core instead: 863 passed, 0 failed, 374 ignored.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core",
+      "outcome": "863 passed, 0 failed, 374 ignored",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (whole crate, compile and regression check)",
+      "outcome": "2754 passed, 3 failed: room_metadata::tests::the_allowlist_is_artifacts_and_the_retrieval_decline_until_a_later_slice_adds_work; zdr_posture::tests::every_non_get_route_is_classified (non-GET routes such as /v1/threads/:id/seen, /fork and /v1/org/hooks have no row in space-surface.v1.json); zdr_posture::tests::no_raw_retention_claim_is_read_outside_the_named_inventory (names space_routes/runs.rs::run_live, claims.zdr). All three concern files and routes outside this slice's diff. Not compared against HEAD.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q --workspace --all-targets (compile check of all touched crates)",
+      "outcome": "no errors",
+      "passed": true
+     },
+     {
+      "command": "buf lint (apps/Model Plane/proto)",
+      "outcome": "exit 100, 1899 findings. The implementer reported the same multiset against HEAD (0 added, 0 removed); I did not re-verify that. Pre-existing lint debt, not attributable to the slice from my run.",
+      "passed": false
+     },
+     {
+      "command": "buf breaking --against baseline.binpb (apps/Model Plane/proto)",
+      "outcome": "exit 0, no findings",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "EP-13 S3 code is in place on model-plane and passes its named unit targets. Done: InferPurpose enum (0-16) and InferRequest.purpose = 21 in the proto (additive; buf breaking clean; no lint findings added against HEAD); the inference-core purpose label (purpose_label, record_request_with_purpose, record_tokens_with_purpose; unset or unknown counts as unspecified); every production InferRequest literal in model-gateway, execution-core and session-core names a purpose, enforced by model-gateway/tests/infer_purpose_inventory.rs; title, follow-ups and the verification judge inherit the turn's min_privacy_tier and min_residency on every route (inherit_turn_floors, D8, ungated, no switch); CallPhase::purpose(). The first attempt's edits were reviewed and kept. ZDR: the tag carries no content; the title is still skipped for ZDR turns; the judge keeps zdr. Not done: the metering decorator (inference-core/src/metered.rs) is not owned, so every series still reads purpose=unspecified until the lead applies lead_todo item 1; the span-level purpose test needs provider/mod.rs and provider/fallback.rs. All cargo runs used CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0. No HEAD copy was built; one git-archive export of the proto tree was linted and then deleted. Logs: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/s3logs/."
+  },
+  {
+   "id": "EP-14-S9",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\Cargo.toml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\Cargo.lock",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\Cargo.toml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\src\\lib.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\tests\\cassette_lint.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\cassettes\\01-plain-answer.jsonl",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\cassettes\\04-honest-refusal.jsonl",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\cassettes\\07-approval-pause.jsonl",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\cassettes\\10-two-tool-loop.jsonl",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\cassettes\\13-compaction-survivor.jsonl",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-inference-replay\\cassettes\\15-do-run-with-plan.jsonl",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\Cargo.toml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\replay_sessions.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\Cargo.toml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\eval-lab.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p mp-inference-replay (from apps\\Model Plane\\rust; CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "exit 0: lib 9 passed, tests/cassette_lint 3 passed, doc-tests 0 run"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test replay_sessions (same environment)",
+     "outcome": "exit 0: 1 test passed in 5.26 s"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test replay_sessions (same environment)",
+     "outcome": "exit 101: error: no test target named `replay_sessions` in `execution-core` package. The required suite does not exist, so the row's third command still fails."
+    },
+    {
+     "command": "NOT RUN this round: rustfmt (no source edits this round), cargo check --workspace --all-targets, go, docker, DB harness",
+     "outcome": "not run"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Decide and grant the execution-core seam, one of: (A) in src/runtime_loop/agent.rs add a #[doc(hidden)] pub wrapper over run_agent that takes only public types and hard-codes SpaceRetrieval::Organisation; make the terminal-token trait reachable (src/session_terminal_auth.rs:93 pub(crate) -> pub, and src/lib.rs:46 'mod session_terminal_auth;' -> 'pub mod') or give the wrapper a concrete token type; add a pub constructor for any sandbox token provider the suite passes (src/sandbox_lease.rs:417 new_for_test is pub(crate)). Or (B) keep the suite in-crate as a #[cfg(test)] module under src/runtime_loop, which reaches pub(crate) items the way agent.rs's own tests do. Option B changes the row's command from --test replay_sessions to --lib, so the plan row must be amended first. Option A must be sequenced with EP-13-S3's uncommitted agent.rs edits.",
+    "Then write apps/Model Plane/rust/services/execution-core/tests/replay_sessions.rs (owned by this slice). Serve each cassette with mp_inference_replay::serve(ReplayInference::new(cassette)) as the inference channel, and use in-process tonic doubles for SessionCore, ManagedRunLifecycle and OrchestrationCoreService (pub mp_contracts server traits). Assert the final run state and tool or approval events: 10 = web_search then fetch_url, then the streamed answer, run completed; 07 = publish_social_post causes an approval pause and nothing is published; 13 = the summary round, then the answer keeps the early reference code; 15 = the plan round, then the answer cites the earlier thread fact. Require replay.served() to equal each cassette's call count and replay.finish() to be Ok. The doubles alone are roughly a slice's worth of work, so budget it as its own slice.",
+    "CI needs no shared-edit line: model-plane-rust-ci.yml picks up the suites through its path filter and cargo test --workspace, and eval-lab.yml already runs the crate.",
+    "After the suite lands, run the DoD proof on a throwaway branch: a deliberate break (drop one tool from the Do offer list, replay goes red with a readable diff) and two green CI run links."
+   ],
+   "deviations": [
+    "Required fix 1 not done: the execution-core suite needs a public replay entry over run_agent in src/runtime_loop/agent.rs, which this slice does not own. No suite file was written, so the row's third test command still fails with 'no test target named replay_sessions'.",
+    "No source edits this round; the crate, cassettes and gateway suite are as left by the previous round.",
+    "Gateway suite consumes cassette 01 only; cassette 04 has no consumer yet.",
+    "Cassette 01 records five calls (answer, two VALIDATION draws, TITLE, FOLLOW_UPS) to match real gateway behaviour; matching was not relaxed.",
+    "Purpose matching is implemented per design D8 (InferRequest.purpose is on the wire).",
+    "Gateway test pins MODEL_GATEWAY_SELF_CONSISTENCY=on and asserts the full SSE frame order."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (a public replay entry over the pub(crate) run_agent, or an in-crate test module; required by apps/Model Plane/rust/services/execution-core/tests/replay_sessions.rs, which is not written)",
+    "apps/Model Plane/rust/services/execution-core/src/session_terminal_auth.rs and apps/Model Plane/rust/services/execution-core/src/lib.rs (only if the seam exposes ManagedRunTokenProvider)",
+    "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs (only if the suite passes a sandbox token provider; new_for_test is pub(crate))"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/execution-core/tests/replay_sessions.rs is missing, and it is one of the row's deliverables. The row's third test command, `cargo test -q -p execution-core --test replay_sessions`, fails with 'no test target named replay_sessions' (I re-ran it). Cassettes 07, 10, 13 and 15 therefore have no consuming suite. The suite needs an execution-core seam: either a public replay entry over the pub(crate) run_agent in src/runtime_loop/agent.rs (not owned by this slice, and it must be sequenced with EP-13-S3's uncommitted agent.rs edits), or a plan-row amendment that moves the suite in-crate under --lib. The lead has to grant one of these before the suite can be written."
+    ],
+    "dod_gaps": [
+     "The lead must choose the execution-core seam (option A: a public wrapper over run_agent plus visibility changes in session_terminal_auth.rs, lib.rs and sandbox_lease.rs; option B: an in-crate test module, which needs the plan row's test command amended). The implementer documents both options.",
+     "DoD proof not produced: a deliberate break (drop one tool from the Do offer list, replay goes red with a readable diff) and two green CI run links on a throwaway branch.",
+     "The owner must decide whether the replay suites become a required CI check (D8)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core replay suite is missing (verified this round: the row command exits 101 with 'no test target named replay_sessions'). Cassettes 10, 07, 13 and 15 have no consumer until a public run_agent entry exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Seam collision: src/runtime_loop/agent.rs, grpc.rs and llm_planner.rs carry uncommitted edits from EP-13-S3 in this same batch (git status shows M). The seam edit must be sequenced with that slice to avoid a conflicting edit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Cassette 04 (honest refusal) has no gateway consumer: a plain chat turn offers no tools, and the knowledge_search offer condition for chat is untraced."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Cassettes 04, 10, 13 and 15 are written as chat-style turns without the title, follow-up and self-consistency draws that cassette 01 needed. Check each against real gateway behaviour when its suite lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Purpose matching is verified only on the plain-answer path (ANSWER, VALIDATION, TITLE, FOLLOW_UPS). TOOL_ROUND and AGENT_ROUND stay unverified until cassettes 10, 07 and 15 have consumers."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "DoD evidence not produced: a deliberate break (drop one tool from the Do offer list, so replay goes red with a readable diff) and two CI run links on a throwaway branch. Needs the execution-core suite first."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner decides whether the replay suites become a required check (D8). The workspace job runs them (model-plane-rust-ci.yml:169); eval-lab runs only the crate's own tests."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "services/model-gateway/tests/support/offline_downstreams.rs fails rustfmt at HEAD (diffs at lines 30 and 46). cargo fmt --all -- --check (model-plane-rust-ci.yml:143) reaches it through the #[path] module in replay_sessions.rs. Not edited: not owned by this slice."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The manifest prints purpose as a number, because prost 0.13.5 generates no i32-to-InferPurpose conversion. A name table would duplicate the proto enum."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The matcher should switch to S6's request_snapshot canonicaliser when S6 lands; it currently uses its own manifest()."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Cassette 04 (honest refusal) has no consumer in either suite, so its shape has never been checked against a real request path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Cassettes 04, 10, 13 and 15 leave out the TITLE, FOLLOW_UPS and VALIDATION draws that cassette 01 needed to match real gateway behaviour, so they will likely need rework once a consuming suite lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Purpose matching for TOOL_ROUND and AGENT_ROUND is unverified; only the plain-answer purposes are exercised (gateway suite, cassette 01)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "services/model-gateway/tests/support/offline_downstreams.rs (modified, not owned by this slice) is reported as failing rustfmt. replay_sessions.rs pulls it in through #[path], so cargo fmt --check in model-plane-rust-ci.yml will flag it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Untracked services/model-gateway/tests/infer_purpose_inventory.rs is not in this slice's ownership list. The lead should attribute it to its own slice (likely EP-13-S3) before committing."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The matcher uses its own manifest(); switch it to S6's request_snapshot canonicaliser when that lands."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p mp-inference-replay",
+      "outcome": "exit 0: lib 9 passed, tests/cassette_lint 3 passed, doc-tests 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test replay_sessions",
+      "outcome": "exit 0: 1 passed, 0 failed (10.8 s)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test replay_sessions",
+      "outcome": "error: no test target named `replay_sessions` in `execution-core` package; the file services/execution-core/tests/replay_sessions.rs does not exist. passed=false",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p mp-inference-replay -p model-gateway -p execution-core --all-targets",
+      "outcome": "exit 0 (only pre-existing warnings, e.g. unused-must-use in model-gateway browser_run.rs tests)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Required fix 1 is NOT done, so the slice stays partial. No execution-core suite exists. Its only route into the Do loop is run_agent (src/runtime_loop/agent.rs:770, pub(crate)), reached through ExecutionService (src/grpc.rs:42, pub(crate)). grpc::serve binds a fixed 0.0.0.0:9093, reads the terminal-token provider from env (grpc.rs about 2000-2060), and serve_with_listener is private. runtime_loop::execute_step (pub, src/runtime_loop/mod.rs:514) is the single-step tool path; its doc says the agent loop (run_agent) is what it cannot reach. The terminal-token trait is pub(crate) (src/session_terminal_auth.rs:93) inside a private module (src/lib.rs:46), and SpaceRetrieval is pub(crate) (src/knowledge_tools.rs:48). The in-crate pattern in agent.rs's test module (MockInference at about line 10476, tonic doubles at about line 12086) is not reachable from tests/. I edited nothing outside ownership and wrote no execution-core test file, because a non-compiling target would break the cargo check --workspace --all-targets gate. This round changed no files; files_changed is the slice's full tree state. Re-run results: the crate and gateway suites are green (see tests_run). Gateway fix verified: DelegatedUserTokens derives Clone (services/model-gateway/tests/replay_sessions.rs:1099). CI wiring confirmed, no edit needed: model-plane-rust-ci.yml's path filter covers apps/Model Plane/rust/** (line 30), it runs cargo check --workspace --all-targets and cargo test --workspace --no-fail-fast (line 169), so the new suites are picked up; eval-lab.yml runs cargo test -q -p mp-inference-replay (line 135) and has the crate path in both filters. Cargo.lock lists the new package; commit it with the workspace member. The lead commits."
+  }
+ ]
+}

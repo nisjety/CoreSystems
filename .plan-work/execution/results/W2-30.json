@@ -1,0 +1,655 @@
+{
+ "batchId": "W2-30",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS16-S3",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/attention_events.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/main.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/tests/attention_acl_contract.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/tests/attention_zdr_matrix.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/run-attention-envelope.json"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core attention",
+     "outcome": "exit 0; test result ok: 31 passed, 0 failed, 12 ignored. The 12 ignored are DB-gated (7 new in attention_events::db_tests plus S1's 5); they compiled and were NOT run."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --test attention_acl_contract --test attention_zdr_matrix",
+     "outcome": "exit 0; attention_acl_contract: 5 passed; attention_zdr_matrix: 4 passed (2 from S1, 2 added here)."
+    },
+    {
+     "command": "rustfmt --edition 2021 --check src/attention_events.rs tests/attention_acl_contract.rs tests/attention_zdr_matrix.rs (session-core)",
+     "outcome": "clean"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo fmt --all -- --check",
+     "outcome": "exit 1. Diffs are in other crates and files (mp-content-safety, mp-contracts, execution-core and more). None of the five owned files appears in the output."
+    }
+   ],
+   "db_tests_written": [
+    "attention_events::db_tests::a_pending_approval_is_announced_once_across_two_sweeps",
+    "attention_events::db_tests::a_decided_approval_is_not_announced",
+    "attention_events::db_tests::a_zero_retention_runs_pending_approval_is_not_announced",
+    "attention_events::db_tests::a_pending_question_is_announced_as_needs_input",
+    "attention_events::db_tests::a_proposed_plan_without_an_approval_is_announced_as_plan_ready",
+    "attention_events::db_tests::a_proposed_plan_with_its_live_plan_approval_is_announced_once_by_the_approval",
+    "attention_events::db_tests::each_announcement_names_its_own_run_owner_and_tenant"
+   ],
+   "lead_todo": [
+    "Run the DB-gated tests against a scratch database: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 DATABASE_URL=<scratch URL whose database name contains 'test'> cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1. scratch_pool refuses a URL without 'test' in it. This runs the 7 new tests and S1's 5.",
+    "Live proof, not run here, after WS01 S2 (drainer fix and migration 0043) is deployed: rebuild session-core from the worktree, then on a dev stack set SESSION_CORE_ATTENTION_EVENTS_ENABLED=true. Create one gated tool approval on a persistent chat run. Check (a) session_audit_outbox rows with subject like mp.v1.run.<run>.event and payload.state ATTENTION_STATE_NEEDS_APPROVAL, with published_at set; (b) nats stream view MODEL_PLANE_RUN_EVENTS shows one RUN_ATTENTION message; (c) the Convex mirror, insight-core, taskexec, sessionreview and runwatch each log or record an ignore; (d) mp_session_learning_run_events_enqueued_total stays flat. Then switch the flag back off.",
+    "Optional shared-edit, lead decides: in the session-core service of the Model Plane compose file (not located or edited in this slice), add SESSION_CORE_ATTENTION_EVENTS_ENABLED=false and SESSION_CORE_ATTENTION_SWEEP_SECONDS=5 so the default is visible. An unset variable already reads as off, so no change is required for safety.",
+    "Commit by the lead only. Include the five owned files listed in files_changed. Exclude the four execution-core files that another batch has modified in this worktree."
+   ],
+   "deviations": [
+    "The row says the sweeper derives pending items with the S1 SQL. attention.rs's fetch_pending is private and attention.rs is not owned, so the sweep carries its own SQL with the same predicates. Each approval's liveness goes through attention::derive, so the two cannot disagree about which approval waits.",
+    "The row's SAVEPOINT wrapper became one autocommit statement per row. The containment is the same: a refused row is counted and retried on the next pass, and it never holds back the rest.",
+    "A proposed plan that has a live plan-kind approval is announced once, by the approval row (source_id is the approval id), not twice.",
+    "Only chat and agent_run threads are announced, which are the attention list's origins. Space, support and mail-task threads never reach the event.",
+    "causation_id is the waiting row's id and correlation_id is the run id. The row did not specify either."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/attention.rs (optional, not required): expose LISTED_ORIGINS and the liveness rule as pub(crate), so the sweep shares them rather than holding a pinned copy of the origins list.",
+    "apps/Model Plane/rust/services/session-core/src/audit_publisher.rs (optional): make check_outbox_authority pub(crate) so a test can call the real drainer check. Today the test mirrors its conditions.",
+    "apps/Model Plane/api/contracts/run-attention-envelope.json.sha256 (not created, not owned): the contracts README asks for a .sha256 pin beside a canonical golden, and every consumer vendors a byte-identical copy. The S4 capability-core test will need that vendored copy."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The 12 DB-gated attention tests (7 new) have not been run. Lead runs: cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1 against a scratch DATABASE_URL.",
+     "Live proof is owed (needs WS01 S2 deployed and session-core rebuilt, switch on): exactly one published RUN_ATTENTION per gated approval (session_audit_outbox.published_at set, message in nats stream view MODEL_PLANE_RUN_EVENTS); Convex, insight-core, taskexec, sessionreview and runwatch ignore it, with log lines captured; RUN_COMPLETED metrics stay flat. Then switch it off again.",
+     "The lead's commit must hold only the five owned files. The execution-core, model-gateway sse.rs, frontend and billing-quota changes and audit-verify.exe in the worktree belong to other work."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The sweep reads pending rows and inserts in a separate statement with no lock, so a decide that commits between the two leaves one RUN_ATTENTION for an approval already decided. S4 must re-check that the approval is still requested before it notifies."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The 600-second window drops items: a waiting row created while the sweeper is down for longer than the window is never announced after restart, because no high-water mark is kept. Needed before the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The seven new DB-gated tests in attention_events::db_tests compile but were not run; this slice ran no Postgres. The lead must run them with the command in lead_todo."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof is owed: a rebuilt session-core with the switch on, the outbox rows published, the NATS stream message seen, and the five consumers' ignore behaviour captured in their logs. The static reads (runwatch returns outcomeAck for unmapped types, taskexec returns no task id, sessionreview returns a skipped outcome, insight-core acks unmapped types, the Convex mirror returns ignored) support the claim but do not prove it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The drainer's check_outbox_authority is private to audit_publisher, so the unit test mirrors its conditions instead of calling the real check. Making it pub(crate) would let the test call it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test seeds a zdr_waived run, which needs a waiver acknowledgement and connection row. The waived refusal is covered only by the pure gate unit test enqueue_permitted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A proposed plan with no run_id is never announced, because the event rides the run subject and there is no run to name. A thread-level subject, or an explicit decision to leave these unannounced, is needed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The three sweep queries filter on status, expiry and requested_at or updated_at, and no existing index matches those predicates. An EXPLAIN (ANALYZE) on a seeded org at production scale is needed before the switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The payload state carries the proto enum name (ATTENTION_STATE_NEEDS_APPROVAL, ATTENTION_STATE_NEEDS_INPUT, ATTENTION_STATE_PLAN_READY). The S4 Go decoder must match these spellings, so the owner should confirm them before S4 freezes the contract."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two pending tool approvals on one run produce two RUN_ATTENTION events, by design, one per row. S4 must coalesce per run and state, or the owner must accept one notification per approval."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The contracts README asks for a .sha256 pin beside the canonical golden. run-attention-envelope.json has none, and S4's capability-core test will need a byte-identical vendored copy plus a pin."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The sweep has no batch limit, so the 600-second window is the only bound on rows read per pass. A burst of pending rows inside the window is read whole in one pass."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "skipped_zdr counts sightings per pass, not distinct rows, so a withheld row raises the counter on every pass while it waits. A distinct count would need state."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "LISTED_ORIGINS is a copy of attention.rs's list, held equal by a source pin in attention_zdr_matrix.rs. Exposing the list from attention.rs would remove the copy."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A run id containing a dot would be refused by the drainer's classify step once its attempts run out. Session-core generates run ids without dots, so this is latent only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The sweep keeps no high-water mark. With the fixed 600 s window, a waiting row created while the sweeper is down (or switched off) for longer than the window is never announced."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The read and the insert run as separate statements with no lock. An approval decided between them still gets one RUN_ATTENTION, so the S4 notifier must re-check that the approval is still requested."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The five consumers' tolerance of the unknown RUN_ATTENTION event_type is supported only by static reads. It must be captured live before the switch goes on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "PLANS_SQL's NOT EXISTS checks only plan approvals requested inside the window. If a proposed plan's updated_at moves after its plan approval has left the window, a second PLAN_READY event (source_id = plan id) goes out for the same waiting item."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The drainer route test copies the conditions of check_outbox_authority (private in audit_publisher.rs) instead of calling the function. The plan row asks that the row pass check_outbox_authority."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test seeds a run with zdr=true in managed_run_terminalization_outbox or a zdr_waived run. Only retention_class='zdr' is exercised against Postgres."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A proposed plan with no run_id is never announced (the inner JOIN on runs), although the S1 attention list counts it. The owner should decide on a thread subject or accept this."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "run-attention-envelope.json has no .sha256 pin, and S4's Go decoder will need a byte-identical vendored copy of it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "payload.state uses the proto enum names (ATTENTION_STATE_*). The owner should confirm these before S4 freezes the Go decoder."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The three sweep queries span all tenants and have no batch limit or matching index. Run EXPLAIN at production scale before switch-on."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "LISTED_ORIGINS and the pending predicates copy attention.rs, held equal only by a source-text pin. Exposing them pub(crate) from attention.rs would remove the copy."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p session-core --bin session-core attention",
+      "outcome": "31 passed, 0 failed, 12 ignored (DB-gated)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --test attention_acl_contract --test attention_zdr_matrix",
+      "outcome": "attention_acl_contract 5 passed; attention_zdr_matrix 4 passed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --all-targets (plan command; compiles all targets)",
+      "outcome": "All targets compiled and passed: bin 703 passed/268 ignored; test targets 5, 4, 4, 9, 4 passed; 0 failures",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core attention -- --ignored --test-threads=1",
+      "outcome": "Not run: needs a scratch DATABASE_URL with 'test' in the name, and docker is forbidden. The 12 DB-gated tests compile.",
+      "passed": false
+     },
+     {
+      "command": "cargo fmt --all -- --check",
+      "outcome": "Exit nonzero from existing diffs elsewhere (approval_delivery.rs, dream_extractor.rs, dreaming.rs, main.rs mod ordering at lines 26 and 49 and others). None are in the slice's added lines. The slice's own files attention_events.rs, attention_acl_contract.rs and attention_zdr_matrix.rs show no fmt diff.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "audit",
+    "authority"
+   ],
+   "notes": "Built the RUN_ATTENTION sweep. attention_events.rs: each pass reads approvals, proposed plans and run questions of chat and agent_run threads inside a 600 s window. It gates on the run posture (zdr flag and retention_class must name persistent), decides each approval's liveness through attention::derive (the S1 derivation), and writes one session_audit_outbox row per waiting item on mp.v1.run.<run>.event. event_id is run_attention:session-core:<blake3 of run|state|source>, written with ON CONFLICT DO NOTHING. Payload is run_id, source_id, state (proto enum name, e.g. ATTENTION_STATE_NEEDS_APPROVAL) and thread_id; the envelope has zdr false, resource_ref run:<id>, and passes the drainer's route conditions. main.rs spawns the sweep only when SESSION_CORE_ATTENTION_EVENTS_ENABLED is literally true; when it is off, a parked task makes no database read and writes nothing. SESSION_CORE_ATTENTION_SWEEP_SECONDS defaults to 5. No migration, proto, nats.conf, nats-provisioner or outbox CHECK change. Golden wire body is api/contracts/run-attention-envelope.json (blake3 values taken from the first run; the golden test now passes). main.rs stays CRLF on every line (289/289); the diff is 15 added lines. Four execution-core files (grpc.rs, knowledge_tools.rs, runtime_loop/agent.rs, runtime_loop/mod.rs) were modified by another batch in this same worktree while this slice ran. This slice did not touch them, and the lead should keep them out of this slice's commit. Other session-core integration targets (outbox_emission, replay_deterministic, runtime_lifecycle) were not run; the Windows rule runs session-core by bin and by named test target."
+  },
+  {
+   "id": "WS27-S10",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\actions\\billing-quota.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\billing-quota.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\billing-quota.test.ts (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\RunCostMeter.tsx (modified)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\RunCostMeter.test.tsx (modified)"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/shared/api/billing-quota.test.ts",
+     "outcome": "7 passed (first run, before the component change)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat/components/RunCostMeter.test.tsx src/shared/api/billing-quota.test.ts",
+     "outcome": "34 passed on the final code (27 RunCostMeter tests including 6 new allowance tests, plus 7 billing-quota tests)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run AgentRunConsole.test.tsx AgentRunConsole.privacy-tier.test.tsx ChatLiveRunPanel.test.tsx ChatPanels.test.tsx ChatMessages.metrics.test.tsx ChatPage.voice-first-turn.test.tsx",
+     "outcome": "6 files, 146 tests passed with the flag off (host components of the meter)"
+    },
+    {
+     "command": "node --test apps/gateway/scripts/action-surface-contract.test.mjs",
+     "outcome": "FAIL, pre-existing at HEAD: 14 registry ids have no dispatcher literal in apps/gateway/src/domains/actions/handlers.rs. Neither file is modified in this worktree and this slice registers nothing."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+     "outcome": "exit 0: unit tests 1041 passed, 1 ignored; every integration target passed, 0 failed. No Rust file changed."
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on the five changed and new files",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "exit 2, 22 errors, all pre-existing and outside the changed files (src/shared/api/quarry-client.ts: @quarry/client not generated in this worktree; src/shared/api/schedule-contract.test.ts cast). None in RunCostMeter or billing-quota files."
+    },
+    {
+     "command": "pnpm vitest run / pnpm typecheck",
+     "outcome": "not run: pnpm's dependency check fails in this worktree (ENOENT on the Quarry-v2 SDK link), so the local node_modules binaries were run instead"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPanels.tsx near line 914 (StepsPanel, which has threadId and activeTask()): change `<RunCostMeter meter={props.meter} />` to `<RunCostMeter meter={props.meter} quotaRefreshKey={`${props.threadId ?? ''}:${activeTask() ? 'live' : 'settled'}`} />`. This reads on Work open and at each task start and settle, never per frame.",
+    "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatLiveRunPanel.tsx near line 590 (`fallback={<RunCostMeter meter={props.meter} />}`): add `quotaRefreshKey={props.runId ?? undefined}`. This panel carries no settle signal, so it reads once per watched run.",
+    "shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentRunConsole.tsx near line 1492 (`<RunCostMeter meter={usage()} />`): add a key from state.runId and a settled flag on state.status (RunStatus), for example `quotaRefreshKey={`${state.runId ?? ''}:${state.status}`}`.",
+    "optional shared-edit C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\vite-env.d.ts: add `readonly VITE_QUOTA_READOUT?: string;` and `readonly VITE_QUOTA_READOUT_METRIC?: string;` inside ImportMetaEnv (tab indent, as the file does).",
+    "optional: add VITE_QUOTA_READOUT=false and an empty VITE_QUOTA_READOUT_METRIC= beside the other VITE_ flags in C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\.env.example, if that file lists them. I did not read that file.",
+    "Live proof (not run): rebuild the frontend with VITE_QUOTA_READOUT=true and VITE_QUOTA_READOUT_METRIC set to a metric billing-core answers for (for example ai.metered.input_tokens); restart the frontend container (bind mount). Set an allowance in a test org, confirm a non-admin member gets 200 from GET /api/v1/billing/quotas/<metric> and sees the line, and capture member and admin screenshots. The flag stays off in all other builds.",
+    "Owner and Control decisions: (a) a trimmed non-admin projection in billing.rs, (b) per-org metric naming versus the build-time value, and (c) whether billing.quota.read must be a registered action (if so: handlers.rs arm, dispatchers.rs function, and the registry entry).",
+    "Pre-existing gate, not this slice: action-surface-contract.test.mjs is red at HEAD (14 ids in depth findings). pnpm test runs it, so pnpm test is red regardless of this slice.",
+    "No gateway change in this slice; the gateway cargo suite passed as a regression check."
+   ],
+   "deviations": [
+    "action-registry.ts is NOT changed. The plan says to register billing.quota.read beside billing.allowances.read, but billing.allowances.read is not in the registry at all (it is a standalone contract file parsed directly by BillingAllowancesSection.tsx). The action-surface contract requires every registered id to have a gateway dispatcher in handlers.rs, which this slice does not own. The contract lives as a standalone file mirroring billing-allowances.ts.",
+    "Metric name: WS27-D9 recommends a setting read by the BFF. I used a build-time SPA value, VITE_QUOTA_READOUT_METRIC, which is one metric per deployment rather than per org, because the route takes the metric in its path and the row says no BFF change.",
+    "billing.rs is not changed. The existing route already admits any org member; the trimmed non-admin projection in the row needs a product/Control decision that is not recorded.",
+    "Solid 2.0.0-rc.0 exports no createResource, so the slice uses the repo's @/shared/lib/create-resource-compat shim, as ChatPanels and ChatPage do.",
+    "The action contract is .strict() so a client that names an organisation is refused. The row did not say so; it is the stronger reading of its 'never an input' intent.",
+    "pnpm vitest and pnpm typecheck were not used in this worktree (pnpm's dependency check fails). Vitest and tsc were run from node_modules directly."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatPanels.tsx (call-site quotaRefreshKey, needed for the after-a-turn refresh)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatLiveRunPanel.tsx (call-site quotaRefreshKey)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\agents\\components\\AgentRunConsole.tsx (call-site quotaRefreshKey)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\vite-env.d.ts (optional declaration of the two VITE names)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\.env.example (optional, flag documentation)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\apps\\gateway\\src\\domains\\actions\\handlers.rs and dispatchers.rs (only if the owner wants billing.quota.read registered in action-registry.ts)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not run: rebuild the frontend with VITE_QUOTA_READOUT=true and VITE_QUOTA_READOUT_METRIC set to a metric billing-core answers for, restart the frontend container, set an allowance in a test org, and capture member and admin screenshots showing live utilization.",
+     "The after-a-turn refresh needs the shared call-site edits (quotaRefreshKey in ChatPanels.tsx, ChatLiveRunPanel.tsx, AgentRunConsole.tsx) that the implementer handed back in lead_todo. Until they land, the readout is read once per mount, so the row's 'after a turn' refresh is not wired.",
+     "Owner and Control rulings are still open: a trimmed non-admin projection in billing.rs, per-org metric naming (WS27-D9) instead of the build-time value, and whether billing.quota.read must be a registered action."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The existing BFF route billing_quota (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/billing.rs:120-146) returns the organisation's raw limit, used and remaining to every org member; the SPA shows only the share, but the amounts are on the wire, so a trimmed projection needs a product/Control decision before the flag is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The metric is one build-time value per deployment (VITE_QUOTA_READOUT_METRIC), not the per-org BFF setting WS27-D9 recommends; per-org naming needs a BFF change or the owner's ruling before orgs with different metrics are switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The after-a-turn refresh needs the three shared call-site edits in lead_todo; until they land the readout reads once per mount, so a settled turn's effect on the allowance is not shown until the panel remounts."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The slice DoD (a non-admin member sees live utilization) needs a rebuilt frontend with the two VITE values, a restarted frontend container, an allowance set in a test org, and member and admin screenshots; none of that ran here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Pre-existing: apps/gateway/scripts/action-surface-contract.test.mjs fails at HEAD because 14 registry ids have no dispatcher literal in handlers.rs (approvals.decide, audit.create_siem_destination, audit.delete_siem_destination, audit.export_log, audit.update_siem_destination, audit.verify_chain, chat.answer_question, chat.execute_approved_plan, chat.run.continue, chat.set_connector_scope, integrations.browse_connection, integrations.fetch_connection_content, mcp.approve_tool, tools.set_policy), so pnpm test is red regardless of this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "billing.quota.read is not in the action registry; registering it needs a dispatcher literal in apps/gateway/src/domains/actions/handlers.rs and a dispatch_ function in dispatchers.rs, both outside this slice, and the registry test requires them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Members are warned about organisation-wide spend that may not be theirs; the line is labelled as organisation but a per-user allowance is a Control backlog item."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The readout tests stub fetch and do not exercise the real BFF route or the RunCostMeter host call sites; no Playwright or gateway-through path covers the member view."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "This worktree's pnpm fails its dependency check (ENOENT on the Quarry-v2 SDK link), and the typecheck's build:quarry-client step has not run, so @quarry/client is missing and 22 pre-existing TypeScript errors remain in quarry-client.ts and schedule-contract.test.ts. An early pnpm exec I ran attempted an install and may have touched node_modules, so check it before relying on pnpm here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Solid 2.0.0-rc.0 has no createResource export; the shim's latest keeps the last reading while a refresh loads, and a failed refresh clears the line only because the fetcher turns errors into undefined."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "src/vite-env.d.ts does not declare the two new VITE names; they type through the Vite index signature, so the declaration is documentation only."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The BFF billing_quota route (apps/Frontend Plane/verevonv3/apps/gateway/src/domains/billing.rs, billing_quota, gated only by authorized_org_id) sends the organisation's raw limit, used and remaining to every org member. The SPA shows only the share, so the trimmed projection the row mentions needs a product/Control ruling before VITE_QUOTA_READOUT is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The metric is one build-time value per deployment (VITE_QUOTA_READOUT_METRIC), not an org-configured setting as WS27-D9 / the row's 'metric name org-configured via env/setting' suggests; orgs with different metrics cannot be served without a BFF change."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "RunCostMeter accepts quotaRefreshKey, but no host passes it yet, so the row's 'fetched once per thread open and after a turn' refresh only works after the lead applies the three shared call-site edits."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "billing.quota.read is a standalone contract (mirroring billing-allowances.ts, which is itself absent from action-registry.ts), not a registry entry. The deviation is justified because the registry test requires a gateway dispatcher in handlers.rs/dispatchers.rs outside this slice, but it is still a variance from the row's 'register next to billing.allowances.read'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Pre-existing at HEAD: apps/gateway/scripts/action-surface-contract.test.mjs fails (registry ids without dispatcher literals). action-registry.ts and apps/gateway are unmodified in this tree, so the failure is not caused by this slice, but the plan's second test command and pnpm test stay red."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The readout tests stub fetch. Nothing exercises the real BFF route through the gateway, the RunCostMeter host call sites, or a member-role e2e path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A metric with no quota configured is answered by billing-core with a zero-utilization status rather than an error, so members would see 'Organisation allowance: 0% used' instead of no line; whether that is acceptable depends on the metric chosen."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "src/vite-env.d.ts does not declare VITE_QUOTA_READOUT / VITE_QUOTA_READOUT_METRIC (they type through the index signature)."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "vitest run src/shared/api/billing-quota.test.ts src/features/chat/components/RunCostMeter.test.tsx --pool=threads (node_modules/vitest direct)",
+      "outcome": "2 files passed, 34 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "node --test apps/gateway/scripts/action-surface-contract.test.mjs",
+      "outcome": "FAIL: 1 test, 'every registered action has exactly one live gateway dispatcher contract' (pass 0, fail 1). The diff lists registry ids with no dispatcher literal. action-registry.ts and apps/gateway are unmodified in git status, and the slice registers no action, so the failure is pre-existing and not caused by this slice.",
+      "passed": false
+     },
+     {
+      "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+      "outcome": "Compiles. 6 result lines: 1066 passed, 0 failed. No Rust file was changed by this slice.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the member quota readout behind VITE_QUOTA_READOUT (off unless the literal string true). billing-quota.ts (actions) is the billing.quota.read contract, strict, so the organisation is never an input. api/billing-quota.ts parses billing-core's QuotaStatus (org_id and metric are ignored) and calls GET /api/v1/billing/quotas/{metric}, with the metric from VITE_QUOTA_READOUT_METRIC. RunCostMeter reads the allowance when it opens and again only when quotaRefreshKey changes, never per frame. It shows \"Organisation allowance: N% used\" (nb: \"Organisasjonens kvote: N % brukt\"), and warns once at utilization >= 0.8 or when exceeded (data-allowance-warning near|exceeded, aria-live polite). A failed read shows nothing. No model-gateway, proto, migration or billing.rs change. The after-a-turn refresh only works once the shared call-site edits in lead_todo are applied; until then the readout is read once per mount. Code and unit tests are done; the live proof is lead-run."
+  },
+  {
+   "id": "WS18-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\tests\\e2e_invoke_chain_test.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\knowledge_tools.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\agent.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\grpc.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\tests\\space_scoped_knowledge_search.rs (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo check -p execution-core --lib (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "compiles; only pre-existing warnings (capability_policy.rs irrefutable let, approval_delivery_worker.rs dead fn, execute_step_with_subagent and decision_closer never used)"
+    },
+    {
+     "command": "cargo test -p execution-core --lib knowledge_tools",
+     "outcome": "22 passed, 0 failed (includes a_space_decision_reaches_the_data_plane_only_on_the_search_it_scopes and the_space_retrieval_header_reads_absent_empty_and_decided_runs_apart)"
+    },
+    {
+     "command": "cargo test -p execution-core --lib knowledge_route_tests",
+     "outcome": "5 passed, 0 failed (includes a_space_run_with_no_decision_refuses_knowledge_search_before_any_call)"
+    },
+    {
+     "command": "cargo test -p execution-core --test space_scoped_knowledge_search",
+     "outcome": "1 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib space_",
+     "outcome": "20 passed, 0 failed (includes the_agentic_space_retrieval_switch_is_strict, a_do_run_carries_its_space_retrieval_only_when_scoped_and_switched_on, execution_dispatch_forwards_the_space_retrieval_only_when_present)"
+    },
+    {
+     "command": "cargo test -p model-gateway --test e2e_invoke_chain_test agentic_dispatch_forwards",
+     "outcome": "started; still compiling when I stopped. Result NOT confirmed, so it must be re-run before this slice is called done"
+    },
+    {
+     "command": "cargo test -p model-gateway --test e2e_invoke_chain_test (full binary, batch test command)",
+     "outcome": "NOT RUN"
+    },
+    {
+     "command": "cargo test -p execution-core --lib (full suite, regression check of the agent loop call-site changes)",
+     "outcome": "NOT RUN"
+    },
+    {
+     "command": "cargo test -p execution-core --test cross_service_loop_contract and --test durable_loop_contract (source-scan contracts over run_agent ordering)",
+     "outcome": "NOT RUN"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 tests/space_scoped_knowledge_search.rs",
+     "outcome": "clean"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, after the MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL line (~line 361), add a WS18-S5 comment and the line `AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false}`. Default off.",
+    "Rebuild and redeploy execution-core first, then model-gateway, with docker (lead only): bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build execution-core model-gateway. Keep AGENTIC_SPACE_RETRIEVAL_ENABLED unset or false until the live proof passes.",
+    "Live proof (lead): a project with a Space-only document and an org-only document. Send a Do turn 'summarise our project docs' with the switch on. Confirm citations come only from the Space, that a turn with no decision shows the degraded 'project knowledge unavailable' result, and that the redacted headers and run steps look right. Check gateway logs for the header's presence only, never its value.",
+    "Ordering with WS18-S2: enable MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL=true (after its staging proof) before AGENTIC_SPACE_RETRIEVAL_ENABLED=true. Otherwise every follow-up Do turn of a scoped thread gets the typed withheld result.",
+    "Finish the pending runs before calling this slice done: cargo test -p model-gateway --test e2e_invoke_chain_test (full binary, which includes agentic_dispatch_forwards_the_space_retrieval_decision_only_when_scoped); cargo test -p execution-core --lib; cargo test -p execution-core --test cross_service_loop_contract and --test durable_loop_contract. Use CARGO_TARGET_DIR=C:/dev/mp-target-w2 and CARGO_INCREMENTAL=0.",
+    "WS18-D8 (owner or lead decision): measure the decision TTL against a multi-minute Do run. This gates enablement, not the code.",
+    "Owner decision before MODEL_ACTION_ADMISSION=table is enabled in any Space-capable deployment: the owner-reads Space scope (P0 depth finding above)."
+   ],
+   "deviations": [
+    "Header rule: the plan says forward the header only when the token is non-empty, else forward nothing. Implemented: with the switch on and a Space-scoped run, the header is always sent, empty when the turn holds no decision. Reason: an absent header must mean the organisation's own search (switch-off stays byte-identical), so 'Space run with no decision' needs its own value; the alternative was a second switch read in execution-core.",
+    "The switch is read only by model-gateway. execution-core reads no AGENTIC_SPACE_RETRIEVAL_ENABLED.",
+    "The S3 receipt frame after connected (retrieval / not_entitled) is NOT emitted. It depends on WS18-S3 (knowledge_receipt), which is not built and not in this batch.",
+    "The plan mentions a WS02 params struct for agentic_run_stream. No such struct exists in this tree, so the new value is a plain positional parameter, like the others.",
+    "Scheduled runs (grpc.rs execute_scheduled_agent_step) pass SpaceRetrieval::Withheld. This is not in the row. It is a fail-closed decision, because validate_scheduled_step_bindings always requires a space_id, so scheduled runs are always Space-scoped and carry no gateway decision.",
+    "Park resume (refuses Space runs in park::admit) and the compatibility entry points (execute_step, execute_step_with_browser_grant, execute_step_with_subagent, and the test drivers run_agent_with_tools and run_agent_with_route) pass SpaceRetrieval::Organisation. execute_step_with_subagent is reached only from tests.",
+    "The header carries the raw decision token, with no 'Bearer ' prefix."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (shared-edit, lines listed in lead_todo)",
+    "apps/Model Plane/rust/services/execution-core/src/owner_reads.rs (WS24-S8 owner: Space scope for knowledge_list_documents; not edited here)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Shared edit to apps/Model Plane/deploy/docker-compose.yml: add AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false} to the model-gateway environment (the lead's work; the implementer listed it in lead_todo).",
+     "Rebuild and redeploy execution-core before model-gateway (docker, lead only). Never enable the switch on a gateway that is newer than execution-core.",
+     "Live proof per the DoD: a project with one Space-only and one org-only document, the Do turn 'summarise our project docs', citations only from the Space, a run without a decision degrading visibly, redacted headers and run steps. The badge depends on WS18-S3.",
+     "WS18-D8: measure the decision TTL against a multi-minute Do run before enabling AGENTIC_SPACE_RETRIEVAL_ENABLED.",
+     "The S3 receipt frame after connected (retrieval/not_entitled) is part of the row but depends on WS18-S3 knowledge_receipt.rs, which is not built. It must be wired before user enablement."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "Cross-Space read in committed code: the owner document inventory tool knowledge_list_documents (src/owner_reads.rs execute; offered at runtime_loop/agent.rs ~1188-1192 when MODEL_ACTION_ADMISSION=table and the run is not ZDR) has no Space condition, so a Space-scoped Do run lists the whole organisation's document titles. The S5 decision does not reach it. Close it (scope or refuse for space_id non-empty) before MODEL_ACTION_ADMISSION=table is enabled in any Space-capable deployment. Owner: WS24-S8."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The S3 knowledge receipt (retrieval / not_entitled frame after connected) is not emitted for Do runs, so the badge and the visible 'project not searched' state do not exist yet. The WS18-S3 owner must wire it into agentic_run_stream before the switch is enabled for users."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ExecuteStep RPC (grpc.rs execute_step) passes SpaceRetrieval::Organisation for every step, so a direct caller that sends knowledge_search with a non-empty space_id would search org-wide. No shipped gateway caller does this (tools.rs and browser_run.rs send only code_interpreter and browser tools), so it is unreachable today. Withhold Space-scoped knowledge_search there before any caller routes it through ExecuteStep."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Decision TTL (WS18-D8) is unmeasured, and the expired-decision path (Data Plane PermissionDenied mapped to a degraded tool error) has no test. Measure the TTL against a multi-minute Do run and prove a live run outliving its decision degrades visibly, before enabling AGENTIC_SPACE_RETRIEVAL_ENABLED."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Rollout ordering: an execution-core built before this slice ignores x-space-retrieval-authorization and runs Space-scoped searches organisation-wide. Deploy execution-core first, then set the gateway switch. Never set the switch on a gateway that is ahead of execution-core."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins the scheduled-path Withheld choice in grpc.rs execute_scheduled_agent_step. The plan's ZDR line ('agentic refused, assert refusal row unchanged') is not added; the ZDR refusal precedes agentic_run_stream, so no header is sent under ZDR, but no test asserts it. The golden ZDR matrix files are [live-only] in this tree. The e2e test also does not assert that the decision value is absent from logs."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Approval continuations of a Space-scoped run are refused today (runtime_loop/resume.rs effective_authority returns AuthoritySpaceMismatch because the gateway continuation sends space_id empty). If WS03 ever admits them, they must carry a retrieval decision too."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Trust boundary: execution-core forwards the decision without verifying it, and the header is optional for any caller holding a valid execution bearer. Only the gateway calls RunAgent, so this matches how space_id is already trusted. The retrieval engine verifies the decision against the verified org and subject, so a forged value fails closed there."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "owner_reads.rs knowledge_list_documents (offered under MODEL_ACTION_ADMISSION=table) has no Space condition, so a Space-scoped Do run can list org-wide document titles; scope or refuse it for non-empty space_id before table admission is enabled in a Space-capable deployment (WS24-S8 owner). Not reachable with defaults; implementer flagged it as P0."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The S3 knowledge receipt frame (retrieval/not_entitled after connected) named in the S5 row is not emitted because WS18-S3 is unbuilt; the visible 'project not searched' state is missing until it is wired into agentic_run_stream."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "grpc.rs execute_step (ExecuteStep RPC) passes SpaceRetrieval::Organisation even when the request carries a space_id, so a future caller routing knowledge_search through ExecuteStep in a Space would search org-wide; no shipped caller does this today."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The expired-decision path (Data Plane PermissionDenied surfaced as a degraded knowledge_search error) has no test and the decision TTL (WS18-D8) is unmeasured."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Deviation from the row: with the switch on, a Space-scoped run with no decision sends an empty x-space-retrieval-authorization header (EC maps it to Withheld) instead of sending no header. This is fail-closed and keeps switch-off byte-identical. The e2e test confirms the empty value survives the wire. The lead should accept it in the ledger."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins the Withheld choice for scheduled runs (grpc.rs execute_scheduled_agent_step) or a ZDR assertion that an agentic ZDR refusal sends no retrieval header, and no test asserts the decision value never appears in logs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL off and AGENTIC_SPACE_RETRIEVAL_ENABLED on, every follow-up Do turn of a scoped thread is Withheld (fails closed), so enable WS18-S2's switch first."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -p execution-core --lib knowledge_tools",
+      "outcome": "22 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --test e2e_invoke_chain_test",
+      "outcome": "158 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test space_scoped_knowledge_search",
+      "outcome": "1 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test cross_service_loop_contract",
+      "outcome": "9 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --test durable_loop_contract",
+      "outcome": "31 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib space_",
+      "outcome": "20 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --lib (full; also compiles the crate)",
+      "outcome": "1550 passed, 0 failed",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "zdr"
+   ],
+   "notes": "Slice WS18-S5 (Do runs retrieve from the project), wave mode. Design: the gateway alone reads AGENTIC_SPACE_RETRIEVAL_ENABLED (strict literal true). When it is on and the agentic run is Space-scoped, model-gateway sends the header x-space-retrieval-authorization on RunAgent: the raw Control retrieval decision, or an empty value when the turn holds none. The header is absent when the switch is off or the run is not Space-scoped. execution-core reads it into SpaceRetrieval {Organisation (absent), Scoped(token), Withheld (empty)} and threads it through run_agent -> run_agent_with_offered -> run_agent_with_route_parkable -> LoopContext (children inherit it) -> execute_step_with_result_handles -> execute_step_inner -> execute_knowledge_search. Scoped adds x-space-decision metadata to the Data Plane Retrieve (KnowledgeClient::search gained one parameter). Withheld returns the typed degraded envelope with reason 'project knowledge unavailable' before any network or env access. Malformed decision metadata fails the search before anything is sent. The Data Plane retrieval engine (apps/Data Plane v2 ... retrieval_svc.rs apply_space_decision) verifies the decision against the verified org and user and rejects invalid or expired ones with PermissionDenied, which execution-core maps to a degraded tool error. Verified in this session: the knowledge_tools, route and integration tests and the sse space_ tests above. Pending: the e2e targeted and full runs, the full EC lib suite and the two EC contract suites. Rustfmt drift in grpc.rs, mod.rs and agent.rs predates this change and sits outside my hunks, so I did not reformat those files. The new e2e test lives in model-gateway/tests/e2e_invoke_chain_test.rs because the plan names that file; it is not in the batch files list but it is a test file beside the change."
+  }
+ ]
+}

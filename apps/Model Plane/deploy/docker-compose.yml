@@ -384,6 +384,9 @@ services:
       MODEL_GATEWAY_RUN_ORIGIN_FIELD: ${MODEL_GATEWAY_RUN_ORIGIN_FIELD:-false}
       # EP-4 S8: MCP App resources (read-through, never stored). Only the literal true; EP-4 S12 flips it.
       MCP_APPS_ENABLED: ${MCP_APPS_ENABLED:-false}
+      # W4-D M1: the app frame's policy and the network origins it grants (resource response `csp`, `network_origins`).
+      # Only the literal true turns it on; off, the response is the S8 shape and the frame keeps its no-network policy.
+      MCP_APPS_NETWORK_ENABLED: ${MCP_APPS_NETWORK_ENABLED:-false}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.
@@ -1232,6 +1235,8 @@ services:
       SESSION_CORE_ARTIFACT_REVISIONS_ENABLED: ${SESSION_CORE_ARTIFACT_REVISIONS_ENABLED:-false}
       # EP-7 S1: the ThreadGoalService store. Only the literal true.
       SESSION_CORE_THREAD_GOALS_ENABLED: ${SESSION_CORE_THREAD_GOALS_ENABLED:-false}
+      # EP-7 W4-F T1: the EventTriggerService record store. Only the literal true. Records only: nothing fires until the consumer and FireAuthorizer land.
+      EVENT_TRIGGERS_ENABLED: ${EVENT_TRIGGERS_ENABLED:-false}
       # EP-12 S9: the owner's ExportThread (ThreadExportService). Only the literal true.
       SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}
       # EP-12 S14: the ThreadShareService snapshot store. Only the literal true; stays off until the share-model ADR (OD-5) is accepted.
@@ -1898,6 +1903,9 @@ services:
       EXECUTION_BROWSER_ASSIST_TTL_SECONDS: ${EXECUTION_BROWSER_ASSIST_TTL_SECONDS:-1800}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
+      # W4-C C1: the Do loop's computer tools (computer.observe, computer.act). Only the literal true turns them on, and
+      # even on, no computer backend is built yet, so every call is refused computer_unavailable.
+      EXECUTION_DO_COMPUTER_ENABLED: ${EXECUTION_DO_COMPUTER_ENABLED:-false}
       # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
       # WS14-S5: an answer continues the same run. Off by default; also needs AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and
@@ -2161,6 +2169,9 @@ services:
       CRON_CONTRACT_GUARDS_ENABLED: ${CRON_CONTRACT_GUARDS_ENABLED:-false}
       # EP-6-S2: Run now, a manual schedule fire through the same Control fire authorization. Only the literal `true` enables it.
       CRON_RUN_NOW_ENABLED: ${CRON_RUN_NOW_ENABLED:-false}
+      # EP-7 W4-F T2: the event trigger fire path (webhook_received consumer and fire sweeper). Only the literal true.
+      # The consumer also needs EVENT_TRIGGER_NATS_URL; the sweeper alone decides nothing until a fire is recorded.
+      EVENT_TRIGGER_FIRE_ENABLED: ${EVENT_TRIGGER_FIRE_ENABLED:-false}
       # WS16-S4: RUN_ATTENTION becomes a typed notification. Off by default; turn NOTIFICATION_NATIVE_TYPES_ENABLED on first.
       CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: ${CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED:-false}
       ATTENTION_NOTIFY_COALESCE_SECONDS: ${ATTENTION_NOTIFY_COALESCE_SECONDS:-60}

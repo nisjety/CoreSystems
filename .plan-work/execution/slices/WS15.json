@@ -1,0 +1,345 @@
+{
+  "ws": "WS15",
+  "header_decisions": [
+    "DEC-11 (WS15-D3): thread-status vocabulary and precedence; gates S6. WS16 owns the closed set; the failed-versus-working order is decided in DEC-11, not in S6 (K3-7/K3-8).",
+    "DEC-17 (WS15-D7): trigger-kind chip deferred until run-level origin exists; not scheduled, no slice.",
+    "WS15-D1: reverse the in-code Do-compaction decision at sse.rs (log line and nothing user-facing); new ledger entry written in S1; gates only the Do-run part of S2.",
+    "WS15-D2: post-hoc provider wait only; no live retry signal (2.6 row 1); scopes S4, no gate.",
+    "WS15-D4: gates optional S8.",
+    "WS15-D5: S9 handed to WS23 as recommended owner; gates S9.",
+    "WS15-D6: marked local in the section header; its content is not stated in the WS15 section.",
+    "WS15-D8: one lifecycle-notices node per turn and no message.delta event; used by S5.",
+    "Free without decision per the section: S1, S2 (non-Do part), S3, S4, S5, S6 (apart from the DEC-11 order)."
+  ],
+  "notes": "Sources read in full: WS15 section (plan lines 924-961) and Appendix B (lines 2253-2322); section 2 reservations and 2.6 rows 1 and 17 checked for tags and ownership.\nBuilt status at HEAD (Glob/Grep; git log afb83928..HEAD = 101 commits, none a WS15 slice; closest are WS03 S8-A park commits and WS14 S2a): S1 not built (no lifecycle_notice.rs, no retry/compaction/context variants or SPA handlers). S2 not built (log-only paths exist in sse.rs budget_compacted_thread and fetch_skill_context; no context_change emitted; lifecycle_events.rs absent). S3 not built (no transient_reason, no ToolRetryScheduled, orchestration.proto has no tag 26). S4 not built (ProviderSummary exists in turn_timing.rs without failed_attempts_ms or retry_wait_ms). S5 not built (no lifecycle FE types or node; WS09-S2 renderLive/nodeKey absent from ChatMessages.tsx). S6 not built (no thread-status.ts; the four status vocabularies remain; WS16-S1 attention.proto and WS16-S2 shared/attention/attention-state.ts absent). S7 PARTLY built by WS03 S8-A: the raw run_parked frame (sse.rs run_parked_event), chat-client.ts case run_parked to onRunParked, run-park.ts, run-console-client.ts and the AG-UI CUSTOM entry in ag_ui.rs exist; the typed ChatEvent::RunParked variant, its taxonomy row and its ledger line do not. S8 not built (no with_lifecycle_notes; with_head_summary exists in session_flow.rs). S9 not built (capability-core migrations stop at 0015; no mcp_server_incidents).\nAmendments applied: K3-7/K3-8 make S6 a [FINISH] 1-day shim (thread-status.ts re-exports WS16's attention-state.ts, created by WS16-S2; no thread-seen.ts; failed-versus-working decided in DEC-11). The WS15 core effort header is therefore 18-27 days (was 20-30; S1-S7 with S6 at 1 day); optional S8 2-3 and S9 5-8 are excluded from it. N2 (K2-1): S3 edits orchestration.proto, so WS12-S2 is in its depends and its DoD is a tag-number diff against git show HEAD:'apps/Model Plane/proto/model_plane/v1/orchestration.proto', not a buf-breaking claim. N1 (K2-3): every slice changes runtime behaviour, so each needs rebuilt images, a running stack and an end-to-end flow (common rebuild command: bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build model-gateway, plus execution-core or session-core where touched). N3 (B.1): S1, S4, S5, S7 and S8 edit ChatMessages.tsx, chat-client.ts, use-chat-controller.ts or chat-normalizers.ts, which belong to WS09/WS12 sessions; those slices name the owner and rebase. N6 and the T4 gate: S9 must ship a revert for its migration (most capability-core migrations have a .down.sql; 0003-0005 do not). N5 does not apply (S1 uses no serde derive, blake3 or sha2 as written). DEC-39: S3 and S9 wait for integrator numbers.\nProto tags: OrchestrationEvent ToolRetryScheduled = 26 is final (2.6 table); RunParked/RunResumed 24/25 already landed in WS03 S8-2; QuestionAsked/Answered are 27/28. The InferChunk retry_notice is withdrawn (2.6 row 1), so S3 needs no inference-core proto change.\nDiscrepancies to resolve before implementation: (a) CoreSidebar.test.tsx (S6 Tests) does not exist; the existing files are CoreSidebar.chat-sessions.test.tsx and CoreSidebar.home-tab.test.tsx. (b) verevon-ui-events.test.ts (S1 Tests) does not exist. (c) MG/mcp_gateway.rs (S9 recorder) does not exist; the MCP modules are mcp_http.rs, mcp_jsonrpc.rs and mcp_oauth.rs; listed as NEW pending the author's choice. (d) Plan line numbers have drifted (budget_compacted_thread now sse.rs:5646; classify_agentic_run_outcome sse.rs:9515; orchestration_event_to_sse sse.rs:10718; event_run_id orchestration_grpc.rs:2052); line numbers are dropped from the file list. (e) The WS09-S1 Playwright regex (B.4, K2-22) does not match chat-lifecycle-cues.spec.ts, so S5's e2e would not run in that job unless the regex is extended. (f) gen-sse-event-taxonomy.py is in S1's Tests but not its Change column; it may need entries for the three new variants (VARIANT_ARM, NON_CHATEVENT_CONSUMER_CASES); not listed. (g) The S4 FE turn_timing payload type sits in chat-client.ts near the turn_timing parser; not named in the row, so not listed. (h) S3's regenerated Go bindings are apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go; listed although the row names no path. (i) The WS12 S5 UI_STATE_CHECKLIST.md rows were not located; not listed. (j) compaction.rs in S2 is conditional (size helper if needed). (k) sse.rs is touched by S2, S3, S7 and S8 and carries the WS12 S11 size ratchet; sse_events.rs by S1 and S7. (l) S6 and WS16-S2 both edit CoreSidebar.tsx (chatRunStatusChip) and chat-organization.ts; S6 must sequence after WS16-S2. (m) The content of WS15-D6 is not stated anywhere in the WS15 section.\nFlag field: only the flag a slice adds is listed (MODEL_GATEWAY_LIFECYCLE_EVENTS, added by S1 as ENABLED_ENV with compose default false). S2, S3, S4, S5, S7 and S8 run behind it (S5 flips its default to true at its DoD); S6 and S9 add none. Rollback is false.\nTest commands are copied from the Tests column; NEW test files are in files and new_files; where the row gives no command for a test file, the command text says so.",
+  "slices": [
+    {
+      "id": "WS15-S1",
+      "title": "Vocabulary, variants, taxonomy gate",
+      "tag": "BUILD",
+      "summary": "Adds the closed lifecycle vocabulary (mp-contracts lifecycle_notice.rs with strict flag MODEL_GATEWAY_LIFECYCLE_EVENTS, default false), three typed ChatEvent variants (retry_scheduled in the steps family; compaction and context_change as control events), the taxonomy regeneration, SPA handlers, AG-UI CUSTOM entries and the D1 ledger entry. Payloads are counts and closed tokens only; no proto, no migration.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/lifecycle_notice.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/lifecycle_event_contract.rs",
+        "apps/Model Plane/docs/sse-event-taxonomy.md",
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/lifecycle_notice.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/lifecycle_event_contract.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0"],
+      "decisions": [],
+      "flag": "MODEL_GATEWAY_LIFECYCLE_EVENTS",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-contracts && cargo test -q -p model-gateway --lib sse_events",
+        "PYTHONUTF8=1 python \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+        "pnpm exec vitest run src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts (run in apps/Frontend Plane/verevonv3; verevon-ui-events.test.ts does not exist at HEAD)",
+        "cargo test --manifest-path apps/gateway/Cargo.toml --all-targets (run in apps/Frontend Plane/verevonv3)",
+        "if WS12 S7 landed: MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden, then sync the script"
+      ]
+    },
+    {
+      "id": "WS15-S2",
+      "title": "Emit silent context changes",
+      "tag": "FINISH",
+      "summary": "Turns the log-only context paths (history shed, compaction outcome, skill truncation and the Do-run tool-result clearing) into counts-only context_change and compaction frames built in a new lifecycle_events module. Each occurrence emits exactly one frame, and flag-off streams stay byte-identical.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/lifecycle_events.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/src/lifecycle_events.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS15-S1"],
+      "decisions": [
+        "WS15-D1 (Do-run part only; reverses the in-code Do-compaction decision at sse.rs, ledger entry written in S1)"
+      ],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 3,
+      "effort_days_high": 5,
+      "test_commands": [
+        "cargo test -q -p model-gateway --lib sse (tests: history_shed_emits_a_context_change_with_the_dropped_count, a_reused_summary_reports_reused_not_summarized, summarizer_outage_reports_truncated, skill_truncation_reports_counts_only, flag_off_stream_is_byte_identical)",
+        "existing, must stay green: model-gateway tests/overflow_contract.rs, tests/skill_budget_contract.rs, tests/context_recovery_contract.rs"
+      ]
+    },
+    {
+      "id": "WS15-S3",
+      "title": "Retry visibility in both tool loops",
+      "tag": "BUILD",
+      "summary": "Makes tool retries visible in the chat tool loop (retry_scheduled through a retry_sink on dispatch_audited_tool) and in the Do loop (OrchestrationEvent ToolRetryScheduled, tag 26, announced by execution-core and forwarded through session-core's orchestration broadcast). The reason is a closed token from transient_reason; error text never leaves the loop, and risky or non-retryable calls announce nothing.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/tool_retry.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/tool_retry_contract.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/retry.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+        "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+        "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS15-S1", "WS15-S2", "WS12-S2"],
+      "decisions": [
+        "DEC-39 (integrator assigns the proto tag; 26 for OrchestrationEvent ToolRetryScheduled is final per section 2.6)"
+      ],
+      "flag": "",
+      "migration": false,
+      "proto_change": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "authority"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "cargo test -q -p model-gateway --lib tool_loop (a_transient_failure_emits_one_retry_scheduled_per_extra_attempt, buffered_events_mode_emits_none, retry_frame_never_contains_the_error_text)",
+        "cargo test -q -p model-gateway --test tool_retry_contract",
+        "cargo test -q -p execution-core --lib retry (a_retried_tool_announces_each_extra_attempt, a_risky_call_announces_no_retry)",
+        "cargo test -q -p execution-core --lib agent (same two test names)",
+        "cargo test -q -p session-core --lib orchestration_grpc (event_run_id_extracts_tool_retry)",
+        "Windows: use --lib targets (per the row)"
+      ]
+    },
+    {
+      "id": "WS15-S4",
+      "title": "Provider wait, post-hoc",
+      "tag": "FINISH",
+      "summary": "Carries failed_attempts_ms and retry_wait_ms from the final ProviderTiming into the turn_timing summary when nonzero, and shows 'waited N s for the provider' in the processing line when the wait exceeds 2 s. Post-hoc only: no live signal and no inference-core proto change.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/turn_timing.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.processing-line.test.tsx"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS15-S1"],
+      "decisions": [
+        "WS15-D2 (post-hoc provider wait only; scopes the slice, no gate)"
+      ],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "cargo test -q -p model-gateway --lib turn_timing (provider_summary_reports_wait_only_when_nonzero)",
+        "vitest: NEW case in src/features/chat/components/ChatMessages.processing-line.test.tsx (no run command given in the row; run in apps/Frontend Plane/verevonv3)"
+      ]
+    },
+    {
+      "id": "WS15-S5",
+      "title": "SPA status cues",
+      "tag": "BUILD",
+      "summary": "Builds the SPA cues: one lifecycle-notices node per turn (capped at 20, de-duplicated), a retrying tool state, one polite live-region sentence per notice, localized strings with a generic fallback for unknown tokens, and no local persistence for temporary or ZDR threads. Flips MODEL_GATEWAY_LIFECYCLE_EVENTS to default true at its DoD.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/stream-activity.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/types.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.lifecycle.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.lifecycle.test.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-lifecycle-cues.spec.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.lifecycle.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.lifecycle.test.ts",
+        "apps/Frontend Plane/verevonv3/tests/e2e/chat-lifecycle-cues.spec.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS15-S1", "WS15-S2", "WS15-S3", "WS09-S2", "WS12-S4", "WS12-S5"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "pnpm exec vitest run src/shared/chat-nodes/derive.test.ts src/features/chat/lib/stream-activity.test.ts src/features/chat/components/ChatMessages.lifecycle.test.tsx src/features/chat/components/use-chat-controller.lifecycle.test.ts",
+        "pnpm typecheck",
+        "pnpm lint",
+        "pnpm test:e2e -- chat-lifecycle-cues",
+        "locale smoke for en and no (no run command given in the row)"
+      ]
+    },
+    {
+      "id": "WS15-S6",
+      "title": "One thread status, shim over WS16 (amended)",
+      "tag": "FINISH",
+      "summary": "Amended by K3-7/K3-8 to a one-day FINISH shim: a new shared/chat/thread-status.ts re-exports WS16's attention-state.ts, and the four divergent status derivations (CoreSidebar chatRunStatusChip, chat-organization, AgentRunConsole pill, space-thread-presentation label) delegate to it. No thread-seen.ts, and no precedence is decided here (DEC-11 owns failed-versus-working).",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/shared/chat/thread-status.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat/thread-status.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-organization.ts",
+        "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/shared/chat/thread-status.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat/thread-status.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS16-S1", "WS16-S2"],
+      "decisions": [
+        "DEC-11 (WS15-D3: precedence and vocabulary; failed-versus-working decided in DEC-11, not in S6)",
+        "WS16-D8 (WS16 owns the closed set, precedence and unseen marker)"
+      ],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-11 owner ruling on failed-versus-working precedence; WS16-S2 attention-state.ts from the WS16 session (not yet built)",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 1,
+      "test_commands": [
+        "pnpm exec vitest run src/shared/chat/thread-status.test.ts src/features/core/components/CoreSidebar.test.tsx src/features/chat/lib/chat-organization.test.ts src/features/agents/components/AgentRunConsole.test.tsx (CoreSidebar.test.tsx does not exist at HEAD)",
+        "grep check inside thread-status.test.ts: no status literal set remains outside thread-status.ts",
+        "SpaceRoomTimeline.test.tsx:79 label strings must stay identical (read-only check)"
+      ]
+    },
+    {
+      "id": "WS15-S7",
+      "title": "Promote run_parked to a typed control event",
+      "tag": "FINISH",
+      "summary": "Promotes WS03's raw run_parked SSE frame to a typed RunParked control ChatEvent with exactly the same payload keys, so the wire is unchanged, and adds its taxonomy row and ledger line. The SPA case (onRunParked) and the AG-UI CUSTOM entry already exist from WS03 S8-A and are verified, not rewritten.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+        "apps/Model Plane/docs/sse-event-taxonomy.md",
+        "apps/Model Plane/docs/decisions/ledger.md"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS03-S8", "WS15-S1", "WS15-S6"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "owner approval to enable executor parking (WS03 S8-A switches, default off) for the live capture",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "cargo test -q -p model-gateway --lib sse_events (run_parked_is_a_control_event)",
+        "PYTHONUTF8=1 python \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+        "vitest: src/shared/api/chat-client.test.ts (no run command given in the row; run in apps/Frontend Plane/verevonv3)"
+      ]
+    },
+    {
+      "id": "WS15-S8",
+      "title": "Persisted counts-only notes (optional)",
+      "tag": "BUILD",
+      "summary": "Optional. Writes counts-only lifecycle notes (cap 8) into message metadata through with_lifecycle_notes beside with_head_summary, refuses them under ZDR, and reads them in messageToTurn so a reload still shows a shed notice. No migration and no new switch.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/lifecycle_event_contract.rs",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS15-S2", "WS15-S5"],
+      "decisions": [
+        "WS15-D4 (optional slice gate)",
+        "DEC-32 (waived runs count as ZDR for new durable stores; S8 refuses waived unless the owner rules otherwise)"
+      ],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "needs_live_stack": true,
+      "needs_external": "owner decision on D4 (whether S8 is built) and the DEC-32 ruling on waived runs",
+      "risk": ["zdr"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "cargo test -q -p model-gateway --lib session_flow (zdr_turn_persists_no_lifecycle_notes lives in tests/lifecycle_event_contract.rs)",
+        "pnpm exec vitest run src/features/chat/components/chat-normalizers.test.ts"
+      ]
+    },
+    {
+      "id": "WS15-S9",
+      "title": "Connector incident ring (optional)",
+      "tag": "BUILD",
+      "summary": "Optional, with WS23 as the recommended owner. Adds a capability-core migration for mcp_server_incidents (ring of 10 per org and server; closed kinds connect_failed, tool_timeout, auth_expired, dns_blocked, schema_invalid; no stderr or error text), a recorder in the MCP gateway and a read endpoint in registry_apis.go; persists nothing for ZDR callers.",
+      "files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0026_mcp_server_incidents.up.sql",
+        "apps/Model Plane/rust/services/model-gateway/src/mcp_gateway.rs",
+        "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go"
+      ],
+      "new_files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0026_mcp_server_incidents.up.sql",
+        "apps/Model Plane/rust/services/model-gateway/src/mcp_gateway.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS01-S0", "WS05", "WS23"],
+      "decisions": [
+        "WS15-D5 (hand to WS23; optional)",
+        "DEC-39 (migration number assigned by the integrator; 0026 is the section 4.4 reservation)"
+      ],
+      "flag": "",
+      "migration": true,
+      "proto_change": false,
+      "optional": true,
+      "planes": ["Model Plane"],
+      "needs_live_stack": true,
+      "needs_external": "WS23 owner ruling on the D5 hand-off; integrator migration number (DEC-39)",
+      "risk": ["zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 8,
+      "test_commands": [
+        "go test ./... (run in apps/Model Plane/go/services/capability-core)"
+      ]
+    }
+  ]
+}

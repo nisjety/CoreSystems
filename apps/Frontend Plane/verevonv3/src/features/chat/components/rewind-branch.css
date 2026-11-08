@@ -1,0 +1,52 @@
+/* The rewind confirmation under an answer, and the undo offer under the answer a rewind landed on (WS17 S9).
+   Both sit in the transcript, so they keep to the surface and border tokens of the chat. */
+.verevon-chat-rewind-confirm,
+.verevon-chat-rewind-undo {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+}
+
+.verevon-chat-rewind-confirm p,
+.verevon-chat-rewind-undo p {
+  margin: 0;
+}
+
+.verevon-chat-rewind-confirm__hidden {
+  display: grid;
+  gap: 4px;
+  max-height: 180px;
+  margin: 0;
+  padding: 0 0 0 16px;
+  overflow: auto;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-chat-rewind-confirm__role {
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-chat-rewind-confirm > button,
+.verevon-chat-rewind-undo > button {
+  justify-self: start;
+  padding: 4px 12px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.verevon-chat-rewind-confirm > button:hover,
+.verevon-chat-rewind-undo > button:hover {
+  background: var(--verevon-surface-soft);
+}

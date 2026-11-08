@@ -1,0 +1,878 @@
+{
+ "batchId": "W1-04",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS04-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/run_control.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/cancel_registry.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/run_control_two_replica_test.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --test run_control_two_replica_test",
+     "outcome": "10 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib -- cancel readyz run_control",
+     "outcome": "41 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib",
+     "outcome": "2135 passed, 1 failed: sse_events::payload_contract::sse_event_payload_golden (sse_events.rs, not touched by this slice)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --no-fail-fast --test zdr_posture_matrix --test run_control_nats_acl_contract --test orchestration_http_test --test health --test zdr_feature_table",
+     "outcome": "all 5 targets passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_refusal_inventory",
+     "outcome": "1 failed: browser_run.rs:802 untyped ZDR refusal (browser_run.rs, not touched by this slice)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the five files listed in files_changed. cancel_registry.rs and http_routes.rs are CRLF in the working copy; run_control.rs and sse.rs are LF. Their edits preserve each file's style.",
+    "Failures in files this slice did not touch: `sse_events::payload_contract::sse_event_payload_golden` (sse_events.rs, modified by another slice) and `zdr_refusal_inventory` flagging `browser_run.rs:802`. Re-check them after the other slices land.",
+    "Live proof, with the ACL deployed first and then MODEL_GATEWAY_RUN_CONTROL_BUS=true on both replicas: slow tool turn on :8080 `/v1/invoke/stream`, then `POST /v1/invoke/{id}/cancel` on the second replica (the overlay is on 28080 per K2-5). Capture the `stopped` frame, `outcome=peer` logs and `run_control_requests_total`, and check `/readyz` reads `ok run_control=ok`. Then stop NATS and confirm the 503, not a 202.",
+    "Update ledger.md: the S1 \"Not done\" note about /readyz, plus an S2 entry (local hit wins, bus error is 503, cancel_run never 503s because the durable cancel is already recorded).",
+    "No shared-edit lines are needed: http_routes.rs and sse.rs were both in this slice's owned files."
+   ],
+   "deviations": [
+    "`/readyz` stays plain text because the OpenAPI and SDK contract says it returns a string, not JSON. Bus off answers \"ok\" exactly as before; bus on or degraded answers \"ok run_control=ok\" or \"ok run_control=degraded\".",
+    "`RunControl::attach(cancels, request_id, run_id)` takes the cancel registry instead of org and user, because the entry already carries them. The WS03 provides line said `attach(request_id, run_id, org, user)`, so WS03 will need this signature.",
+    "`cancel_run` does not answer 503 when the owner is unreachable: the durable cancel has already succeeded, so the failure is logged with `via=unavailable`. The plan row only asks for the `via` log field, and the summary's 503 applies to `invoke_cancel`.",
+    "`CancelRoute::Local` is counted in `run_control_requests_total` only when the bus is on, so a bus-off gateway emits no new metric.",
+    "ZDR callers' Stop skips the bus entirely rather than asking and getting a 404."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live two-replica proof over real NATS: needs docker and the replica overlay; the lead runs it.",
+     "NATS ACL deployed before MODEL_GATEWAY_RUN_CONTROL_BUS is turned on, plus the S1 ignored live NATS tests (including the unverified no-responders mapping).",
+     "Re-check sse_events_payload_golden and zdr_refusal_inventory once the other slices land; both fail outside this slice's files.",
+     "Ledger entry for S2 and the correction to the S1 note on /readyz."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The two-replica Stop has not run over real NATS: with the bus on, a slow-tool turn on one replica stopped from the other needs the `stopped` frame, `outcome=peer` on both replicas and `gateway_active_streams` returning to 0. This also depends on the ACL deploy and the five ignored NATS live tests from S1, including the unverified no-responders mapping."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "`agentic_run_stream` registers nothing with the cancel registry (WS03 owns this), so `/continue` segments are not reachable over the run-keyed subject until WS03 registers the stream and calls `attach`."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "`RunControl::request` counts any answered reply as outcome=peer, including a `not_found` from a foreign caller, which the handler turns into a 404. The metric overstates peer hits; it should be split in S1's metric code."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR guard is a behavioural test through the router plus a source-order test on sse.rs. A true positive-control streaming test (a non-ZDR stream attaches, a ZDR one does not) needs the e2e_invoke_chain harness."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The `Unavailable` mapping for BadReply, PayloadTooLarge and a failing bus is untested end to end. The loopback hub can only produce Timeout; a NATS-down 503 test belongs in the live suite or needs a failing transport double."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two streams for one run id on different replicas would both subscribe to `mp.v1.runctl.run.{id}.cancel` and NATS delivers the request to one of them. This is unlikely for one run but untested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The ledger entry for WS04-S1 still says `/readyz` does not report `run_control`; it should be updated, along with the S2 deploy order, ACL before flag."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A cycle exists between a cancel-registry entry, its listener's handler and the registry's `Arc` until `finish` removes the entry. It matches today's leak profile when finish is missed, but a `Weak` handle would remove the cycle."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The cross-replica Stop has not run over real NATS: a slow-tool turn on one replica stopped from the other, with the `stopped` frame, `outcome=peer` on both replicas and `gateway_active_streams` back to 0, plus a NATS-down 503. This needs the ACL deployed before the flag is turned on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "`agentic_run_stream` registers nothing with the cancel registry, so `/continue` segments are not reachable over the run-keyed subject until WS03 registers the stream and calls `attach(&cancels, request_id, run_id)`. WS03 must use that signature, not the plan's `(request_id, run_id, org, user)`."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "`invoke_cancel` treats a `decide_for` Refusal (Err) as non-ZDR and sends the Stop to the bus. The bus carries ids only and the owner re-checks org and user, so there is no content leak, but it is fail-open for an inconsistent-claims token. Consider treating Err as local-only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "`RunControl::request` counts any answered reply as outcome=peer, including a `found:false` from a foreign caller that the handler turns into a 404. This overstates `run_control_requests_total{outcome=peer}`."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR guard is a behavioural test plus a source-order test on sse.rs. There is no positive control showing a non-ZDR stream does attach through the real `invoke_stream_sse`, so the zero-listener assertion could pass vacuously if the stream failed before registering."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The Unavailable mapping for BadReply, PayloadTooLarge and a failing NATS client is untested end to end, because the loopback hub can only produce Timeout."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Two live streams sharing one run id on different replicas both subscribe to `mp.v1.runctl.run.{id}.cancel`, and NATS delivers a request to only one of them, so a run-keyed Stop could miss the other. This is untested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Update ledger.md: the S1 note that /readyz does not report run_control, and add an S2 entry covering local-hit-wins, bus error as 503, cancel_run never 503, and the `ok run_control=<state>` plain-text readyz body."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "A cycle between a cancel-registry entry, its listener's handler (which holds a clone of the registry) and the registry is broken only by `finish`. A `Weak` handle would remove it."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr"
+   ],
+   "notes": "The bus, the cancel fan-out and the /readyz report are built with every new switch off. With MODEL_GATEWAY_RUN_CONTROL_BUS off, attach does nothing, cancel falls through to the old 404, and /readyz still answers plain \"ok\". The tests the plan names for this slice pass. No partial edits from an earlier attempt were found.\n\nBehaviour added:\n- run_control.rs:\n  - `attach(cancels, request_id, run_id)` subscribes to `mp.v1.runctl.req.{id}.*` and, when the stream has a run, `mp.v1.runctl.run.{run_id}.cancel`. It is bounded to 250 ms and best effort, and the listener is held in the cancel-registry entry, so `finish` drops it.\n  - `cancel_stream` and `cancel_run` return `CancelRoute` (Local, Peer, NoOwner or Unavailable). The local registry wins; the bus is asked only on a local miss.\n  - The owner handler honours only Cancel ops for its own request or run id. Queue and probe get \"not here\" until S3.\n  - The run-keyed cancel subject has no loop observer; WS03-S3 plugs that in later.\n  - A NATS `listen` cancelled half way now aborts its serving tasks, which the attach budget needs.\n  - `LoopbackHub::listener_count()` and `RunControl::degraded()` (pub(crate)) were added for tests.\n- cancel_registry.rs: each entry holds an `Option<RemoteListener>`, set by `attach_remote`.\n- sse.rs: one call-in after `register_run`, before the spawned task that emits `connected`. A ZDR turn returns into its direct stream before this point, so it never attaches.\n- http_routes.rs:\n  - `invoke_cancel` answers 202 as before for a local hit and 202 with `via:\"peer\"` for a peer. A missing or foreign stream is the unchanged 404. An owner that times out or fails is 503 `{error:\"run_control_unavailable\", retryable:true}`.\n  - ZDR callers' Stop stays local and puts nothing on the bus.\n  - `cancel_run` also asks the run subject on a local miss. Its response is unchanged and its log line gains `via` (local, peer, unavailable or none).\n  - `/readyz` reports the bus state. 200 is kept while degraded.\n- Tests: the new two-replica file covers cross-replica cancel, wrong user or org, no owner, a muted owner giving 503, a listener removed on finish, run-cancel fan-out, bus off, `zdr_turn_registers_no_run_control_listener` and a source-order guard on the call-in. Unit tests were added in run_control.rs and cancel_registry.rs. In http_routes.rs I added the peer/via test, a readyz bus-state test, and updated the cancel-log and readyz tests.\n\nNot run: the plan's second command `--all-targets`, because several non-lib targets fail on Windows as noted in the instructions. I ran `--lib` plus the five targets listed above. I ran no fmt, no docker and no live proof."
+  },
+  {
+   "id": "WS01-S11",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/coresystem-conformance.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/coresystem-conformance-artifact-test.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/CORESYSTEM_ACCEPTANCE_THRESHOLDS.tsv",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/RELEASE_GATE_WAIVERS.tsv",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/model-plane-ops-gates.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "bash 'apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh' (and --self-test)",
+     "outcome": "passed: 17 rows valid; self-test rejects 7 broken copies"
+    },
+    {
+     "command": "bash scripts/tests/coresystem-conformance-artifact-test.sh",
+     "outcome": "passed (original artifact cases plus 16 gate cases with a stub release tool, pinned date, temp evidence dir and temp waivers)"
+    },
+    {
+     "command": "bash scripts/coresystem-conformance.sh --json --profile runtime",
+     "outcome": "exit 2, blockers: dirty_worktree, candidate_artifact_missing, rollback_artifact_missing, rollback_rehearsal_missing, capability_promotion_ledger_invalid. The ledger blocker is a local false gap: capability-promotion-ledger-test.sh needs rg, which is not installed in this shell. The workflow installs ripgrep."
+    },
+    {
+     "command": "bash scripts/coresystem-conformance.sh --profile nonsense",
+     "outcome": "exit 64 as designed"
+    },
+    {
+     "command": "rollback-rehearsal-test.sh, migration-expand-contract-test.sh, rebuild-service-test.sh",
+     "outcome": "all passed"
+    },
+    {
+     "command": "go test ./... in apps/Model Plane/go/services/nats-provisioner",
+     "outcome": "ok (cached)"
+    },
+    {
+     "command": "release-contract-test.sh, release-runtime-partition-test.sh, release-input-security-test.sh",
+     "outcome": "FAILED on this Windows host: 'platform does not support O_NOFOLLOW' (environmental). Not verified locally; they need a Linux run."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the three release-*.sh tests on Linux or WSL; they fail here on O_NOFOLLOW.",
+    "After the first PR run, confirm the workflow YAML parses and both jobs go green; the audit job needs the session-core migrations to apply on postgres:16.",
+    "S12: set MODEL_PLANE_CANDIDATE_ARTIFACT_DIR, MODEL_PLANE_ROLLBACK_ARTIFACT_DIR and MODEL_PLANE_ARTIFACT_VERIFY_KEY (path only), commit a rollback-rehearsal evidence file, then run 'bash scripts/coresystem-conformance.sh --json --profile runtime' on a clean tree to confirm it reads ready.",
+    "Optional, outside my files: scripts/coresystem-conformance-artifact.sh could pass --profile runtime; today CORESYSTEM_CONFORMANCE_PROFILE=runtime does the same without editing it."
+   ],
+   "deviations": [
+    "Added a nats-provisioner go test step and an informational runtime-conformance report step to release-gates beyond the three release scripts the row names.",
+    "session-core-audit-db runs only the one DB-only ignored audit_publisher test; the two broker-backed tests need a provisioned NATS and stay with the live proof.",
+    "Added an ACCEPTANCE_THRESHOLDS_FILE override and a --self-test mode to acceptance-thresholds-test.sh, and env overrides to the conformance script (MODEL_PLANE_RELEASE_ARTIFACT_SCRIPT, MODEL_PLANE_RELEASE_GATE_WAIVERS_FILE, CORESYSTEM_ROLLBACK_EVIDENCE_DIR, CORESYSTEM_CONFORMANCE_TODAY) so the gate can be tested offline.",
+    "Replaced rg with grep in the conformance script so it runs where ripgrep is absent."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "CI green on a PR and the workflow run URL as evidence: the lead must push and confirm both jobs go green, including that the session-core migrations apply on postgres:16.",
+     "Run the three release-*.sh tests on Linux or WSL: they fail on Windows on O_NOFOLLOW, so they are unverified locally.",
+     "Runtime conformance reads ready on a clean candidate tree only after S12: a signed candidate and rollback artifact, the verify key path, and a committed rollback-rehearsal evidence file.",
+     "Optional shared edit, scripts/coresystem-conformance-artifact.sh: pass --profile runtime to the conformance script. CORESYSTEM_CONFORMANCE_PROFILE=runtime does the same today without editing it."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The rehearsal evidence file records no candidate or rollback manifest digest, so the gate cannot tie a PASSED rehearsal to the artifacts under review; rollback-rehearsal.sh should write the two manifest digests and the gate should compare them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The thresholds are file-only. No script reads live metrics (gateway error ratio, p95, audit lag, terminal rows, ZDR days to review) and compares them to approved targets, so the 7-day baseline plus an enforcement step is still to build before any row can move to approved."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gate has not been run against the real release-artifact.sh verify with a real signed artifact; the offline tests use a stub release tool. A signed fixture artifact test belongs to S12."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "session-core-audit-db covers only the requeue function test. Other DB-only ignored session-core tests touching the audit outbox (tool ledger reservation rows, terminalization outbox writes) are not wired into any CI job."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "capability-promotion-ledger-test.sh depends on rg (not owned by this slice); it should use grep -E so the conformance gate runs without ripgrep."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The workflow's path filter does not cover apps/Model Plane/docs/compliance evidence changes, so a stale or edited rehearsal evidence file triggers no CI run; this is fine while the gate is informational in CI."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The rehearsal evidence file records no candidate or rollback manifest digest, so the gate cannot tie a PASSED rehearsal to the artifacts it verified. rollback-rehearsal.sh should write both digests and the gate should compare them before the runtime profile can mean anything."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The thresholds are file-only with value 'unset'. Nothing reads live metrics (error ratio, p95, audit lag, ZDR days to review) and compares them to targets, so rows cannot move to approved until the 7-day baseline and an enforcement step exist."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gate is tested only with a stub release tool. It has never run against release-artifact.sh verify on a real signed artifact, which belongs to S12."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "session-core-audit-db wires only the requeue function test. Other DB-only ignored session-core audit-outbox tests, such as tool-ledger reservation and terminalization writes, are not in any CI job."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "capability-promotion-ledger-test.sh depends on rg, so the conformance gate reports capability_promotion_ledger_invalid wherever ripgrep is absent. The workflow installs it; the test should use grep -E instead."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The workflow path filter excludes docs/compliance evidence, so a stale or edited rehearsal evidence file triggers no run. This is harmless while the runtime conformance step is informational."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The JSON output loop iterates \"${waived[@]}\" and \"${checks[@]}\" unguarded under set -u, which would fail on bash older than 4.4 when the array is empty, unlike the guarded forms used elsewhere in the script. It works on the CI and local bash."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "The gate no longer greps markdown for artifact state. Candidate and rollback artifacts are checked with release-artifact.sh verify against MODEL_PLANE_ARTIFACT_VERIFY_KEY (candidate under MODEL_PLANE_RELEASE_MODE=1), and the new blockers are candidate_artifact_unverified, rollback_artifact_unverified and artifact_verify_key_missing. It reads the newest rollback-rehearsal-<date>.txt in docs/compliance/evidence, which must start with 'result PASSED' and be no older than the rollback_rehearsal_age_days threshold (30 days while that threshold is unset); the blockers are rollback_rehearsal_missing, rollback_rehearsal_failed and rollback_rehearsal_stale. New flag: --profile runtime|full, default full, with CORESYSTEM_CONFORMANCE_PROFILE as the env default, so coresystem-conformance-artifact.sh (not mine to edit) can use it without a change. The runtime profile skips the dev and cross-plane preflights and does not block on source_only ledger rows or unapproved thresholds; both are still blockers under full, and a ready runtime report is not promotion. Waivers live in RELEASE_GATE_WAIVERS.tsv (7 columns, max 30 days, not future-dated, per profile). An expired row adds waiver_expired:<blocker>, one malformed row voids the whole file, and *_unverified, artifact_verify_key_missing, dirty_worktree and invalid-file blockers cannot be waived. JSON gains 'profile' and 'waived'. The old threshold check grepped for tab-delimited 'proposed' and 'approved' on the last column, which could never match; it now reads the test's state line. The thresholds TSV has 8 new rows, all proposed, and values are 'unset' except audit_outbox_terminal_rows == 0. 'unset' is accepted only while proposed. New units are milliseconds, days, rows and per_mille; the new operator is >=. The TSV stays CRLF. The thresholds test gained a --self-test and an ACCEPTANCE_THRESHOLDS_FILE override. The workflow has two jobs. release-gates runs the three release tests, the thresholds test and its self-test, the conformance artifact test, the rollback-rehearsal, migration lint and rebuild tests, nats-provisioner go test, and an informational runtime conformance report. session-core-audit-db runs the ignored audit_publisher requeue test against a Postgres service and fails if fewer than 1 test ran. go-audit and promtool are dropped per K2-8 and K2-14. The YAML was not parsed locally because PyYAML is not installed."
+  },
+  {
+   "id": "WS12-S12",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\verevonv3-ci.yml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\bundle-budget.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\scripts\\check-bundle-budget.mjs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\scripts\\check-bundle-budget.test.mjs"
+   ],
+   "tests_run": [
+    {
+     "command": "node --test scripts/check-bundle-budget.test.mjs (cwd apps/Frontend Plane/verevonv3)",
+     "outcome": "12 pass, 0 fail, 0 skipped"
+    },
+    {
+     "command": "pnpm exec eslint scripts/check-bundle-budget.mjs scripts/check-bundle-budget.test.mjs",
+     "outcome": "exit 0, no findings"
+    },
+    {
+     "command": "pnpm exec vitest run scripts/check-bundle-budget.test.mjs",
+     "outcome": "exit 1: Vitest collects the node:test file and fails the suite (TypeError: The URL must be of scheme file, 0 tests). Hence the shared vite.config.ts exclude below."
+    },
+    {
+     "command": "pnpm exec vitest list --filesOnly --exclude \"scripts/**/*.test.mjs\"",
+     "outcome": "exit 0; the budget test is not listed, so the exclude glob works"
+    },
+    {
+     "command": "pnpm --filter @verevon/remote-core run build, then pnpm exec vite build",
+     "outcome": "exit 0 locally, but on this worktree's uncommitted state and local node_modules, so not CI's build; outputs removed afterwards"
+    },
+    {
+     "command": "node scripts/check-bundle-budget.mjs against the real Vite dist, plus --update and growth on a scratch copy of the budget",
+     "outcome": "entry resolved to assets/index-*.js (not the modulepreload links); unrecorded ceilings warn and exit 0; --update recorded sizes on the scratch copy; a 20 KB growth exited 1; shipped bundle-budget.json left unrecorded"
+    },
+    {
+     "command": "node scripts/check-bundle-budget.mjs --bogus",
+     "outcome": "exit 2, Unknown option"
+    },
+    {
+     "command": "pnpm typecheck",
+     "outcome": "exit 1, 34 errors: 21 in src/shared/api/quarry-client.ts (@quarry/client needs the Docker-generated SDK), 12 in RemoteSupportPage.tsx (remote-core dist, removed by me after the build), 1 in src/shared/api/ag-ui-client.ts:126 TS2366 caused by another slice's uncommitted lifecycle.* members in src/shared/chat/verevon-ui-events.ts. So pnpm build, the row's command, cannot pass in this worktree; CI must prove it."
+    },
+    {
+     "command": "pnpm exec playwright test --list --project=chunk-recovery",
+     "outcome": "exit 0; config loads and 3 tests are listed (no browser run)"
+    },
+    {
+     "command": "YAML validity of verevonv3-ci.yml",
+     "outcome": "not machine-validated: no YAML parser is available offline. The diff is additive (77 insertions, 0 deletions, LF) and was reviewed by eye"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/vite.config.ts: in test.exclude, after the line 'apps/gateway/scripts/**/*.test.mjs', add the line 'scripts/**/*.test.mjs', with a comment that the node:test budget test runs from verevonv3-ci.yml. Apply before the first push.",
+    "Commit only these paths: .github/workflows/verevonv3-ci.yml, apps/Frontend Plane/verevonv3/bundle-budget.json, apps/Frontend Plane/verevonv3/scripts/check-bundle-budget.mjs, apps/Frontend Plane/verevonv3/scripts/check-bundle-budget.test.mjs, plus the vite.config.ts line. The worktree has other slices' uncommitted edits that must stay out.",
+    "Push to the integration branch. Record run URLs (gh run list --workflow verevonv3-ci.yml): spa-browser-fixtures must be green with the chunk-recovery project's 3 tests; in spa-verify, note the budget step's measured line and whether the node test step passed.",
+    "Record the first measurement: put the spa-verify log numbers into bundle-budget.json as entryGzipBytes and totalJsGzipBytes, or run node scripts/check-bundle-budget.mjs --update on a build made the way CI makes it (Quarry SDK via Docker, remote-core built, pnpm exec vite build, Node 22). Commit that as its own change.",
+    "Red proof: on a throwaway branch, pull a ~200 KB module into the app entry. The spa-verify budget step must go red; record the run URL, then discard the branch.",
+    "Decide whether the budget and fixture steps stay blocking from the first recorded run, or get continue-on-error for the first three runs per the plan's rollout convention."
+   ],
+   "deviations": [
+    "The row asks for a budget step inside the existing spa-verify job, while the Provides/consumes note says no edits inside existing jobs except S1 triggers. I followed the row.",
+    "No skip guard in spa-browser-fixtures: the chunk-recovery project and spec already exist (WS09-S5, commit dcdd8118a), so the job runs them.",
+    "Ceilings are null, not invented numbers. The first measurement has to come from a CI-equivalent build.",
+    "--base-ref resolves the ref as a tree (ref^{tree}) and reads ./bundle-budget.json from it, so the test can name a base without creating commits.",
+    "The shrink check uses a symmetric 2048-byte tolerance band. The row says only that a shrink must lower the ceiling; the band absorbs gzip differences across Node releases and hosts.",
+    "No package.json script added (package.json is not owned). The workflow runs node --test directly."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead applies the shared edit to apps/Frontend Plane/verevonv3/vite.config.ts: add 'scripts/**/*.test.mjs' to test.exclude, otherwise pnpm test in spa-verify collects the node:test file and fails. Do this before the first push.",
+     "spa-browser-fixtures has not run on GitHub; the chunk-recovery project's 3 tests need a green CI run (docker/CI only).",
+     "The first measurement is not recorded: both ceilings in bundle-budget.json are null, so the budget only warns until the lead commits the CI numbers or runs --update on a CI-equivalent build.",
+     "Red proof is outstanding: a ~200 KB import into the entry must turn the spa-verify budget step red on a throwaway branch. Only the function-level growth case is unit-tested.",
+     "The --base-ref step's 'git fetch --depth=1 origin <base sha>' is unproven until the first pull request run."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "vite.config.ts test.exclude needs 'scripts/**/*.test.mjs' before the first push; without it pnpm test (vitest run) in spa-verify collects the node:test file and fails (reproduced)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "bundle-budget.json ceilings are null, so the budget only warns and passes; the lead must record the first CI measurement (the spa-verify log line 'assets/index-*.js: N gzip bytes; K JS files: M gzip bytes') before the gate enforces anything."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "spa-browser-fixtures has never run on GitHub; the chunk-recovery spec (3 tests) is only listed, not run. Its route matches **/assets/AuthPage-*.js, so the lazy chunk name must still match the build, and it depends on vite preview answering /api without a backend."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The red proof is not run: a ~200 KB import into the entry must turn the spa-verify budget step red on a throwaway branch. Only the function-level growth case is unit-tested."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TOLERANCE_BYTES = 2048 is an unmeasured guess; calibrate it against the gzip difference between CI (Node 22) and a local build (Node 24 here) after the first recording."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The total-JS ceiling counts every emitted .js, including lazy chunks (the local build has elk and connectGraphScene.webgl at about 1.4 MB raw each), so a lazy-route change can trip the total gate; the entry ceiling is the only first-load guard."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "--update needs a local build with the Docker-generated Quarry SDK, so only a developer with Docker can record or lower a ceiling. Growth then fails every later PR until someone does, which needs an owner."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "--base-ref depends on 'git fetch --no-tags --depth=1 origin <base sha>' succeeding on GitHub; the first pull request run is the proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "pnpm typecheck is red in this worktree: @quarry/client needs the Docker SDK, and ag-ui-client.ts:126 TS2366 comes from another slice's uncommitted lifecycle.* union members in verevon-ui-events.ts. pnpm verify runs before the budget step, so spa-verify cannot reach the budget until verify is green on CI."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan's rollout convention is continue-on-error for the first three runs, then blocking. The budget step and the fixture job are blocking as soon as ceilings are recorded; the owner should decide whether to add continue-on-error for the first runs."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "pnpm test does not run scripts/check-bundle-budget.test.mjs; only the workflow step does. A package.json line could cover local runs, but package.json is not owned here."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "measure() is checked against a real Vite dist only by the manual CLI run, not by a committed test; the committed tests use synthetic fixtures."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "vite.config.ts test.exclude must gain 'scripts/**/*.test.mjs' before the first push, or pnpm test in spa-verify breaks on the node:test file."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Ceilings are null, so the gate enforces nothing until the first CI measurement is recorded."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "spa-browser-fixtures is unrun on GitHub; the chunk-recovery route matches **/assets/AuthPage-*.js, so the lazy chunk name must still match the build, and vite preview must answer /api without a backend."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "TOLERANCE_BYTES = 2048 is an unmeasured guess; calibrate it against the gzip difference between CI (Node 22) and a local build after the first recording."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The total-JS ceiling counts lazy chunks (elk, connectGraphScene.webgl), so a lazy-route change can trip the total gate; only the entry ceiling guards first load."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Recording or lowering a ceiling needs a build with the Docker-generated Quarry SDK, so every later growth failure needs a Docker-capable owner to resolve."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan's rollout convention is continue-on-error for the first three runs; the new steps become blocking as soon as ceilings are recorded, so the owner should decide whether to add it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The row says no edits inside existing jobs except S1 triggers, but it also asks for a budget step in spa-verify; the implementer followed the row, so this is a deliberate, documented deviation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "measure() is checked against a real Vite dist only by a manual CLI run, not by a committed test; the committed tests use synthetic fixtures."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Built the row's code: a stack-free spa-browser-fixtures job (vite build, vite preview on 5176, playwright --project=chunk-recovery; the WS09 S5 project and spec already exist, so no skip guard), a bundle budget step after pnpm verify in spa-verify, the node test step, and the budget script. The script gzips the module entry from dist/index.html and the sum of all dist .js files, and compares them with bundle-budget.json. Growth past the ceiling fails, and so does a shrink past it that --update has not recorded. --update lowers only. --base-ref (a git tree-ish) refuses a ceiling raised above, or unset from, the base. A 2048-byte tolerance band absorbs gzip differences between hosts. The ceilings are null (unrecorded), so the budget warns and passes until the first CI measurement is recorded. No honest first measurement exists here: the Quarry SDK needs Docker, and the local build includes uncommitted edits. No switch, no proto, no migration, no ZDR surface. Nothing was committed or pushed; the worktree holds other slices' uncommitted changes, which must stay out of this commit."
+  },
+  {
+   "id": "WS06-S0",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/observability/rules/audit-core.rules.yml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/observability/rules/audit-core.rules.test.yml"
+   ],
+   "tests_run": [
+    {
+     "command": "Offline parse and consistency check of audit-core.rules.yml and audit-core.rules.test.yml, run with a scratch Go program in the session scratchpad (gopkg.in/yaml.v3 v3.0.1 from the module cache, GOWORK=off GOPROXY=off)",
+     "outcome": "Passed: both files parse; 5 alerts defined; 8 test cases; every expected alert carries the rule's labels and summary; rule_files resolves. This is not promtool, so PromQL and promtool expectations remain unverified."
+    },
+    {
+     "command": "git status --short -- apps/Control Plane/observability apps/Control Plane/docker-compose.yml",
+     "outcome": "Only the two new rule files are untracked; no tracked file changed; nothing staged or committed."
+    },
+    {
+     "command": "docker run ... prom/prometheus:v2.54.1 check rules and test rules (the row's two commands)",
+     "outcome": "Not run: docker is lead-only in this batch and promtool is not installed on this host. See lead_todo steps 1 and 2."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "promtool check rules (lead, Docker): docker run --rm --entrypoint promtool -v \"$PWD/apps/Control Plane/observability/rules:/o\" -w /o prom/prometheus:v2.54.1 check rules audit-core.rules.yml. Expect exit 0.",
+    "promtool unit tests (lead, Docker): docker run --rm --entrypoint promtool -v \"$PWD/apps/Control Plane/observability/rules:/o\" -w /o prom/prometheus:v2.54.1 test rules audit-core.rules.test.yml. Expect all 8 cases to pass. If one fails, check its eval_time against the values notation first.",
+    "Live proof (row DoD, lead's decision on the forged-subject publish): from C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b run bash scripts/run-control-plane.sh up -d controlplane-prometheus. Confirm /api/v1/rules lists group control-audit-core with five rules. Publish a forged-subject audit event on the Control bus and capture /api/v1/alerts with ControlAuditCoreAuthorityMismatch firing. Rollback: delete the two rule files and restart the prometheus container.",
+    "shared-edit: none. apps/Control Plane/docker-compose.yml:1079 (rules mount) and the rule_files glob in apps/Control Plane/observability/prometheus.yml both landed in 2f8b8caa. Do not add a second rule_files key.",
+    "Commit (lead): the two untracked rule files, LF per .gitattributes. Suggested subject: feat(control-plane): alert on audit-core refusals, backlog and bus disconnects (WS06-S0).",
+    "Build ledger (lead): record WS06-S0 with no switch. Mark it source-verified only after lead_todo steps 1 and 2 pass, and live-verified only after step 3."
+   ],
+   "deviations": [
+    "prometheus.yml was not edited. The row asks to add rule_files, but the glob already landed in 2f8b8caa as /etc/prometheus/rules/*.rules.yml, which matches the new file, and the batch note forbids a second rule_files key.",
+    "docker-compose.yml was not edited. The mount ./observability/rules:/etc/prometheus/rules:ro already exists at line 1079, so no shared-edit line is needed.",
+    "Alert severities and the absence of a runbook annotation are my choices. The row fixes only the expressions and durations, and no Control audit runbook exists yet.",
+    "Test series use bus=control for the event and consumer series (what subscriber.New emits for the primary bus) and bus=primary for the NATS gauge (what main.go sets), so the labels match what the code emits."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "promtool check rules and promtool test rules (8 cases) have not run; the lead must run them in Docker with prom/prometheus:v2.54.1.",
+     "Live proof is open: /api/v1/rules must list group control-audit-core with five rules, and a forged-subject event on the Control bus must put ControlAuditCoreAuthorityMismatch in /api/v1/alerts (pending or firing). Capture both.",
+     "Commit of the two untracked rule files is lead-only."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Prove the S0 DoD on the running stack: after bash scripts/run-control-plane.sh up -d controlplane-prometheus, /api/v1/rules must list group control-audit-core with five rules, and a forged-subject event on the Control bus must put ControlAuditCoreAuthorityMismatch in firing state in /api/v1/alerts. Keep both captures."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "WS06-S1 CI (audit-core-ci.yml) is specified to run only promtool check rules, so unless it also runs promtool test rules these eight unit tests never run in CI. WS01-S11 has already dropped its promtool job on the assumption that WS06-S1 covers it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The NATS and consumer gauges are refreshed only by the readiness callback behind /healthz and /readyz (C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/cmd/server/main.go:104-106 and internal/api/api.go:107,155-168). The compose healthcheck calls /healthz every 30 s (apps/Control Plane/docker-compose.yml:871). subscriberReadiness returns before Health() while the primary bus is disconnected, so audit_core_consumer_pending freezes at its last value during an outage."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No rule covers result=dead_lettered (C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/internal/subscriber/subscriber.go, deadLetter). A store error that exhausts maxDeliveries (5) is dead-lettered as delivery_exhausted and shows up only as the warning-level store-error increase. The owner should decide whether to add a dead-letter alert."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The primary bus is labelled control on audit_core_events_total and audit_core_consumer_pending (subscriber.New default, cmd/server/main.go:77), but primary on audit_core_nats_connected (main.go:104). One bus therefore appears under two names in alerts. Align the label in code in a later slice."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Add a runbook annotation once a Control audit runbook exists (WS06-S9 names apps/Control Plane/docs/AUDIT_CHAIN_RUNBOOK.md). The Model audit rules already link theirs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The owner should confirm the severities chosen here: critical for ControlAuditCoreAuthorityMismatch and ControlAuditCoreNATSDisconnected, warning for the other three. The row fixes only the expressions and durations."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "ControlAuditCoreConsumerPending (15 min) can fire during the WS01 phase 0 replay of 4,992 rows if the consumer takes that long to drain. Decide whether to accept that or silence it for the replay window."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The 8 promtool unit tests run in CI only if WS06-S1's audit-core-ci.yml also runs promtool test rules; WS01-S11 dropped its promtool job on the assumption that WS06-S1 covers it."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The row's evidence (running Prometheus lists the group, forged-subject alert captured) is not yet produced; promtool results are also pending."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The audit_core_nats_connected and audit_core_consumer_pending gauges are refreshed only by the readiness callback (/healthz polled every 30 s), and they freeze while the primary bus is disconnected, so ControlAuditCoreConsumerPending can go stale during an outage."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No rule covers result=dead_lettered; an event that exhausts maxDeliveries shows up only as the warning-level store_error increase. The owner should decide whether to add a dead-letter alert."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "ControlAuditCoreConsumerPending (15 m) can fire during the WS01 phase 0 replay of about 4,992 rows if the consumer drains slowly."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The primary bus is labelled control on events and consumer series but primary on audit_core_nats_connected, so one bus appears under two names in alerts."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Add a runbook annotation once WS06-S9's AUDIT_CHAIN_RUNBOOK.md exists. The Model audit rules already link theirs."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The owner should confirm the severities chosen: critical for AuthorityMismatch and NATSDisconnected, warning for the other three. The row fixes only expressions and durations."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The untracked directory apps/Control Plane/audit-core/internal/chain/ appears in git status but is not part of WS06-S0; the lead should make sure it is committed with the slice that owns it (presumably WS06-S2), not this one."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit"
+   ],
+   "notes": "WS06-S0 code is written. C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/observability/rules/audit-core.rules.yml defines five alerts over existing audit_core_* series (authority mismatch, store error, malformed, consumer pending for 15 m, NATS disconnected for 5 m). C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/observability/rules/audit-core.rules.test.yml holds eight promtool test cases (fire and quiet for each alert). Both files are LF, match the sibling audit-delivery files, and agree with each other offline. The row's promtool commands could not run here, so the status is partial until lead_todo steps 1 and 2 pass. The slice has no switch, so every switch is off by default. Nothing tracked changed."
+  },
+  {
+   "id": "WS06-S1",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/internal/chain/chain.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/internal/chain/chain_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/audit-core/internal/chain/testdata/vectors.json",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.github/workflows/audit-core-ci.yml",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/AUDIT_INTEGRITY_ADR_2026-10-23.md"
+   ],
+   "tests_run": [
+    {
+     "command": "go vet ./internal/chain/ (from apps/Control Plane/audit-core)",
+     "outcome": "clean"
+    },
+    {
+     "command": "go test -count=1 -v ./internal/chain/...",
+     "outcome": "ok, 17 tests passed (vectors file pin, genesis, canonical details, 13 row-hash vectors, linked chain, attestation and checkpoint payloads, domain separation, every-field-changes-hash, length-prefix ambiguity, key-order permutations, idempotence over 500 random documents, fuzz seeds)"
+    },
+    {
+     "command": "go test -run xxx -fuzz FuzzCanonicalDetails -fuzztime 15s ./internal/chain/",
+     "outcome": "PASS, about 890k executions, no failure"
+    },
+    {
+     "command": "Go yaml.v3 parse of .github/workflows/audit-core-ci.yml",
+     "outcome": "valid YAML, jobs test and promtool"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Open a PR (or push the branch) so .github/workflows/audit-core-ci.yml runs; capture the CI run URL as the S1 evidence and add it to the ADR if wanted.",
+    "Have the integrator confirm or assign the ADR number (DEC-39) and rename or retitle the ADR if it is not 0013.",
+    "Commit the five new files: apps/Control Plane/audit-core/internal/chain/{chain.go,chain_test.go,testdata/vectors.json}, .github/workflows/audit-core-ci.yml, apps/AUDIT_INTEGRITY_ADR_2026-10-23.md.",
+    "If the repo's autocrlf or gitattributes could rewrite testdata/vectors.json line endings, the pinned test normalises CRLF to LF, so no action is needed; the ADR hash is of the LF bytes."
+   ],
+   "deviations": [
+    "ADR file named apps/AUDIT_INTEGRITY_ADR_2026-10-23.md (today's date for the plan's <date> placeholder) and titled ADR-0013 per plan section 2.5.",
+    "The truncated default text for DEC-39 ended at 'Add matrix' with no stated dimension, so no build matrix was added to the workflow.",
+    "The workflow also watches apps/Control Plane/observability/rules/**, the Control, Application and Model Plane compose files (cmd/server contract tests read them) and its own file, beyond the plan's single audit-core path filter.",
+    "Added a pinned-sha256 test (TestVectorsFileIsPinned) so the vectors file and the ADR cannot drift; the plan row only asks for the hash in the ADR."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Open a PR or push the branch so audit-core-ci.yml runs green; the CI run URL is the S1 evidence (the plan exempts CI-only slices from docker evidence).",
+     "Integrator confirms or assigns the ADR number (DEC-39) and renames the ADR file or title if it is not 0013.",
+     "Commit the five S1 files only (internal/chain/{chain.go,chain_test.go,testdata/vectors.json}, .github/workflows/audit-core-ci.yml, apps/AUDIT_INTEGRITY_ADR_2026-10-23.md)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "audit-core-ci.yml has never run on GitHub; the plan's evidence for S1 is a green CI run URL on a PR, which only the lead can produce (and promtool in the job needs the docker image prom/prometheus:v2.54.1)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The workflow push trigger lists model-plane as the integration branch (the current local branch); the owner should confirm that branch name before the workflow is pushed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "ADR number 0013 is a placeholder; the integrator must allocate it (DEC-39), and the ADR status stays 'proposed' until DEC-35 is ratified for S3 and later."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "host(ip_address) text is hashed verbatim; the exporter and the offline verifier must emit exactly Postgres's host() rendering (IPv6 compressed lowercase, no netmask), and the vectors cover only one IPv6 form."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Lone UTF-16 surrogate escapes in details are decoded by Go to U+FFFD and re-emitted as raw U+FFFD while Postgres jsonb may reject or retain them; the hash is over read-back text so it is stable in practice, but no vector pins this case."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Only the Go implementation runs in CI; the Python reference that generated vectors.json is not committed, so regenerating or cross-checking a changed vector needs that script re-created from the ADR description."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "New files in internal/chain and the workflow are LF while most audit-core Go files in this working copy are CRLF; harmless to gofmt and git, but mixed endings inside the module."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "S2 should reuse chain.Row and RowHash for the inserter and add the read-back SELECT (host(ip_address), details::text, micros); the Row field-count test will force any added hashed column to be covered."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "audit-core-ci.yml has never run on GitHub; the plan's evidence for S1 is a CI run URL on a PR, and the promtool job needs docker pull of prom/prometheus:v2.54.1."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The workflow push trigger lists model-plane as the integration branch; the owner should confirm that name before the file is pushed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "ADR number 0013 is a placeholder (DEC-39), and the ADR stays proposed until DEC-35 is ratified for S3 and later."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "host(ip_address) text is hashed verbatim, so the S2 inserter and any offline verifier must emit Postgres's exact host() rendering; only one IPv6 form is pinned in vectors."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No vector pins a lone UTF-16 surrogate escape in details, which Go decodes to U+FFFD while Postgres jsonb may reject it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The Python reference that generated vectors.json is not committed, so cross-checking a changed vector needs that script rebuilt from the ADR text."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "New files are LF while many audit-core Go files in the working copy are CRLF; harmless to gofmt and git."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The untracked audit-core.rules.yml and audit-core.rules.test.yml under Control Plane/observability/rules belong to WS06-S0, not S1, so they must not be committed under the S1 commit; the promtool job will check them once they land."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit"
+   ],
+   "notes": "No partial edits were found from an earlier attempt; all five files are new. chain.go is a pure package (no DB, clock or keys). API: GenesisHash, CanonicalDetails, RowHash (VAC1 as in the plan row), AttestationPayload (VAH1), CheckpointPayload (VAK1), plus the Row type and sentinel errors. Details are canonicalised with UseNumber and number tokens kept verbatim (1.0, 1e3 and 1000 stay distinct), keys sorted by UTF-8 bytes, and an explicit hand-written string escape (not encoding/json) so the bytes cannot move with a Go release. Signed-payload times are UTC with fixed microsecond width. An org id containing a newline is refused in signed payloads. vectors.json was generated by an independent Python reference written from the format description, and the Go code matched it on the first run. The vectors file sha256 (LF) is pinned in a test constant and recorded in the ADR: a4d3e9a8a3beec560015d0d7b6eb5dd1c9312585d4210eb7c8daff14fe7e73cf. The ADR is apps/AUDIT_INTEGRITY_ADR_2026-10-23.md, headed ADR-0013 (placeholder number per DEC-39), with the encoding spec plus the DEC-35 decisions as the plan default, not as ratified. The CI workflow has a test job (Postgres 16, go vet, go test -p 1 with TEST_DATABASE_URL, build of every cmd binary) and a promtool job. The promtool job runs check rules and test rules over apps/Control Plane/observability/rules/*.rules.yml and *.rules.test.yml, and does nothing if none exist. It uses go-version-file go.mod, has no branches filter on pull_request, and adds model-plane to the push branches. No runtime change; no switch added."
+  },
+  {
+   "id": "WS05-S6.code",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/approval_delivery_worker.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --lib permission (CARGO_INCREMENTAL=0)",
+     "outcome": "41 passed, 0 failed (includes 3 new tests)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test autonomy_ladder_contract --test tool_class_registry_parity",
+     "outcome": "11 passed and 6 passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib the_inline_loop_ignores",
+     "outcome": "1 passed (a first run failed because the test fn's own name contained the forbidden needle; renamed, then passed)"
+    },
+    {
+     "command": "cargo fmt -p execution-core -p model-gateway -- --check",
+     "outcome": "fails on about 100 files that predate this slice; the only hunk in permission/mod.rs is the pre-existing mcp__s__post line in a class_tests test; no hunk in the code I added. Not run: cargo test --workspace, cargo check --workspace --all-targets"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: after the soak, change the tool-risk row (around lines 62-63 and 147) to say the registry class and approval floor are the only classifier, name heuristics deleted. Not before.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: do not mark the WS05 entries (2026-10-21 'Tool side-effect classes are declared in the registry' and 'A declared class may tighten...') implemented yet. After the soak, add 'WS05-S6: is_risky_tool and the mcp__ blanket deleted; requires_* are floor lookups; the off path was kept one release'. Now, add one line to the 2026-10-23 WS05-S4 entry: 'WS05-S6 (code half): requires_durable_owner_approval_with and requires_consent_to_disclose_with read the declared floor (durable_owner / ask) under TOOL_CLASS_GATE; divergence points owner_approval and disclosure_consent; the name list is deleted only after the soak.'",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: only after the soak and proof-stack evidence, change `TOOL_CLASS_GATE: ${TOOL_CLASS_GATE:-off}` (about line 1298) to default `enforce`. Not now.",
+    "Soak start gate: run TOOL_CLASS_GATE=shadow on the proof stack for two weeks and read tool_class_divergence_total, which now has the points posture, risky, restricted_write, rung, owner_approval and disclosure_consent; require zero built-in divergence, plus MCP-read evidence (echo_read answers a Do prompt)."
+   ],
+   "deviations": [
+    "The row says the code half is the enforce path behind TOOL_POLICY_ENFORCED; that switch and the Go enforce path belong to S5 in capability-core and already exist, and no Go file is owned here. The execution-core class gate (TOOL_CLASS_GATE=enforce) also already existed. So S6.code adds floor-lookup variants of the requires_* predicates and the comment, test and ledger prep, not a new switch.",
+    "The requires_* wrappers are added as gated *_with functions beside the legacy predicates rather than replacing them, because deleting the legacy path must wait for the soak and off must stay byte-identical."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs (about line 832, requires_durable_owner_approval) and src/runtime_loop/agent.rs (approval_kind_for / approval_reason_for around 6461-6474, permission_mode at about 6649) and src/runtime_loop/mod.rs (about line 296) and src/runtime_loop/resume.rs (about line 127): the call sites that still call the name predicates directly, to be switched to RunGate::requires_durable_owner_approval / requires_consent_to_disclose. autonomy_ladder_contract.rs could then forbid the direct calls. Not owned by this slice.",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs, process_tools.rs, code_interpreter.rs, integration_tools.rs, info_tools.rs, shipping_tools.rs, social_tools.rs, web_tools.rs and browser_agent/browser_risk.rs: doc comments still say 'permission::is_risky_tool'. Reword them in the same change that deletes the list."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Deletion of is_risky_tool and the mcp__ blanket, and the compose default TOOL_CLASS_GATE=enforce, wait for the two-week shadow soak with zero built-in divergence on the proof stack (docker, live).",
+     "Ledger and matrix doc updates (shared files): the implementer's lead_todo lines are to be applied by the lead. Entries move to implemented only after the soak.",
+     "Full gates (cargo test --workspace --no-fail-fast, cargo fmt --all --check, cargo check --workspace --all-targets) were not run by the implementer. I ran the targeted tests and cargo check. fmt fails on pre-existing files.",
+     "Call sites in grpc.rs, agent.rs, runtime_loop/mod.rs and resume.rs must be switched to RunGate methods by the slice that owns those files."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under TOOL_CLASS_GATE=enforce a tool declared with the ask floor reads as requires_consent_to_disclose: it labels the approval as a disclosure (approval_kind Permission) instead of a destructive operation. The seeded built-ins are correct, but a future MCP or policy row with floor ask but a risky class would be mislabelled. Decide whether the disclosure marker needs its own column before MCP rows can carry an ask floor."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The requires_*_with variants and the RunGate methods have no production caller yet: grpc.rs, agent.rs, runtime_loop/mod.rs and resume.rs still call the name predicates. Until they are switched (files not owned here) the owner and disclosure markers do not move with TOOL_CLASS_GATE; the posture gate does through evaluate_call_with_class."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins that tickets.create and read_subagent_result keep requires_* true when a ZDR or waived run has no view (it falls back to the legacy name answer, which is correct but covered only through the None-view case)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "cargo fmt --check fails on about 100 files in execution-core and model-gateway that predate this slice (pre-existing CRLF/format drift); the full gate in the plan row cannot go green until a repo-wide format pass lands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "After the deletion the *_with functions can drop their gate parameter, is_risky_tool and the legacy golden (LEGACY_CLASSIFICATION_GOLDEN) should be re-pointed to class-derived answers, and tests/autonomy_ladder_contract.rs lines 68-80 (which require rung_required_for to reuse is_risky_call) must be rewritten in the same change."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "requires_durable_owner_approval_with, requires_consent_to_disclose_with and the RunGate methods have no production caller: grpc.rs, runtime_loop/agent.rs, runtime_loop/mod.rs and resume.rs still call the name predicates. The owner and disclosure markers do not follow TOOL_CLASS_GATE until those call sites are switched (files not owned by this slice), and that must happen before enforce is meaningful for them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under enforce, an ask floor is read as requires_consent_to_disclose, so a future MCP or policy row with a risky class and an ask floor would be labelled as a disclosure approval instead of a destructive one. Decide whether the disclosure marker needs its own column before MCP rows can carry an ask floor."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Soak start gate not met and not runnable here: two weeks of TOOL_CLASS_GATE=shadow on the proof stack with zero built-in tool_class_divergence_total (points now include owner_approval and disclosure_consent) plus MCP-read evidence. Until then is_risky_tool, the mcp__ blanket and the off path stay."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test pins that tickets.create and read_subagent_result keep requires_* true on a ZDR or waived run with no snapshot view under enforce, other than the None-view case."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "cargo fmt --check fails on about 100 pre-existing files in execution-core and model-gateway, so the plan's full format gate cannot go green until a repo-wide format pass lands. After the soak the *_with functions can drop their gate parameter, and the legacy golden plus autonomy_ladder_contract.rs lines 68-80 must be rewritten in the same change."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Doc comments in runtime_loop/mod.rs, process_tools.rs, code_interpreter.rs, integration_tools.rs, info_tools.rs, shipping_tools.rs, social_tools.rs, web_tools.rs and browser_agent/browser_risk.rs still say permission::is_risky_tool and need rewording when the list is deleted."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "The enforce path was already built by S3/S4: TOOL_CLASS_GATE=enforce (execution-core) and TOOL_POLICY_ENFORCED (capability-core, S5, Go). There was no uncommitted partial work in my files at the start. This slice adds what S6 can safely land before the soak, with every switch unchanged and off-path behaviour byte-identical. (1) permission/mod.rs: requires_durable_owner_approval_with and requires_consent_to_disclose_with, built on by_gate. Under enforce they read the declared floor (durable_owner and ask). Under shadow the legacy name answer decides and a divergence is counted with point owner_approval or disclosure_consent. Plus RunGate::requires_durable_owner_approval and RunGate::requires_consent_to_disclose. A doc note on is_risky_tool says the list and the mcp__ blanket are the legacy fallback and are deleted after the soak. (2) Tests in class_tests: every seeded built-in gives the same two predicate answers by floor as by name; gate behaviour in off, shadow (counted), enforce, and with no view; RunGate snapshot behaviour. (3) approval_delivery_worker.rs comments no longer cite the is_risky_tool set; a class says whether a tool is gated, never whether it is resumable. (4) tool_loop.rs: the inline_tool_allowed doc no longer says execution-core rejects dynamic MCP names until capability-core binds them, and a new source-text test pins that the inline loop never mentions the class, ResolveToolBindings or ToolClassGate identifiers. The deletion of is_risky_tool and the mcp__ blanket, the enforce default in compose, and the ledger entries moving to implemented are deliberately NOT done: the plan's start gate is two weeks of shadow with zero built-in divergence plus MCP-read proof-stack evidence, and the off path is kept for one release. Status is partial for that reason only."
+  }
+ ]
+}

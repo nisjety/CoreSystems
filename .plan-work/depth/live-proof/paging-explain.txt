@@ -1,0 +1,29 @@
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=4.83..20.88 rows=1 width=797) (actual time=0.106..0.330 rows=101 loops=1)
+   Buffers: shared hit=323
+   InitPlan 2 (returns $1)
+     ->  Result  (cost=4.27..4.28 rows=1 width=8) (actual time=0.057..0.058 rows=1 loops=1)
+           Buffers: shared hit=3
+           InitPlan 1 (returns $0)
+             ->  Limit  (cost=0.28..4.27 rows=1 width=8) (actual time=0.055..0.055 rows=1 loops=1)
+                   Buffers: shared hit=3
+                   ->  Index Only Scan Backward using idx_messages_thread_id on messages  (cost=0.28..12.24 rows=3 width=8) (actual time=0.054..0.055 rows=1 loops=1)
+                         Index Cond: ((thread_id = 'ws09s8-20261027t022522z-thread'::text) AND (sequence IS NOT NULL))
+                         Heap Fetches: 1
+                         Buffers: shared hit=3
+   ->  Nested Loop  (cost=0.56..16.61 rows=1 width=797) (actual time=0.105..0.317 rows=101 loops=1)
+         Buffers: shared hit=323
+         ->  Index Scan Backward using idx_messages_thread_id on messages m  (cost=0.28..8.30 rows=1 width=824) (actual time=0.078..0.151 rows=101 loops=1)
+               Index Cond: ((thread_id = 'ws09s8-20261027t022522z-thread'::text) AND (sequence < $1))
+               Buffers: shared hit=20
+         ->  Index Scan using threads_pkey on threads t  (cost=0.28..8.30 rows=1 width=27) (actual time=0.001..0.001 rows=1 loops=101)
+               Index Cond: (id = 'ws09s8-20261027t022522z-thread'::text)
+               Filter: (org_id = 'FUEk9LuqykPUnW2n7dhrbEeNKwRsV5uf'::text)
+               Buffers: shared hit=303
+ Planning:
+   Buffers: shared hit=419
+ Planning Time: 3.395 ms
+ Execution Time: 0.462 ms
+(25 rows)
+

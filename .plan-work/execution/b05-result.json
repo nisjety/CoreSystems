@@ -1,0 +1,427 @@
+[
+ {
+  "id": "WS13-S1",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+   "apps/Model Plane/api/contracts/approval-causes.json (new)",
+   "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs (new)",
+   "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+   "apps/Model Plane/rust/crates/mp-contracts/tests/approval_cause_golden.rs (new)",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+   "apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/approvals.rs",
+   "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs (6 mock Approval literals got cause: None; mechanical, needed to compile)"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p mp-contracts approval_cause",
+    "outcome": "pass: 7 unit + 5 golden (vocabulary vs JSON, scope options, digest known answer, round trip + unknown degrade, no argument text)"
+   },
+   {
+    "command": "cargo test -q -p mp-contracts",
+    "outcome": "all pass (155 unit + all test targets)"
+   },
+   {
+    "command": "cargo test -q -p execution-core --lib",
+    "outcome": "1170 passed, 0 failed (includes the 3 named agent-level pause tests, a_browser_gate_carries_the_typed_risk_category, every_gate_that_holds_a_step_says_which_one_it_was, and cause assertions added to the S0 pins). Run with a temporary patch to mcp_gateway.rs, since reverted byte-for-byte (see needs_other_files)"
+   },
+   {
+    "command": "cargo test -q -p session-core --all-targets",
+    "outcome": "547 passed, 174 ignored (DB-gated, not run), 0 failed; includes 4 new cause tests"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib approvals; cargo test -q -p model-gateway --test orchestration_http_test",
+    "outcome": "30 passed; 26 passed"
+   },
+   {
+    "command": "cargo check -q --workspace --all-targets",
+    "outcome": "clean (with the same temporary mcp_gateway.rs patch)"
+   },
+   {
+    "command": "buf build (in apps/Model Plane/proto)",
+    "outcome": "ok. buf generate was NOT run (see lead_todo)"
+   },
+   {
+    "command": "N2 tag diff of orchestration.proto against HEAD",
+    "outcome": "additions only: ApprovalCause fields 1-9 (new message), Approval.cause = 16, CreateApprovalRequest.cause = 13. No existing tag changed or removed (338 -> 349 field lines)."
+   },
+   {
+    "command": "cargo fmt --all -- --check",
+    "outcome": "FAILS repo-wide on pre-existing files (about 120 files, hundreds of hunks). My new files are rustfmt-clean (rustfmt run on them); my hunks in existing files were hand-formatted and no remaining fmt hunk touches them."
+   },
+   {
+    "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+    "outcome": "70 passed, 22 failed. All 22 are other-plane goldens and vendored copies (Quarry, Data Plane, usage-ledger, auth-core sha pins, zdr-posture-matrix sha copies); none touches a file I changed. Not diffed against a clean HEAD run."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Fix or confirm the execution-core build break in mcp_gateway.rs (WS05-S2 fields) before committing; I verified with a temporary patch only.",
+   "Run 'buf generate' in apps/Model Plane/proto after all in-flight proto edits are in, and commit the regenerated Go stubs (orchestration.pb.go). Optionally 'buf lint'.",
+   "Commit with CRLF preserved: mod.rs, grpc.rs, browser_events.rs and approvals.rs are CRLF; agent.rs and orchestration_grpc.rs are LF; the new files are LF.",
+   "Rebuild session-core, execution-core and model-gateway images. Live evidence: run asking tickets.create and a provider write, then psql \"select kind, metadata->'cause' from approvals order by requested_at desc limit 2\" shows owner_effect_reserved and provider_write (or auto_posture_provider_write under auto posture).",
+   "Check mp_session_approval_cause_total{code} on session-core /metrics after those runs.",
+   "No DB-gated tests were added. If you want one, a create-then-get round trip of metadata.cause through store::request_approval would go in the plan_gate_pg style.",
+   "Apply the doc lines listed in needs_other_files (README row, CONTRACTS.md, ledger).",
+   "When the S8 slice comes, vendor approval-causes.json into execution-core tests/fixtures with a pin and add it to zdr-contract-sync GOLDENS."
+  ],
+  "deviations": [
+   "Tags: used the section 4.3 finals (CreateApprovalRequest.cause 13, Approval.cause 16), not the stale 12/14 in the S1 row; WS03 S2 already holds 12, 14 and 15.",
+   "The plan lists 'three sites' for awaiting_approval(cause); there are four (the browser-agent AwaitingApproval mapping in browser_execution_to_step_outcome also returns it), so all four carry a cause.",
+   "Edited model-gateway/tests/orchestration_http_test.rs (not on the owned list): added cause: None to 6 mock Approval struct literals that stopped compiling when Approval gained a field. Mechanical, same as the continuation_mode precedent.",
+   "Briefly patched execution-core/src/mcp_gateway.rs (not owned) with ..Default::default() so execution-core would compile for testing, then restored the original bytes (sha256 999e3474... matches the backup). The break is from WS05-S2's gateway.proto additions (ListMcpToolsRequest.unstaged, ProxyMcpToolRequest.expected_digest), not from this slice. Until someone fixes it, execution-core does not compile in the worktree.",
+   "buf generate not run: it would regenerate every proto, including other slices' in-flight gateway.proto and inference.proto edits. buf build passes.",
+   "The three named pause tests (owner_effect, consent_to_disclose, capability_high_risk) are in agent.rs and run the real loop; I also added step-level tests in runtime_loop/mod.rs. No new session-core DB-gated tests: the cause logic is a pure function (new_approval_metadata), tested without a database."
+  ],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs (pre-existing break from WS05-S2: add the new ListMcpToolsRequest.unstaged and ProxyMcpToolRequest.expected_digest fields to the two request literals, e.g. ..Default::default(); execution-core does not compile without it)",
+   "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go (and any other buf-generated output): regenerate for the new ApprovalCause message and the two cause fields",
+   "apps/Model Plane/api/contracts/README.md: add a row for approval-causes.json",
+   "apps/Model Plane/docs/CONTRACTS.md and docs/decisions/ledger.md: record the cause vocabulary and the tags used (13 and 16)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Go stubs not regenerated: apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go has no ApprovalCause (grep count 0). Run buf generate in apps/Model Plane/proto once the other in-flight proto edits (gateway.proto, inference.proto) are in, and commit the stubs. Go consumers only pass the approval through, so nothing breaks until then.",
+    "Live evidence not captured (needs docker): rebuild session-core, execution-core and model-gateway, ask tickets.create and a provider write, then run psql 'select kind, metadata->'cause' from approvals order by requested_at desc limit 2'. Expect owner_effect_reserved and provider_write (or auto_posture_provider_write under auto posture). Also check mp_session_approval_cause_total{code} on session-core /metrics.",
+    "buf breaking was replaced by the N2 tag diff and buf baseline is not yet in place (WS12-S2). Diff checked: additions only, ApprovalCause fields 1-9, Approval.cause=16, CreateApprovalRequest.cause=13, matching the section 4.3 finals. No existing tag changed.",
+    "No session-core DB-gated test (create then get round trip of metadata.cause through store::request_approval). The 174 ignored DB tests were not run. The cause logic is a pure function, tested without a database, and decide_approval's SQL only strips continuation_descriptor, so the cause survives a decision.",
+    "Docs not yet written: a row for approval-causes.json in api/contracts/README.md, the cause vocabulary and tags 13/16 in docs/CONTRACTS.md and docs/decisions/ledger.md. Vendoring approval-causes.json with a pin into zdr-contract-sync GOLDENS belongs to S8.",
+    "Commit hygiene for the lead: the shared worktree also holds other slices' hunks in the owned files. agent.rs has 'reasoning_effort: 0' (WS11) and durable_loop_contract.rs has the spend-regex relaxation (WS02/WS03). Stage by hunk. mod.rs, grpc.rs, browser_events.rs, approvals.rs and orchestration.proto are CRLF; agent.rs, orchestration_grpc.rs and the new files are LF. I confirmed both LF files have 0 CRs at HEAD and in the working copy, so there is no line-ending flip."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Built: closed CauseCode vocabulary (10 codes), scope_options_for stub [\"once\"], action_key (tool, plus operation only for execute_provider_action, never argument values), keyed run-salted blake3 call_digest over canonicalised args with length prefixes, normalized() (unknown code -> unclassified_gate, scope options fixed server-side, fields bounded to 200 chars), and to_metadata/from_metadata (approvals.metadata.cause, no migration). The plan's tags were stale, so I used the section 4.3 finals (Create 13, Approval 16). Creators: StepOutcome.cause: Option<CauseCode> with awaiting_approval(cause) at all four sites (the browser-agent AwaitingApproval mapping too, not only the three the plan names). Mapping: capability ask -> capability_high_risk; hook ask -> hook_ask; permission gate -> owner_effect_reserved / consent_to_disclose / provider_write (execute_provider_action) / risky_effect_under_ask. PendingPause.cause feeds pause_for_approval; grpc.rs ExecuteStep pause sends it; resolve_write_approval sends provider_write under ask and auto_posture_provider_write otherwise (it now takes tool_name and tool_input, for the digest and key only); browser gate sends browser_action_risk with the risk_category, tool browser_agent, and no digest or URL. Gateway cache builder leaves cause None (pinned by a test). session-core: new_approval_metadata validates and normalises the cause, stores it in metadata.cause, increments mp_session_approval_cause_total{code} only when a row was actually inserted, and approval_from_row reads it back. ZDR: a ZDR caller stores no cause (test a_zero_retention_caller_stores_no_cause). Approval kind and reason text are unchanged (byte-identical; the S0 pins still pass). The plan says reason is derived from the code; I kept approval_reason_for(tool_name) because its predicates are exactly the cause predicates and the S0 pins hold it. capability_policy_ask is in the vocabulary but nothing raises it (WS05). effect_class and rule_id are left empty (no declared-class lookup in execution-core yet; S6). The new APPROVAL cause data is dark. There is no flag and no switch, as the plan says."
+ },
+ {
+  "id": "WS05-S2",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+   "apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_jsonrpc.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/capability_observation.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+   "apps/Model Plane/go/services/capability-core/internal/api/mcp_tools.go",
+   "apps/Model Plane/go/services/capability-core/internal/api/mcp_tools_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/api/mcp_tools_integration_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+   "apps/Model Plane/go/services/capability-core/internal/models/availability.go",
+   "apps/Model Plane/go/services/capability-core/internal/models/derive_mcp_class_test.go",
+   "apps/Model Plane/go/services/capability-core/internal/server/server_mcp_tool_test.go",
+   "scripts/tests/fixtures/mcp-annotated-server.mjs"
+  ],
+  "tests_run": [
+   {
+    "command": "cd apps/Model Plane/go/services/capability-core && go vet ./internal/api/ && go vet -tags integration ./internal/api/ && go test ./internal/api/ ./internal/models/ ./internal/server/",
+    "outcome": "vet clean for both tag sets; api passed uncached (18.1 s), models and server passed (cached, unchanged); gofmt clean on mcp_tools.go"
+   },
+   {
+    "command": "Earlier rounds, unchanged by this fix: capability-core go test ./... and go vet ./..., cargo test -q -p model-gateway --lib (1987 passed), mp-contracts --all-targets, execution-core tool_class_registry_parity (6 passed), buf breaking exit 0",
+    "outcome": "passed in earlier rounds; not re-run, since this round only deleted a Go constant"
+   }
+  ],
+  "db_tests_written": [
+   "TestObservationDriftAndApprovalAgainstPostgres",
+   "TestObservationNeverLowersAClassAndTwoOrgsNeverShareARow",
+   "TestRegistrationUpsertKeepsAStoredTrustChoiceOnlyForTheSameEndpoint"
+  ],
+  "lead_todo": [
+   "Free disk space on C: (it was at 100% during this round) before any cargo or docker build.",
+   "Run the DB tests: cd 'apps/Model Plane/go/services/capability-core' && go test -tags integration ./internal/api/ -run 'TestObservationDriftAndApprovalAgainstPostgres|TestObservationNeverLowersAClassAndTwoOrgsNeverShareARow|TestRegistrationUpsertKeepsAStoredTrustChoiceOnlyForTheSameEndpoint' ; and go test -tags integration ./internal/registry/... . If the apply statement fails, fix applyObservationSQL or approveToolSQL in mcp_tools.go first.",
+   "Compose: set MCP_TOOL_OBSERVATION_ENABLED=true on model-gateway for the proof stack only; confirm model-gateway and capability-core share MCP_OAUTH_SERVICE_TOKEN; optional MCP_TOOL_OBSERVATION_TTL on capability-core. Rebuild both images.",
+   "Live proof with the fixture (PORT 8931; allow the host via MCP_INTERNAL_ALLOWED_HOSTS or tunnel it, allowlist echo_read, create_item, drop_all): expect echo_read external_write, create_item destructive, drop_all unclassified/ask, all approved; capabilities rows kind mcp_tool; registry_audit_log mcp_tool_observed rows. Then POST /__fixture/description, wait the 60 s catalog TTL, and expect review_state drifted, capability enabled=false with reason tool_definition_changed, one mcp_tool_drifted row. Check ProxyMcpTool with an old expected_digest answers tool_definition_changed (grpcurl). Approve via POST /api/v1/mcp/{server}/tools/echo_read/approve and show the re-pin plus an mcp_tool_approved row.",
+   "Lead-owned docs: ledger entries for the observation-route boundary (DEC-12 D5) and annotation_trust; capability-ownership-matrix rows for MCP tools; note that D5 needs the security nod and D2 the owner call before the switch goes beyond the proof stack.",
+   "Not-owned follow-ups: api/openapi.yaml (GET /api/v1/mcp/{id}/tools, POST .../approve, annotation_trusted); api/contracts/zdr-posture-matrix.json golden mcp_tool_observation_under_zdr (then run bash scripts/tests/zdr-contract-sync.test.sh); move pub mod capability_observation; into model-gateway lib.rs and make derive_org_scoped_service_token pub(crate).",
+   "Verify gateway.pb.go parity with buf generate in CI (only gateway.pb.go was copied; inference.pb.go and orchestration.pb.go differ because of other slices' uncommitted proto edits).",
+   "WS05-S4: execution-core must set ListMcpToolsRequest.unstaged=true and ProxyMcpToolRequest.expected_digest from the registry pin."
+  ],
+  "deviations": [
+   "server.go left unchanged: the policy gate already surfaces availability.ReasonCode, and server_mcp_tool_test.go pins tool_definition_changed",
+   "AnnotationTrust is *bool (nil keeps the stored choice) so the gateway write-through cannot reset an admin's trust",
+   "capability_observation.rs is declared via #[path] inside runtime_registries.rs because lib.rs is not owned",
+   "derive_org_scoped_service_token is duplicated in capability_observation.rs because the one in mcp_oauth.rs is private and not owned",
+   "MCP_TOOL_OBSERVATION_ENABLED defaults OFF per the lead rule (the plan says on after S2 proves)",
+   "policy_relaxable not created: no migration in S2, and S5 consumes it",
+   "added the mcp_tool_approved audit action beyond the plan's observed and drifted"
+  ],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/mcp_oauth.rs",
+   "apps/Model Plane/api/openapi.yaml",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+   "apps/Model Plane/docs/decisions/ledger.md",
+   "apps/Model Plane/docs/capability-ownership-matrix.md",
+   "apps/Model Plane/docker-compose.yml",
+   "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Postgres integration tests were not run by me: TestObservationDriftAndApprovalAgainstPostgres, TestObservationNeverLowersAClassAndTwoOrgsNeverShareARow, TestRegistrationUpsertKeepsAStoredTrustChoiceOnlyForTheSameEndpoint, and go test -tags integration ./internal/registry/... . The two big CTE statements (applyObservationSQL, approveToolSQL), the new registration upsert CTE and the withMCPToolCascade wrapper have only been checked by reading against the schema. Only the lead can run them against real Postgres.",
+    "Live proof is open and lead-owned. Rebuild model-gateway and capability-core, and set MCP_TOOL_OBSERVATION_ENABLED=true on the proof stack. Confirm both share MCP_OAUTH_SERVICE_TOKEN. Connect the fixture and check three rows: echo_read external_write, create_item destructive, drop_all unclassified with an ask floor. Mutate the description and wait out the 60 s catalog TTL. Then expect drifted, the capability off with tool_definition_changed and one mcp_tool_drifted audit row. Also check that ProxyMcpTool with the old expected_digest answers tool_definition_changed, and that POST .../approve re-pins and writes an mcp_tool_approved row. Observation is only triggered by a ListMcpTools call, so for the proof something (execution-core on a Do run, or grpcurl) must call it, and again after the mutation.",
+    "Switch defaults: MCP_TOOL_OBSERVATION_ENABLED defaults OFF (only the literal \"true\" enables it), against the plan's 'default on after S2 proves'. That is correct for now. The lead flips it after the proof, and compose still needs both env lines.",
+    "Decisions that are still open and not the implementer's to close: DEC-12 D5 (security nod on the HMAC observation-write route; a compromised gateway holding the root secret can mint a token for any org except 'global') and D2 (owner call on annotation_trust). No path from the gateway's /v1/mcp registration to set annotation_trust exists yet, because mcp_capability_payload does not send it. Today trust can only be set through capability-core's own registration API, which is consistent with 'ships default untrusted'. Approval is the one place a derived class may be re-derived downward, using only capability:write plus owner/admin; whether that is enough, or should need authz.RiskOverrideScope as in S1's lowering rule, belongs in the D5 review.",
+    "Not-owned follow-ups (the implementer listed them, and I agree they are needed): api/openapi.yaml (GET /api/v1/mcp/{id}/tools, POST .../approve with body {approved_digest}, annotation_trusted), the zdr-posture-matrix.json golden mcp_tool_observation_under_zdr plus bash scripts/tests/zdr-contract-sync.test.sh, the ledger and capability-ownership-matrix rows, compose env, and moving 'pub mod capability_observation' into model-gateway lib.rs (it is declared via #[path] inside runtime_registries.rs for now).",
+    "ZDR wiring has no handler-level test. The decision is the pure should_observe(switch, zdr), unit-tested for the ZDR, unreadable-posture and switch-off cases, and list_mcp_tools calls it with identity.zdr_for(..).ok(), which I read and found correct. Nothing drives GatewayService::list_mcp_tools with a ZDR identity and asserts that no post is made. Worth adding with the golden fixture, but I do not count it as a blocker.",
+    "S4 must still consume the new fields: execution-core sets ListMcpToolsRequest.unstaged=true and sends ProxyMcpToolRequest.expected_digest from the registry pin. Today mcp_gateway.rs sends unstaged=false and an empty digest, so the digest check is dormant until then."
+   ]
+  },
+  "review_defects": [
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/internal/api/mcp_tools.go:393-404 (server state cached once per batch) and applyObservationSQL cap CTE :591-620; same in approveTool :781-788/:838 and approveToolSQL :908-915",
+    "scenario": "The gateway posts a 200-tool batch. lookupObservedServer reads the server as enabled at the start. While the batch is still running, an admin sends PATCH enabled=false or DELETE, and withMCPToolCascade switches every capabilities row of that server off. The writes still in flight, and every tool after that point in the batch, then run applyObservationSQL with d.enabled=true computed from the stale server snapshot. They set capabilities.enabled=true, availability_state='available' and a fresh health_checked_at. The CAS guard checks only capability_tools fields and never the server's current state. After hydration the gateway stops listing a deleted server, so nothing corrects the row until MCP_TOOL_OBSERVATION_TTL (1 h by default, up to 24 h). Until then the registry reports tools of a disabled or deleted server as callable. That breaks the patch comment's own claim that 'no tool row outlives the switch that turned its server off'. approveTool has the same race: it reads the server, a concurrent disable lands, then it writes enabled=callable.",
+    "fix": "Decide enabled inside the write statement against the server row as it is now. Add a CTE that takes SELECT ... FROM mcp_servers WHERE id=$6 AND (org_id=$1 OR org_id='global') AND deleted_at IS NULL FOR SHARE, and set enabled = $22 AND that row is enabled with rollout stable or canary. The cascade's UPDATE of mcp_servers then serializes with it. Do the same in approveToolSQL."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:1300-1305 (admin check skipped for scope=='user') with patch :1435-1474 (normalizeMCPConfig keeps AnnotationTrust when shared_with is widened) and the PUT carry-over CASE :1338-1343",
+    "scenario": "User A, not an admin, registers a user-scoped server with annotation_trust:true. This is allowed because s.Scope=='user'. Its tool delete_repo declares readOnlyHint:true and derives as class read (risk low, approval floor none). A then sends PATCH /api/v1/mcp/{id} {shared_with:[B,C]}. Only ownership is checked, and the stored annotation_trust survives because normalizeMCPConfig keeps the field. A later gateway write-through PUT, with the same endpoint and scope and no trust key, also carries it over. B's and C's runs now get delete_repo as a trusted read tool, decided by a non-admin. The handler's own comment says 'for a server shared beyond one user that takes an admin', and the trust is meant to be an admin call wherever others are exposed (DEC-12 D2 is still pending the owner).",
+    "fix": "Treat a user-scoped server with a non-empty shared_with as shared. Require verifiedIsAdmin to set or keep annotation_trust on it. In patch, clear AnnotationTrust (or refuse the change) when shared_with goes from empty to non-empty and the caller is not an admin. Gate the PUT carry-over the same way."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/go/services/capability-core/internal/api/mcp_tools.go:255-267 (default branch restores drifted to approved) with apps/Model Plane/rust/services/model-gateway/src/capability_observation.rs:162-182 (per-replica ledger, 15 min refresh)",
+    "scenario": "There are two gateway replicas. The server changes echo_read from D1 to D2. Replica A's catalog refreshes and posts D2, the row goes to drifted with enabled=false, and A's ledger marks D2 as freshly posted. Replica B still holds D1 in its 60 s catalog cache, and its last post of the tool was more than 15 minutes ago, so the tool is due. B gets a listing and posts D1. decideObservation sees digest==pin with stored.state=drifted and qualifies, and sets the row back to approved and enabled. A will not post D2 again for 15 minutes, and B corrects it only on its next listing after its cache refreshes. So a stale observation lifts the quarantine on a tool whose server serves a changed definition, with no person involved. The plan row says the row stays disabled 'until approval'.",
+    "fix": "Do not let observation move a row out of drifted. Leave a drifted row drifted until approveTool, or a person's explicit restore, changes it. If automatic restore is wanted, carry the gateway's discovery timestamp and restore only when the observation is newer than the drift's observed_at."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/rust/services/model-gateway/src/capability_observation.rs:245-252 and apps/Model Plane/go/services/capability-core/internal/api/mcp_tools.go:534",
+    "scenario": "capability-core answers 200 for every per-tool outcome, including contended (three lost compare-and-sets) and rejected. post_observations treats any 2xx as success, so ledger.record(..., true) suppresses a re-post for REFRESH_INTERVAL (15 min). If a drift observation loses three races, for example with replicas posting at the same moment, it is reported as contended and dropped. The tool stays approved and enabled on the old pin for up to 15 minutes, although the gateway saw the change.",
+    "fix": "Parse the results array. Record each tool with a contended (or 5xx) outcome as failed so the 30 s back-off retries it, or have capability-core return a non-2xx status when any observation is contended."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go:1347-1357 (registration cascade only when NOT $10 enabled)",
+    "scenario": "An admin re-registers a server with PUT, removing drop_all from tool_allowlist or setting rollout_state=quarantine while enabled stays true. The cascade does not run. The gateway filters by its new allowlist and never observes drop_all again. For a quarantined server it only re-posts after the 15 min ledger interval. The tool's capabilities row stays enabled and available until the observation TTL (1 h, up to 24 h) expires, and its capability_tools review_state stays approved.",
+    "fix": "In the registration statement, also cascade enabled=false to tool rows whose tool_name is not in the new allowlist, or whose server rollout_state is not stable or canary."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/go/services/capability-core/internal/api/availability.go:256-297 (tenant attestation path accepts kind=mcp_tool rows)",
+    "scenario": "A tenant health attester posts /api/v1/capabilities/availability for a cap.mcp_tool.* row at its current version (1.0.0-<pin12>). It refreshes health_checked_at, which keeps a tool the gateway no longer sees inside MCPToolObservationTTL indefinitely. It also overwrites availability_reason_code=tool_definition_changed on a drifted row, so the gate reports the generic capability_disabled instead of the drift cause. The observation window is supposed to be the whole health attestation of an MCP tool.",
+    "fix": "Refuse kind=mcp_tool rows in attestAvailabilityForLane: observation is their only attester."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/rust/services/model-gateway/src/grpc.rs:1830-1852 (observe only on gRPC ListMcpTools); apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs:50-58 (no credential, unstaged:false)",
+    "scenario": "Only the gRPC ListMcpTools path triggers observation. The inline chat callers use McpListingOptions::default() with observe=false. execution-core's list_tools sends no bearer, so the gateway's mandatory identity check refuses it. In this tree no production path ever posts an observation. The DoD live proof ('connect fixture server: three rows') cannot happen by connecting the fixture; it needs a hand-minted gRPC call.",
+    "fix": "Record this in the lead TODO and the evidence plan. Prove it with a grpcurl ListMcpTools call carrying a minted service or user token, or wire the inline listing to observe behind the flag. Do not claim connect-time rows."
+   }
+  ],
+  "notes": "Fix applied: the unused constant observationActor (and its comment) is deleted from mcp_tools.go. The audit actor 'model-gateway' stays as the literal in the apply SQL, which is its only user; a grep for observationActor now finds nothing. The file is LF and kept that way. One Edit call failed with ENOSPC because the C: drive was at 100%. I checked that the file was unchanged and re-ran the Edit, which succeeded. The drive is still full, so the lead should free space before the next build. I started a du scan of the temp folder that timed out and is running in the background. It only reads and changes nothing. Status stays partial for the earlier reasons: the Postgres integration tests, the rebuilt images and the live proof need the lead, and so do the owner decisions on annotation_trust and the DEC-12 D5 security nod."
+ },
+ {
+  "id": "WS11-S5.code",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/inference.proto",
+   "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/thinking.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/source_validation.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/effort_ladder_contract.rs (new)",
+   "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (one-line compile fix, not owned)",
+   "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (one-line test-mock compile fix, not owned)",
+   "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (one-line mock compile fix)",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (one-line compile fix, not owned)"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p inference-core --lib grpc",
+    "outcome": "45 passed, 0 failed (includes proto_level_roundtrips_to_internal, unknown_enum_value_is_invalid_argument, a_level_leaves_the_legacy_budget_input_untouched, model_info_carries_effort_levels_as_canonical_names)"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib thinking",
+    "outcome": "13 passed, 0 failed"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib zdr",
+    "outcome": "95 passed, 0 failed (zdr_posture and zdr_precheck source scans of direct_infer_turn still green)"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib zdr_turn",
+    "outcome": "8 passed (includes zdr_turn_honors_the_effort_level)"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib truncation",
+    "outcome": "7 passed (includes truncation_budget_includes_the_allowance and the updated subscription test)"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --test effort_ladder_contract",
+    "outcome": "13 passed, 0 failed"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib (full)",
+    "outcome": "1987 passed, 0 failed, 4 ignored"
+   },
+   {
+    "command": "cargo check -q -p session-core -p inference-core --lib --tests",
+    "outcome": "clean for my changes (execution-core reported only errors from other slices: ListMcpToolsRequest.unstaged and ProxyMcpToolRequest.expected_digest in mcp_gateway.rs; none about reasoning_effort)"
+   },
+   {
+    "command": "python tag-number diff of inference.proto working tree vs git show HEAD (N2)",
+    "outcome": "removed or changed: []; added: InferRequest.reasoning_effort=17, ModelInfo.effort_levels=8, enum ReasoningEffort values 0..6"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block (near line 191-300), add the line `      MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}` (default OFF; only the literal true enables).",
+   "Regenerate Go bindings for inference.proto (additive only): `docker run --rm -v \"$PWD:/w\" -w /w bufbuild/buf generate` or the native buf recipe, so go/gen/model_plane/v1/inference.pb.go gains ReasoningEffort, InferRequest.reasoning_effort=17 and ModelInfo.effort_levels=8. Do not regenerate baseline.binpb.",
+   "Attach the N2 tag-number diff as proto evidence: git show 'HEAD:apps/Model Plane/proto/model_plane/v1/inference.proto' vs the working tree shows nothing removed or changed, and added InferRequest.reasoning_effort=17, ModelInfo.effort_levels=8 and the ReasoningEffort enum 0..6. The contract test proto_is_additive_at_the_reserved_tags pins the same.",
+   "Ledger and status: record 'effort ladder: gateway derivation is thinking::plan; allowance table mirrored in the gateway and pinned by effort_ladder_contract; MODEL_GATEWAY_EFFORT_LADDER default off'; mark WS11-S5.code done; the live proof stays open.",
+   "Rollout order: inference-core S1-S4 deployed with their flags OFF, then gateway flag OFF, then inference-core adapter flags ON (INFERENCE_CORE_OPENAI_REASONING_EFFORT, INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING), then MODEL_GATEWAY_EFFORT_LADDER=true. Flag on without the adapter flags sends budget 0 and a level that nothing renders, so Deep would send no thinking.",
+   "Live proof (one route the dev stack has, N1 evidence): rebuild both with `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build inference-core model-gateway`. Flag off: /v1/models JSON unchanged and quick/deep requests unchanged. Flag on with the adapter flag on, on gpt-5-mini: effort quick then deep shows effort_resolved Low then High lines, a /v1/models entry with effort_levels, and the same prompt at quick then deep giving two distinct cache keys and a miss (WS11-S1 N1 evidence). Optionally one forced fallback showing re-resolution per attempt model.",
+   "Another slice's compile errors were seen in execution-core mcp_gateway.rs (ListMcpToolsRequest.unstaged, ProxyMcpToolRequest.expected_digest); they are not from this slice."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (edited one line: reasoning_effort: 0 in the explicit InferRequest literal near line 6797)",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (edited one line: reasoning_effort: 0 in the explicit pb::InferRequest literal near line 2347)",
+   "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (edited one line: effort_levels: Vec::new() in the test mock ModelInfo literal near line 3017)",
+   "apps/Model Plane/deploy/docker-compose.yml (lead-applied per instruction)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Live proof not done (docker, lead only): rebuild inference-core and model-gateway, then show the flag-off /v1/models JSON unchanged. With the flag on, show quick then deep on gpt-5-mini giving effort_resolved Low then High, an effort_levels entry in /v1/models, and distinct cache keys. Optionally show one forced fallback re-resolving per attempt model.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `      MODEL_GATEWAY_EFFORT_LADDER: ${MODEL_GATEWAY_EFFORT_LADDER:-false}` to the model-gateway environment block (default off).",
+    "Go bindings (go/gen/model_plane/v1/inference.pb.go) are not regenerated. The lead runs native buf generate (additive only) and must not regenerate baseline.binpb. buf lint and buf breaking were not run; the N2 tag-number proof is the evidence, as the plan binds.",
+    "Rollout-order guard for the ledger: gateway flag on before the inference-core adapter flags (INFERENCE_CORE_OPENAI_REASONING_EFFORT, INFERENCE_CORE_ANTHROPIC_ADAPTIVE_THINKING) sends budget 0 plus a level nothing renders, so Deep would send no thinking. Inference-core flags must come on first.",
+    "Four one-line compile fixes outside the owned set must be kept or rehomed by the lead: reasoning_effort: 0 in model-gateway tool_loop.rs and execution-core runtime_loop/agent.rs, and effort_levels: Vec::new() in the model-gateway src/grpc.rs test mock and tests/e2e_invoke_chain_test.rs. All are minimal and necessary after the additive proto change.",
+    "The working tree holds other slices' hunks in model-gateway src/grpc.rs, http_routes.rs and others (capability observation, MCP listing). The lead must stage by hunk so this slice's commit carries only its own lines.",
+    "Ledger entry: the gateway derivation is thinking::plan, the allowance table is mirrored in the gateway and pinned by effort_ladder_contract (allowance_table_matches_inference_core), MODEL_GATEWAY_EFFORT_LADDER defaults off, and the live proof stays open."
+   ]
+  },
+  "review_defects": [],
+  "notes": "What was built. Proto: enum ReasoningEffort (REASONING_EFFORT_UNSPECIFIED..MAX = 0..6; values prefixed because proto enum values share the package scope), InferRequest.reasoning_effort = 17, ModelInfo.effort_levels = 8. Both are additive; field 13 stays a legacy input and the level wins.\n\ninference-core grpc.rs: effort_from_wire maps the wire level to effort::Level (UNSPECIFIED to None; unknown numeric to invalid_argument), and From<ModelInfo> emits canonical lowercase names. The level is not erased from the legacy budget at the conversion; \"level wins\" is for the adapters' resolve.\n\nGateway thinking.rs is the single derivation. plan(profile, ceiling, ladder_on) returns a Plan {budget_tokens, effort, allowance_tokens}. Off, it is exactly the legacy budget_tokens (including the step-down). On, it is the level plus a budget of 0. source_review_plan(ladder_on) is 4096 off and High on. effort_level handles quick/brief to Low, deep/extended/thorough to High, canonical names pass through, and standard or empty to none. Unknown values go to none and bump gateway_effort_unknown_total with a warn. The metric is in thinking.rs, so gateway_metrics.rs is untouched. reasoning_allowance, raised_ceiling and allowance_for_wire mirror inference-core's allowance table and 32768 cap; the contract test allowance_table_matches_inference_core pins the copy by reading effort.rs. parse_ladder reads MODEL_GATEWAY_EFFORT_LADDER and only the literal \"true\" (trimmed) enables it.\n\nWired sites. The streamed turn (sse.rs) sets budget and reasoning_effort from thinking::plan. The ZDR turn goes through zdr_turn_settings_with, with ZdrTurnSettings.thinking: Plan carried into direct_infer_turn and the http_routes ZDR infer. Source validation calls source_review_plan and clears the level together with the budget for tool_reporting and for the private repair request. truncation_budget(cost_basis, allowance) now adds the allowance via raised_ceiling at both scoring sites; the fallback site derives it from grpc_req.reasoning_effort. /v1/models ModelDescriptor.effort_levels is skip_serializing_if empty, so the JSON is byte-identical while inference-core advertises nothing. With the switch off everything matches the old output; the full gateway lib suite is green.\n\nDeviations. The proto change makes four literals in files I do not own fail to compile. I made these minimal one-line edits and the lead should keep or rehome them: tool_loop.rs (reasoning_effort: 0 in the tool-round InferRequest), execution-core agent.rs (reasoning_effort: 0 in the governed-loop InferRequest), model-gateway src/grpc.rs and tests/e2e_invoke_chain_test.rs (effort_levels: Vec::new() in two ModelInfo mock literals).\n\nNot proven. buf lint and buf breaking were not run and are not cited; the tag diff stands in (N2). The Go bindings are not regenerated. Nothing is proven live; flag-on needs inference-core S2-S4 flags and a rebuilt image first, as the rollout order says."
+ },
+ {
+  "id": "WS09-S3",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/snapshot-throttle.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/lib/snapshot-throttle.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.snapshot-throttle.test.ts",
+   "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.stream-churn.test.ts"
+  ],
+  "tests_run": [
+   {
+    "command": "pnpm exec vitest run src/features/chat --maxWorkers=4 (cwd apps/Frontend Plane/verevonv3)",
+    "outcome": "80 of 81 files pass, 1213 tests pass, 1 expected-fail. The only failure is use-chat-controller.zdr-refusal 'names the feature a feature refusal carries', which also fails with VITE_CHAT_SNAPSHOT_THROTTLE_MS=0, so it is not caused by this slice. Without --maxWorkers=4, a full run hit vitest worker-start timeouts (environmental)."
+   },
+   {
+    "command": "pnpm exec vitest run src/features/chat/lib/snapshot-throttle.test.ts",
+    "outcome": "16 passed"
+   },
+   {
+    "command": "pnpm exec vitest run src/features/chat/components/use-chat-controller.snapshot-throttle src/features/chat/components/use-chat-controller.stream-churn",
+    "outcome": "snapshot-throttle 15 passed, stream-churn 5 passed plus the 1 deliberate it.fails"
+   },
+   {
+    "command": "pnpm exec tsc -p tsconfig.app.json --noEmit",
+    "outcome": "34 errors, none in the touched files (pre-existing)"
+   },
+   {
+    "command": "pnpm exec eslint <touched files>",
+    "outcome": "0 errors; 9 solid/reactivity warnings in use-chat-controller.ts. The one at the new snapshotWriter closure (line 842) is mine; I did not check the other 8 against the base."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Evidence run for the DoD (second dev server, `pnpm dev --port 5174 --strictPort`, LOCAL_E2E_BASE_URL=http://localhost:5174): run the S1 Playwright spec chat-transcript-performance.spec.ts and compare transcript-key setItem counts before and after, expecting at most 1 per second while streaming.",
+   "Manual kill-tab-mid-stream check on the second dev server: the reload should show the server-saved text through the existing resume/readSavedAnswer path. Also check the Steps panel consumers at ChatPage.tsx:651 and :662 for the createdAt of the Compose response step now staying at the first upsert.",
+   "Commit, with VITE_CHAT_SNAPSHOT_THROTTLE_MS documented. Add the ZDR cases (use-chat-controller.snapshot-throttle.test.ts, 'ZDR across every flush trigger') to WS01-S0's matrix list, as the plan asks.",
+   "use-chat-controller.zdr-refusal 'names the feature a feature refusal carries' fails independently of this slice, and also with the throttle set to 0. Someone should look at it."
+  ],
+  "deviations": [
+   "The plan row says flag default 1000, which conflicts with the generic rule that every switch defaults OFF. I followed the plan row: default 1000, and 0 restores the per-token behaviour of snapshot writes, step replacement and Trace rows alike (reduceStreamChurn = ms > 0).",
+   "D8 (first message.delta per turn) is applied per stream: a resumed connection records its own first delta. Keying per turn made use-chat-controller.resume-replay 'only the four new frames reached the Trace' fail, and the plan requires that suite to stay green.",
+   "Edited use-chat-controller.stream-churn.test.ts, which is not in the owned list but is the S1 test the plan says S3 flips (a test file beside the code changed). It is CRLF and the style was kept.",
+   "Did not touch the call sites at the old :1640/:2611/:3111. The early-return in upsertTaskStep makes the per-token answer and reasoning upserts no-ops, so there are no call-site edits.",
+   "The pending write carries the thread id only and reads state at write time, rather than carrying the transcript arrays."
+  ],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Evidence run that needs a second dev server: run the S1 Playwright spec chat-transcript-performance.spec.ts on :5174 and compare transcript-key setItem counts before and after. The target is at most 1 per second while streaming. Only the vitest stream-churn test measures this so far.",
+    "Manual kill-tab-mid-stream check on the second dev server. The reload should show the server-saved text through the resume / readSavedAnswer path.",
+    "Check the Steps panel consumers (ChatPage.tsx around 651 and 662). The Compose response step's createdAt now stays at the first upsert, because isSameTaskStep ignores createdAt.",
+    "Add the 'ZDR across every flush trigger' cases to WS01-S0's matrix list, as the plan asks. Then commit, with VITE_CHAT_SNAPSHOT_THROTTLE_MS documented.",
+    "The DoD line 'one write per terminal' is not pinned by any test. Terminal writes stay synchronous and unthrottled at the existing call sites, as the plan says. The persistence effect can add one trailing write within one window after a terminal. No test counts the transcript-key writes after the terminal event, so the lead can decide whether to pin a bound there.",
+    "The zdr-refusal test 'names the feature a feature refusal carries' fails independently of this slice (see the test run above). Someone should look at it."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Nothing was left over from an earlier attempt: git status showed the owned files untouched.\n\nWhat was built:\n- snapshot-throttle.ts adds createSnapshotWriter (the first call writes at once, calls in the next window collapse into one trailing write, flush/cancel/dispose, interval 0 writes every call), flushOnPageLifecycle (visibilitychange to hidden, pagehide) and parseSnapshotThrottleMs. Cadence is timer-driven, so it is exact under fake timers.\n- In use-chat-controller.ts:\n  - The persistence effect now calls snapshotWriter.schedule(threadId) instead of writeThreadSnapshot. The writer carries only the thread id and reads state.turns and state.taskSteps when it writes, so a late write is the latest state. A write for a thread no longer in view is dropped.\n  - writeThreadSnapshot is unchanged, so the temporary, foreign-origin and retention guards run at write time. A pending write is dropped, not flushed, if the thread turns temporary or the org turns ZDR before the window closes.\n  - Flush points: before loadThread, resetChatState, branchAt and a new-thread send mutate state; on page hidden and pagehide; and in cleanup before disposed is set. Terminal writes stay direct and synchronous.\n  - upsertTaskStep returns early when the merged step equals the existing one, ignoring createdAt.\n  - appendUiEvent keeps only the first message.delta per stream. The stream is keyed by assistant turn id, or `<id>:resume` for a resumed connection. resetUiEvents replaces setUiEvents at the five reset sites.\n- I flipped the S1 pins in the stream-churn test (CRLF kept) to the S3 targets. The new snapshot-throttle controller test covers every trigger, ZDR and temporary at every trigger, the throttle=0 rollback, an invalid value falling back to the default, and the Trace and step behaviour.\n\nFlag: VITE_CHAT_SNAPSHOT_THROTTLE_MS is parsed strictly (whole ms only, anything else keeps 1000, capped at 60000).\n\nKnown and accepted:\n- A terminal write is followed, at most one window later, by one more write when the effect re-runs. I did not suppress it because it also persists post-terminal changes such as ratings and edits. The target of one write per terminal is therefore met as a synchronous, unthrottled terminal write plus at most one trailing write.\n- A hard-killed tab loses up to 1 s of local-only partial text. The plan accepts this."
+ },
+ {
+  "id": "WS03-S9",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/scripts/tests/durable-loop-proof.sh",
+   "apps/Model Plane/scripts/tests/durable-loop-live-proof.sh",
+   "apps/Model Plane/scripts/tests/durable-loop-proof-test.sh",
+   "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "bash -n scripts/tests/durable-loop-live-proof.sh && bash scripts/tests/durable-loop-proof-test.sh (from apps/Model Plane)",
+    "outcome": "passed: 'durable-loop proof runners contract: ok', exit 0"
+   },
+   {
+    "command": "cargo tests from the earlier round (loop_fold_zdr_matrix 7, durable_loop_contract 31, model-gateway zdr_posture_matrix 13 and continue_preconsume_test 6)",
+    "outcome": "passed earlier; not re-run this round, no Rust file touched"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Fix or wait for the in-flight execution-core compile break (src/mcp_gateway.rs missing `unstaged` and `expected_digest` initializers, other slice), then run: cd 'apps/Model Plane' && bash scripts/tests/durable-loop-proof.sh static (expect all 12 stages PASS).",
+   "Run the db stage (docker): bash 'apps/Model Plane/scripts/tests/durable-loop-proof.sh' db; adjust filter minimums (approval_consume=7 loop_checkpoint=24 tool_ledger=13 park=15) if the harness counts differ.",
+   "Live run on a rebuilt stack with the coupled switches flipped together and one pause made in the app, then MP_COOKIE='<signed-in session Cookie header>' bash 'apps/Model Plane/scripts/tests/durable-loop-live-proof.sh'; expect to adjust container names, decide body and error codes on first run; restore every switch to false afterwards.",
+   "Commit the evidence file the runner writes and add the dated bundle (source-verified vs live-verified, never production) to MODEL_PLANE_STATUS.md and the plan's Build ledger S9 row; capability rows stay source_only.",
+   "Optional: register durable-loop-proof-test.sh and durable-loop-proof.sh in scripts/coresystem-conformance.sh and apps/Model Plane/scripts/tests/coresystem-qm-proof.sh.",
+   "git: the three new scripts are untracked; set the exec bit in the index when committing (git update-index --chmod=+x)."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/MODEL_PLANE_STATUS.md (evidence bundle row)",
+   "docs/plans/model-plane-chat-build-plan-2026-10-14.md (Build ledger S9 row)",
+   "scripts/coresystem-conformance.sh and apps/Model Plane/scripts/tests/coresystem-qm-proof.sh (optional runner registration)",
+   "apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs (another slice's missing proto fields block execution-core lib compile)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "db stage not run (needs docker, which this verifier must not use): bash 'apps/Model Plane/scripts/tests/durable-loop-proof.sh' db. The filter minimums approval_consume=7 loop_checkpoint=24 tool_ledger=13 park=15 are unconfirmed against the harness counts and may need adjusting on the first run.",
+    "Live proof never executed: durable-loop-live-proof.sh needs a rebuilt stack, the coupled switches flipped together, one pause made in the app, and MP_COOKIE. Container names (model-plane-<svc>-1), the decide body, the error codes (park_not_due, approval_not_found, approval_not_granted) and the 403 or 404 owner-check answer are source-reasoned only. A run on a live stack is the only check. The BFF empty-body 400 and the 409 on a same-token replay were confirmed against source (continue_preflight and preconsume_refusal).",
+    "The full 'cargo test --workspace --no-fail-fast' needs a re-run with free disk space. The lead should free space or reuse a warm target dir.",
+    "Evidence bundle not written: the dated entry (source-verified vs live-verified, never production) in apps/Model Plane/MODEL_PLANE_STATUS.md and the Build ledger S9 row in docs/plans/model-plane-chat-build-plan-2026-10-14.md. Capability rows stay source_only (docs/CAPABILITY_PROMOTION_LEDGER.tsv is untouched, correct).",
+    "Git housekeeping: the three scripts are untracked (durable-loop-proof.sh, durable-loop-live-proof.sh, durable-loop-proof-test.sh; only the proof-test one is outside the owned or named list and is an acceptable test helper). Set the exec bit in the index on commit (git update-index --chmod=+x). durable_loop_contract.rs is modified (+14/-7) and must be committed with the others. loop_fold_zdr_matrix.rs is already committed (1bdd66ae).",
+    "Optional: neither new script is registered in scripts/coresystem-conformance.sh or apps/Model Plane/scripts/tests/coresystem-qm-proof.sh (grep finds no durable-loop entry)."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Review fixes applied, scripts only (LF files, style kept). (1) Live proof stage 3: removed the events-table count of RUN_RESUMED_AFTER_APPROVAL (session-core only broadcasts it in memory). Replaced by an informational say line; the winning stream's event names are still listed. The literal no longer appears in the live proof. (2) Live proof stage 1: the nonexistent-run check no longer expects 409 continue_disabled. The owner check runs before continue_preflight, so with the switch on or off the answer is the owner refusal; both states now accept 403 or 404 (401 still fails as a bad cookie), with a comment saying continue_disabled is not provable against a run the caller does not own. I did not verify the exact grpc_status_to_http mapping for authorized=false ResolveRunOwner beyond NotFound->404 and PermissionDenied->403, hence both accepted. (3) durable-loop-proof-test.sh now fails if the live proof has a non-comment line pairing RUN_RESUMED_AFTER_APPROVAL with the events table. The live run itself was not executed (no docker)."
+ }
+]

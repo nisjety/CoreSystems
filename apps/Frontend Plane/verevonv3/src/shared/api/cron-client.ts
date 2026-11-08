@@ -59,12 +59,24 @@ export interface CronFeatures {
   run_now?: boolean
 }
 
-export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[]; features?: CronFeatures }> {
+/**
+ * `creator: 'self'` asks capability-core for the caller's own schedules only (EP-6-S4), so a member's
+ * browser does not receive another member's schedule and its goal text (D2-121).
+ */
+export interface CronListOptions {
+  readonly creator?: 'self'
+}
+
+export function listCronSchedules(
+  orgId: string,
+  options: CronListOptions = {},
+): Promise<{ schedules: CronSchedule[]; features?: CronFeatures }> {
+  const query = options.creator === 'self' ? '?creator=self' : ''
   // capability-core serialises an empty Go slice as `"schedules": null`, so an
   // org with no schedules yet answered with null and every caller that did
   // `result.schedules.filter(...)` threw — the chat's "Planlagte kjøringer"
   // panel showed "Kunne ikke laste" instead of "Ingen planlagte kjøringer".
-  return requestJson<{ schedules: CronSchedule[] | null; features?: CronFeatures }>('/api/v1/cron', {
+  return requestJson<{ schedules: CronSchedule[] | null; features?: CronFeatures }>(`/api/v1/cron${query}`, {
     headers: { 'x-verevon-org-id': orgId },
   }).then((result) => ({ ...result, schedules: result.schedules ?? [] }))
 }

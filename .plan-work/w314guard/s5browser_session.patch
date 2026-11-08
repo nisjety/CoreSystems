@@ -1,0 +1,508 @@
+diff --git a/apps/Model Plane/rust/services/execution-core/src/browser_session.rs b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs
+index 5bb2e5a3b..dfeb25789 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/browser_session.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs	
+@@ -12,9 +12,10 @@
+ //! org-core itself: org-core's resolve scope is held by the browser-broker principal alone, so the
+ //! refusal the broker returns is the only site answer this loop sees.
+ 
+-use std::collections::HashSet;
++use std::collections::HashMap;
++use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Mutex, OnceLock, PoisonError};
+-use std::time::Duration;
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
+ 
+ use mp_contracts::model_plane::v1::{
+     browser_broker_client::BrowserBrokerClient, orchestration_event, AcquireGrantRequest,
+@@ -145,6 +146,46 @@ pub(crate) const TAKEN_OVER: Refusal = Refusal {
+     message: "The person is using the browser. Wait for them to give it back.",
+ };
+ 
++/// The person held the browser past the takeover's wait and never gave it back (EP-1 S5): the page,
++/// and any sign-in the person made on it, were closed.
++pub(crate) const HELP_TIMED_OUT: Refusal = Refusal {
++    code: "browser_help_timed_out",
++    message: "The person did not give the browser back in time.",
++};
++
++/// How long a takeover pause waits for the person to give the browser back (EP-1 S5, D5): the TTL
++/// of its `browser_human_assist` approval. A setting, not a switch: only a takeover pause reads it,
++/// and none is raised while the takeover pause is off.
++const ASSIST_TTL_ENV: &str = "EXECUTION_BROWSER_ASSIST_TTL_SECONDS";
++/// Quarry's own takeover idle limit (its plan D8-3), and so the default wait.
++const ASSIST_TTL_DEFAULT_SECONDS: u32 = 30 * 60;
++/// The configured wait is clamped to these: shorter cuts off a sign-in, longer is the hour every
++/// other approval waits.
++const ASSIST_TTL_MIN_SECONDS: u32 = 5 * 60;
++const ASSIST_TTL_MAX_SECONDS: u32 = 60 * 60;
++/// How long past the approval's expiry the held page is kept, so a give-back the approval store took
++/// just in time still finds the page when its continue arrives.
++const ASSIST_EXPIRY_GRACE: Duration = Duration::from_secs(60);
++
++/// Reads the configured wait: whole seconds, clamped. A value that is not a number is the default.
++#[must_use]
++pub(crate) fn assist_ttl_from(value: Option<&str>) -> u32 {
++    value
++        .and_then(|raw| raw.trim().parse::<u64>().ok())
++        .map_or(ASSIST_TTL_DEFAULT_SECONDS, |seconds| {
++            u32::try_from(seconds)
++                .unwrap_or(u32::MAX)
++                .clamp(ASSIST_TTL_MIN_SECONDS, ASSIST_TTL_MAX_SECONDS)
++        })
++}
++
++/// The takeover wait, read once per process.
++#[must_use]
++pub(crate) fn assist_ttl_seconds() -> u32 {
++    static TTL: OnceLock<u32> = OnceLock::new();
++    *TTL.get_or_init(|| assist_ttl_from(std::env::var(ASSIST_TTL_ENV).ok().as_deref()))
++}
++
+ /// The switch that pauses a Do run on a browser call the person's takeover refused (EP-1 S1).
+ /// Default off: the model then reads the [`TAKEN_OVER`] refusal, as it does with the switch on for
+ /// every call the run cannot pause on.
+@@ -233,19 +274,33 @@ pub(crate) fn takeover_event(
+ 
+ /// The runs paused on a takeover whose page the person holds (EP-1 S1). A paused request returns
+ /// and drops its [`RunRelease`] guard, which would end the page the person is using; a held run's
+-/// guard leaves it. The hold ends when the run releases the paused call or finishes. Empty while the
+-/// takeover pause is off.
+-fn held_runs() -> &'static Mutex<HashSet<String>> {
+-    static HELD: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
++/// guard leaves it. The hold ends when the run releases the paused call or finishes, or when the wait
++/// runs out (EP-1 S5). Empty while the takeover pause is off.
++fn held_runs() -> &'static Mutex<HashMap<String, Hold>> {
++    static HELD: OnceLock<Mutex<HashMap<String, Hold>>> = OnceLock::new();
+     HELD.get_or_init(Mutex::default)
+ }
+ 
++/// One run's entry in [`held_runs`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Hold {
++    /// The person holds the page. The number tells this hold from a later one of the same run, so
++    /// the expiry of an earlier wait never ends a later one.
++    Person(u64),
++    /// The wait ran out and the page was closed; the run's next browser call is told so once.
++    TimedOut,
++}
++
+ /// Keep `run_id`'s page past the end of this request: the run paused while the person holds it.
+-pub(crate) fn hold_for_person(run_id: &str) {
++/// Returns the hold's number, which [`expire_hold_after`] names.
++pub(crate) fn hold_for_person(run_id: &str) -> u64 {
++    static NEXT: AtomicU64 = AtomicU64::new(1);
++    let number = NEXT.fetch_add(1, Ordering::Relaxed);
+     held_runs()
+         .lock()
+         .unwrap_or_else(PoisonError::into_inner)
+-        .insert(run_id.to_owned());
++        .insert(run_id.to_owned(), Hold::Person(number));
++    number
+ }
+ 
+ /// End `run_id`'s hold, if it has one.
+@@ -257,10 +312,139 @@ pub(crate) fn end_hold(run_id: &str) {
+ }
+ 
+ fn is_held_for_person(run_id: &str) -> bool {
+-    held_runs()
+-        .lock()
+-        .unwrap_or_else(PoisonError::into_inner)
+-        .contains(run_id)
++    matches!(
++        held_runs()
++            .lock()
++            .unwrap_or_else(PoisonError::into_inner)
++            .get(run_id),
++        Some(Hold::Person(_))
++    )
++}
++
++/// [`HELP_TIMED_OUT`] once for a run whose takeover wait ran out (EP-1 S5), `None` otherwise. It is
++/// read before anything else a released call checks, since ending the hold forgets it.
++#[must_use]
++pub(crate) fn take_help_timed_out(run_id: &str) -> Option<Refusal> {
++    let mut held = held_runs().lock().unwrap_or_else(PoisonError::into_inner);
++    if held.get(run_id) != Some(&Hold::TimedOut) {
++        return None;
++    }
++    held.remove(run_id);
++    Some(HELP_TIMED_OUT)
++}
++
++/// Ends the takeover hold `number` of `run_id` once its wait runs out (EP-1 S5): the approval's TTL
++/// and a grace. A give-back, a run end or a later hold in between leaves it alone. The wait lives in
++/// this process: a restart loses it together with the held page itself.
++pub(crate) fn expire_hold_after(
++    state: &StateStore,
++    bearer: &str,
++    org_id: &str,
++    run_id: &str,
++    number: u64,
++    ttl_seconds: u32,
++) {
++    let Ok(handle) = tokio::runtime::Handle::try_current() else {
++        return;
++    };
++    let state = state.clone();
++    let (bearer, org_id, run_id) = (bearer.to_owned(), org_id.to_owned(), run_id.to_owned());
++    handle.spawn(async move {
++        tokio::time::sleep(Duration::from_secs(u64::from(ttl_seconds)) + ASSIST_EXPIRY_GRACE).await;
++        let quarry = QuarryAgentClient::from_env().ok().flatten();
++        expire_hold(
++            &state,
++            production_broker(),
++            &bearer,
++            quarry.as_ref(),
++            &org_id,
++            &run_id,
++            number,
++        )
++        .await;
++    });
++}
++
++/// The end of a takeover the person never gave back: when hold `number` still stands, the run is
++/// marked timed out and its page released, which closes the Quarry run (control stays with the
++/// person until Quarry ends it) and revokes the grant. The revoke uses the bearer of the pause, which
++/// may have lapsed by now; the grant then ends at its own TTL. Returns whether the hold was ended.
++async fn expire_hold(
++    state: &StateStore,
++    broker: &dyn BrowserBroker,
++    bearer: &str,
++    quarry: Option<&QuarryAgentClient>,
++    org_id: &str,
++    run_id: &str,
++    number: u64,
++) -> bool {
++    {
++        let mut held = held_runs().lock().unwrap_or_else(PoisonError::into_inner);
++        if held.get(run_id) != Some(&Hold::Person(number)) {
++            return false;
++        }
++        held.insert(run_id.to_owned(), Hold::TimedOut);
++    }
++    if let Some(session) = state.take_browser_session(run_id) {
++        release(
++            broker,
++            bearer,
++            quarry,
++            org_id,
++            Some(&session.quarry_run_id),
++            &session.grant_id,
++            "the person did not give the browser back",
++        )
++        .await;
++    }
++    true
++}
++
++/// What a released Do browser call meets after a give-back (EP-1 S5), before it is dispatched;
++/// `None` dispatches it. The run grant is read back under the bearer this continue carries, the
++/// person's click-time one: a grant that lapsed while the person held the page ends the session,
++/// and the model reads that it was lost (the person's sign-in went with it).
++pub(crate) async fn revalidate_after_handback(
++    dispatch: &BrowserDispatch<'_>,
++    quarry: Option<&QuarryAgentClient>,
++) -> Option<Refusal> {
++    let session = dispatch.state.browser_session(dispatch.run_id)?;
++    let lost = match dispatch
++        .broker
++        .validate_grant(dispatch.bearer, &session.grant_id)
++        .await
++    {
++        Ok(response) if grant_live(&session.grant_id, &response, SystemTime::now()) => return None,
++        Ok(_) | Err(BrokerError::Refused) => SESSION_LOST,
++        Err(error) => return Some(error.refusal()),
++    };
++    if let Some(session) = dispatch.state.take_browser_session(dispatch.run_id) {
++        end_session(&session, dispatch, quarry, "the grant lapsed during a takeover").await;
++    }
++    Some(lost)
++}
++
++/// What a released Do browser call meets when its continue carried no browser bearer: a run whose
++/// takeover timed out is told so, and a run that still holds a page is told to sign in again, since
++/// nothing may act on the page without the person's bearer. `None` leaves the call to its dispatch.
++/// A park (WS03-S8) is not an option here: a run holding an approval release never parks.
++#[must_use]
++pub(crate) fn handback_without_bearer(state: &StateStore, run_id: &str) -> Option<Refusal> {
++    take_help_timed_out(run_id)
++        .or_else(|| state.browser_session(run_id).map(|_| CREDENTIAL_EXPIRED))
++}
++
++/// Whether a read-back grant still serves the session: the broker says it is active and for this
++/// grant, it is not zero-retention, and its expiry, when stated, is still ahead.
++fn grant_live(grant_id: &str, response: &ValidateGrantResponse, now: SystemTime) -> bool {
++    let now_seconds = now
++        .duration_since(UNIX_EPOCH)
++        .map_or(0, |since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX));
++    ValidatedBrowserGrant::from_broker_response(grant_id, response).is_ok_and(|grant| !grant.zdr())
++        && response
++            .expires_at
++            .as_ref()
++            .is_none_or(|expires| expires.seconds > now_seconds)
+ }
+ 
+ /// The ids of one open page, held in [`StateStore`] for its run. None of them reaches the model.
+@@ -1004,6 +1188,259 @@ impl Drop for RunRelease {
+     }
+ }
+ 
++#[cfg(test)]
++mod handback_tests {
++    //! EP-1 S5: the takeover wait, its expiry, and the grant read-back at a give-back.
++
++    use std::sync::Mutex;
++
++    use mp_contracts::model_plane::v1::ValidateGrantResponse;
++
++    use super::*;
++
++    /// A BrowserBroker whose read-back answer the test chooses. It records the bearer of every
++    /// read-back and every grant it revokes; it never mints, since these tests open no page.
++    struct ReadBackBroker {
++        answer: Result<ValidateGrantResponse, BrokerError>,
++        bearers: Mutex<Vec<String>>,
++        revoked: Mutex<Vec<String>>,
++    }
++
++    impl ReadBackBroker {
++        fn answering(answer: Result<ValidateGrantResponse, BrokerError>) -> Self {
++            Self {
++                answer,
++                bearers: Mutex::default(),
++                revoked: Mutex::default(),
++            }
++        }
++
++        fn live() -> Self {
++            Self::answering(Ok(live_grant()))
++        }
++    }
++
++    fn live_grant() -> ValidateGrantResponse {
++        ValidateGrantResponse {
++            grant_id: "grant-s5".to_owned(),
++            active: true,
++            allowed_domains: vec!["example.com".to_owned()],
++            ..ValidateGrantResponse::default()
++        }
++    }
++
++    #[tonic::async_trait]
++    impl BrowserBroker for ReadBackBroker {
++        async fn acquire_run_grant(
++            &self,
++            _bearer: &str,
++            _grant: RunGrant<'_>,
++        ) -> Result<String, BrokerError> {
++            Err(BrokerError::Refused)
++        }
++
++        async fn validate_grant(
++            &self,
++            bearer: &str,
++            _grant_id: &str,
++        ) -> Result<ValidateGrantResponse, BrokerError> {
++            self.bearers.lock().unwrap().push(bearer.to_owned());
++            self.answer.clone()
++        }
++
++        async fn revoke_grant(
++            &self,
++            _bearer: &str,
++            grant_id: &str,
++            _reason: &str,
++        ) -> Result<(), BrokerError> {
++            self.revoked.lock().unwrap().push(grant_id.to_owned());
++            Ok(())
++        }
++    }
++
++    fn held_session() -> BrowserSession {
++        BrowserSession {
++            grant_id: "grant-s5".to_owned(),
++            quarry_run_id: "run-q-s5".to_owned(),
++            lease_id: "lease-s5".to_owned(),
++            host: "example.com".to_owned(),
++            fence: vec!["example.com".to_owned()],
++        }
++    }
++
++    fn dispatch<'a>(
++        state: &'a StateStore,
++        broker: &'a ReadBackBroker,
++        bearer: &'a str,
++        run_id: &'a str,
++    ) -> BrowserDispatch<'a> {
++        BrowserDispatch {
++            state,
++            broker,
++            bearer,
++            org_id: "org-1",
++            run_id,
++        }
++    }
++
++    #[test]
++    fn assist_ttl_defaults_to_1800_and_clamps() {
++        for unset in [None, Some(""), Some("soon"), Some("-5"), Some("12.5")] {
++            assert_eq!(assist_ttl_from(unset), 1800, "{unset:?}");
++        }
++        assert_eq!(assist_ttl_from(Some("60")), 300);
++        assert_eq!(assist_ttl_from(Some("900")), 900);
++        assert_eq!(assist_ttl_from(Some(" 1200 ")), 1200);
++        assert_eq!(assist_ttl_from(Some("7200")), 3600);
++        assert_eq!(assist_ttl_from(Some("99999999999999")), 3600);
++    }
++
++    #[tokio::test]
++    async fn resume_uses_click_time_bearer_not_stored_one() {
++        let state = StateStore::new();
++        state.replace_browser_session("run-s5-click", held_session());
++        let broker = ReadBackBroker::live();
++
++        let refusal = revalidate_after_handback(
++            &dispatch(&state, &broker, "bearer-click", "run-s5-click"),
++            None,
++        )
++        .await;
++
++        assert_eq!(refusal, None, "a live grant lets the released call run");
++        assert_eq!(*broker.bearers.lock().unwrap(), vec!["bearer-click".to_owned()]);
++        assert_eq!(state.browser_session("run-s5-click"), Some(held_session()));
++        assert!(broker.revoked.lock().unwrap().is_empty());
++    }
++
++    #[tokio::test]
++    async fn expired_grant_at_resume_maps_to_session_lost() {
++        let lapsed = ValidateGrantResponse {
++            expires_at: Some(prost_types::Timestamp {
++                seconds: 1,
++                nanos: 0,
++            }),
++            ..live_grant()
++        };
++        let inactive = ValidateGrantResponse {
++            active: false,
++            ..live_grant()
++        };
++        let answers = [
++            ("run-s5-lapsed", Ok(lapsed)),
++            ("run-s5-inactive", Ok(inactive)),
++            ("run-s5-gone", Err(BrokerError::Refused)),
++        ];
++        for (run_id, answer) in answers {
++            let state = StateStore::new();
++            state.replace_browser_session(run_id, held_session());
++            let broker = ReadBackBroker::answering(answer);
++
++            let refusal =
++                revalidate_after_handback(&dispatch(&state, &broker, "bearer-click", run_id), None)
++                    .await;
++
++            assert_eq!(refusal, Some(SESSION_LOST), "{run_id}");
++            assert_eq!(state.browser_session(run_id), None, "{run_id}: the session ended");
++            assert_eq!(*broker.revoked.lock().unwrap(), vec!["grant-s5".to_owned()], "{run_id}");
++        }
++    }
++
++    #[tokio::test]
++    async fn a_refused_click_time_bearer_keeps_the_page_and_asks_to_sign_in() {
++        let state = StateStore::new();
++        state.replace_browser_session("run-s5-bearer", held_session());
++        let broker = ReadBackBroker::answering(Err(BrokerError::CredentialRefused));
++
++        let refusal = revalidate_after_handback(
++            &dispatch(&state, &broker, "bearer-stale", "run-s5-bearer"),
++            None,
++        )
++        .await;
++
++        assert_eq!(refusal, Some(CREDENTIAL_EXPIRED));
++        assert_eq!(state.browser_session("run-s5-bearer"), Some(held_session()));
++    }
++
++    #[tokio::test]
++    async fn timed_out_assist_releases_session_and_tells_model() {
++        let state = StateStore::new();
++        state.replace_browser_session("run-s5-timeout", held_session());
++        let broker = ReadBackBroker::live();
++        let number = hold_for_person("run-s5-timeout");
++
++        let ended = expire_hold(
++            &state,
++            &broker,
++            "bearer-pause",
++            None,
++            "org-1",
++            "run-s5-timeout",
++            number,
++        )
++        .await;
++
++        assert!(ended);
++        assert_eq!(state.browser_session("run-s5-timeout"), None);
++        assert_eq!(*broker.revoked.lock().unwrap(), vec!["grant-s5".to_owned()]);
++        assert!(!is_held_for_person("run-s5-timeout"), "a timed-out page is not kept");
++        assert_eq!(
++            handback_without_bearer(&state, "run-s5-timeout"),
++            Some(HELP_TIMED_OUT),
++            "the run's next browser call is told the wait ran out"
++        );
++        assert_eq!(take_help_timed_out("run-s5-timeout"), None, "it is told once");
++        assert!(HELP_TIMED_OUT.text().starts_with("browser_help_timed_out: "));
++    }
++
++    #[tokio::test]
++    async fn an_earlier_wait_never_ends_a_later_hold_or_a_given_back_run() {
++        let state = StateStore::new();
++        state.replace_browser_session("run-s5-again", held_session());
++        let broker = ReadBackBroker::live();
++        let first = hold_for_person("run-s5-again");
++        let second = hold_for_person("run-s5-again");
++
++        let expired_first = expire_hold(
++            &state,
++            &broker,
++            "bearer-pause",
++            None,
++            "org-1",
++            "run-s5-again",
++            first,
++        )
++        .await;
++        assert!(!expired_first, "the run paused again: its later hold stands");
++        assert!(is_held_for_person("run-s5-again"));
++
++        end_hold("run-s5-again");
++        let expired_second = expire_hold(
++            &state,
++            &broker,
++            "bearer-pause",
++            None,
++            "org-1",
++            "run-s5-again",
++            second,
++        )
++        .await;
++        assert!(!expired_second, "a given-back run is not expired");
++        assert_eq!(state.browser_session("run-s5-again"), Some(held_session()));
++        assert!(broker.revoked.lock().unwrap().is_empty());
++        assert_eq!(take_help_timed_out("run-s5-again"), None);
++    }
++
++    #[test]
++    fn a_continue_without_a_browser_bearer_asks_to_sign_in_again() {
++        let state = StateStore::new();
++        assert_eq!(handback_without_bearer(&state, "run-s5-none"), None, "no page, no answer");
++        state.replace_browser_session("run-s5-none", held_session());
++        assert_eq!(handback_without_bearer(&state, "run-s5-none"), Some(CREDENTIAL_EXPIRED));
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use std::sync::Mutex;

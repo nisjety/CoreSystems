@@ -1,0 +1,9 @@
+title: ZDR er på i organisasjonen din
+continue: Fortsett uten ZDR for denne nøkkelen
+cancel: Velg en annen modell
+
+Organisasjonen har slått på ZDR, og vi kan ikke bekrefte ZDR for denne nøkkelen. Om den gir null datalagring, avhenger av avtalen din med leverandøren. Bekreft for å fortsette uten ZDR for samtaler med nøkkelen, eller velg en annen modell.
+
+Hvis du fortsetter, slås ZDR av bare for samtaler du kjører med denne nøkkelen. De lagres da i arbeidsområdet ditt som vanlige samtaler. Organisasjonens kunnskap som hentes inn i samtalen, og resultater fra verktøy, sendes til leverandøren av nøkkelen. Følgende bakgrunnsjobber kjøres ikke for disse samtalene: minneindeksering, «dreaming»-utvinning og gjennomgang av læring. Samtaler som allerede er kjørt, blir værende der de er.
+
+ZDR er fortsatt på for resten av organisasjonen, for andre medlemmer og for alle andre modeller og tilkoblinger. Du kan trekke valget tilbake når som helst under Integrasjoner.

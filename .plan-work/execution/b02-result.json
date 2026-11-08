@@ -1,0 +1,366 @@
+[
+ {
+  "id": "WS02-S6",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/model-gateway/src/run_context.rs (new)",
+   "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/compaction.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+   "apps/Model Plane/python/eval-lab-py/cases/run_context/15_do_run_remembers_thread_fact.yaml (new)",
+   "apps/Model Plane/python/eval-lab-py/cases/run_context/16_do_run_follows_org_instruction.yaml (new)",
+   "apps/Model Plane/python/eval-lab-py/tests/test_runner.py"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -p model-gateway --lib run_context (CARGO_TARGET_DIR=isolated, from apps/Model Plane/rust)",
+    "outcome": "18 passed, 0 failed (all ten plan-named tests plus eight more)"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib (whole lib suite, includes the_assembled_prompt_is_not_a_function_of_the_question and the sse.rs source-reading tests)",
+    "outcome": "1925 passed, 0 failed, 4 ignored. An earlier run caught memory_prefetch::every_prefetch_exit_records_an_outcome failing because I had changed fetch_chat_memory_context; fixed by restoring that function unchanged and giving the run its own loader."
+   },
+   {
+    "command": "cargo test -q -p model-gateway --test e2e_invoke_chain_test run_context",
+    "outcome": "5 passed: agentic_dispatch_carries_the_composed_run_context, agentic_run_context_in_instructions_mode_reads_no_history_or_memory, agentic_run_context_skips_memory_for_a_trivial_prompt_and_keeps_history, agentic_run_context_on_the_pinned_subscription_route_is_instructions_only, agentic_run_context_off_is_byte_identical_and_makes_no_extra_call"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --test e2e_invoke_chain_test (whole file)",
+    "outcome": "133 passed, 0 failed"
+   },
+   {
+    "command": "cargo check -p model-gateway --lib (warnings scan)",
+    "outcome": "no warnings in model-gateway"
+   },
+   {
+    "command": "rustfmt --check on run_context.rs and on my added regions of the e2e file",
+    "outcome": "clean"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/deploy/docker-compose.yml: after the line `      MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY: ${MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY:-}` (model-gateway environment, ~line 466) add exactly:\\n      # Run context for Do/Plan runs (WS02-S6): off, instructions or full. Empty is off.\\n      MODEL_GATEWAY_RUN_CONTEXT: ${MODEL_GATEWAY_RUN_CONTEXT:-}\\n      MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS: ${MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS:-}",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: append a new `## Do runs inherit the Ask run context; the two loops stay separate (WS02-S6, 2026-10-21)` section stating: State `implemented, switch off`. A Do/Plan run now gets the same authored-instruction text an Ask turn gets (one composer, run_context::compose_authored_instructions), plus with `full` bounded thread history (cut by the Ask budget planner, no summariser call, honest assistant-role notice, contract caps) and a 400 ms memory block. It is composed in model-gateway and sent as RunAgentRequest.run_context (field 18); execution-core only inserts it (S7). model-gateway's dispatch_tool loop and execution-core's execute_step_inner stay separate: nothing here imports across them, and instruction text is data that cannot change mode, plan_mode or the autonomy rung (e2e asserts the request is otherwise identical). Switch MODEL_GATEWAY_RUN_CONTEXT=off|instructions|full (strict parse, default off, read per dispatched run), history budget MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS (default 8000, clamp 1000-40000). Pinned subscription route forces instructions only; memory skipped for trivial prompts and Space-scoped runs (DEC-06); ZDR never carries history or memory and records no status; waived runs compose like Ask and record no status (DEC-32). Rejected: making fetch_chat_memory_context return an outcome label (a source-reading test in memory_prefetch.rs pins its shape), so the run has its own loader that can tell a timed-out recall from an empty one. Rollout: staging instructions, then full; production only after WS02-S7 and the eval gate (cases 15 and 16).",
+   "Once WS14-S3's orchestration.proto change is committed, make the tree compile (not part of this slice): add `QuestionAsked(_) | QuestionAnswered(_)` arms to the three matches on orchestration_event::Event in model-gateway/src/sse.rs (orchestration_event_to_sse, orchestration_event_to_step_update, the payload match near the end), and add create_run_question, list_run_questions and answer_run_question stubs (Err(Status::unimplemented(..))) to the ScriptedRunEvents impl of OrchestrationCoreService in model-gateway/tests/e2e_invoke_chain_test.rs. Both fail to compile against the current working-tree proto without them.",
+   "Commit WS02-S6 preserving line endings: run_context.rs and sse.rs are LF; lib.rs, compaction.rs, the e2e test, test_runner.py and the two new YAML cases are CRLF. Stage hunks only (the worktree holds other slices' edits to http_routes.rs, orchestration tests, protos).",
+   "Python selftest not run here: from apps/Model Plane/python/eval-lab-py run `make selftest` (needs pytest, pyyaml, pydantic via `make venv`); expect 'suite must hold 16 cases' and the new test_run_context_cases_drive_an_agentic_run_after_a_short_thread to pass.",
+   "Run `cd apps/Model Plane/rust && cargo test -p execution-core --test compaction_parity_contract` once the build directory is free (reads model-gateway/src/compaction.rs; my change is additive).",
+   "Rebuild model-gateway only (`bash apps/Model Plane/scripts/compose.sh up -d --no-deps --build model-gateway`) with the compose lines above applied. Staging proof with MODEL_GATEWAY_RUN_CONTEXT=instructions then full: turn 1 (Ask) states a fact, set an org instruction in Settings, turn 2 in Do asks about both; capture the gateway log line `run context composed` (states and counts only), `GET run` metadata `runs.metadata.run_context`, the answer and the run console. Then set the switch back to empty/off, restart, and show the next Do run has no run_context and no RecordRunContext call. Execution-core does not yet insert the context into its prompt (WS02-S7), so the answer will only change after S7 is deployed; the status record can be proven now.",
+   "Eval: set EVAL_CAPABILITIES=run-context-full for case 15, and run-context-instructions,authored-instruction-fixture (with PLATFORM_SYSTEM_INSTRUCTIONS='End every answer with the exact token EVAL-RULE-7.' on the stack) for case 16, then `make eval` with EVAL_LIVE=1; both are gates only after S7."
+  ],
+  "deviations": [],
+  "needs_other_files": [
+   "apps/Model Plane/rust/services/model-gateway/src/memory_prefetch.rs (its source-reading test pins fetch_chat_memory_context's early-return shape, which is why I did not reuse that function)",
+   "apps/Model Plane/deploy/docker-compose.yml and apps/Model Plane/docs/decisions/ledger.md (shared; exact lines in lead_todo)",
+   "apps/Model Plane/api/contracts/zdr-posture-matrix.json (+ .sha256): the RecordRunContext row of Appendix B N7 is still open from WS02-S4, untouched here"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Compile gate: the worktree does not currently build the model-gateway lib tests or the e2e target, because of the WS14-S3 proto change (QuestionAsked/QuestionAnswered arms in the three sse.rs matches, and three stubs in ScriptedRunEvents in the e2e file). The lead must land those before the S6 tests can be run in-tree. They are not S6 defects.",
+    "Shared edit still to apply: apps/Model Plane/deploy/docker-compose.yml, adding MODEL_GATEWAY_RUN_CONTEXT and MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS pass-through after MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY, with the exact lines in the implementer's lead_todo.",
+    "Shared edit still to apply: apps/Model Plane/docs/decisions/ledger.md, adding the entry 'Do runs inherit the Ask run context; the two loops stay separate'.",
+    "Python eval-lab selftest not run by me or by the implementer (no pytest, pyyaml or pydantic installed). I read the test_runner.py diff and both YAML cases by eye: the fields match CaseSpec, load_cases uses rglob, and the count assertion of 16 is consistent. The lead must run make selftest once the venv exists.",
+    "cargo test -p execution-core --test compaction_parity_contract was not run. It reads model-gateway/src/compaction.rs, but the S6 additions are additive and do not touch the constants and prefixes it parses.",
+    "Open from WS02-S4 and untouched here: the RecordRunContext row of the ZDR posture matrix (api/contracts/zdr-posture-matrix.json and .sha256, Appendix B N7).",
+    "Live proof needs docker, which I was not allowed to use. Rebuild model-gateway, run staging with MODEL_GATEWAY_RUN_CONTEXT=instructions and then full, and capture the 'run context composed' log line, runs.metadata.run_context, the answer and the run console. Then set the switch back to off and show the next Do run carries no run_context and makes no RecordRunContext call. The answer only changes once WS02-S7 seeds the context in execution-core.",
+    "Eval cases 15 and 16 are gates only after S7, and need EVAL_CAPABILITIES=run-context-full (case 15) and run-context-instructions,authored-instruction-fixture plus PLATFORM_SYSTEM_INSTRUCTIONS on the stack (case 16).",
+    "Commit with hunk staging, preserving each file's line endings. The worktree holds other slices' edits to http_routes.rs, orchestration_http_test.rs, the protos and others."
+   ]
+  },
+  "review_defects": [
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/rust/services/model-gateway/src/run_context.rs:641-671 (persona_toggle future inside tokio::join!), via sse.rs load_thread_persona_enabled -> load_context_assembly_messages (sse.rs:4902-4907, no timeout)",
+    "scenario": "Set MODEL_GATEWAY_RUN_CONTEXT to instructions or full. The BFF always injects persona_instructions for a user who has a persona, so the persona read runs. The read is session-core GetContextAssembly, and it has no per-request bound: the channel only has a 5 s connect timeout, and the session-core handler does DB reads and memory-bucket loading, including Letta. If that RPC stalls (a slow DB or Letta, or a wedged replica), tokio::join! waits on it no matter how fast the 3 s HISTORY_TIMEOUT and 400 ms memory futures finish. The Do run then sits prepared and never dispatched, and the client sees only `connected` for as long as the RPC hangs. The module claims 'a slow store must cost the history, not the run' and 'None of them can fail the run', but one unbounded read defeats both claims. This also happens in `instructions` mode, which the plan names as the first and safest staging step.",
+    "fix": "Wrap the persona read in tokio::time::timeout with its own short bound (for example the same 3 s as HISTORY_TIMEOUT, or less). On elapse, fall back to `true`, which is the same fail-open default the function already uses on error. Add a unit/e2e test with a session-core mock whose get_context_assembly never returns, and assert that the run still dispatches within the bound."
+   },
+   {
+    "severity": "medium",
+    "where": "apps/Model Plane/rust/services/model-gateway/src/run_context.rs:536-547 (load_memory query: goal) fed by sse.rs:9933 (goal: &content = raw req.content); compare the Ask path sse.rs:1576 and 1688-1694, which queries memory with the PII-redacted user_content",
+    "scenario": "An org has the pii_filter policy on, so pii_redaction_required=true. A user starts a Do run in `full` mode with a goal that contains an email address or a national id. The Ask path sends SearchMemory with redact_pii(req.content). The new run loader sends the raw goal as SearchMemoryRequest.query, and session-core forwards it verbatim to the Letta search (memory_grpc.rs ~396). The result is a new egress of raw PII to the memory backend that Ask deliberately avoids, even though the doc comment says this is 'the same search an Ask turn makes'. The plan also flags this coupling (WS26 S9: 'WS02 S6 needs the predicate').",
+    "fix": "Carry the redacted query into RunContextRequest/RunFacts: compute redact_pii(&req.content).0 when pii_redaction_required in invoke_stream_sse, exactly as Ask does, and use that string for load_memory's query (and for the trivial-prompt check, if desired). Add a test asserting that the SearchMemory query is redacted when the policy is on."
+   },
+   {
+    "severity": "low",
+    "where": "apps/Model Plane/rust/services/model-gateway/src/run_context.rs:425-433 (history reason) and 312-331 (bound_history)",
+    "scenario": "A thread whose prior turns exceed MODEL_GATEWAY_RUN_CONTEXT_HISTORY_TOKENS is cut by the token-budget planner (apply_head_drop), not by the contract caps. The run record still stamps history {state: truncated, reason: \"cap\"}. An operator reading runs.metadata.run_context therefore cannot tell 'cut by the configured budget' from 'cut by the executor's hard 24-message/64 KiB cap'. Those two need different remediations (raise the env budget, or accept that the contract cap is the limit). The status is the only audit trail of what a run was told, so this mislabels it. 'cap' is also not in the plan's closed-reason list, and the plan's `waived_default` is never emitted.",
+    "fix": "Stamp a distinct closed reason (for example `budget`) when plan_head_summary_by_budget produced the cut, and keep `cap` only when fit_caps removed turns. Record both reasons in the ledger entry the lead applies."
+   }
+  ],
+  "notes": "What was built. run_context.rs holds RunContextMode (strict parse: only the exact lowercase literals \"instructions\" and \"full\" enable; anything else is off), the history-token budget (default 8000, clamp 1000-40000), AuthoredLayers, the single compose_authored_instructions that both Ask and Do now use (sse.rs authored_instructions_message is a thin wrapper, output unchanged), bound_history, the pure compose(), the async prepare() and record_status(). prepare() reads the persona toggle (only when persona text exists and the run is not ZDR), the thread history (3 s bound) and memory (the Ask 400 ms budget) concurrently, composes, logs closed tokens and counts only, and stamps RecordRunContext best-effort (2 s bound). compaction.rs gains apply_head_drop, run_history_dropped_notice and RUN_HISTORY_DROPPED_NOTICE. sse.rs threads Option<RunContext> through spawn_run_dispatch, resolved_run_agent_request and build_run_agent_request; agentic_run_stream takes Option<RunContextRequest> as a last parameter, composes right after the connected frame and never for a continuation; invoke_stream_sse builds the request (none when the switch is off, and the layers are not even read); continue_run passes None.\\n\\nBehaviour. Off: no field, no extra read, no RecordRunContext call (e2e proves byte-identical request for unset, off, FULL, true, 1, instruction). Instructions: authored text only; history and memory stay unstated on the record. Full: also bounded history and memory. The pinned subscription route gets instructions only (history and memory stamped skipped_by_policy/route_uncached). Memory is skipped, stamped skipped_by_policy, for a trivial prompt (reason trivial_prompt) and for a Space-scoped run (space_scope). ZDR: instructions allowed, history and memory skipped with reason zdr, status never recorded. Waived: composed like an Ask turn (DEC-32 default) but the status is not recorded because session-core refuses a waived credential. Timeout, error and missing credential make the part UNAVAILABLE with that closed reason, never EMPTY. The current user turn (the thread's last user message, persisted before dispatch) is dropped from history. History is cut with plan_head_summary_by_budget plus apply_head_drop, then to the contract caps (24 messages, 64 KiB) so execution-core's validate can never refuse a composed run; an oversize authored text is truncated and stated (truncated/cap) rather than refused. The e2e test asserts that apart from run_context the full-mode request equals the off request (mode, rung, plan_mode, budget unchanged).\\n\\nDeviations. (1) The switch is read from the environment once per dispatched run (RunContextMode::from_env in invoke_stream_sse), not in a process-wide OnceLock: the e2e suite flips switches per test with serial EnvGuard, which a latched OnceLock would break; rollback is still unset/off plus restart. (2) fetch_chat_memory_context is left byte-for-byte as it was, because memory_prefetch.rs (not mine) has a source-reading test that counts its early returns; the run reads memory through run_context::load_memory (same request, same timeout constant made pub(crate), same outcome metric made pub(crate)), because the Ask function folds timeout/error/empty into one empty answer and the run record must tell them apart. (3) Instead of making load_context_assembly_messages pub(crate) (its return type is private), sse.rs gets pub(crate) load_thread_persona_enabled, which delegates to it with no Data Plane bearer so no retrieval is paid. (4) The closed reason waived_default is not stamped anywhere: a waived run is composed like Ask and its status is not recorded; if the owner wants waived Do runs to skip history and memory, it is a one-line change in plan_history. (5) The notice left where history was cut is an assistant turn that names no recovery tool (the Do loop has no reattach_context, and a run's history may carry only user/assistant roles per mp_contracts::run_context::validate). (6) Eval case 16 requires the fixtures authored-instruction-fixture and run-context-instructions: the eval harness calls model-gateway directly, so the BFF-injected org/Space/persona layers never reach it; the case exercises the deployment's PLATFORM_SYSTEM_INSTRUCTIONS layer (sentinel EVAL-RULE-7) and says so in its header. Case 15 requires run-context-full. Both skip honestly until EVAL_CAPABILITIES names them. test_runner.py: count 14 to 16, the 12-seed-turn threshold now applies only to cases tagged compaction, plus one new test for the run-context cases.\\n\\nNot verified. The Python selftest was NOT run: this machine has no pytest, pyyaml or pydantic and installing them needs a network download I was not cleared to make; the two YAML cases were reviewed by eye only. cargo test -p execution-core --test compaction_parity_contract (reads compaction.rs source) was not run because execution-core compiles for tens of minutes under the current build contention; my compaction.rs change is additive and touches none of the constants that test reads. The Space-session memory_scope_key migration (K1-10) is not needed for the space_scope skip as built here (it keys on the run's own space id).\\n\\nBuild environment trap. The shared target dir was locked for 30+ minutes by other agents' cargo runs, so I verified in an isolated CARGO_TARGET_DIR (C:/Users/IMAFER~1/AppData/Local/Temp/cargo-ws02s6, safe to delete). While verifying, the tree did not compile for reasons that are not this slice: the WS14-S3 proto change (orchestration.proto QuestionAsked/QuestionAnswered events and CreateRunQuestion/ListRunQuestions/AnswerRunQuestion RPCs) makes three matches in sse.rs non-exhaustive and the ScriptedRunEvents mock in the e2e file incomplete. I added temporary stubs to get a compile, ran everything above, and REMOVED them again, so sse.rs and the e2e file as delivered do not compile against the current WS14-S3 proto until the lead adds those arms and stubs (see lead_todo)."
+ },
+ {
+  "id": "WS05-S0",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+   "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "apps/Model Plane/proto/model_plane/v1/capabilities.proto"
+  ],
+  "tests_run": [
+   {
+    "command": "cargo test -q -p execution-core --lib permission (cwd apps/Model Plane/rust in the shared worktree)",
+    "outcome": "did NOT compile: 2x E0046 (missing create_run_question, list_run_questions, answer_run_question) at browser_events.rs:506 and agent.rs:8757 (MockOrchestration). Cause is a sibling slice's uncommitted orchestration.proto (+162 lines, three new RPCs), not this slice. Not fixed here: those mocks belong to the sibling change."
+   },
+   {
+    "command": "cargo test -q -p execution-core --lib permission, in a scratch copy of the Rust workspace (this slice's three files as in the worktree, orchestration.proto restored to HEAD, separate CARGO_TARGET_DIR)",
+    "outcome": "PASSED: test result ok, 23 passed, 0 failed, 1112 filtered out. The golden passes by exact name: permission::tests::legacy_classification_golden ... ok (1 passed). The HEAD permission module had 20 #[test] fns; this slice adds 1."
+   },
+   {
+    "command": "earlier attempt: same scratch copy but sharing the worktree target dir",
+    "outcome": "invalid as a HEAD check: cargo reused mp-contracts build output from the shared target and reproduced the sibling's errors. Discarded; no artifacts of the worktree were rebuilt by it."
+   },
+   {
+    "command": "tag-number diff of apps/Model Plane/proto/model_plane/v1/capabilities.proto against git show HEAd (B.1 N2)",
+    "outcome": "53 field/tag pairs identical, 0 rpc changes, same line count (205). The only changed line is 78 (comment). Additive proof: no tag added, removed or renumbered."
+   },
+   {
+    "command": "rustfmt --check on the permission module (scratch copy of the final file)",
+    "outcome": "clean; HEAD copy also clean. One formatting hunk in the first draft was fixed before the final run."
+   },
+   {
+    "command": "rustfmt --check on agent.rs, HEAD vs worktree",
+    "outcome": "322 hunks in both: this slice adds no formatting diff (pre-existing hunks only)."
+   },
+   {
+    "command": "cross-check: independent Python mirror of the classifier rules rendered the 40 golden rows",
+    "outcome": "matched the Rust output (the Rust test is the oracle). Not a test run; recorded as a cross-check only."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: replace line 142, the bullet beginning '- ✅ **G2 stdio transport**', with this single line: \"- **G2 stdio transport: not wired** (corrected 2026-10-21; the 2026-05-30 line that said it was wired is wrong). Stdio is quarantined: `handle_register_mcp_server` in `runtime_registries.rs` accepts only `transport=http`, and `handle_proxy_mcp_tool` answers `unimplemented` for any other transport. No code in `model-gateway` spawns a subprocess, and `mcp_jsonrpc::parse_stdio_command` has no production caller. The HTTPS bridge (`transport=http`) is the only MCP transport that dispatches; sse still returns `Unimplemented`. Tool-level MCP rows (declared side-effect classes in `capability_tools`) arrive in WS05-S1 and S2.\"",
+   "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md (optional, same stale claim in line 9): replace the substring \"§5 G2 MCP stdio+HTTP transport is wired (`model-gateway/src/mcp_jsonrpc.rs` → `runtime_registries::handle_proxy_mcp_tool`, stdio spawns subprocess + JSON-RPC, sse still `Unimplemented`)\" with \"§5 G2 MCP HTTPS bridge is the only wired transport (stdio is quarantined and not wired, see the G2 stdio line, corrected 2026-10-21; sse still `Unimplemented`)\".",
+   "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert the four entries below directly under the '---' separator, above '## 2026-10-21 - The reasoning-effort ladder lives in inference-core (WS11-S1)', each followed by one blank line.\n\n## 2026-10-21 - Tool side-effect classes are declared in the registry; the name heuristics are the oracle until then (WS05)\n\n**Status: proposed.** Today the permission gate infers risk from the tool name. `permission::is_risky_tool` matches a fixed list of destructive and outbound verbs as substrings, and every `mcp__` name is risky. `rung_required_for` and `check_autonomy_rung` take the rung from that same match, and the only argument-level refinement is `execute_provider_action`, by its catalogued operation. A name cannot say what a tool does, so an unlisted or renamed tool gets whatever substring it happens to contain. The proposal: each offered tool would carry a declared side-effect class (`read`, `sandbox_compute`, `context_write`, `external_write`, `destructive`, `owner_effect`, with `unclassified` as the strictest default) and an approval floor, held in capability-core's per-tool registry and carried in the signed policy decision; execution-core would decide from the class. The name lists are deleted only after a shadow comparison shows zero built-in divergence. Until then `legacy_classification_golden` in `permission/mod.rs` pins what the heuristics answer for every offered name and the MCP spellings, and the class-derived answers must reproduce it for every built-in. Plan: `docs/plans/model-plane-chat-build-plan-2026-10-14.md`, WS05.\n\n## 2026-10-21 - A declared class may tighten a tool but never loosen a seeded row (WS05)\n\n**Status: proposed.** A class that comes from outside the seed (an MCP server's `readOnlyHint`, a registrant's form, a generic registry upsert) may raise a tool's class or add an approval floor. It may not lower the class of a row the seed already classed without the override scope that protects a high risk level today. `enforceRiskFloor` in capability-core already refuses a plain write that would lower a currently high capability, and it fails closed for the seeded high-risk ids; the proposal applies that rule to the per-tool class. An MCP annotation is a third-party claim: it is untrusted by default, a read-only hint would derive `external_write`, and a tool whose description or schema changes after its first observation would be disabled until a person re-approves it. Relaxation is a separate decision: a user or org `allow` would apply only to a digest-pinned MCP row, never to a built-in, an `owner_effect` tool or an `unclassified` one (plan WS05 D6, DEC-08; the relaxation lands in WS05-S5).\n\n## 2026-10-21 - The MCP observation write is an org-scoped internal route that can only create or refresh observations (WS05 D5)\n\n**Status: proposed; needs a security sign-off before WS05-S2 merges.** To observe MCP tools (WS05-S2), model-gateway would post tool digests and hints to capability-core over the org-derived internal route, authenticated by the `X-Mcp-Service-Token` that the internal MCP routes already check (`registry_apis.go`). The route would create or refresh observation rows and nothing else: it cannot approve a drifted tool, lower a class or write policy. A ZDR caller never writes an observation, and an observation carries digests, classes and hints, never descriptions, schemas, arguments or outputs. Rejected alternatives: a user bearer (a read-only user could not write the observation) and a Control-issued principal (a new entry in a Control-owned file, before the narrow route is shown to be insufficient). Any change that lets this route do more reopens this entry. It is not the service identity the Verevon relay ruling rejects: the route is scoped to one org, stores only digests and hints, and returns no tenant content.\n\n## 2026-10-21 - Non-read MCP tools are withheld from Do runs until an approved call can be resumed (WS05 D3)\n\n**Status: deferred.** An approved MCP call cannot be resumed cold. The approval delivery worker resumes only `execute_provider_action`, `book_shipment` and `tickets.create`, and its module doc says arbitrary MCP tools have unknown, third-party idempotency semantics, so an `ask` pause on an MCP write would be recorded and then never run. Until a continuation can execute an approved MCP call exactly once, the only MCP mode that may be enabled is `MCP_DO_TOOLS=read`: it would offer and execute read-class MCP tools only, and `all` stays blocked. Revisit when the in-place resume (WS03) and resumable approvals (WS13) run an approved MCP call once on a rebuilt stack. The trigger is that proof, not a date.",
+   "Shared-tree blocker, not caused by this slice: the uncommitted sibling change to apps/Model Plane/proto/model_plane/v1/orchestration.proto (three new RPCs: CreateRunQuestion, ListRunQuestions, AnswerRunQuestion) makes execution-core's lib test target fail to compile (E0046 at browser_events.rs:506 and agent.rs:8757). The mock implementations belong to that sibling change. Land its mock update before re-running the permission filter in the shared tree. This slice is verified in a HEAD-based copy (see tests_run).",
+   "Generated copies: run a scoped buf generate for model_plane/v1/capabilities.proto only (apps/Model Plane/proto/buf.gen.yaml, Go output). Do not run an unscoped generate; the ledger's 2026-05-30 codegen hygiene finding records that it rewrites unrelated dataplane files. That refreshes apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go line 216 and the verevon TS mirror at line 149. Alternatively leave the stale comment for WS05-S1, which regenerates the same proto anyway.",
+   "Commit evidence to attach: the tag-number diff in tests_run (N2) and the HEAD-based test output (23 passed; the golden passes by exact name). The DoD line 'docs corrected; ledger merged' is complete only after the two shared-edit lines above are applied.",
+   "Suggested commit message: 'test(execution-core): pin the name-based tool classification as a golden (WS05-S0)'. Body: comment-only proto change; two stale line references replaced by names; no runtime change; the golden is the oracle for declared classes. End it with the attribution line from the session rule: 'Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>'."
+  ],
+  "deviations": [
+   "The golden is a one-line-per-name text table, not a struct. It also pins evaluate_call under ask and auto, a superset of the design tuple. Rung labels use autonomy::label.",
+   "Helper placed in agent.rs (#[cfg(test)] pub(crate) offerable_tool_names) so the golden can live in permission/mod.rs, whose test filter the plan names. The design allowed this.",
+   "Ledger: four entries, following the plan row (three proposed, the fourth deferred). The design text listed three.",
+   "Matrix line 9 (the 2026-07-12 re-verification note) repeats the stale stdio claim. Offered as an optional lead line; line 142 is the required correction named in the plan row."
+  ],
+  "needs_other_files": [
+   "apps/Model Plane/docs/capability-ownership-matrix.md (shared file: lead applies the line in lead_todo)",
+   "apps/Model Plane/docs/decisions/ledger.md (shared file: lead applies the four entries in lead_todo)",
+   "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go (checked-in generated copy of the risk comment, line 216: regenerate with a scoped buf generate)",
+   "apps/Frontend Plane/verevon/src/lib/model-plane/gen/model_plane/v1/capabilities_pb.ts (generated copy of the same comment, line 149)"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Docs and ledger are not done until the lead applies the shared edits: capability-ownership-matrix.md line 142 (stdio is not wired; optionally the same stale claim on line 9) and the four proposed entries in decisions/ledger.md. Neither file is modified in git status yet, so the DoD line 'docs corrected; ledger merged' is open.",
+    "The plan's test command cannot compile in the shared tree. The uncommitted sibling orchestration.proto adds three RPCs (CreateRunQuestion, ListRunQuestions, AnswerRunQuestion), and the mock impls at browser_events.rs:506 and agent.rs:8757 do not implement them (E0046). The sibling change must land those mocks before the filter runs in the shared tree.",
+    "Optional: the generated copies of the proto comment are stale (go/gen/.../capabilities.pb.go and the verevon TS mirror). A scoped buf generate of capabilities.proto fixes them, or WS05-S1 will, since it regenerates the same proto."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Golden: legacy_classification_golden in permission/mod.rs pins 40 rows, one line per name, sorted. The 40 names are the 33 offered and process names from offered_tool_defs and process_tool_defs, plus tickets.create, mcp__s__t, and five ingress spellings (MCP__s__t, ' mcp__s__t ', ' tickets.create ', ' read_subagent_result ', ' save_memory '). Each row records is_risky_call for a read and a write argument form (only execute_provider_action differs by argument), is_restricted_context_write, rung_required_for, requires_durable_owner_approval, requires_consent_to_disclose, and evaluate_call under ask and auto. Deny is asserted strictest for every name and both arguments. Production code in permission/mod.rs is unchanged; its diff is additions inside mod tests only (122 added, 0 removed). agent.rs gains a #[cfg(test)] pub(crate) helper offerable_tool_names (offer lists stay private). Behaviour pinned on purpose: name-based classification ignores the raw spelling, so MCP__s__t and ' mcp__s__t ' are NOT risky today (the mcp__ prefix is case- and whitespace-sensitive), and process_start, process_signal, process_stdin, subagent.task and browser.observe are NOT risky by name. Drift fixed in owned files: the capabilities.proto risk_level comment (it listed safe/read_only/mutation/dangerous; capability-core accepts low/medium/high only, per IsSupportedRiskLevel) and two agent.rs comments with stale ':1332-1354' line references, now named. No runtime change, no flags, no migrations, no DB tests. Shared worktree is busy with other slices: model-gateway compaction.rs, lib.rs, sse.rs, run_context.rs, orchestration.proto and gen-sse-event-taxonomy.py are modified or new and are not this slice's."
+ },
+ {
+  "id": "WS14-S3",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+   "apps/Model Plane/rust/crates/mp-contracts/src/user_question.rs (new)",
+   "apps/Model Plane/rust/crates/mp-contracts/tests/user_question_golden.rs (new)",
+   "apps/Model Plane/rust/services/session-core/migrations/0054_run_questions.sql (new)",
+   "apps/Model Plane/rust/services/session-core/migrations/revert/0054_run_questions.down.sql (new)",
+   "apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+   "apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+   "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+   "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+   "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.test.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+   "NOT OWNED, required to compile: apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+   "NOT OWNED, required to compile: apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs",
+   "NOT OWNED: apps/Model Plane/rust/services/model-gateway/src/sse.rs (question arms; event-name map now ends in a `_ => return None` tail this round)",
+   "NOT OWNED: apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+   "NOT OWNED: apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "NOT OWNED: apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+   "NOT OWNED: apps/Model Plane/rust/services/model-gateway/src/zdr_posture.rs"
+  ],
+  "tests_run": [
+   {
+    "command": "python scripts/gen-sse-event-taxonomy.py --check (apps/Model Plane)",
+    "outcome": "pass: sse taxonomy up to date (23 events)"
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib sse",
+    "outcome": "pass: 249 passed, 0 failed"
+   },
+   {
+    "command": "Earlier rounds, not re-run: cargo check --workspace --all-targets; model-gateway --lib 1925 pass; orchestration_http_test 26 pass; execution-core --lib 1135 pass; mp-contracts user_question 13 lib + 5 golden pass; session-core run_question 17 host pass (10 DB ignored); mp-orchestration proto_shim 24 pass; BFF run_question 5 pass; vitest orchestration-client + action-registry 50 pass; proto tag diff vs HEAD additive only",
+    "outcome": "pass as reported previously"
+   }
+  ],
+  "db_tests_written": [
+   "cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1 (10 tests in orchestration_store::run_question_db_tests)"
+  ],
+  "lead_todo": [
+   "Run the 10 ignored DB tests through the harness with the filter above and add +10 to the harness test count; migration 0054 CHECKs have never been applied to a real Postgres.",
+   "Regenerate Go bindings with buf (apps/Model Plane/go/gen is NOT edited by me); run buf lint and buf breaking against proto/baseline.binpb. Tag diff vs HEAD is additive only.",
+   "Deploy order: session-core (migration 0054 at boot), then model-gateway, then the Frontend BFF; rebuild the three images.",
+   "Live proof: no producer exists, so create a question by RPC (CreateRunQuestion with a user-bound token on a persistent run); then GET /api/v1/orchestration/runs/<run>/questions lists it, POST .../questions/<id>/answer answers once, identical retry replays, different second answer 409 question_already_answered, expired 410 question_expired, other user 404; ZDR org token gets 412 zdr_durable_mutation_forbidden and waived token 403 zdr_waiver_route_mismatch on both routes.",
+   "Run bash scripts/tests/zdr-contract-sync.test.sh to confirm no drift (matrix untouched).",
+   "Optionally document the two HTTP routes in apps/Model Plane/api/openapi.yaml and regenerate api/sdk/*.",
+   "Record the DEC-39 reservation as used (events 27/28, migration 0054)."
+  ],
+  "deviations": [],
+  "needs_other_files": [],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "The 10 ignored DB tests (orchestration_store::run_question_db_tests) have not run against a real Postgres. Migration 0054 CHECKs (id prefix, answer_shape, digest length) and the partial unique idempotency index have never been applied. Lead: run `cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1` through the DB harness.",
+    "buf lint and buf breaking, and regeneration of the Go bindings under apps/Model Plane/go/gen, are the lead's to run. I did not touch go/gen. I checked tag additivity myself: git diff of orchestration.proto has zero removed lines, and QuestionAsked=27 and QuestionAnswered=28 sit after RunResumed=25 at HEAD. HEAD has no tag 26, which is left for WS15.",
+    "The plan row names golden cases `e_zdr_token_list_questions_refused` and `e_zdr_token_answer_question_refused` in zdr-posture-matrix.json. The implementer left the matrix and its .sha256 untouched. Its enforcement_rows model bearers x inference route with fixed decision/code, and the Rust loader rejects unknown fields and pins the row count (ENFORCEMENT_ROWS), so a per-route refusal row does not fit that schema. The ZDR proof sits elsewhere: the DURABLE_MUTATIONS inventory in zdr_posture.rs, 7 gateway route tests, and session-core RPC tests. Lead decision: accept that, or extend the matrix schema in a deliberate re-pin. Also run `bash scripts/tests/zdr-contract-sync.test.sh` to confirm no drift.",
+    "Live proof is not done: the stack needs session-core (migration 0054 at boot), then model-gateway, then the BFF, rebuilt in that order. Then create a question by RPC and check list, answer, replay, 409, 410, foreign user 404, ZDR 412 and waived 403 on both routes, plus the psql row and the two events.",
+    "Append-only shared docs are the lead's: ledger entry, ZDR.md questions row, capability-ownership-matrix question-store row, the DEC-39 reservation recorded as used (27/28, 0054), and optionally openapi.yaml and api/sdk regeneration for the two HTTP routes.",
+    "GDPR erasure is by ON DELETE CASCADE from runs; the DB test covers run deletion only, not purge_organization_data, which is a real-PG check for the lead."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Fix applied: in orchestration_event_to_sse (sse.rs), the two-variant `QuestionAsked | QuestionAnswered => return None` arm in the event-name map is replaced by a trailing `_ => return None,` with the comment kept and extended. The generator now parses 16 named arms and finds no extra orchestration_event::Event mentions; docs/sse-event-taxonomy.md is unchanged. File stays LF (0 CRLF). The step-update and payload map arms are unchanged. Side effect to note: the `_` tail means a future orchestration event variant would silently get no SSE frame in this map instead of a compile error; the generator check (arm count vs body) is the remaining guard. Everything else from the previous report stands (zdr-posture-matrix.json and sha256 untouched; model-gateway/src/grpc.rs unchanged)."
+ },
+ {
+  "id": "WS12-S1",
+  "outcome": "ready-partial",
+  "status": "partial",
+  "files_changed": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\verevonv3-ci.yml",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\quarry-v2-ci.yml",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\docs\\CI_BASELINE_2026-10.md"
+  ],
+  "tests_run": [
+   {
+    "command": "python -c \"import yaml,sys; [yaml.safe_load(open(f)) for f in sys.argv[1:]]\" .github/workflows/verevonv3-ci.yml .github/workflows/quarry-v2-ci.yml (run with PYTHONUTF8=1 and a scratch venv holding PyYAML 6.0.3, because the system python3 has no yaml module)",
+    "outcome": "passed: both files parse, no error"
+   },
+   {
+    "command": "inline parse of on.pull_request.branches and on.push.branches for the five trigger files",
+    "outcome": "verevonv3-ci and quarry-v2-ci: [main, develop, fix/ui-premium-restore] on both triggers; buf.yml already identical; verevonv3-security still [main, fix/ui-premium-restore] (not owned); repo-gates.yml pull_request has no branches filter, push [main, fix/ui-premium-restore]"
+   },
+   {
+    "command": "python3 -m unittest scripts/tests/test_buf_lint_ratchet.py (the repo-gates.yml selftest command)",
+    "outcome": "Ran 3 tests, OK, exit 0"
+   },
+   {
+    "command": "gh repo view --json defaultBranchRef; gh api repos/nisjety/CoreSystems/branches; gh run list --limit 40 and --branch fix/ui-premium-restore (read-only)",
+    "outcome": "default branch dev; origin has 5 branches, no main and no develop; the only runs ever are three SSE taxonomy freshness runs, all failure (35846527491 on fix/ui-premium-restore 2026-09-23, 36708647737, 38134106293); no run exists for any other workflow"
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Commit the three changed files (verevonv3-ci.yml, quarry-v2-ci.yml, the CI_BASELINE doc). Nothing is committed.",
+   "Push fix/ui-premium-restore, or open a PR into it from a throwaway branch, then run gh run list --branch fix/ui-premium-restore --limit 30 and fill the first-run column with each workflow's conclusion and URL. Still missing: verevonv3-ci, buf, model-plane-rust-ci and contract-goldens. sse-taxonomy already has run 35846527491 (failure).",
+   "Run the S1 negative proof: a PR into fix/ui-premium-restore with a deliberate pnpm typecheck error should turn spa-verify red. Not run here.",
+   "Choose the pull_request policy. Either keep the K1-23 lists (as applied), or apply DEC-39 D1 by removing the pull_request branches key from verevonv3-ci.yml, quarry-v2-ci.yml, buf.yml and verevonv3-security.yml. buf.yml and verevonv3-security.yml are outside this slice. model-plane-rust-ci, contract-goldens, sse-taxonomy and repo-gates.yml already have no pull_request filter.",
+   "WS12-S1.ext (blocked-external): the repository owner changes the default branch from dev (DEC-39 D1(c)) and sets required status checks on the protected branch. The request is written in the baseline doc; it is not sent.",
+   "DEC-39 D2: name one maintainer, then add the CODEOWNERS entry and matrix row for scripts/gates/ and .github/workflows/repo-gates.yml. No maintainer is named in the repo."
+  ],
+  "deviations": [
+   "The owned path docs/ci/CI_BASELINE_2026-10.md does not exist. The plan row and the existing doc are at apps/Frontend Plane/verevonv3/docs/CI_BASELINE_2026-10.md, so that file was edited instead of creating a duplicate.",
+   "DEC-39 D1 (drop the pull_request branches filter) was not applied to verevonv3-ci.yml or quarry-v2-ci.yml. Appendix B row K1-23 names the exact list on both triggers, and the plan says that row wins over section text, so the filters stay and develop was added. This conflicts with the decision list in the task. The lead must choose one pull_request policy (see lead_todo)."
+  ],
+  "needs_other_files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\verevonv3-security.yml: add develop to the branches list on both pull_request (line 14) and push (line 9), currently [main, fix/ui-premium-restore]"
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "Recorded runs: the DoD wants at least one recorded run on the integration branch for each of verevonv3-ci, model-plane-rust-ci, contract-goldens, buf and sse-taxonomy. Only sse-taxonomy has one (35846527491, failure). The first-run column honestly says 'none as of 2026-10-21'. Closing it needs a push of fix/ui-premium-restore (or a throwaway branch), then gh run list and the run URLs pasted into the doc.",
+    "Negative proof not run: a PR with a deliberate pnpm typecheck error turning spa-verify red. Needs GitHub.",
+    "WS12-S1.ext (blocked-external): repository owner changes the default branch from dev (DEC-39 D1c) and sets required status checks. Written up in the doc as requested, not sent.",
+    "verevonv3-security.yml still lists [main, fix/ui-premium-restore] without develop on both triggers. It is outside this slice's ownership list. The plan row says to apply the same filter change there, so the lead should either add develop in a separate owned edit or record it as an accepted gap. The doc already flags it as pending.",
+    "DEC-39 D1 vs Appendix B K1-23: the implementer kept the pull_request branches filter and added develop (K1-23 wins per the task rule). The repo now runs two pull_request policies, because model-plane-rust-ci, contract-goldens, sse-taxonomy and repo-gates have no filter. This is documented in the doc's Trigger policy section. Lead decision if the owner wants one policy.",
+    "DEC-39 D2: no maintainer is named, so no CODEOWNERS entry or matrix row exists for scripts/gates/ and repo-gates.yml. The doc lists the owner as 'none yet'.",
+    "Not re-verified by me: the gh repo view / gh run list evidence quoted in the doc (I did not run gh). The trigger blocks of the other workflows quoted in the doc do match the files (buf.yml, repo-gates.yml, model-plane-rust-ci.yml, contract-goldens.yml, sse-taxonomy.yml)."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Code half of WS12-S1 is done. verevonv3-ci.yml and quarry-v2-ci.yml now list main, develop and fix/ui-premium-restore on both triggers (Appendix B row K1-23). buf.yml already had that list, and repo-gates.yml already exists with the S1 shell shape (PR on any base, push on integration and main), so neither was edited. verevonv3-security.yml still lacks develop and is outside this slice's ownership. The CI_BASELINE doc now carries the read-only gh evidence, an owner for each red (Frontend Plane, Model Plane, Ingestion Plane, or none yet for repo-gates), a trigger-policy note, and a first-run column with the sse-taxonomy run recorded. The other five workflows have no run on the integration branch, so the DoD's recorded-run evidence needs a push. Nothing was committed, pushed, or sent to GitHub."
+ },
+ {
+  "id": "WS12-S6",
+  "outcome": "ready",
+  "status": "done",
+  "files_changed": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\gen-sse-event-taxonomy.py",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\sse-event-taxonomy.md",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\sse-taxonomy.yml",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\scripts\\tests\\test_sse_taxonomy.py"
+  ],
+  "tests_run": [
+   {
+    "command": "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check (default Windows cp1252 locale, and with PYTHONUTF8=1)",
+    "outcome": "PASS: 'sse taxonomy up to date (23 events)', exit 0. Before the change the same command exited 1 on this host with a UnicodeEncodeError; the committed doc was current under UTF-8 (the read used the cp1252 locale)."
+   },
+   {
+    "command": "python3 -m unittest scripts/tests/test_sse_taxonomy.py (run in the worktree and in a scratch tree built from git archive HEAD)",
+    "outcome": "PASS: Ran 11 tests, OK in both trees. Tests cover: live tree builds; unknown SPA case red; renamed orchestration wire name red; stray/renamed proto field red; comment inside arm lists green (control); CUSTOM-switch label does not count as native; unlisted literal writer red while test-module literal ignored; stale literal entry red; declared oneof member with no arm listed as not yet written; unparseable oneof field fails loudly; cfg(test) item removal; unsupported cfg(test) item fails loudly."
+   },
+   {
+    "command": "Sensitivity check (scratch script, in-memory monkeypatch): whole-file case scan; comment stripping disabled; test-item stripping disabled",
+    "outcome": "Each broken variant turned exactly its matching test red (test_only_the_native_switch_counts_as_handled, test_comments_inside_the_arm_lists_change_nothing, test_an_unlisted_literal_writer_is_red_and_test_code_is_not)."
+   },
+   {
+    "command": "Drift-proof run block extracted from .github/workflows/sse-taxonomy.yml, run with bash --noprofile --norc -eo pipefail in a scratch copy of the gated files",
+    "outcome": "PASS: 'stale doc', 'renamed SPA case' and 'renamed orchestration arm' each detected (gate red), each file restored byte-identical afterwards. Live worktree files were not probed because other slices are editing them."
+   },
+   {
+    "command": "Mutation outputs (in memory, live sources): unknown SPA case; renamed orchestration arm; comment inside arm lists",
+    "outcome": "unknown SPA case: RED, 'the SPA stream client handles these names, but no producer writes them: [mystery_event]'. Renamed orchestration arm: RED, \"arm 'RunResumed' returns 'run_resumed_v2' but its proto field is 'run_resumed'\". Comment inside arm lists: GREEN."
+   },
+   {
+    "command": "Build against committed HEAD sources (git archive HEAD of model-gateway src, orchestration.proto, chat-client.ts, copied into a scratch tree)",
+    "outcome": "Builds with no gate error. The generated doc differs from the worktree doc only by the two rows for question_asked (27) and question_answered (28), which exist only in the uncommitted proto."
+   }
+  ],
+  "db_tests_written": [],
+  "lead_todo": [
+   "Commit only the four owned paths: .github/workflows/sse-taxonomy.yml, apps/Model Plane/scripts/gen-sse-event-taxonomy.py, apps/Model Plane/docs/sse-event-taxonomy.md, scripts/tests/test_sse_taxonomy.py (new). The worktree holds other slices' uncommitted work; do not stage it with this slice.",
+   "Keep the doc consistent with the committed proto. The regenerated doc has rows for question_asked (27) and question_answered (28), which come from the uncommitted WS14 proto edit. If that proto is not in the same commit, first run python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" from the committed tree and then --check; otherwise CI's --check goes red.",
+   "Push to the integration branch and record the 'SSE taxonomy freshness' run URL. That run is the S6 DoD evidence: the green check, the unit step, and the three 'detection confirmed' lines from the drift-proof step. Attach the mutation outputs from this report.",
+   "The workflow YAML was not parsed by a YAML parser, because none is available offline (no PyYAML; no yaml package in the frontend node_modules). The first CI run on the branch is the parse proof. The drift-proof shell logic was executed locally under -eo pipefail.",
+   "Follow-up, outside this slice: run-console-client.ts has cases for all 16 orchestration names today. A consumer check against that file would make orchestration coverage durable; this gate checks the orchestration producer side only."
+  ],
+  "deviations": [
+   "Mutation 3 (a comment inside an arm list) is a positive control and must stay green; a comment-tolerance case cannot turn the gate red. Mutations 1 and 2 are red as specified.",
+   "The literal-writer scan skips #[cfg(test)] items (the plan said every .rs under MG/src). Test-only literals would otherwise count; on the live tree the only one is step_update in agentic_follow_tests, so the plan's shared step_update entry is not in the table.",
+   "Added a forward check beyond the plan's list: every literal producer must have a native SPA case, the same rule ChatEvent already has. Holds on the live tree (all six literal writers are handled).",
+   "A oneof member with no producer arm is listed in the doc as 'not yet written' instead of failing. The plan did not require exhaustiveness, and the live proto already declares 27 and 28 without arms from an in-flight slice. Stray arms and wire-name mismatches still fail.",
+   "Workflow path filters: the plan named orchestration.proto only. I also added apps/Model Plane/rust/services/model-gateway/src/**/*.rs (the orchestration map and most literal writers live in sse.rs, which the old list omitted) and scripts/tests/test_sse_taxonomy.py.",
+   "Explicit UTF-8 file I/O and UTF-8 stdout were added so the check runs on a Windows checkout. This was not in the plan, and it means the plan's claim that sse-taxonomy was red at HEAD was at least partly a locale artifact: the committed doc matched source under UTF-8."
+  ],
+  "needs_other_files": [
+   "apps/Model Plane/docs/decisions/ledger.md: record the two policy choices made here, per the CLAUDE.md rule that decisions live in the ledger. (1) A oneof member declared in orchestration.proto with no producer arm is listed as 'not yet written', not failed. (2) #[cfg(test)] items are excluded from the literal-writer scan. Not edited: the file is outside this slice's ownership."
+  ],
+  "verifier": {
+   "verdict": "pass",
+   "required_fixes": [],
+   "dod_gaps": [
+    "The committed doc has two rows (question_asked 27, question_answered 28, 'not yet') that exist only in the uncommitted orchestration.proto edit from another slice. Commit the doc together with or after that proto. If the doc goes in alone, CI --check goes red with a 2-row diff. I confirmed this in a HEAD-sources scratch tree.",
+    "The live worktree gate is red right now, but not because of this slice. sse.rs holds another slice's temporary edit, `orchestration_event::Event::QuestionAsked(_) | ...QuestionAnswered(_) => return None, // TMP-WS02-S6-VERIFY`, inside orchestration_event_to_sse. The gate fails loudly on it: 'parsed 16 orchestration arms but the body writes 18'. That is the designed behaviour for an arm shape it does not read. 9 of the 11 unit tests also fail in the live tree for the same reason. They are green in a scratch tree of HEAD sources plus the four owned files. Once that TMP edit is removed or replaced by a normal arm, the live tree should go green. If WS14 intends a permanent `=> return None` arm, ORCHESTRATION_ARM needs extending then.",
+    "Not provable here: the first GitHub Actions run of 'SSE taxonomy freshness' on the integration branch. That run is the YAML parse proof, the green check, the unit step, and the three 'detection confirmed' lines of the drift-proof step. No YAML parser is available offline.",
+    "Policy choices still to record in apps/Model Plane/docs/decisions/ledger.md, which is outside this slice's ownership: a oneof member with no arm is listed as 'not yet written' and not failed; #[cfg(test)] items are excluded from the literal-writer scan."
+   ]
+  },
+  "review_defects": [],
+  "notes": "Built the S6 slice in full. The generator now (1) reads the orchestration_event_to_sse arms and the OrchestrationEvent oneof from orchestration.proto, and requires each arm's wire name to equal its proto field name; (2) collects literal .event(\"...\") writers across model-gateway src, skipping #[cfg(test)] items, and requires every one to be listed in LITERAL_PRODUCERS with a reason and every listed one to still be written; (3) reads SPA cases only from the native switch inside dispatchEvent, so AG-UI CUSTOM labels no longer count; (4) every native case must name a ChatEvent, alias, literal producer or orchestration name; (5) every ChatEvent and literal producer must have a native case. The doc gains an \"Other producers\" section and is otherwise unchanged (diff is additive). Workflow: path filters widened, unit-test step added, drift proof extended to three probes. Encoding: all file I/O is explicit UTF-8 and stdout is UTF-8, so --check runs on a Windows checkout. CONCURRENCY WARNING: other slices are editing this same worktree right now (sse.rs +203 lines, orchestration.proto +162 lines with uncommitted question_asked=27 and question_answered=28 oneof members, untracked run_context.rs and user_question.rs). The gate is green on the live tree at the time of my last run. Nothing outside the four owned paths was edited or staged. No docker, no DB harness, no commit, no push."
+ }
+]

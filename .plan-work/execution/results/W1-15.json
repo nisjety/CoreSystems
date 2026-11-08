@@ -1,0 +1,335 @@
+{
+ "batchId": "W1-15",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS10-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/model_entitlement.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/dispatchers.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/model-entitlement-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/model-entitlement-client.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/docs/endpoint-map.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/onboarding/crawl_preview/stream_e2e.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets (CARGO_INCREMENTAL=0)",
+     "outcome": "pass: 717 passed, 1 ignored (pre-existing) in the bin; 7, 3 and 1 passed in the integration targets; 0 failed"
+    },
+    {
+     "command": "cargo test -q ... --bin verevon-gateway-rs -- orgs:: config:: actions (after rustfmt of the new file)",
+     "outcome": "pass: 106 passed, 0 failed"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/actions src/shared/api/model-entitlement-client.test.ts",
+     "outcome": "pass: 10 files, 136 tests"
+    },
+    {
+     "command": "node --test apps/gateway/scripts/action-surface-contract.test.mjs",
+     "outcome": "FAIL, pre-existing: 11 registry ids (approvals.decide, audit.* x5, chat.answer_question, chat.execute_approved_plan, chat.run.continue, mcp.approve_tool, tools.set_policy) have no quoted literal in handlers.rs. A script run over git HEAD shows the same 11; org.set_model_entitlement is present on both sides, so the slice adds no mismatch."
+    },
+    {
+     "command": "pnpm exec tsc --noEmit -p . (filtered to model-entitlement and action-registry)",
+     "outcome": "no errors reported for those files; not a full-repo typecheck, and I did not diff the repo-wide failing set"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml (verevon-gateway service environment): add `MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}` once, next to VEREVON_GATEWAY_CONTINUE_PARK_ENABLED. Add the same line with the value false to docker-compose.production.yml if that file lists gateway switches. Neither file is owned by this slice.",
+    "WS10-S4 must serve POST /v1/models/access on model-gateway (the draft plus include_catalogue form of GetModelAccess, as JSON, with the same bearers as GET /v1/models, returning catalogue entries with id and entitled). It must also add the `entitlement` sibling field (with hidden_count) to GET /v1/models. Either hand these to the S4 slice or take the route name as a decision. Until both exist the ZDR guard and the hidden_count read are inert or fail closed.",
+    "Evidence per the plan (after S2, S3 and S4 are rebuilt): rebuild the gateway image (verevon-gateway-rs), set MODEL_ENTITLEMENT_ADMIN_ENABLED=true in a test stack only, and curl as owner and as member with real session cookies. Expected: owner PUT then GET shows the policy and revision; member PUT 403; explain for self and for another user; ZDR-TEST org with a policy that strips every attested model gets 409 model_policy_leaves_no_zdr_model; a stopped org-core gives a fail-closed refusal. Do not enable it in production before S7."
+   ],
+   "deviations": [
+    "Adding the AppState field forced a one-line `model_entitlement_admin_enabled: false,` into the five explicit AppState test literals outside my ownership: main.rs (tests::test_state), domains/browser.rs, domains/chat/shared.rs, domains/orchestration.rs, onboarding/crawl_preview/stream_e2e.rs. Each is a mechanical line next to continue_park_form. Without them the crate does not compile. Line endings kept.",
+    "The plan names no HTTP route for the gateway's GetModelAccess call. I chose POST {model_gateway_url}/v1/models/access with JSON {draft, include_catalogue:true}; the response is read as the GetModelAccessResponse JSON (catalogue[{id, provider, entitled, reason}]). I added a row for it in endpoint-map.md.",
+    "Attestation is not on ModelAccessEntry. The guard intersects entitled verdicts with the chat models that /v1/models marks as attested, using the same predicate as the ZDR switch gate.",
+    "Flag-off responses: GET answers 200 {enabled:false}; PUT and explain answer 404 not_found. GET on an active-org member passes before the flag check, so a non-member still gets 403.",
+    "The new Rust and TS files are LF, matching the previous slice's new files; I ran rustfmt on the new Rust file only."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/docker-compose.yml (MODEL_ENTITLEMENT_ADMIN_ENABLED default false, see lead_todo)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/main.rs, src/domains/browser.rs, src/domains/chat/shared.rs, src/domains/orchestration.rs, src/onboarding/crawl_preview/stream_e2e.rs (one test-literal line each, already added)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof not run: rebuild the verevon-gateway-rs image, set MODEL_ENTITLEMENT_ADMIN_ENABLED=true on a test stack only, and curl as owner and as member with real session cookies. Expected: owner PUT then GET round-trips the policy and revision, member PUT is 403, explain works for self and for another user, a ZDR-TEST org with a policy that strips every attested model gets 409 model_policy_leaves_no_zdr_model, and a stopped org-core gives a fail-closed refusal. This needs S2, S3 and S4 rebuilt first.",
+     "Shared edit left for the lead: add `MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}` to the verevon-gateway service environment in apps/Frontend Plane/verevonv3/docker-compose.yml, next to VEREVON_GATEWAY_CONTINUE_PARK_ENABLED, and a false line in docker-compose.production.yml if it lists gateway switches.",
+     "WS10-S4 must serve POST /v1/models/access on model-gateway and add the `entitlement` sibling (with hidden_count) to GET /v1/models. Until then the ZDR write guard fails closed with 503 for ZDR orgs on any restricting PUT, and the hidden_count read is inert.",
+     "The plan's `pnpm test` command is red on action-surface-contract.test.mjs for the 11 pre-existing ids, so the lead must diff the failing set against HEAD rather than trust the exit code."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The HTTP route and JSON shape of model-gateway's GetModelAccess for the BFF (POST /v1/models/access) is not specified by any slice; S4 must serve exactly what the guard sends and reads, or the guard fails closed for every ZDR org restricting PUT."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The guard takes attested model ids from GET /v1/models as the acting admin, which S4 filters by that admin's own stored policy. A model the admin currently cannot see but the draft would allow is not counted as attested, so the guard can refuse a legitimate ZDR policy (the safe direction). It needs an unfiltered attested set, for example an attested flag on ModelAccessEntry."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The guard sends min_privacy_tier as org-core's lower-case label (global, eu_resident, zdr_contractual, sovereign), but the proto field is the PrivacyTier enum. S4's JSON-to-proto mapping must accept the labels."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The guard makes one sequential model-gateway call per restricting layer (up to 21) with a 25 s client ceiling each. There is no concurrency and no latency test; join them if a ZDR org with many role overrides is slow."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF does not check semantic validity (unknown effort, tier, glob, default against policy). org-core answers invalid_model_policy and the guard has already spent a catalogue read by then. Not tested against the real org-core."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Every restricting PUT now reads the org from org-core to learn its ZDR posture, including a failed read that blocks non-ZDR orgs with 503 when org-core is degraded. A stronger fix is for GET policy and PUT to take the posture from the session or from org-core's PUT response."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "While the admin switch is on, a policy that would leave the acting admin themself unable to see any model gets no warning; the plan has no self-lockout rule."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needs the gateway image rebuilt (verevon-gateway-rs), a real org-core with the S2 migration, and real cookies. Not run: the wiremock suite proves the contract shape, not the real org-core delegation signature for the model-entitlement routes."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The pre-existing action-surface-contract.test.mjs fails at HEAD on 11 registry ids with no quoted literal in handlers.rs (approvals.decide, audit.*, chat.answer_question and others), so the plan's `pnpm test` command is red for reasons outside this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The model-gateway route and JSON shape that the guard calls (POST /v1/models/access with {draft, include_catalogue:true}, reading catalogue[{id, entitled}]) is named by no slice. WS10-S4 must serve exactly this, or the guard fails closed for every ZDR org on a restricting PUT."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The guard takes attested model ids from GET /v1/models called as the acting admin. S4 filters that list by the admin's stored policy, so an attested model the admin currently cannot see but the draft would allow is not counted. The guard can then wrongly refuse a legitimate ZDR policy. This is the safe direction, but it needs an unfiltered attested set, for example an attested flag on ModelAccessEntry."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The guard sends min_privacy_tier as org-core's lower-case label, while the proto field is the PrivacyTier enum. S4's JSON-to-proto mapping must accept the labels, or a restricting tier in the draft fails or is misjudged."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "zdr_switch_gate judges only what the acting admin sees. If ZDR is turned on after a role policy has been saved, a role whose policy leaves no attested model passes the switch gate whenever the admin still sees one. That role's members are then refused at run time (the safe direction, but silent). The plan has no later role-by-role check at switch time."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The write guard makes one sequential model-gateway call per restricting layer, up to 21, each with a 25 s client ceiling, and there is no latency or concurrency test. Join them if a ZDR org with many role overrides is slow."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF checks structure only, so org-core's semantic invalid_model_policy comes after the guard has already spent a catalogue read and verdict calls. Nothing was tested against a real org-core, including the delegation signature on the model-entitlement routes."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Every restricting PUT reads the org from org-core to learn its ZDR posture, so a degraded org-core blocks even non-ZDR orgs with 503 model_policy_guard_unavailable. Take the posture from the session or from org-core's PUT response instead."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "While the admin switch is on, a policy that leaves the acting admin themself with no visible model gets no warning. The plan has no self-lockout rule."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The GET policy route returns 403 to a non-admin member once the switch is on, and `{enabled:false}` to every member while it is off. S6's SPA section must treat 403 as hidden rather than as an error."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Log texts in settings.rs changed from \"org ZDR gate\" to \"org ZDR check\" for the credential-mint and catalogue-read failures. Check that no log alert or test greps the old text."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needs the gateway image rebuilt, a real org-core with the S2 migration, and real cookies. The wiremock suite proves the contract shape, not the real delegation signature or the real model-gateway route."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "authority",
+    "policy",
+    "zdr"
+   ],
+   "notes": "The slice's code and unit tests are built; the admin switch is off by default. With it off: GET model-entitlement answers {enabled:false}, PUT and explain are 404, nothing is called upstream, and the ZDR switch gate does not read hidden_count. The feature is not usable end to end. The ZDR write guard calls POST {model_gateway_url}/v1/models/access, which model-gateway does not serve (WS10-S4 builds the admission side but never names this HTTP route), so for an org with ZDR on a restricting PUT fails closed with 503 until it exists.\n\nWhat was built:\n- Routes: GET and PUT /api/v1/orgs/{id}/model-entitlement and GET .../explain, in the new orgs/model_entitlement.rs.\n- Admin gate: PUT and GET policy go through require_org_admin, then org-core's CallerRole check (its refusal passes through; a test covers the two gates disagreeing). Explain is open to a member for themselves; naming another user needs admin.\n- Body validation: structural only, mirroring org-core's limits (500 entries, 128 chars, 20 roles, 16 surfaces, 64 KB, unknown fields refused, expected_revision required). org-core keeps the semantic rules.\n- ZDR write guard (D10): only judges a layer that can remove a model. It reads the org's ZDR from org-core, then the catalogue, then one draft verdict per restricting layer. A role override replaces the default, so each layer is judged alone. 409 model_policy_leaves_no_zdr_model; any unreadable answer is 503 model_policy_guard_unavailable and never a pass. A body that restricts nothing reads nothing.\n- zdr_switch_gate in settings.rs: when the admin switch is on and the catalogue shows no attested model but entitlement.hidden_count > 0, it answers 409 zdr_models_not_entitled. I extracted mint_model_plane_credentials and read_model_catalogue from it and made model_attests_zdr_for_chat pub(super); behaviour is unchanged otherwise, and the log texts for the failed mint and failed catalogue read changed (\"org ZDR gate\" became \"org ZDR check\").\n- Config: AppState.model_entitlement_admin_enabled, parsed once in build_state, on only for the exact word \"true\". A test asserts no handler reads the env.\n- Action: org.set_model_entitlement (control, risk high, requiresApproval, strict zod schema). It is not in MODEL_EXECUTABLE_ACTION_IDS, and a registry test asserts that. The dispatcher calls the real PUT handler, so the same guard applies; a test asserts it.\n- SPA client model-entitlement-client.ts (+ test) and endpoint-map rows."
+  },
+  {
+   "id": "WS10-S4",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/model_access.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/model_entitlement_admission.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/model_entitlement_refusal_contract.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p model-gateway --lib",
+     "outcome": "2243 passed, 0 failed, 4 ignored (includes new model_access unit tests, gRPC refusal-before-run test, updated set_policy test)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --tests --no-fail-fast",
+     "outcome": "all targets pass except zdr_refusal_inventory, which fails on browser_run.rs:802 (a file I did not touch); e2e_invoke_chain_test 153 passed including 9 new entitlement tests; model_entitlement_admission 5 passed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test model_entitlement_refusal_contract",
+     "outcome": "6 passed (did not run execution-core --all-targets: Windows pre-existing non-lib target failures)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit execution-core/src/subscription_refusal.rs + runtime_loop/agent.rs (~:2791, the Err(error) arm of the infer round): for ANY run (not only pinned) read mp_contracts::model_entitlement::Refusal::from_status(&error); when Some, fail the run with a typed refusal carrying refusal.code() (model_not_entitled or model_entitlement_unavailable) in the response (code is &'static str, so Refusal::bare(code) fits), terminal failure code from Session Core's fixed vocabulary (provider_unavailable for unavailable, inference_failed for not_entitled), never latch, never park, and log only grpc code and refusal code (content-free). The contract test tests/model_entitlement_refusal_contract.rs already pins the wire this reads.",
+    "Verify the new gateway behaviour live only after S3 is enforced: rebuild model-gateway, inference-core and execution-core via compose.sh and run the S7 flow through the BFF (restricted member refused on /v1/invoke, /v1/invoke/stream and gRPC, owner not, zero new thread/run rows).",
+    "model-gateway cargo test --all-targets has one failure not from this slice: zdr_refusal_inventory flags src/browser_run.rs:802 as an untyped ZDR refusal."
+   ],
+   "deviations": [
+    "Added one line `pub mod model_access;` to model-gateway/src/lib.rs (not an owned file): the slice's NEW module cannot compile or be tested without it. The lead must NOT add it again.",
+    "Execution-core typed run failure (the mapping, not the contract test) not built: needs src/subscription_refusal.rs and src/runtime_loop/agent.rs, which are not owned. See needs_other_files and lead_todo.",
+    "Admission fails open on any non-typed GetModelAccess error (transport failure, Unimplemented, timeout 3 s): inference-core's own PEP still refuses under enforce, so only the thread/run rows of a refused turn are not prevented in that case.",
+    "The effort clamp is applied by rewriting req.effort after admission instead of at the single call site in sse.rs, so it covers the durable stream, the ZDR stream and the unary ZDR path with one change. The agentic/execution-core path (RunAgentRequest) is not clamped.",
+    "gRPC transports covered: invoke and invoke_stream (the row names invoke only)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/subscription_refusal.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Execution-core typed run failure is not built: the Err arm of the infer round in execution-core/src/runtime_loop/agent.rs and subscription_refusal.rs must read mp_contracts::model_entitlement::Refusal::from_status and fail the run with refusal.code() (lead shared-edit; only the contract test exists). Until then an entitlement refusal in a governed run ends as the generic graceful reply.",
+     "Live proof (docker, lead only): rebuild model-gateway, inference-core, execution-core; run the S7 flow via the BFF: restricted member refused on /v1/invoke, /v1/invoke/stream and gRPC, owner not, zero new thread/run rows, after S3 enforce is on.",
+     "model-gateway zdr_refusal_inventory fails on src/browser_run.rs:802 (an untyped ZDR refusal from other committed work); the lead should have that owner fix it before the all-targets command is green."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Gateway admission fails open on a non-typed GetModelAccess error, so under enforce a refused turn can still create thread/message/run rows before inference-core's PEP refuses it; decide whether enforce should fail closed at the gateway once the mode is exposed in the answer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The effort clamp is not applied on the agentic path (RunAgentRequest to execution-core), so a capped role can still run a deep agent loop; the ceiling must reach execution-core before max_effort is promised."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Typed execution-core run failure is unbuilt (needs agent.rs and subscription_refusal.rs); until then an entitlement refusal in a governed run ends as the generic graceful reply."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "get_policy allowed_models is read through GetModelAccess with the caller's credential, which inference-core answers only for a user who can manage the policy; a service-principal BFF caller will see it empty, so the real read-back may need to come from org-core."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The durable stream's infer_stream-open failure path and its tool-loop rounds do not map the entitlement trailers; only the unary fallback frame, the ZDR direct arm and grpc_status_to_http do. Reachable only when admission was unchecked."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The policy default_effort is not applied when the caller names no effort; the SPA composer is expected to apply it (S6)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "deployment_allowlist_refusal in normalize.rs builds the same status/body pair that model_access::http now builds; unify when normalize.rs is next touched."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Every turn now costs one extra GetModelAccess gRPC call (cached 30 s in inference-core); measure its latency on the cold path before enabling enforce."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model_access::admit fails open on any non-typed GetModelAccess error (transport, Unimplemented, 3 s timeout), so under enforce a refused turn can still create thread/message/run rows before inference-core's own PEP refuses it; the plan wants fail-closed, decide before enforce is switched on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The effort clamp rewrites req.effort only on the invoke, SSE and ZDR paths; the agentic RunAgentRequest path to execution-core is not clamped, so a role capped by max_effort can still run a deep agent loop."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Typed execution-core run failure for model_not_entitled / model_entitlement_unavailable is unbuilt (needs agent.rs and subscription_refusal.rs, not owned); pin it with the existing contract test wire when the lead does the shared edit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "tests/model_entitlement_admission.rs asserts admission ordering by scanning source text for call order; the behavioural proof is the 9 new e2e_invoke_chain_test cases and the gRPC refusal-before-run unit test, so a refactor that keeps the text order but skips the call would not be caught."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "get_policy allowed_models is read through GetModelAccess with the caller's own credential, which inference-core answers for a policy manager only; a service-principal BFF caller sees it empty, so the read-back may need to come from org-core."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The durable stream's infer_stream-open failure and tool-loop rounds do not map the entitlement trailers; only the unary fallback frame, ZDR direct arm and grpc_status_to_http do (reachable only when admission was unchecked)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "lib.rs got one line `pub mod model_access;`, outside the named ownership list but unavoidable for the owned new module; the lead must not add it again."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Every turn now costs one extra GetModelAccess gRPC call (two when the model is unnamed and the policy sets a chat default); measure cold-path latency before enabling enforce."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "deployment_allowlist_refusal in normalize.rs builds the same status/body pair as model_access::http; unify when normalize.rs is next touched."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "zdr"
+   ],
+   "notes": "Built: model_access::admit asks inference-core GetModelAccess with the caller's own credential on unary /v1/invoke, SSE /v1/invoke/stream, and gRPC invoke and invoke_stream, before any session-core call. A refusal gives typed 403 or 503, a single SSE error frame, or PERMISSION_DENIED or UNAVAILABLE with trailers; the ZDR branch is under the same admission. It applies only when the answer says enforced. An unnamed model uses the policy's chat default, and that default is itself judged. The effort clamp rewrites req.effort to the policy max_effort with mp_contracts Policy::clamp_effort, mapping the client profile onto the ladder and back to the legacy quick/deep when the ladder is off, and it can only lower a request. list_models adds an optional entitlement sibling field, left out when no policy is applied. New trailers are mapped in grpc_status_to_http (503 for unavailable), invoke_inference_error, the ZDR direct stream arm and the durable fallback error frame. get_policy fills allowed_models from GetModelAccess with include_catalogue. set_policy still refuses by name, now pointing at PUT /api/v1/orgs/{id}/model-entitlement. No new switch: it follows GetModelAccess.enforced, so with MODEL_ENTITLEMENT_MODE off nothing changes (the only added cost is one gRPC call per turn). Not done: the execution-core typed run failure itself needs src edits outside my files, so only the contract test exists (status never FAILED_PRECONDITION, not a ZDR refusal, not in the subscription reader's closed code list, content-free, inference-core uses the catalogue builders)."
+  }
+ ]
+}

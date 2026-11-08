@@ -1,0 +1,7 @@
+title: Vi kan ikke bekrefte ZDR for denne nøkkelen
+continue: Forstått
+cancel: Forstått
+
+Vi kan ikke bekrefte ZDR for denne nøkkelen. Organisasjonen din bruker ikke ZDR nå, så ingenting endres.
+
+Samtaler med nøkkelen behandles hos leverandøren etter din avtale med dem. Slår organisasjonen på ZDR senere, spør vi deg før du kan bruke nøkkelen.

@@ -1,0 +1,109 @@
+{
+  "contract": "connection.zdr-capabilities",
+  "version": 1,
+  "catalog_version": 1,
+  "description": "What Verevon knows about whether a user-owned model connection can give zero data retention (ZDR). integration-corev2 owns the per-connection record and embeds this file (go:embed); Auth Core only compares the opaque digest it gets back; inference-core is cross-checked by a Rust test that reads this file and instantiates the real provider capabilities. Authored data, not generated: change it deliberately, bump catalog_version, re-pin and re-vendor (see README.md). A provider row is assessed only for the exact (provider_key, auth_mode) pair; anything else gets the fallback. Honest by construction: cannot_verify is a first-class state, never rounded up to supported.",
+  "states": ["supported", "not_supported", "cannot_verify"],
+  "bases": [
+    "verevon_attested_deployment",
+    "provider_terms_known",
+    "provider_by_contract",
+    "customer_asserted",
+    "not_assessed"
+  ],
+  "run_rule": {
+    "zdr_stays_on": ["supported"],
+    "acknowledgement_required": ["not_supported", "cannot_verify"]
+  },
+  "locales": ["no", "en"],
+  "wording_variants": ["org_zdr_on", "org_zdr_off", "first_use"],
+  "wording_keys": [
+    {"key": "chatgpt_subscription_not_supported", "state": "not_supported", "variants": ["org_zdr_on", "org_zdr_off", "first_use"]},
+    {"key": "connection_cannot_verify", "state": "cannot_verify", "variants": ["org_zdr_on", "org_zdr_off", "first_use"]},
+    {"key": "connection_supported", "state": "supported", "variants": ["org_zdr_on", "org_zdr_off"]}
+  ],
+  "digest": {
+    "algorithm": "sha256",
+    "encoding": "lowercase_hex",
+    "fields": ["auth_mode", "basis", "capability", "catalog_version", "provider_key"],
+    "canonical_form": "The object holding exactly the fields above, serialised with keys in ascending order, no whitespace outside strings, UTF-8, catalog_version as an integer. Only integration-corev2 computes it; every other plane treats it as an opaque string.",
+    "vectors": [
+      {
+        "id": "codex_subscription_catalog_1",
+        "note": "the digest stored for the ChatGPT subscription while catalog_version is 1",
+        "input": {"provider_key": "openai-codex-subscription", "auth_mode": "codex_chatgpt_device_code", "capability": "not_supported", "basis": "provider_terms_known", "catalog_version": 1},
+        "canonical": "{\"auth_mode\":\"codex_chatgpt_device_code\",\"basis\":\"provider_terms_known\",\"capability\":\"not_supported\",\"catalog_version\":1,\"provider_key\":\"openai-codex-subscription\"}",
+        "sha256": "7d865ca0c6296627837c0603192debcd2c217bcb17b884738fe99befdb810fbd"
+      },
+      {
+        "id": "codex_subscription_catalog_2",
+        "note": "a catalog_version bump changes the digest, which revokes every acknowledgement given against the old one",
+        "input": {"provider_key": "openai-codex-subscription", "auth_mode": "codex_chatgpt_device_code", "capability": "not_supported", "basis": "provider_terms_known", "catalog_version": 2},
+        "canonical": "{\"auth_mode\":\"codex_chatgpt_device_code\",\"basis\":\"provider_terms_known\",\"capability\":\"not_supported\",\"catalog_version\":2,\"provider_key\":\"openai-codex-subscription\"}",
+        "sha256": "74776afca7304ff1484468369d18b2d29bac1c9fe803c1efa6a02eb04a5f50f3"
+      },
+      {
+        "id": "unassessed_connection_fallback",
+        "note": "a connection nobody assessed is hashed under its own provider_key and auth_mode with the fallback capability and basis",
+        "input": {"provider_key": "example-llm-gateway", "auth_mode": "api_key", "capability": "cannot_verify", "basis": "not_assessed", "catalog_version": 1},
+        "canonical": "{\"auth_mode\":\"api_key\",\"basis\":\"not_assessed\",\"capability\":\"cannot_verify\",\"catalog_version\":1,\"provider_key\":\"example-llm-gateway\"}",
+        "sha256": "451731439b57be37fc4e84c10c1d324e16c7f8bd0d9ad80b62eb765387e8d0e3"
+      },
+      {
+        "id": "codex_subscription_capability_change",
+        "note": "a capability or basis change changes the digest",
+        "input": {"provider_key": "openai-codex-subscription", "auth_mode": "codex_chatgpt_device_code", "capability": "supported", "basis": "verevon_attested_deployment", "catalog_version": 1},
+        "canonical": "{\"auth_mode\":\"codex_chatgpt_device_code\",\"basis\":\"verevon_attested_deployment\",\"capability\":\"supported\",\"catalog_version\":1,\"provider_key\":\"openai-codex-subscription\"}",
+        "sha256": "ae03bb4e049bb582c476c92e6b86b2c14159c8744083a622f5bb07e6a0b733e8"
+      }
+    ]
+  },
+  "providers": [
+    {
+      "basis_ref": "openai-codex-subscription@1",
+      "provider_key": "openai-codex-subscription",
+      "auth_mode": "codex_chatgpt_device_code",
+      "capability": "not_supported",
+      "basis": "provider_terms_known",
+      "waiver_route": true,
+      "wording_key": "chatgpt_subscription_not_supported",
+      "inference_provider_id": "openai-codex-subscription",
+      "inference_supports_zdr": false,
+      "evidence": "ChatGPT subscription sign-in: Global residency, no ZDR commitment, consumer account terms. inference-core CodexSubscriptionProvider::capabilities reports residency Global and supports_zdr false; the Rust cross-check test pins the two together."
+    }
+  ],
+  "fallback": {
+    "basis_ref": "fallback@1",
+    "capability": "cannot_verify",
+    "basis": "not_assessed",
+    "waiver_route": false,
+    "wording_key": "connection_cannot_verify"
+  },
+  "cases": [
+    {
+      "id": "known_codex_subscription",
+      "input": {"provider_key": "openai-codex-subscription", "auth_mode": "codex_chatgpt_device_code"},
+      "expect": {"basis_ref": "openai-codex-subscription@1", "capability": "not_supported", "basis": "provider_terms_known", "waiver_route": true, "wording_key": "chatgpt_subscription_not_supported"}
+    },
+    {
+      "id": "unknown_provider",
+      "input": {"provider_key": "example-llm-gateway", "auth_mode": "api_key"},
+      "expect": {"basis_ref": "fallback@1", "capability": "cannot_verify", "basis": "not_assessed", "waiver_route": false, "wording_key": "connection_cannot_verify"}
+    },
+    {
+      "id": "known_provider_other_auth_mode",
+      "input": {"provider_key": "openai-codex-subscription", "auth_mode": "api_key"},
+      "expect": {"basis_ref": "fallback@1", "capability": "cannot_verify", "basis": "not_assessed", "waiver_route": false, "wording_key": "connection_cannot_verify"}
+    },
+    {
+      "id": "empty_provider",
+      "input": {"provider_key": "", "auth_mode": ""},
+      "expect": {"basis_ref": "fallback@1", "capability": "cannot_verify", "basis": "not_assessed", "waiver_route": false, "wording_key": "connection_cannot_verify"}
+    },
+    {
+      "id": "provider_alias_is_not_a_key",
+      "input": {"provider_key": "codex-subscription", "auth_mode": "codex_chatgpt_device_code"},
+      "expect": {"basis_ref": "fallback@1", "capability": "cannot_verify", "basis": "not_assessed", "waiver_route": false, "wording_key": "connection_cannot_verify"}
+    }
+  ]
+}

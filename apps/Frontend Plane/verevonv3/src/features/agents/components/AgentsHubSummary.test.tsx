@@ -86,6 +86,16 @@ beforeEach(() => {
 // No I18nProvider wraps these renders, so useI18n() resolves the Norwegian argument, matching
 // defaultLocale ('no'), the same convention the other agent page tests use.
 describe('AgentsHubSummary', () => {
+  it('shows a loading line, not an empty automations list, until the organisation is known', async () => {
+    reads.session.current = { status: 'loading', user: { id: 'user-1' }, activeOrg: null, permissions: [] }
+
+    render(() => <AgentsHubSummary />)
+
+    expect(await screen.findByText('Henter automatiseringene …')).toBeTruthy()
+    expect(screen.queryByText('Ingen automatiseringer ennå.')).toBeNull()
+    expect(reads.listMySchedules).not.toHaveBeenCalled()
+  })
+
   it('says plainly that nothing exists yet, and names the next step for each card', async () => {
     const { container } = render(() => <AgentsHubSummary />)
 

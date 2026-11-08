@@ -1,0 +1,406 @@
+{
+  "ws": "WS24",
+  "header_decisions": [
+    "DEC-24 (WS24 D1, D2): workspace edits are a per-run overlay with no promote caller, and the write rung is WorkspaceWrite. Owner list item 12 recommends Approve. It gates only the product-route exposure of S4 (WORKSPACE_TOOLS=all), not building.",
+    "DEC-25 (WS24 D4-D7): typed ModelAccess side map, closed exempt-reason set, the 7 unexecutable ids kept as visible debt, hash basis and read authority. Already settled (plan line 2008 says settled DEC-25); applied in S5-S8.",
+    "DEC-10 (WS24 D9, OD2): Do on the product route stays OFF in code and compose; only flag flips are gated. Owner list item 5 recommends Approve. Gates product-route flips only.",
+    "Local WS24 decisions proceed without approval: D3 tool names (workspace_read, workspace_grep, workspace_glob, workspace_list, workspace_edit, workspace_put), D8 glob engine (globset is not in Cargo.lock; the fallback is a hand-rolled matcher of about 80 lines) and D10.",
+    "Plan header: no decision needed for S0-S5 or for S8 option (a).",
+    "Appendix B K1-20 (binding): WS08 and WS26 block WS24. Applied as WS08 and WS26 in depends_on of every slice.",
+    "Appendix B K3-25 (binding): WS24-S7 admission needs a registry row, an OWNER_ACTION_PINS entry (code review) and an owner verifier; a row alone admits nothing. Applied in the S6 and S7 summaries."
+  ],
+  "slices": [
+    {
+      "id": "WS24-S0",
+      "title": "Characterisation goldens and ledger entries",
+      "tag": "FINISH",
+      "summary": "Pins the Do tool catalogue (each offered tool with trusted_capability_id, rung_required_for and is_risky_tool) and the 8 model-eligible ids as golden tests, records the DEC-24 and DEC-25 decisions and the never-promote rule in the decisions ledger, and corrects the stale workspace_hydrate.rs header. Docs and tests only; no runtime change.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json",
+        "apps/Model Plane/rust/services/execution-core/tests/tool_catalogue_characterisation.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.test.ts",
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/do_tool_catalogue.json",
+        "apps/Model Plane/rust/services/execution-core/tests/tool_catalogue_characterisation.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.test.ts"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS08", "WS26"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": false,
+      "needs_external": "",
+      "risk": ["none"],
+      "effort_days_low": 1,
+      "effort_days_high": 2,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib",
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/shared/actions"
+      ]
+    },
+    {
+      "id": "WS24-S1",
+      "title": "Content version and surfaced upload failure",
+      "tag": "FINISH",
+      "summary": "Defines the workspace content version as the sha256 of the redacted bytes, equal to the CAS put hash, and makes an upload or snapshot failure visible: upload_and_discard_workspace returns WorkspaceUploadOutcome with uploaded=false, a workspace_upload_failed counter increments, and the run summary says the workspace changes were not saved. Counters only; no new persistence.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/workspace_hydrate.rs",
+        "apps/Model Plane/rust/services/execution-core/src/sandbox_lease.rs",
+        "apps/Model Plane/rust/services/execution-core/src/state.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+      ],
+      "new_files": [],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S0", "WS08", "WS26"],
+      "decisions": ["DEC-24"],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "WS22 session agreement on the per-step Space write-through reconcile (the plan settles it by DEC-24)",
+      "risk": ["data-loss", "zdr"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib workspace_hydrate sandbox_lease"
+      ]
+    },
+    {
+      "id": "WS24-S2",
+      "title": "Workspace edit engine as pure functions",
+      "tag": "BUILD",
+      "summary": "Adds execution-core workspace_edit.rs with read, grep, glob, list, edit and put under a canonical root: sha256 version tokens, closed EditError codes, EOL, BOM and mode preservation, a 1 MiB edit cap and atomic temp-plus-rename writes, plus a per-workspace RwLock on HydratedWorkspace. Pure file operations with no network, gRPC, sandbox lease or tool bridge.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/workspace_edit.rs",
+        "apps/Model Plane/rust/services/execution-core/src/lib.rs",
+        "apps/Model Plane/rust/services/execution-core/src/state.rs",
+        "apps/Model Plane/rust/services/execution-core/Cargo.toml",
+        "apps/Model Plane/rust/Cargo.lock",
+        "apps/Model Plane/rust/services/execution-core/tests/workspace_edit_contract.rs"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/src/workspace_edit.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/workspace_edit_contract.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S1", "WS08", "WS26"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": false,
+      "needs_external": "",
+      "risk": ["data-loss", "policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib workspace_edit && cargo test -q -p execution-core --test workspace_edit_contract"
+      ]
+    },
+    {
+      "id": "WS24-S3",
+      "title": "Read-only workspace tools behind WORKSPACE_TOOLS",
+      "tag": "BUILD",
+      "summary": "Adds four read tools (workspace_read, workspace_grep, workspace_glob, workspace_list) offered only to Space-scoped runs that are not ZDR or waived, when WORKSPACE_TOOLS is read or all. They dispatch through the signed capability gate as cap.workspace.read (migration 0018), which must be advertised, bound, seeded and attested. Off by default in code and compose.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/workspace_tools.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "apps/Model Plane/rust/services/execution-core/src/health_attest.rs",
+        "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "apps/Model Plane/go/services/capability-core/migrations/0018_workspace_read_capability.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0018_workspace_read_capability.down.sql",
+        "apps/Model Plane/go/services/capability-core/internal/models/availability.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/availability_test.go",
+        "apps/Model Plane/go/services/capability-core/internal/registry/migration_security_integration_test.go",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/src/workspace_tools.rs",
+        "apps/Model Plane/go/services/capability-core/migrations/0018_workspace_read_capability.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0018_workspace_read_capability.down.sql"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S2", "WS01-S0", "WS03", "WS05-S1", "WS08", "WS26"],
+      "decisions": [],
+      "flag": "WORKSPACE_TOOLS=off|read|all (execution-core env; default off in code and compose; read then all on the proof stack)",
+      "migration": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "integrator assigns the capability-core migration number at merge (DEC-39; 0018 is the plan's 4.4 reservation)",
+      "risk": ["zdr", "authority", "policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib",
+        "cd \"apps/Model Plane/go/services/capability-core\" && go test ./... && go vet ./... && go test -tags integration ./internal/registry/..."
+      ]
+    },
+    {
+      "id": "WS24-S4",
+      "title": "Workspace write tools as per-run overlay",
+      "tag": "BUILD",
+      "summary": "Adds workspace_edit and workspace_put as per-run overlay writes offered only when WORKSPACE_TOOLS=all. The write arms take the exclusive workspace lock (the code_interpreter and process arms take it around their execution), they are refused in plan mode and leaf subagents, and they return durability run_overlay with a reminder that other runs do not see the change. They dispatch as cap.workspace.write (migration 0019, a separate row so an org can disable writes and keep reads), with no per-call approval, matching save_memory.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/workspace_tools.rs",
+        "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "apps/Model Plane/rust/services/execution-core/src/health_attest.rs",
+        "apps/Model Plane/go/services/capability-core/migrations/0019_workspace_write_capability.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0019_workspace_write_capability.down.sql"
+      ],
+      "new_files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0019_workspace_write_capability.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0019_workspace_write_capability.down.sql"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S2", "WS24-S3", "WS01-S0", "WS03", "WS13", "WS08", "WS26"],
+      "decisions": ["DEC-24", "DEC-10"],
+      "flag": "WORKSPACE_TOOLS=all (the same switch as S3; the write arms are offered only in mode all)",
+      "migration": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "owner acceptance of DEC-24 D1 (overlay visibility, explicit accept under F-t3-076) and D2 (rung), and DEC-10 (OD2), before WORKSPACE_TOOLS=all reaches the product route; integrator assigns the migration number (DEC-39)",
+      "risk": ["data-loss", "zdr", "authority", "policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib",
+        "cd \"apps/Model Plane/go/services/capability-core\" && go test ./... && go vet ./... && go test -tags integration ./internal/registry/..."
+      ]
+    },
+    {
+      "id": "WS24-S5",
+      "title": "Model access classification and contract",
+      "tag": "FINISH",
+      "summary": "Makes the frontend action registry's model access exhaustive: a typed model-access.ts (none, read or write_approval; a closed exempt-reason set; executor declarations) derives the 8-id eligibility set, catalog-manifest moves to schema version 3 with modelAccess, exemptReason, sideEffectClass and schemaHash, and a canonical agent-action-admission.json is vendored to the Rust, Go and frontend trees. action-registry.ts is not edited and no runtime behaviour changes.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/admission-contract.test.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+        "apps/Model Plane/api/contracts/agent-action-admission.json",
+        "apps/Model Plane/api/contracts/agent-action-admission.json.sha256",
+        "apps/Model Plane/api/contracts/README.md",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+        "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+        "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json",
+        "apps/Model Plane/rust/services/execution-core/tests/agent_action_admission_contract.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "scripts/tests/zdr-contract-sync.test.sh"
+      ],
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/admission-contract.test.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+        "apps/Model Plane/api/contracts/agent-action-admission.json",
+        "apps/Model Plane/api/contracts/agent-action-admission.json.sha256",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+        "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+        "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json",
+        "apps/Model Plane/rust/services/execution-core/tests/agent_action_admission_contract.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS05-S1", "WS12", "WS08", "WS26"],
+      "decisions": ["DEC-25"],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": false,
+      "needs_external": "",
+      "risk": ["authority", "policy"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm vitest run src/shared/actions src/shared/context-packs && pnpm typecheck && pnpm lint",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --test agent_action_admission_contract",
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p model-gateway --lib every_ask_read",
+        "bash scripts/tests/zdr-contract-sync.test.sh"
+      ]
+    },
+    {
+      "id": "WS24-S6",
+      "title": "Agent action admissions table and pinned owner actions",
+      "tag": "BUILD",
+      "summary": "Adds a capability-core agent_action_admissions table (status enabled, declared or retired) behind MODEL_ACTION_ADMISSION, served as a signed model-action-view-v2 beside v1, with tickets.create byte-identical under tickets_only. Execution-core admits a server-resolved owner action only when OWNER_ACTION_PINS pins its name, schema hash, parameters and adapter (new owner_actions.rs). Per K3-25 a table row alone admits nothing: the pin and the owner verifier are also required.",
+      "files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0022_agent_action_admissions.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0022_agent_action_admissions.down.sql",
+        "apps/Model Plane/go/services/capability-core/internal/registry/agent_action_admissions_store.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/model_action_view.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/model_action_view_test.go",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/owner_actions.rs",
+        "apps/Model Plane/rust/services/execution-core/src/ticket_tools.rs",
+        "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "apps/Model Plane/deploy/docker-compose.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/go/services/capability-core/migrations/0022_agent_action_admissions.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/0022_agent_action_admissions.down.sql",
+        "apps/Model Plane/go/services/capability-core/internal/registry/agent_action_admissions_store.go",
+        "apps/Model Plane/rust/services/execution-core/src/owner_actions.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S5", "WS05-S1", "WS05-S3", "WS13", "WS08", "WS26"],
+      "decisions": ["DEC-25"],
+      "flag": "MODEL_ACTION_ADMISSION=tickets_only|table (capability-core and execution-core; default tickets_only, table on the proof stack)",
+      "migration": true,
+      "optional": false,
+      "planes": ["Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "integrator assigns the capability-core migration number at merge (DEC-39; 0022 is the plan's 4.4 reservation); the WS13 approval floor must exist before write_approval rows are admitted",
+      "risk": ["authority", "policy", "zdr"],
+      "effort_days_low": 6,
+      "effort_days_high": 8,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib owner_actions"
+      ]
+    },
+    {
+      "id": "WS24-S7",
+      "title": "Control run-action target table and view v2",
+      "tag": "BUILD",
+      "summary": "Replaces the switch in runActionTarget with a user-core run_action_targets table (action_id, service_audience, permission, class, hash_basis, schema_hash) seeded with tickets.create only. The model-action view request takes optional action ids, intersected with the table and with agent entitlement (a read-class action needs no write entitlement), and the capability-core verifier accepts v2. Per K3-25 a row alone admits nothing: each new action also needs an OWNER_ACTION_PINS entry and an owner verifier.",
+      "files": [
+        "apps/Control Plane/user-core/internal/spaces/run_action_targets.go",
+        "apps/Control Plane/user-core/internal/spaces/run_action_decision.go",
+        "apps/Control Plane/user-core/internal/spaces/model_action_view.go",
+        "apps/Control Plane/user-core/internal/spaces/model_action_view_test.go",
+        "apps/Control Plane/user-core/internal/spaces/run_action_decision_test.go",
+        "apps/Control Plane/user-core/migrations/031_space_effect_policy_read_actions.up.sql",
+        "apps/Control Plane/user-core/migrations/031_space_effect_policy_read_actions.down.sql",
+        "apps/Model Plane/go/services/capability-core/internal/api/model_action_view.go",
+        "apps/Model Plane/rust/services/execution-core/src/ticket_tools.rs"
+      ],
+      "new_files": [
+        "apps/Control Plane/user-core/internal/spaces/run_action_targets.go",
+        "apps/Control Plane/user-core/migrations/031_space_effect_policy_read_actions.up.sql",
+        "apps/Control Plane/user-core/migrations/031_space_effect_policy_read_actions.down.sql"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S6", "WS08", "WS26"],
+      "decisions": ["DEC-25"],
+      "flag": "RUN_ACTION_TARGETS=tickets_only|table (user-core env; default tickets_only)",
+      "migration": true,
+      "optional": false,
+      "planes": ["Control Plane", "Model Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Control Plane owner review of the user-core edits (one owner per PR); integrator assigns the migration number (DEC-39; 031 is the plan's 4.4 reservation); the migration is skipped if control-signed reads are deferred",
+      "risk": ["authority", "auth", "policy", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "test_commands": [
+        "cd \"apps/Control Plane/user-core\" && go test ./internal/spaces/... ./internal/http/..."
+      ]
+    },
+    {
+      "id": "WS24-S8",
+      "title": "Owner read knowledge.list_documents in Do",
+      "tag": "BUILD",
+      "summary": "Adds the owner read knowledge.list_documents to the Do loop: a new owner_reads.rs calls Data Plane DocumentService ListDocuments with the run's delegated user bearer (the same bearer execute_knowledge_search uses) and returns at most 25 rows of document_id, title, source, type and status with no content. It is offered only when MODEL_ACTION_ADMISSION=table, the admission row is enabled and the run is not ZDR. The model-access row gains its do executor and the contract is regenerated in every copy.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/owner_reads.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/agent_action_admission_contract.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json",
+        "apps/Model Plane/api/contracts/agent-action-admission.json",
+        "apps/Model Plane/api/contracts/agent-action-admission.json.sha256",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json",
+        "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json",
+        "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json"
+      ],
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/src/owner_reads.rs"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S5", "WS24-S6", "WS08", "WS26"],
+      "decisions": ["DEC-25"],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Data Plane v2", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "Data Plane owner confirmation that ListDocuments accepts the forwarded delegated bearer exactly as the gateway retrieval authorize step does (not determined in the plan; the proof settles it)",
+      "risk": ["authority", "zdr", "policy"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p execution-core --lib owner_reads"
+      ]
+    },
+    {
+      "id": "WS24-S9",
+      "title": "Proofs, ZDR matrix rows and ownership docs",
+      "tag": "FINISH",
+      "summary": "Adds workspace-tools-proof.sh and agent-action-admission-proof.sh, modelled on tickets-create-proof.sh with a disposable Postgres and no credential creation. Adds the ZDR posture-matrix rows workspace_tools_under_zdr_not_offered_not_executed, owner_actions_under_zdr_not_offered and owner_reads_under_zdr_not_offered with their vendored copies, adds the workspace_tools refusal key, records the ledger and capability-ownership rows, and makes CI run the two new contract tests. Proofs run only on rebuilt images, with flags flipped on the proof stack only.",
+      "files": [
+        "apps/Model Plane/scripts/tests/workspace-tools-proof.sh",
+        "apps/Model Plane/scripts/tests/agent-action-admission-proof.sh",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json",
+        "apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json",
+        "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json.sha256",
+        "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json",
+        "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json.sha256",
+        "apps/Model Plane/api/contracts/zdr-refusals.json",
+        "apps/Model Plane/api/contracts/zdr-refusals.json.sha256",
+        "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json",
+        "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json.sha256",
+        "scripts/tests/zdr-contract-sync.test.sh",
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Model Plane/docs/capability-ownership-matrix.md",
+        ".github/workflows/model-plane-rust-ci.yml"
+      ],
+      "new_files": [
+        "apps/Model Plane/scripts/tests/workspace-tools-proof.sh",
+        "apps/Model Plane/scripts/tests/agent-action-admission-proof.sh"
+      ],
+      "new_files_already_present": [],
+      "depends_on": ["WS24-S4", "WS24-S8", "WS08", "WS26"],
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "optional": false,
+      "planes": ["Model Plane", "Frontend Plane"],
+      "proto_change": false,
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "test_commands": [
+        "bash scripts/tests/zdr-contract-sync.test.sh"
+      ]
+    }
+  ],
+  "notes": "Sources: plan lines 1307-1352 (WS24 header 1308-1317, slice table 1320-1331, Provides and consumes 1334-1335, ZDR clause 1338, top risks 1341-1344) and Appendix B in full (2253-2320), applied as binding. Appendix B rows that touch WS24: K1-20 (WS08 and WS26 block WS23 and WS24; applied to depends_on of every slice), K3-25 (admission needs a registry row, an OWNER_ACTION_PINS entry and an owner verifier; applied to S6 and S7), K3-13 (WS22-S2 depends on WS24-S1, so S1 must land the scrub idempotence corpus first; the redacted_paths field belongs to WS22). N1 applied: needs_live_stack is true for the runtime slices S1, S3, S4, S6, S7, S8 and S9, and false for the doc, test or contract-only slices S0, S2 and S5. N8 applied: paths not in the tree are NEW files. depends_on rule: each slice carries its Deps column, WS08 and WS26 (K1-20), and the header items the plan names for it (WS01-S0 and WS03 for S3 and S4, WS05-S1 for S3, S5 and S6, WS12 for S5, WS13 for S4 and S6).\n\nBuilt status: none of the 10 slices is built at HEAD 12dd8cb7 on branch model-plane. Glob and Grep found none of the new files (workspace_edit.rs, workspace_tools.rs, owner_actions.rs, owner_reads.rs, the two new Rust contract tests, the tool-catalogue fixture, model-access.ts, the eligibility test, admission-contract.test.ts, run_action_targets.go, agent_action_admissions_store.go, the two proof scripts), and no capability-core migration above 0015 or user-core migration above 029 exists. No code contains content_version, would_redact, WorkspaceUploadOutcome, workspace_upload_failed, WORKSPACE_TOOLS, OWNER_ACTION_PINS, MODEL_ACTION_ADMISSION, RUN_ACTION_TARGETS, cap.workspace.read or WORKSPACE_READ_CAPABILITY. knowledge.list_documents exists only as the model-gateway Ask-loop read (tool_loop.rs:3659, verevon_actions.rs:879), not as an execution-core Do tool. git log afb83928..HEAD (101 commits) contains no WS24 slice commit; its two keyword hits (ad322122, 6b20966d) are WS03 ledger and ops commits. The FINISH slices S0, S1, S5 and S9 have base code in place (the upload path, the 8-id eligibility set, the tickets proof and the posture matrix) but none of their specified new artifacts, so new_files_already_present is empty for every slice. The FE contracts directory and the model-gateway tests/fixtures directory already exist.\n\nDependencies at HEAD: the ZDR wave (WS01-S0, Z-18) is committed (for example 5ae7fe13, c2f5c802, d6c8e557, 20293fdd, e1b02596), so the [live-only] tags on zdr-refusals.json and its neighbours are stale, and that file is tracked. The waived concept appears in runtime_loop/mod.rs (10 matches) and agent.rs (69 matches). WS05-S1 is not landed (no capability_tool_classes and no migration 0016). The code_interpreter arm exists (runtime_loop/mod.rs execute_code_interpreter). WS08 attachments, WS12, WS13 and WS26 were not checked.\n\nPath normalisation: MP = apps/Model Plane; EC = apps/Model Plane/rust/services/execution-core/src; EC/../ = execution-core/; MG = apps/Model Plane/rust/services/model-gateway/src; CC = apps/Model Plane/go/services/capability-core; FE and FP = apps/Frontend Plane/verevonv3; CP user-core = apps/Control Plane/user-core; SM = apps/Model Plane/go/services/sandbox-manager (no slice file list needs it). Plan references corrected: the availability.go:55,97 cite is internal/models/availability.go, not internal/api (the cited availability_test.go:176 is correct in internal/api); migration_security_test.go is internal/registry/migration_security_integration_test.go. The test_commands expand MP and FP to the real directories. Tests-column items without a runnable command are recorded here and not in test_commands: S6 Go tests TestModelActionViewTicketsCreateIsByteIdenticalUnderV2, TestModelActionViewOffersOnlyEnabledRowsInTheSignedList and TestModelActionViewRejectsHashMismatch (capability-core internal/api; no command given); S7 Go tests TestRunActionTargetTableSeedsTicketsCreateOnly, TestIssueModelActionViewIntersectsEntitlement, TestRunActionDecisionRejectsActionOutsideTable and TestIssueModelActionViewRefusesZDR (user-core internal/spaces); S9 proof scripts workspace-tools-proof.sh and agent-action-admission-proof.sh (rebuilt-stack evidence; no command given). Candidate gate found on disk and not named in the plan: apps/Model Plane/scripts/tests/tickets-create-config-contract-test.sh (for S6).\n\nLine drift: plan line references are from afb83928. runtime_loop/agent.rs is now 23,305 lines (plan base 13,328 plus 207 live). Current positions: merged_tool_defs agent.rs:875 (plan 622-680), append_server_resolved_tool_defs 966 (plan 701-725), is_server_resolved_tool_name 988, every_offerable_tool_def 5345 (plan 3800), offered_tool_defs 5656 (plan 4109); execute_web_fetch runtime_loop/mod.rs:1134 (plan 1102); execute_code_interpreter mod.rs:923; grpc.rs is 2306 lines. These still hold: permission/mod.rs:77, :124 and :181; state.rs:95 HydratedWorkspace; ticket_tools.rs:391 request_model_action_view; model_action_view.go Verify at 180 and Validate at 212; user-core run_action_decision.go runActionTarget at 340. Locate code by symbol. agent.rs is the hot spot for S1, S3, S4, S6 and S8.\n\nGaps and assumptions: (a) globset is not in apps/Model Plane/rust/Cargo.lock, so S2 adds a new crate; the plan's D8 fallback (about 80 lines hand-rolled) avoids the lock change. tempfile is in the lock but is not a dev-dependency of execution-core, so S2 must add it. (b) The S5 admission-contract.test.ts location is inferred next to model-access.ts, and the vendored filename agent-action-admission.json is assumed for all four copies. (c) The metric location for workspace_upload_failed_total and the callers of upload_and_discard_workspace are not named in the plan and were not guessed. (d) S9 carries the workspace_tools refusal key in zdr-refusals.json, plus the frontend copy and the vendored posture-matrix copies. (e) The compose wiring of RUN_ACTION_TARGETS is not stated, so it is not listed. (f) Whether Data Plane ListDocuments accepts the forwarded delegated bearer is undetermined in the plan (S8). (g) Migration numbers are the plan's 4.4 reservations (capability-core 0018 read, 0019 write, 0022 admissions; user-core 031); 0016 and 0017 belong to WS05 and 0020 and 0021 to WS25 and WS19; the integrator assigns them at merge (DEC-39). (h) S8 has an empty flag because it adds none; it is gated by MODEL_ACTION_ADMISSION=table from S6 and by per-row enabled status. (i) S3 names the zdr key only as a dependency; the key itself is listed under S9.\n\nProvides and consumes (from the plan): WS05 class contract through cap.workspace.read and .write; WS13 no approval for workspace tools, and OWNER_ACTION_PINS requires_durable_approval for write_approval rows; WS22 HydratedWorkspace.lock, content_version, WorkspaceUploadOutcome and overlay rows with base_hash equal to the version token; WS21 and WS23 admission rows. Effort: the slices sum to 38-53 days, matching the header; track A (S1-S4) 17-23 d, track B (S5-S8) 18-25 d, S0 plus S9 3-5 d."
+}

@@ -153,6 +153,9 @@ pub struct PurgeSummary {
     /// Thread goals, the owner's objectives and criteria (EP-7 S1). They also cascade from
     /// `threads`; counted here so the erasure proof names the content table.
     pub thread_goals: u64,
+    /// Thread share snapshots, the owner's redacted copies of a thread (EP-12 S14). They also
+    /// cascade from `threads`; counted here so the erasure proof names the content table.
+    pub thread_share_snapshots: u64,
     pub messages: u64,
     pub task_events: u64,
     pub task_assignments: u64,
@@ -160,6 +163,9 @@ pub struct PurgeSummary {
     pub cron_fires: u64,
     pub tasks: u64,
     pub cron_schedules: u64,
+    /// Event trigger records (W4-F T1), the member's configuration of connector-event wakes. They name
+    /// no thread or run; counted here so the erasure proof names the table.
+    pub event_triggers: u64,
     pub events: u64,
     pub run_trace_events: u64,
     /// Request snapshots and their system/tool blobs (EP-14 S6).
@@ -209,6 +215,7 @@ impl PurgeSummary {
             + self.memory_index
             + self.artifact_revisions
             + self.thread_goals
+            + self.thread_share_snapshots
             + self.messages
             + self.task_events
             + self.task_assignments
@@ -216,6 +223,7 @@ impl PurgeSummary {
             + self.cron_fires
             + self.tasks
             + self.cron_schedules
+            + self.event_triggers
             + self.events
             + self.run_trace_events
             + self.run_request_snapshots
@@ -259,8 +267,9 @@ pub(crate) const ERASURE_BLOCKED_LEGAL_HOLD: &str = "erasure_blocked_legal_hold"
 pub(crate) const ERASURE_HOLD_CHECK_UNAVAILABLE: &str = "erasure_hold_check_unavailable";
 
 /// What a hold keeps when it blocks a thread erase: every content family `delete_thread_rows`
-/// and the org purge remove, named so the refusal says what stays. Thread goals and artifact
-/// revisions are thread-bound tables of their own (C-B9) and must stay in this list.
+/// and the org purge remove, named so the refusal says what stays. Thread goals, artifact
+/// revisions and share snapshots are thread-bound tables of their own (C-B9, EP-12 S14) and must
+/// stay in this list.
 pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
     "messages",
     "runs",
@@ -270,6 +279,7 @@ pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
     "agent_memory",
     "thread_goals",
     "artifact_revisions",
+    "thread_share_snapshots",
 ];
 
 /// The most thread ids one check call may name (org-core `retention.MaxCheckThreadIDs`).
@@ -602,6 +612,14 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
+    // Thread share snapshots (EP-12 S14) go before their threads, for the same reasons.
+    summary.thread_share_snapshots =
+        sqlx::query("DELETE FROM thread_share_snapshots WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
     summary.messages = sqlx::query(
         "DELETE FROM messages WHERE thread_id IN (SELECT id FROM threads WHERE org_id = $1)",
     )
@@ -654,6 +672,14 @@ pub async fn purge_organization_data(
         .rows_affected();
 
     summary.cron_schedules = sqlx::query("DELETE FROM cron_schedules WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Event trigger records (W4-F T1): the org's rows, deleted before runs and threads so a later
+    // reference from a run or thread cannot strand one. Nothing else in the purge reads them.
+    summary.event_triggers = sqlx::query("DELETE FROM event_triggers WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -1205,6 +1231,7 @@ mod tests {
             memory_index: 1,
             artifact_revisions: 1,
             thread_goals: 1,
+            thread_share_snapshots: 1,
             messages: 1,
             task_events: 1,
             task_assignments: 1,
@@ -1212,6 +1239,7 @@ mod tests {
             cron_fires: 1,
             tasks: 1,
             cron_schedules: 1,
+            event_triggers: 1,
             events: 1,
             run_trace_events: 1,
             run_request_snapshots: 1,
@@ -1243,7 +1271,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            36,
+            38,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1265,8 +1293,11 @@ mod tests {
 
         // No query ever builds its WHERE clause via string formatting of
         // the caller-supplied org_id — every statement binds `$1`.
+        // The test module below formats table names into its own coverage checks (the held-scope
+        // test), so only the code above it is scanned.
+        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
         assert!(
-            !source.contains("format!(\"DELETE"),
+            !production.contains("format!(\"DELETE"),
             "a DELETE must never be built with format!/string interpolation"
         );
 
@@ -1285,6 +1316,7 @@ mod tests {
         let plans = pos("DELETE FROM plans WHERE org_id = $1");
         let artifact_revisions = pos("DELETE FROM artifact_revisions WHERE org_id = $1");
         let thread_goals = pos("DELETE FROM thread_goals WHERE org_id = $1");
+        let thread_share_snapshots = pos("DELETE FROM thread_share_snapshots WHERE org_id = $1");
         let messages = pos("DELETE FROM messages");
         let task_events = pos("DELETE FROM task_events");
         let task_assignments = pos("DELETE FROM task_assignments");
@@ -1292,6 +1324,7 @@ mod tests {
         let cron_fires = pos("DELETE FROM cron_fires");
         let tasks = pos("DELETE FROM tasks WHERE org_id = $1");
         let cron_schedules = pos("DELETE FROM cron_schedules WHERE org_id = $1");
+        let event_triggers = pos("DELETE FROM event_triggers WHERE org_id = $1");
         let events = pos("DELETE FROM events");
         let trace_events = pos("DELETE FROM run_trace_events WHERE org_id = $1");
         let snapshot_blobs = pos("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1");
@@ -1327,6 +1360,10 @@ mod tests {
         assert!(
             thread_goals < threads,
             "thread goals (EP-7 S1) must be purged before their threads"
+        );
+        assert!(
+            thread_share_snapshots < threads,
+            "thread share snapshots (EP-12 S14) must be purged before their threads"
         );
         assert!(
             task_events < tasks,
@@ -1365,6 +1402,10 @@ mod tests {
             "request snapshots must be purged before runs (their rows reference them)"
         );
         assert!(runs < threads, "runs must be purged before threads");
+        assert!(
+            event_triggers < runs && event_triggers < threads,
+            "event trigger records (W4-F T1) must be purged before runs and threads"
+        );
         assert!(
             pos("DELETE FROM agent_skills WHERE org_id = $1")
                 < pos("DELETE FROM skill_revisions WHERE org_id = $1"),
@@ -1728,11 +1769,12 @@ mod tests {
         server.verify().await;
     }
 
-    /// C-B9: the held scope names thread goals and artifact revisions, and both erase paths
-    /// still remove them, so the list and the deletes cannot drift apart unnoticed.
+    /// C-B9 and EP-12 S14: the held scope names thread goals, artifact revisions and share
+    /// snapshots, and both erase paths still remove them, so the list and the deletes cannot
+    /// drift apart unnoticed.
     #[test]
     fn held_scope_names_goals_and_revisions_that_erasure_removes() {
-        for table in ["thread_goals", "artifact_revisions"] {
+        for table in ["thread_goals", "artifact_revisions", "thread_share_snapshots"] {
             assert!(HELD_THREAD_CONTENT.contains(&table), "{table} must be in the held scope");
             assert!(
                 include_str!("grpc.rs").contains(&format!("DELETE FROM {table} WHERE thread_id = $1")),

@@ -1,0 +1,742 @@
+{
+ "batchId": "W1-01",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS11-S7",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/effort.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/intent.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p inference-core --lib intent",
+     "outcome": "33 passed, 0 failed (includes exhausted_budget_clamps_effort_to_low, pinned_model_is_not_clamped, cap_clamps_down_never_up via effort filter)"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib effort",
+     "outcome": "36 passed, 0 failed (includes cap_clamps_down_never_up, only_the_literal_true_enables_the_budget_clamp)"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib fallback",
+     "outcome": "60 passed, 0 failed"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add one row/line stating that the per-role (and per-org) reasoning-effort cap is Control-owned (WS10 supplies it); inference-core only enforces it through effort::clamp_to_cap(level, cap) with cap None until WS10 lands.",
+    "Live proof (after rebuilding inference-core with INFERENCE_CORE_EFFORT_BUDGET_CLAMP=true and the S2 OpenAI effort switch on): an exhausted-budget org (cost-core fixture) invoking a verevon-* mode with effort deep resolves to Low; check the 'effort clamped by budget posture' log line."
+   ],
+   "deviations": [
+    "The clamp is applied in fallback.rs resolve_intent from Decision.effort_cap rather than inside intent::choose, because choose returns only a model id; the cap is computed by a pure effort_cap(posture) beside choose and carried on Decision.",
+    "Plan test cap_clamps_down_never_up sits in effort.rs (where clamp_to_cap lives); the filter `intent` runs the other two plan tests, so I also ran the `effort` filter.",
+    "Only the Exhausted posture clamps (plan wording: cheap fallback forced or budget exhausted); Constrained keeps the requested effort."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: the lead must add one line stating the per-role/per-org reasoning-effort cap is Control-owned (WS10 supplies it), and inference-core only enforces it via effort::clamp_to_cap(level, cap) with cap None until WS10.",
+     "Live proof: rebuild inference-core with INFERENCE_CORE_EFFORT_BUDGET_CLAMP=true and the S2 OpenAI effort switch on. An exhausted-budget org invoking a verevon-* mode with deep effort should resolve to Low, and the 'effort clamped by budget posture' log line should appear. The row says visible in effort_resolved; that log lives in the S2-S4 adapters, and this slice logs its own line instead."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Nothing in the request path copies reasoning_effort onto InferRequest until WS11-S5 lands the gateway derivation, so the clamp is inert end to end (it only acts when req.reasoning_effort is Some); also the legacy thinking_budget_tokens is not clamped, so a flag-off ladder path still spends the legacy budget under an exhausted posture."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The clamp is visible only as a fallback.rs log line; WS27/WS15 should surface applied-vs-requested effort to the user (the plan notes a silent clamp is a user surprise)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "resolve_intent itself (the switch-on rewrite of reasoning_effort) has no unit test because it needs a FallbackChain with a stub BudgetClient returning Exhausted; the clamp pieces are tested separately."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Constrained posture does not clamp effort (only a tier-cheaper model); owner may want Constrained to cap at Medium."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The clamp is inert end to end until WS11-S5 copies reasoning_effort onto InferRequest. Until then req.reasoning_effort is always None here. The legacy thinking_budget_tokens is not clamped, so an exhausted-budget org on the legacy path still gets its full thinking budget."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "resolve_intent's switch-on rewrite of reasoning_effort has no unit test. It would need a FallbackChain with a stub BudgetClient returning Exhausted. The switch is a process-wide OnceLock, so a test cannot toggle it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The clamp surfaces only as an info log in fallback.rs. WS27/WS15 should show applied-versus-requested effort to the user, otherwise the clamp is a silent surprise."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Constrained posture does not clamp effort, only Exhausted does. The owner may want Constrained capped at Medium."
+    }
+   ],
+   "unreviewed_risk": [
+    "money",
+    "policy"
+   ],
+   "notes": "No partial prior edits existed in the owned files. Built: effort.rs gets clamp_to_cap(level, cap: Option<Level>) (clamps down only, cap None for everyone until WS10), the strict-parser switch INFERENCE_CORE_EFFORT_BUDGET_CLAMP (only literal \"true\", read once via OnceLock) and budget_clamp_enabled(). intent.rs gets effort_cap(posture) (Exhausted -> Some(Low), all other postures None; constrained deliberately does not clamp) and Decision.effort_cap, filled in resolve. fallback.rs resolve_intent, only when the switch is on and the request carries a reasoning_effort, applies clamp_to_cap and logs \"effort clamped by budget posture\" with requested/applied/clamped. Pinned models never produce a Decision so they are never clamped. Switch off: the request is rewritten exactly as before. All three files kept CRLF. The plan's `effort_resolved` log lives in the adapters (S2-S4); this slice logs its own clamp line in fallback.rs instead."
+  },
+  {
+   "id": "WS01-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/scripts/rebuild-service.sh",
+    "apps/Model Plane/scripts/tests/audit-delivery-proof.sh",
+    "apps/Model Plane/scripts/tests/rebuild-service-test.sh",
+    "apps/Model Plane/scripts/tests/audit-delivery-proof-test.sh",
+    "apps/Model Plane/docs/runbooks/audit-delivery-replay.md",
+    "apps/Model Plane/docs/postmortem/0002-session-audit-trail-never-delivered.md"
+   ],
+   "tests_run": [
+    {
+     "command": "bash scripts/tests/rebuild-service-test.sh (stub docker/compose; mutation-checked by dropping --no-deps)",
+     "outcome": "ok"
+    },
+    {
+     "command": "bash scripts/tests/audit-delivery-proof-test.sh (stub docker/curl; mutation-checked by dropping the read-only option)",
+     "outcome": "ok"
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core (whole binary; --all-targets not used on Windows)",
+     "outcome": "555 passed, 0 failed, 178 ignored (incl. audit_publisher: 27 passed, 3 ignored)"
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/nats-provisioner && go test ./... && go vet ./...",
+     "outcome": "ok"
+    },
+    {
+     "command": "cd apps/Control Plane/audit-core && go test ./... && go vet ./... (no TEST_DATABASE_URL)",
+     "outcome": "all packages ok; internal/provisioner timed out once under load (context deadline exceeded), passed on rerun with -count=1; vet clean"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit docs/compliance/evidence/live-reads-audit-delivery-<date>.txt: create it with the 3-line header of live-reads-audit-delivery-2026-10-06.txt ('# Live reads, <date>: audit delivery after the session-core publisher fix and replay', '# Engineering evidence, not legal advice. Read-only; counts, names, timestamps; no payload, tenant id or credential.', '# Follows live-reads-audit-delivery-2026-10-06.txt') and then append the output of: audit-delivery-proof.sh --stage baseline (before deploy), baseline (after deploy), --stage canary, --stage final, plus the docker inspect revision/created lines it prints, plus the K2-11 line before the 5000 step: 'GATE K2-11: role gate on GET /api/v1/audit deployed at <gateway revision>' OR 'GATE K2-11: owner accepts that every org member can read the replayed rows (<who>, <date>, <N rows>)'",
+    "shared-edit docs/compliance/evidence/README.md: add a Contents row for live-reads-audit-delivery-<date>.txt (what it is: the post-fix deploy and replay reads; how produced: scripts/tests/audit-delivery-proof.sh stages, runbook apps/Model Plane/docs/runbooks/audit-delivery-replay.md)",
+    "Run both new contract tests in the usual gate: bash 'apps/Model Plane/scripts/tests/rebuild-service-test.sh' and bash 'apps/Model Plane/scripts/tests/audit-delivery-proof-test.sh' (no docker needed, need bash and jq).",
+    "Live: build session-core from a clean detached worktree at the WS01-S0 commit with 'bash apps/Model Plane/scripts/rebuild-service.sh --require-clean [--env-file <live env files>] session-core', then follow audit-delivery-replay.md sections 1-7 (baseline, deploy, verify, canary of 10 with --stage canary, K2-11 gate, requeue up to 5000, --stage final, one tool turn, GET /api/v1/audit?event=tool_action).",
+    "After the final read passes: update the status line of postmortem 0002 and the trust-claims re-verification section 6; run the ignored DB tests via the harness: cargo test -p session-core --bin session-core audit_publisher -- --ignored --test-threads=1 (DATABASE_URL, NATS_URL, USER, PASSWORD), and audit-core with TEST_DATABASE_URL."
+   ],
+   "deviations": [
+    "Added two test files beside the new scripts (rebuild-service-test.sh, audit-delivery-proof-test.sh) because the plan row's tests are only existing suites and the new scripts needed their own contract tests.",
+    "Did not change the postmortem Status, as the plan requires that only after the final read; added only the pointer, the rebuild-service mention and the K2-11 gate note.",
+    "Ran 'cargo test -q -p session-core --bin session-core' (whole binary) instead of '--all-targets', per the Windows instruction for binary crates."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live deploy not done: build session-core from a clean detached worktree at the WS01-S0 commit with rebuild-service.sh --require-clean, then run the baseline, deploy, verify, canary (10 rows), K2-11 gate, 5000-row replay and final stages of the runbook.",
+     "Evidence file docs/compliance/evidence/live-reads-audit-delivery-<date>.txt and its README Contents row are not created. The lead creates them from the implementer's lead_todo.",
+     "K2-11 gate: the 5000-row step needs the Space role gate on GET /api/v1/audit deployed, or the owner's recorded acceptance in the evidence file.",
+     "Postmortem 0002 Status and trust-claims re-verification section 6 must change only after the final read passes.",
+     "Ignored session-core audit_publisher DB and broker tests (DATABASE_URL, NATS_URL, USER, PASSWORD) and audit-core TEST_DATABASE_URL tests were not run; the lead's harness must run them.",
+     "Manual checks that need a user session: one tool turn adds tool_action_reserved and tool_action to audit_events, and GET /api/v1/audit?event=tool_action returns rows."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The deploy, the 10-row canary and the 5000-row replay with the dated evidence file have not run; nothing in the postmortem may be claimed as delivered until the --stage final read passes."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "K2-11: the 5000-row replay needs either the Space role gate on GET /api/v1/audit (WS06/F-t1-031) or the owner's recorded acceptance that every org member can read the replayed rows."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ignored audit_publisher DB and broker tests and the audit-core TEST_DATABASE_URL tests were not run here (no DATABASE_URL, NATS or TEST_DATABASE_URL); the lead's harness must run them."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Older sibling services running against the new session-core is unproven (the plan says compatibility is undetermined); the runbook requires a smoke tool turn, a thread read and an approval before replaying."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The proof script's jsz field names (num_pending, num_ack_pending, num_redelivered, push_bound under consumer_detail) are asserted against a stub shaped like the 2026-10-06 reduction, not a live broker response; confirm on the first live run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "audit-core internal/provisioner TestProvisionIsIdempotentAndPreservesLegacyConsumer timed out once under load (in-process NATS) and passed on rerun; it may be flaky on a busy machine."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Neither new test script is wired into any CI workflow; WS01-S11 (model-plane-ops-gates.yml) should add them, together with audit-delivery.rules tests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Postmortem 0002 follow-up 2 still says no alert rules file exists, although audit-delivery-alerts.md and the WS01-S1 rules exist; fix it when the status is updated after the final read."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "rebuild-service.sh --env-file only prepends the path to compose.sh arguments, but compose.sh still dies when apps/Model Plane/deploy/.env is unreadable. A build from a clean worktree that has no deploy/.env therefore cannot run the script; the lead must copy or link deploy/.env, or compose.sh must learn to skip it."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Deploy, 10-row canary and 5000-row replay have not run. Nothing in postmortem 0002 may be claimed as delivered until audit-delivery-proof.sh --stage final passes on the live stack."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "K2-11: before the 5000-row replay, the evidence file must hold either the gateway revision carrying the role gate on GET /api/v1/audit or the owner's recorded acceptance. The runbook states this gate in section 5."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The jsz field names (num_pending, num_ack_pending, num_redelivered, push_bound) are asserted only against a stub shaped like the 2026-10-06 reduction. Confirm them on the first live run; the durables-drained check fails closed if they are missing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Compatibility of older sibling services with the new session-core is undetermined. The runbook requires a smoke tool turn, a thread read and an approval before replaying."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "audit-core internal/provisioner TestProvisionIsIdempotentAndPreservesLegacyConsumer timed out once under load for the implementer and passed on rerun. It passed with -count=1 here, so it may be flaky on a busy machine."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The two added test scripts (rebuild-service-test.sh, audit-delivery-proof-test.sh) are outside the plan's named list but beside the new scripts, so acceptable. Neither is wired into CI yet: WS01-S11 (model-plane-ops-gates.yml) should add them."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Postmortem 0002 follow-up 2 still says no alert rules file exists. Fix it when the status is updated after the final read."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "git status also shows other untracked files in the Model Plane scripts and runbooks folders (migration-policy.md, migration-expand-contract-test.sh, verify-office-render.sh). They belong to other slices and were not counted against this slice's ownership."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "authority"
+   ],
+   "notes": "The code, scripts, runbook and tests are built. The slice's definition of done is a live deploy, replay and evidence file, which only the lead can run, so status is partial. rebuild-service.sh: refuses MODEL_PLANE_PRODUCTION=1 and artifact trees (even with --dry-run). It tags the running image as model-plane-<svc>:pre-<yyyymmdd>-<revision label> before the build, never moves an existing tag, and runs compose.sh up -d --no-deps --build for one service. It waits for healthy (or 10 s stable when the image has no healthcheck), then prints the new revision and the rollback command. Options: --dry-run, --require-clean, --wait-seconds, --env-file (paths only, to carry the live env chain for a worktree build). audit-delivery-proof.sh: read-only (SELECTs under default_transaction_read_only=on, jsz GET, metrics scrape, docker inspect). It prints evidence-style blocks and CHECK lines for stages baseline (never fails), canary and final. It checks the fix commit is an ancestor of the running revision, migration 43 plus the function, requeued rows delivered, terminal and pending rows at 0, the terminal gauge at 0, both durables drained, and 0 details.zdr=true rows in the outbox and in audit_events. AUDIT_FIX_COMMIT overrides the commit under test; there are env overrides for container names. The runbook carries the K2-11 gate before the 5000-row step (role gate on GET /api/v1/audit, or the owner's recorded acceptance in the evidence file). The postmortem got only a pointer to the runbook, the rebuild-service mention and the gate note (CRLF kept). Its Status is deliberately unchanged, because it may change only after the final read passes. The new evidence file docs/compliance/evidence/live-reads-audit-delivery-<date>.txt was not created (shared file, lead creates it)."
+  },
+  {
+   "id": "WS01-S3",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Control Plane\\auth-core\\src\\auth\\organization-events.plugin.ts",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Control Plane\\auth-core\\src\\auth\\membership-audit-outbox.postgres.spec.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Control Plane/auth-core' && pnpm test -- membership-audit",
+     "outcome": "3 suites passed, 39 tests passed, 11 skipped (the Postgres describe, including the two new flush cases, is skipped without TEST_DATABASE_URL)"
+    },
+    {
+     "command": "npx tsc --noEmit -p tsconfig.json; npx eslint (prettier rule off, CRLF files) on the two files; npx prettier --end-of-line auto --check",
+     "outcome": "all clean"
+    },
+    {
+     "command": "pnpm test -- deployment-contract audit-plugin orphan-organization",
+     "outcome": "audit-plugin and orphan-organization pass; deployment-contract has 3 failures (production render, env file and key-mount contract tests). These are compose-render checks in a file I did not touch, and none of them exercise the outbox code."
+    }
+   ],
+   "db_tests_written": [
+    "membership-audit-outbox.postgres.spec.ts -t \"flushes a dead-lettered row whose timestamps arrive as strings\"",
+    "membership-audit-outbox.postgres.spec.ts -t \"retries a failing row no sooner than its exponential backoff\""
+   ],
+   "lead_todo": [
+    "Run the Postgres cases: cd 'apps/Control Plane/auth-core' && pnpm test -- membership-audit, with TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID set on a lifecycle fixture.",
+    "Full auth-core suite: diff the failing set against HEAD (15 pre-existing failures in 3 suites).",
+    "Rebuild: bash 'apps/Control Plane/scripts/run-control-plane.sh' up -d --no-deps --build auth-core, then record before and after counts of organization_membership_audit_outbox (stuck and dead-lettered rows published, attempts stable) and audit_events rows for the evidence file."
+   ],
+   "deviations": [],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the Postgres cases against a real fixture (TEST_DATABASE_URL, CONTROL_LIFECYCLE_FIXTURE_ID).",
+     "Full auth-core suite: diff the failing set against HEAD.",
+     "Rebuild auth-core with 'bash apps/Control Plane/scripts/run-control-plane.sh up -d --no-deps --build auth-core', then record before and after counts of organization_membership_audit_outbox and audit_events rows."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Run the two new flush cases and the existing outbox cases against a real Postgres fixture (TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID); they were written and type-checked but never executed here."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Rebuild auth-core with 'bash apps/Control Plane/scripts/run-control-plane.sh up -d --no-deps --build auth-core' (service key not verified in the plan). Take before and after counts of organization_membership_audit_outbox rows (3 stuck, 3 dead-lettered) and audit_events rows. Confirm attempts stop growing and audit-core holds role_change and membership events."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The backoff keys on updated_at, which the actor-recovery function and other writers also touch; a row whose updated_at was bumped recently with attempts above 0 waits out its backoff. That is acceptable, but confirm it against the live rows."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The real cause of a non-Date timestamp reaching the flush is still undetermined (the plan says so too). The helper masks it; find which pool or driver path returns strings."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The same bare `.toISOString()` and the unbackedoff claim shape exist in the invitation and other outbox flushes in organization-events.plugin.ts (invitation audit, projection, deletion); the plan row covers only the membership outbox."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The full auth-core suite diff against HEAD was not run (15 pre-existing failures in 3 suites per the plan); only the suites touching the plugin were run."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The two new Postgres cases and the existing outbox cases have never executed; run them with TEST_DATABASE_URL and CONTROL_LIFECYCLE_FIXTURE_ID on a lifecycle fixture."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Rebuild auth-core with run-control-plane.sh and record before and after counts of organization_membership_audit_outbox (3 stuck, 3 dead-lettered, attempts stable) and audit_events rows for the evidence file."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The full auth-core suite was not diffed against HEAD (15 pre-existing failures in 3 suites). The implementer reports 3 deployment-contract failures in the suites it ran; confirm they are in the pre-existing set."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Backoff keys on updated_at, which the actor-recovery function and other writers also bump, so a recently touched row with attempts above 0 waits out its backoff; confirm against the live rows."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The root cause of the non-Date timestamp (which pool or driver path returns strings) is still undetermined; the helper masks it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The invitation, projection and deletion outbox flushes in organization-events.plugin.ts have the same unbacked-off claim shape and may have the same bare toISOString; the plan row covers only the membership outbox."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "auth"
+   ],
+   "notes": "The slice is built and its Postgres cases were not run: there is no local Postgres and I may not run docker. pnpm install --frozen-lockfile --ignore-scripts was run once in auth-core because node_modules was missing in this worktree. Both files are CRLF and still are. There was no earlier partial edit; git showed the two owned files clean.\n\norganization-events.plugin.ts:\n- New exported `auditTimestampIso(value)`: a Date gives `toISOString()`, a non-Date truthy value gives `new Date(value).toISOString()`, anything else gives undefined. The membership flush now uses it for `actor_resolution_dead_lettered_at`. The payload is unchanged.\n- Backoff in the claim query of `flushOrganizationMembershipAuditOutbox`: `attempts = 0 OR updated_at < NOW() - LEAST(power(2, LEAST(attempts, 12)), 3600) * INTERVAL '1 second'`. This differs from the plan row only in clamping the exponent at 12. Without the clamp `power(2, attempts)` overflows double precision for the huge attempt counts old rows carry and would make the whole claim query error. The wait is still capped at 3600 s. No migration.\n\nmembership-audit-outbox.postgres.spec.ts:\n- Added `jest.mock('better-auth/api')` and a `jest.mock('../db')` delegate. The delegate points the plugin's `sqlClient` at a second fixture connection that returns timestamps as raw strings. Importing the plugin otherwise fails under jest on better-auth's ESM.\n- New plain `describe` that needs no DB. It reproduces the bare `.toISOString()` TypeError on a string timestamp, then checks `auditTimestampIso` for a Date, a string, a number, null and undefined. This one ran and passed.\n- Two new Postgres cases, placed after the last existing test because the flush also claims every other eligible row in the schema:\n  - A dead-lettered row (dead-letter aged 10 minutes) is flushed and published when its timestamps arrive as strings.\n  - A failing publisher is not retried before the backoff: attempts go 1, then 10 with `updated_at` now (skipped), then 100000 with `updated_at` 30 minutes ago (still skipped, so the 3600 s cap holds with no overflow), then 61 minutes ago (retried and published)."
+  },
+  {
+   "id": "WS12-S7.code",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json.sha256",
+    "apps/Frontend Plane/verevonv3/scripts/verify-sse-frames.mjs",
+    "scripts/tests/zdr-contract-sync.test.sh",
+    ".github/workflows/contract-goldens.yml",
+    ".gitattributes"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 MP_UPDATE_GOLDEN=1 cargo test -q -p model-gateway --lib sse_event_payload_golden",
+     "outcome": "1 passed; wrote the golden"
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib payload_contract",
+     "outcome": "4 passed, 0 failed (the sample-coverage, no-content, ZDR-keys and committed-golden tests)"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "All rows I added pass (golden digest, pin file, both vendored rows, spa consumer). The run as a whole reports 75 passed, 22 failed; every failure is in a row I did not touch (missing Data Plane/Quarry fixture files in this worktree, pre-existing digest/CRLF pin mismatches)."
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh --self-test",
+     "outcome": "Fails, not from my rows: it aborts copying Data Plane rerank-v1 goldens that do not exist in this worktree. Not run to green."
+    },
+    {
+     "command": "node scripts/verify-sse-frames.mjs <synthetic transcript> from apps/Frontend Plane/verevonv3",
+     "outcome": "Exit 1 as intended on a frame with a renamed key (reports missing delta, unexpected text); conforming frames pass; transport event connected is skipped."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Run the live evidence on the dev stack: bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build model-gateway (use recreate-with-live-env.sh if the build is from the worktree), drive a non-ZDR turn with reasoning, steps, tools, citations, artifacts and usage through the BFF, capture with curl -N, then node \"apps/Frontend Plane/verevonv3/scripts/verify-sse-frames.mjs\" <transcript>; repeat for one ZDR turn for the typed refusal frame.",
+    "Stage the new files (untracked): the two sse-event-payloads.json and .sha256 pairs and verify-sse-frames.mjs; the existing files are modified in place.",
+    "Any slice that changes a ChatEvent payload (WS02, WS04, WS14, WS15, WS27) must regenerate the golden with MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden, then refresh both .sha256 pins, the SPA copy and the GOLDENS digest in zdr-contract-sync.test.sh.",
+    "Run the sync script and its --self-test on a full checkout once the other planes' fixtures are present, and confirm CI is green."
+   ],
+   "deviations": [
+    "The golden nests events under an `events` key with a contract/version/generated_by header instead of putting the event map at the top level, to match the other generated goldens' headers. verify-sse-frames.mjs reads that shape.",
+    "The test module is named payload_contract and the golden test sse_event_payload_golden sits inside it, so both of the plan's filters select it. The plan's ordering of sse_events.rs 'test submodule only' is followed: no non-test code changed.",
+    "MP_UPDATE_GOLDEN writes only the Model Plane golden. The .sha256 pin, the SPA copy and the sync-script digest are refreshed by hand (done once here), like infer-statuses.json."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live evidence on the dev stack (needs docker): one non-ZDR turn and one ZDR turn captured with curl -N and checked with verify-sse-frames.mjs.",
+     "The sync script and its --self-test have not run green on a full checkout, because the other planes' fixtures are missing in this worktree.",
+     "The new files are untracked and must be staged: the two sse-event-payloads.json and .sha256 pairs and verify-sse-frames.mjs."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The plan's evidence step is not done: rebuild model-gateway, drive one non-ZDR chat turn through the BFF covering reasoning, steps, tools, citations, artifacts and usage, capture it with curl -N, run node scripts/verify-sse-frames.mjs on it, and repeat for one ZDR turn to capture the typed refusal frame."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The rename mutation (delta to text in the ReasoningDelta payload arm turns the Rust test and the sync script red) was not run; the golden compare and the digest pin should catch it but it is unproven."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "VARIANTS is a hand-kept list beside covered(); a new variant forces a covered() arm (compile error) but only a failing test, not a compile error, forces VARIANTS and samples() to follow, and only if the author adds the name to VARIANTS."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Minimal/full samples cannot see conditional branches inside nested objects (only top-level keys are recorded) or values that depend on runtime state, such as a Usage with cost_basis Subscription."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "apps/Model Plane/api/contracts/README.md has no row for sse-event-payloads.json, and no FE test yet reads the vendored copy (chat-event-contract.test.ts and chat-event-payloads.generated.ts belong to WS12-S8); neither file was in this slice's ownership."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "scripts/tests/zdr-contract-sync.test.sh already fails 22 checks in this worktree for rows owned by other sessions (Data Plane rerank-v1 and usage-ledger fixtures, Quarry vendored copies, CRLF .sha256 pins), which also makes its --self-test abort; the contract-goldens workflow will stay red until those land."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "contract-goldens.yml does not run verify-sse-frames.mjs because there is no committed transcript fixture yet; add a synthetic fixture and a step if the owner wants the verifier gated in CI."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The plan's evidence step is not done: rebuild model-gateway, capture one non-ZDR turn and one ZDR turn with curl -N through the BFF, and run verify-sse-frames.mjs on both. Only the lead can do this, because it needs docker."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's rename mutation (delta to text in the ReasoningDelta payload arm turns the Rust test and the sync script red) was not run. The golden compare and the digest pin should catch it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "VARIANTS is a hand-kept list beside covered(). A new variant fails to compile in covered(), but only a failing test (every_variant_has_a_minimal_and_a_full_sample) forces VARIANTS and samples() to follow."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The golden records only top-level payload keys. Conditional keys inside nested objects, and keys that depend on runtime state such as Usage with cost_basis Subscription, are not visible to the minimal and full samples."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "apps/Model Plane/api/contracts/README.md has no row for sse-event-payloads.json, and no FE test reads the vendored copy yet. The file is outside this slice's ownership; WS12-S8 is meant to add the reader."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "MP_UPDATE_GOLDEN rewrites only the Model Plane golden. The .sha256 pin, the SPA copy and the GOLDENS digest are refreshed by hand, so the next ChatEvent change must do that four-step refresh."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "zdr-contract-sync.test.sh already fails 25 checks in this worktree, for rows other sessions own, so the contract-goldens workflow stays red and --self-test aborts until those land. The implementer's --self-test was not run to green and I did not rerun it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "contract-goldens.yml does not run verify-sse-frames.mjs because no transcript fixture is committed yet. The verifier treats events outside the golden (orchestration events, transport frames) as skips, so they fail only under --strict."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Built the payload_contract test module (appended to sse_events.rs, CRLF kept): samples() has a minimal and a full sample for all 23 ChatEvent variants, a wildcard-free covered() match plus a VARIANTS list, and sse_event_payload_golden, which renders {contract, version, generated_by, events:{name:{family, variants, keys:{key:{types, presence}}}}} and compares it with the committed file. It rewrites the file under MP_UPDATE_GOLDEN=1. error merges Error, ZdrError and SubscriptionError. Types are null/boolean/integer/number/string/array/object. Presence is always or optional across all samples of the event. Only top-level payload keys are recorded, with no sample text; a test guards that. A ZDR-keys test pins usage.retention_class, retention_reason, error.action and feature, and retrieval_notice.wording_key. The golden is committed with its .sha256 pin (format \"<hex> *name\"), vendored with its pin into the SPA, and the digest is pinned in GOLDENS (213d7304af12091c...), two VENDORED rows and one spa CONSUMERS row. contract-goldens.yml gets the apps/**/sse-event-payloads.json* path in both path lists. .gitattributes gets the contracts json and sha256 LF rules (*.json was already LF; I also pinned the pins). verify-sse-frames.mjs parses a curl -N transcript and checks each frame: always keys present, no unlisted keys, types allowed; events outside the golden are listed and fail only under --strict. Mid-task, the merge commit 5ca407501 left model-gateway lib tests not compiling (browser_grants.rs used Claims::effective_zdr and org_zdr/zdr_waiver, absent from auth.rs); it cleared on its own before my final run, and I did not touch those files."
+  },
+  {
+   "id": "WS01-S9",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\store.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\scripts\\tests\\migration-expand-contract-test.sh",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\docs\\runbooks\\migration-policy.md"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core -- store::tests",
+     "outcome": "22 passed, 1 ignored (the DB test). This filter also matched other modules that end in store::tests; the two new unit tests are among the passes."
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo clippy -q -p session-core --bin session-core",
+     "outcome": "no warnings reported for store.rs (other files have pre-existing warnings)"
+    },
+    {
+     "command": "bash 'apps/Model Plane/scripts/tests/migration-expand-contract-test.sh'",
+     "outcome": "18 fixture self-test cases pass, then the lint of HEAD prints 'migration expand/contract lint ok' (exit 0)"
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p session-core --all-targets",
+     "outcome": "not finished: it passed the 600 s tool limit and went to the background, so it has no result. Only the store::tests run above is a verified pass."
+    }
+   ],
+   "db_tests_written": [
+    "cargo test -p session-core --bin session-core older_migrator_boots_only_with_ignore_missing -- --ignored"
+   ],
+   "lead_todo": [
+    "Run the ignored DB test through the harness: older_migrator_boots_only_with_ignore_missing (needs DATABASE_URL; it creates and drops its own schema migration_policy_<pid>). Update the harness test count by 1.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: optional, only when the rollback overlay (S10) is built. In the session-core environment block add: SESSION_CORE_MIGRATION_IGNORE_MISSING: ${SESSION_CORE_MIGRATION_IGNORE_MISSING:-false}. Do not set it true in the base file.",
+    "The full 'cargo test -q -p session-core --all-targets' took over 10 minutes on Windows and did not finish for me. Run it from your side if you want the full-binary result."
+   ],
+   "deviations": [
+    "Plan row says the switch defaults true; Appendix B N6 (binding) says false, so it defaults false.",
+    "Cutoffs are my choice: session-core 0044-0048 are grandfathered from the additive rule only, because 0044 and 0048 drop a constraint they replace. They still need and have revert files. Go services are policed only from the next unused number (capability-core 0017, cost-core 0011, letta-bridge 0003).",
+    "The DB test uses a scratch schema (CREATE SCHEMA plus search_path) instead of a scratch database, so it needs no CREATE DATABASE right. It applies 0001-0043, then a migrator knowing only up to 0042 must fail strict and boot with ignore_missing.",
+    "No compose edit: the default is false, so nothing needs to be set in the base file."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the ignored DB test through the harness: cargo test -p session-core --bin session-core older_migrator_boots_only_with_ignore_missing -- --ignored (needs DATABASE_URL).",
+     "Run the full 'cargo test -q -p session-core --all-targets' on the lead side.",
+     "Add SESSION_CORE_MIGRATION_IGNORE_MISSING: ${SESSION_CORE_MIGRATION_IGNORE_MISSING:-false} to the compose file, only once the S10 overlay exists.",
+     "Rollback rehearsal (S10/S12) must show an older image booting over the newer schema with the switch true, and failing with it false."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The lint is textual. It does not catch non-additive changes made through DO blocks or dynamic SQL, nor ADD CONSTRAINT or CHECK that rejects existing rows. Add a statement-level parse if it proves too loose."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "WS01-S11 should add this script as a CI job (release-gates in model-plane-ops-gates.yml). Nothing runs it in CI today."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Before SESSION_CORE_MIGRATION_IGNORE_MISSING is set true anywhere (S10/S12 rollback overlay), check that the 0044-0048 constraint and trigger replacements are safe for the older binary. They are grandfathered from the additive rule."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "WS07-S7 (drops agent_skills_org_name_uq) must carry '-- contract: drop agent_skills_org_name_uq' and its revert, or this lint fails it."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The rollback rehearsal (S10/S12) must show an older image booting over the newer schema with the switch true, and failing with it false."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The lint is textual: it misses non-additive changes made through DO blocks or dynamic SQL, and ADD CONSTRAINT or CHECK that rejects existing rows."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Nothing runs migration-expand-contract-test.sh in CI yet; WS01-S11 must add it to the release-gates job."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "session-core 0044-0048 are grandfathered from the additive rule (0044 and 0048 drop constraints they replace). Check them against the older binary before the switch is set true in the rollback overlay."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The ignored DB test (apply 0001-0043, a migrator knowing only up to 0042 errors strict and boots with ignore_missing) has not been run; it needs the DB harness."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "WS07-S7 (drops agent_skills_org_name_uq) must carry '-- contract: drop agent_skills_org_name_uq' and a revert file, or this lint fails it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The migrator's iter() filter in the DB test relies on the public `migrations` Cow field of sqlx::migrate::Migrator; it compiles on the current sqlx but would break if that field is made private."
+    }
+   ],
+   "unreviewed_risk": [
+    "data-loss",
+    "policy"
+   ],
+   "notes": "store.rs: new switch SESSION_CORE_MIGRATION_IGNORE_MISSING, off by default; only the literal \"true\" enables it. With it on, session-core logs a WARN naming applied versions the binary does not embed, then runs the migrator with set_ignore_missing(true). With it off, behaviour is unchanged (the same strict sqlx run). The apply() function is shared with the DB test. store.rs stays CRLF. The new test and runbook are LF. The lint covers four services. session-core: revert file required from 0044; additive rule from 0049. capability-core: additive rule from 0017. cost-core: from 0011. letta-bridge: from 0003. For the Go services a revert file is required only for contract migrations. The script runs the self-test first. The plan said 'default true' but Appendix B N6 says false, so I used false (N6 wins)."
+  },
+  {
+   "id": "WS10-S0",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/MODEL_ENTITLEMENTS_ADR_2026-10-15.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/GATEWAY_DEDUPLICATION_PLAN.md",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Application Plane/convex-core/convex/schema.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/scripts/tests/ownership-docs-contract.test.mjs"
+   ],
+   "tests_run": [
+    {
+     "command": "node --test scripts/tests/ownership-docs-contract.test.mjs (repo, after all edits)",
+     "outcome": "50 run, 46 pass, 4 fail. The four failures are the 'ws10-s0 shared' tests (matrix rule 19, matrix inference-core row, capability-matrix section 4.6 row, ledger top entry); they fail only because the three shared files are not edited yet. Every ADR, Control Plane, GatewayDeduplication, schema.ts and convex test passes, and the existing rerank, rule 18 and ledger tests still pass."
+    },
+    {
+     "command": "node C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ws10s0_verify_shared.mjs (applies the exact shared lines in memory, runs a scratch copy of the same test file, writes nothing to the repo)",
+     "outcome": "50 run, 50 pass, 0 fail. This proves the lead_todo lines satisfy the four shared tests and leave the existing matrix and ledger tests green."
+    },
+    {
+     "command": "python3 line-ending check on ADR, CONTROL_PLANE_OWNERSHIP.md, GATEWAY_DEDUPLICATION_PLAN.md and schema.ts",
+     "outcome": "ADR 84/84 CRLF, CP 536/536 CRLF, GDP 1283/1283 CRLF, all with final newline and no NUL. schema.ts stays LF (1077 lines, 0 CR). Test file stays LF."
+    },
+    {
+     "command": "git status --short on the owned, shared and test files",
+     "outcome": "Four modified files and one new file (the ADR). The three shared files are not modified by this slice."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/master-ownership-matrix.md (CRLF, keep line endings): (a) replace the whole line that starts with '| `inference-core` | Rust |' with: | `inference-core` | Rust | Provider routing, streaming, structured outputs, prompt cache, speech/vision/doc provider traits where native; chat model entitlement enforcement (rule 19, ADR-0005) |  (b) insert as a new line directly after the line that starts with '18. **A first-party service principal', keeping the blank line before '## 4. Research Notes Used': 19. **Model entitlements are Control-owned, Model Plane-enforced, and fail closed.** org-core stores, resolves and explains which chat models an organisation, role or member may use. inference-core is the one puller and the enforcement point, with its own service principal; model-gateway asks it and decides nothing. An answer that cannot be read within its stale bound refuses (503 `model_entitlement_unavailable`) and never falls back. Quota reads keep failing open on a Control outage, a deliberate asymmetry: a cost ceiling has a second line in cost-core, a deny list has none. The entitlement holds model and actor ids only, never content. Service principals are exempt and counted (`service_exempt`) until an acts-for-user contract exists (WS20). Decision: [ADR-0005](MODEL_ENTITLEMENTS_ADR_2026-10-15.md); ledger entry of 2026-10-23 (proposed). Enforcement is not built.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md (CRLF): (a) insert as a new line directly after the line that starts with '| Provider routing / inference / multimodal |': | Model entitlement: which chat models an org, role or member may use (ADR-0005) | **org-core** (stores, resolves, explains); **inference-core** enforces by pull | Postgres (`org_model_policies`, WS10-S2, not built) | model-gateway asks via `GetModelAccess` and decides nothing | — | designed, not built; a policy, not a registry: `routing_policies` has no runtime reader |  (b) insert directly after the line that starts with '- **Ruling:** capability-core owns the **skills registry**' (section 4.5), in this order: a blank line; ### 4.6 Model entitlements — a policy owned by org-core, not a registry; a blank line; - **Ruling:** the per-organisation and per-role chat model policy (ADR-0005) is org-core's, and it is a policy, not a registry. inference-core enforces it and nothing else decides it. `routing_policies` has no runtime reader and a registry row cannot see membership or roles, so it is not the store. model-gateway asks through `GetModelAccess`. No cache in front of the enforcer may hold a verdict longer than the enforcer's own bound. The existing blank line and '---' follow it.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF): insert after the first line that is exactly '---' (line 23) and before the blank line that precedes '## 2026-10-21 - Do runs inherit the Ask run context...': a blank line; ## 2026-10-23 - Model entitlements: org-core stores, inference-core enforces, fail-closed; quota stays fail-open (WS10-S0); a blank line; **Status: proposed.** ADR-0005 (`apps/MODEL_ENTITLEMENTS_ADR_2026-10-15.md`) records DEC-13 (a) as the plan's default. org-core stores and explains a chat model policy per organisation and per role. inference-core is the only puller and the enforcement point: it fetches the answer with its own service principal and caches it for 30 s. model-gateway asks through `GetModelAccess` and decides nothing. Under `enforce`, an answer past its stale-if-error bound (900 s if it restricted the member, 120 s if not) refuses with `model_entitlement_unavailable`, and an unrecognised mode value enforces. The asymmetry is deliberate: quota reads still fail open on a Control outage, because cost-core still records the spend, so a cost ceiling has that second line. A deny list has none, so entitlement is fail-closed. The metadata holds model and actor ids only. Service principals stay exempt (`service_exempt`) until an acts-for-user contract exists (WS20). Not built: the enforcement (WS10 S1-S7). The owner ratifies DEC-13 before S2 merges. ; a blank line; ---",
+    "After applying the three shared edits, run: node --test scripts/tests/ownership-docs-contract.test.mjs from the repo root. Expect 50 of 50. The four 'ws10-s0 shared' tests are red until these lines are in. The same lines were applied in memory and passed 50/50 (script C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ws10s0_verify_shared.mjs).",
+    "Evidence: doc-only slice, exempt from rebuild and live proof under Appendix B N1. When pushed, record 'Evidence: CI run URL' for WS10-S0. No docker, no rebuild, no DB harness was run by this slice. No CI workflow references the test file, so the red state does not block CI, but land the three shared edits in the same commit.",
+    "Owner ratification: record DEC-13 (a) as ratified in the decision register before any WS10 S2 merge (plan Appendix B K1-8). The ADR status already says the default is taken and that ratification is pending.",
+    "Numbering (DEC-39): ADR-0005 and matrix rule 19 are the next free numbers at this HEAD (ADR-0001 to 0004 exist). The integrator confirms them when the drafts merge. The ADR filename date 2026-10-15 is the plan's name; rename only with the links in the shared lines and the owned notes."
+   ],
+   "deviations": [
+    "Status line reads 'accepted for implementation as the plan default (DEC-13 (a))', not 'accepted by owner': the row's DoD item 'ADR accepted by owner' stays open because the owner has not ratified DEC-13; the default was taken per the brief.",
+    "The Control Plane model-entitlement block sits after the 'Designed, not built.' paragraph (below line 360), not beside lines 355-356, so the 'Built (read on 2026-10-06)' list stays accurate.",
+    "ADR Date is 2026-10-15 to match the plan-named file, not the drafting date 2026-10-23; the ledger, GatewayDeduplication and schema notes use 2026-10-23.",
+    "Shared files (master matrix, capability matrix, ledger) are described as lead-applied lines, not edited, per the lead's instruction. The four tests that read them are red until those lines are applied.",
+    "The plan's test row names the existing ownership-docs-contract.test.mjs; WS10-S0 assertions were added to that file, and five FILES entries were added to it."
+   ],
+   "needs_other_files": [
+    "apps/master-ownership-matrix.md",
+    "apps/Model Plane/docs/capability-ownership-matrix.md",
+    "apps/Model Plane/docs/decisions/ledger.md"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead must apply the three shared edits (apps/master-ownership-matrix.md rule 19 and inference-core row note, apps/Model Plane/docs/capability-ownership-matrix.md row and section 4.6, apps/Model Plane/docs/decisions/ledger.md top entry), preserving CRLF, then re-run node --test scripts/tests/ownership-docs-contract.test.mjs and expect 50/50 in the same commit.",
+     "Owner ratification of DEC-13 (a) in the decision register (Appendix B K1-8) is still open, so the row's 'ADR accepted by owner' DoD item cannot be closed by the slice.",
+     "ADR number 0005 and rule 19 need the integrator's confirmation (DEC-39)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "An unrecognised MODEL_ENTITLEMENT_MODE value enforces (DEC-13 'unknown = enforce'), so a mistyped rollback to off would turn enforcement on; the owner must choose this or a parser that ignores unknown values before WS10 S3 merges, since a new switch should default off."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The owner has not ratified DEC-13 (a); WS10 S2-S7 must not merge until the decision register records the ratification (plan Appendix B K1-8)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Service principals and scheduled runs stay outside the policy until the WS20 acts-for-user contract exists, and only the service_exempt metric makes that visible."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing yet pins the org-core internal route, scope and inference-core principal that ADR-0005 and the Control Plane doc name; a source-reading contract test in the rule-18 style should land with WS10 S2."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "I verified which paths reach normalize (unary and stream do, gRPC invoke does not) but not ai_chat, deep research or the tool loop, so the ADR's bypass list rests on the plan; WS10 S3 or S4 must add a test that enumerates every provider-calling route."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The ledger mixes hyphen and em-dash entry headers; the new entry uses the hyphen the newest entries use, and a later cleanup can unify them."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ADR filename and Date carry the plan's 2026-10-15 while the drafting date is 2026-10-23; if the owner wants the drafting date, rename the file and update the links in rule 19, the ledger entry and the owned notes together."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The ADR records that an unrecognised MODEL_ENTITLEMENT_MODE value enforces, so a mistyped rollback value would turn enforcement on. The owner must confirm that choice before WS10 S3 merges, and S3's parser test must pin it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "DEC-13 (a) is not yet ratified by the owner, and WS10 S2-S7 must not merge until it is. The ADR status line says so correctly."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The new tests only grep prose. Nothing pins the org-core route, scope or principal that the ADR and the Control Plane doc name, so a source-reading contract test should land with WS10 S2."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ADR's list of paths that bypass normalize rests on the plan. WS10 S3 or S4 should add a test that enumerates every provider-calling route."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ADR filename and Date use the plan's 2026-10-15 while the ledger and note dates use 2026-10-23. Rename only together with the links in rule 19 and the ledger entry."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority"
+   ],
+   "notes": "WS10-S0 doc and comment slice, no runtime change. Written: ADR-0005 (Series A shape, CRLF, DEC-13 (a) recorded as the plan default with owner ratification still pending); CONTROL_PLANE_OWNERSHIP.md model-entitlement row in the data-boundary table and a designed-not-built block after the retention section; GATEWAY_DEDUPLICATION_PLAN.md CR-06 allowlist text kept and marked SUPERSEDED by ADR-0005 at the allowlist line and at the fix-direction line; schema.ts comment-only deprecation of allowedModels (grep shows no Convex reader, validator unchanged); WS10-S0 assertions appended to ownership-docs-contract.test.mjs, with five new FILES entries so the line-ending check covers the owned docs. The three shared files (master matrix rule 19 and row note, capability matrix row and 4.6, ledger top entry) are NOT edited: their exact lines are in lead_todo and were verified in memory (50/50). Status is partial until the lead applies them. No docker, no rebuild, no live proof, no DB tests. Evidence is documentary, exempt under Appendix B N1."
+  }
+ ]
+}

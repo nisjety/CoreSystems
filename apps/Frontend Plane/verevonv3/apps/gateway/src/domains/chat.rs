@@ -3,6 +3,7 @@ mod deck_templates;
 pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
+mod library;
 pub(crate) mod shared;
 mod search;
 mod streams;
@@ -57,6 +58,11 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/rewind",
             post(json_handlers::rewind_thread),
         )
+        // Undo a rewind: the leaf returns to the turn the rewind left, even past a later branch (WS17 S9).
+        .route(
+            "/api/v1/chat/threads/{thread_id}/undo-rewind",
+            post(json_handlers::undo_rewind_thread),
+        )
         // Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
         .route(
             "/api/v1/chat/threads/{thread_id}/artifacts",
@@ -65,6 +71,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions",
             get(artifacts::list_artifact_revisions),
+        )
+        // The person's edit and restore in the Output panel (EP-3 S4); the gateway refuses what it may not.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}",
+            put(artifacts::save_artifact_revision),
+        )
+        .route(
+            "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/restore",
+            post(artifacts::restore_artifact_revision),
         )
         .route(
             "/api/v1/chat/composer-capabilities",
@@ -135,6 +150,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(documents::upload_chat_document),
         )
         .route("/api/v1/chat/documents/extract", post(documents::extract_chat_document))
+        // The chat library (F-t3-080): saved artifacts and uploaded text, one filtered Data Plane view. 404 while
+        // the artifact-promote switch is off.
+        .route("/api/v1/chat/library", get(library::list_chat_library))
         .route(
             "/api/v1/chat/feedback",
             post(json_handlers::submit_feedback),

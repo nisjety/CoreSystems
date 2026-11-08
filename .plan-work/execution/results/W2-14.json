@@ -1,0 +1,169 @@
+{
+ "batchId": "W2-14",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS24-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts (new; shipping.get_quotes row now declares do: get_shipping_quotes)",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/catalog-manifest.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-eligibility.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/admission-contract.test.ts (new)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/agent-action-admission.json (new, regenerated)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json (new, byte-identical copy of the regenerated golden)",
+    "apps/Model Plane/api/contracts/agent-action-admission.json.sha256 (new, digest 62ca800b3ecb99908355148ef1b8a089ede5a88abb1a736cfcc59554169c8dbd)",
+    "apps/Model Plane/api/contracts/README.md",
+    "apps/Model Plane/go/services/capability-core/internal/api/testdata/agent-action-admission.json (new, vendored, re-copied)",
+    "apps/Model Plane/rust/services/execution-core/tests/agent_action_admission_contract.rs (new)",
+    "apps/Model Plane/rust/services/execution-core/tests/fixtures/agent-action-admission.json (new, vendored, re-copied)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (new test only)",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/agent-action-admission.json (new, vendored, re-copied)",
+    "scripts/tests/zdr-contract-sync.test.sh (GOLDENS digest line for agent-action-admission.json updated to 62ca800b...)"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Frontend Plane/verevonv3\" && VEREVON_UPDATE_GOLDEN=1 pnpm exec vitest run src/shared/actions/admission-contract.test.ts (regenerated golden after the shipping.get_quotes fix)",
+     "outcome": "passed, 5 of 5; shipping.get_quotes executor is {ask: shipping_get_quotes, do: get_shipping_quotes}"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/actions src/shared/context-packs",
+     "outcome": "12 files, 142 tests passed"
+    },
+    {
+     "command": "pnpm typecheck (tsc -b)",
+     "outcome": "exit with 34 errors, the same pre-existing count as before; 0 in src/shared/actions"
+    },
+    {
+     "command": "pnpm exec eslint on model-access.ts, admission-contract.test.ts, catalog-manifest.ts, catalog-manifest.test.ts, model-eligibility.ts",
+     "outcome": "exit 0, no findings. prettier is not installed in this package, so no prettier check was run"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test agent_action_admission_contract (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "passed, 4 of 4"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib every_ask_read (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "passed, 1 of 1. The lib target now compiles; the earlier blocker is gone"
+    },
+    {
+     "command": "bash scripts/tests/zdr-contract-sync.test.sh",
+     "outcome": "all 10 agent-action-admission checks ok (golden matches pin, pin agrees, 4 vendored copies byte-identical, 4 consumer rows). Totals 87 passed, 22 failed; all 22 failures are in other goldens (cross-plane-token-requests digest, missing retrieve/rerank goldens, usage-envelopes pin, quarry and zdr posture vendored copies), none in files this slice touches"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the slice: the files listed in files_changed. The four contract copies, the .sha256 pin and the zdr-contract-sync.test.sh digest line must go in the same commit so the byte comparison holds.",
+    "Confirm the frontend build (pnpm build) before shipping; it was not run here.",
+    "Remaining depth items are unchanged and still open: Control-owner review of org.mark_exported and org.acknowledge_deletion (DEC-25)."
+   ],
+   "deviations": [
+    "The shipping.get_quotes row now carries do: get_shipping_quotes as the reviewer required; the earlier note that no Do executor exists was a search miss.",
+    "The eligibility set is an explicit eligible flag on each map row, not a rule derived from access. brreg and shipping are read but must stay ineligible, and the seven D5 ids are access none but stay eligible.",
+    "buildActionCatalogManifest and canonicalActionCatalogJson became async because the per-row schemaHash needs Web Crypto. catalog-manifest.test.ts was updated to await them; it is the test beside the changed file.",
+    "The model-gateway test exempts knowledge_search by name because it is a retrieval arm, not an action."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The plan's CI-only evidence for the model-gateway every_ask_read test (a failing-then-passing mutation with a dummy id and a dummy Ask arm) has not been run; the lead or CI must close it.",
+     "pnpm build for the Frontend Plane was not run; the implementer left it to the lead.",
+     "Full pnpm lint exits 1 with 39 errors, all in files outside this slice (the Norwegian-text and bare-label rules); no lint message names a changed file, but a HEAD-vs-worktree diff of the failing set was not done.",
+     "The Control-owner review of org.mark_exported and org.acknowledge_deletion (DEC-25) is a human decision that only the lead or the owner can close.",
+     "bash scripts/tests/zdr-contract-sync.test.sh exits 1 with 22 failures in goldens this slice does not touch; they are pre-existing, but the lead should record the failing set against the main checkout."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "org.mark_exported and org.acknowledge_deletion are still eligible for agents today (carried over from the existing allowlist) and need the Control-owner review DEC-25 requires before any agent calls them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "capability-core's vendored copy under internal/api/testdata has no Go test that reads it; the admission-table reader lands in WS24-S6."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "sideEffectClass, authority and the exempt reason per row come from a provisional rule table (default external_write); each row needs owner review before any id is admitted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan's Verified starting point says 168 registry ids; the registry now has 180, so the plan's counts are stale."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "buildActionCatalogManifest and canonicalActionCatalogJson are now async; any future caller outside the tests must await them."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Vendored copies have no pin files beside them (only the canonical one has a .sha256), so their drift is caught by the byte comparison alone."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The sync script's 22 pre-existing failures in unrelated goldens still hide new drift in those areas; the lead should re-diff the failing set against the main checkout before relying on the exit code."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "org.mark_exported and org.acknowledge_deletion stay eligible (eligible: true) with executor {} per the plan's D5 rule, so the Control-owner review DEC-25 requires is still open before any agent path is wired."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "inbox.review_ai_action has reversible:false and risk:'high' in the registry but is classed no_owner_executor, while the plan's rule order gives irreversible_destructive; sideEffectClass is already destructive, so only the closed reason label is off, and it should be corrected in model-access.ts and the vendored copies together."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The prefix and irreversible rule table the plan asks to be written as data is not in the code: each MODEL_ACCESS row is hand-assigned, so no test can re-derive a row's reason from its registry fields and a new id can be misclassified silently."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "agent_action_admission_contract.rs checks each Do executor by a quoted substring anywhere in execution-core src, so a name that appears only in a comment or test string passes; it should match a dispatch or catalogue arm."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The worktree holds other sessions' uncommitted edits to use-chat-controller.ts, chat-nodes/index.ts, model-gateway grpc.rs, http_routes.rs, e2e_invoke_chain_test.rs and session-core memory_grpc.rs, which are outside this slice's ownership set; the commit must stage only the files_changed list."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "none-access rows default their authority to control_run_decision although no run decision applies to a closed row; a neutral value or a comment would stop a reader inferring control authority."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "ownerSchemaHash is optional on every row and nothing ties hashBasis owner_contract to a present digest, so a future owner row could omit it without a type or test failure."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan's Verified starting point still says 168 registry ids; the registry has 180, which the plan counts should reflect."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "capability-core's vendored agent-action-admission.json has no Go reader in this slice; the byte-identical check is the only guard until WS24-S6 adds the admission-table reader."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "Fixed the one required item: the shipping.get_quotes row in model-access.ts now declares its Do executor get_shipping_quotes, which execution-core has (runtime_loop/mod.rs:120 and :907, capability_policy.rs:1545, tests/fixtures/do_tool_catalogue.json:37). The contract was regenerated with VEREVON_UPDATE_GOLDEN=1, the canonical copy and the three vendored copies were re-copied byte-identically from the SPA golden, the .sha256 pin was refreshed, and the GOLDENS digest in zdr-contract-sync.test.sh was updated. The shipping row is still read, eligible false, with authority delegated_user_bearer and the executor now {ask, do}. No runtime behaviour changed, no switch was added, and action-registry.ts is untouched. The model-gateway every_ask_read test that was previously blocked by another session's in-progress proto work now compiles and passes. Nothing was committed, staged or pushed."
+  }
+ ]
+}

@@ -1,0 +1,575 @@
+{
+ "batchId": "W2-19",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS13-S4",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib denial",
+     "outcome": "exit 0; test result ok. 2 passed, 0 failed, 216 filtered out (denial_memory_is_off_unless_the_switch_reads_true, a_denial_matches_only_the_call_it_declined_in_its_run). This is the earlier run that had an empty log, now observed."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib denial",
+     "outcome": "exit 0; test result ok. 7 passed, 0 failed, 1442 filtered out. The 7 are the four denial_memory tests (a_denied_call_is_not_re_asked_in_the_same_run, a_different_argument_set_is_still_asked, a_denial_in_another_run_does_not_apply, and a_subagent_never_consults_denial_memory, which now passes) plus three other tests whose names contain 'denial' that this slice does not add (browser_agent gate_persistent_cookie_use_aborts_the_run_on_denial, runtime_loop::resume a_denial_at_the_fence_is_the_same_refusal_as_a_denial_on_the_claim_or_the_read, ticket_tools a_control_denial_never_calls_the_owner). Run twice with the same result."
+    },
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib",
+     "outcome": "exit 0 (non-test build). Four warnings, none in agent.rs or approval_cause.rs: capability_policy.rs:340 unreachable else, approval_delivery_worker.rs:746 unused fn, runtime_loop/mod.rs:529 unused fn execute_step_with_subagent, runtime_loop/resume.rs:581 unused fn decision_closer."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core block, after line 1260 `      EXECUTION_LOOP_PARKING_ENABLED: ${EXECUTION_LOOP_PARKING_ENABLED:-false}` (line 284 is the model-gateway block and is not the anchor), add `      APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}`, with an optional comment line above it.",
+    "Live check before the switch is enabled anywhere: confirm execution-core's run bearer can call ListApprovals for its own run (orchestration:read for service callers). If it cannot, the read fails, the call still pauses, and the switch has no visible effect."
+   ],
+   "deviations": [
+    "Ran one extra `cargo check -p execution-core --lib` (non-test build) to close the previously open check; the task did not list it."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `APPROVAL_DENIAL_MEMORY_ENABLED: ${APPROVAL_DENIAL_MEMORY_ENABLED:-false}` in the execution-core environment block (beside EXECUTION_LOOP_PARKING_ENABLED); the compose file is still unmodified",
+     "Live proof per the row: rebuild execution-core with the switch on, deny a call, have the model re-propose it, and confirm the psql approvals count stays 1 and the transcript shows the typed denial; different arguments still pause",
+     "Live check that execution-core's run/session bearer is allowed to call ListApprovals for its own run; otherwise the read fails closed to 'not declined' and the switch has no visible effect"
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "a_subagent_never_consults_denial_memory passes because the leaf-role blocklist (agent.rs around line 3363) refuses delete_records at depth 1 before any awaiting_approval outcome, so the phase-3 denial lookup is never reached. The depth guard that keeps subagents out of denial memory is structural (`if ctx.depth == 0`, agent.rs around line 4206) and no test isolates it; exercising it directly needs a call that reaches awaiting_approval at depth > 0."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The denial lookup calls ListApprovals with the run bearer. If execution-core's bearer lacks orchestration:read for service callers, the read fails, the call still pauses, and the switch silently does nothing. Needs a live check before the switch is on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers the ListApprovals error path (answers not-declined) or the zdr/waived guard in declined_earlier_in_run. The S8 golden cases cover ZDR only at the contract level."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A denial answered from memory writes no tool-step record, so the Agent Run Console shows no row for it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "cargo check of the execution-core lib shows four warnings in files this slice does not touch (capability_policy.rs:340, approval_delivery_worker.rs:746, runtime_loop/mod.rs:529, runtime_loop/resume.rs:581). Not fixed here; outside the slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "declined_earlier_in_run calls ListApprovals with ctx.session_bearer, and nobody has checked live that this bearer has the read scope. If it is refused, the warn path returns false and denial memory silently does nothing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "a_subagent_never_consults_denial_memory passes because the leaf-role blocklist refuses delete_records at depth 1 before an awaiting_approval outcome exists, so no test isolates the `ctx.depth == 0` guard that keeps subagents out of denial memory."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers the zdr or waived early return in declined_earlier_in_run, the ListApprovals error path (expected to answer not-declined and still pause), or the BrowserActionRisk exclusion."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows that with the switch off the agent never calls ListApprovals. Behaviour is identical by inspection, since denial_memory_on() returns false first, but nothing asserts it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A call answered from denial memory pushes a ToolStepResult but calls no record_tool_step, so the Agent Run Console and the audit trail show no row for the refused re-proposal."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "Each gated call at depth 0 now makes one extra unpaginated ListApprovals RPC when the switch is on. This is fine at today's approval counts, but the plan's optional list_denied_call_digests helper is the escape hatch if payloads grow."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p mp-contracts --lib denial (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "exit 0; 2 passed, 0 failed, 216 filtered out",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p execution-core --lib denial",
+      "outcome": "exit 0; 7 passed, 0 failed, 1442 filtered out. This includes the 4 slice tests: a_denied_call_is_not_re_asked_in_the_same_run, a_different_argument_set_is_still_asked, a_denial_in_another_run_does_not_apply, a_subagent_never_consults_denial_memory. The other 3 match 'denial' by name only and are not from this slice.",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p execution-core --lib (also compiles mp-contracts)",
+      "outcome": "exit 0; 4 warnings (unreachable else, and unused functions verification_result_for, execute_step_with_subagent and decision_closer). I did not confirm which files they sit in, but they look unrelated to agent.rs and approval_cause.rs.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority"
+   ],
+   "notes": "Fixed the one required item. In a_subagent_never_consults_denial_memory, the assertion now checks for \"a delegated subagent may never run\", which is the leaf-role blocklist text the child really receives, and its assert message reads \"the child is refused by the leaf role blocklist\". This was the only change this round, made with two single-line Edits. agent.rs is still all CRLF (28270 of 28270 lines); approval_cause.rs was not touched in this round and is still LF. The earlier mp-contracts background run had an empty log and was never observed; the same command now passes. The docker-compose anchor line was verified at line 1260. Nothing was committed, pushed, staged or reset. No DB tests were written. The scratch logs are in the scratchpad (ws13s4-mpc-denial.log, ws13s4-exec-denial.log)."
+  },
+  {
+   "id": "WS13-S5",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/auth.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/model-plane-token.controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/model-plane-token.controller.spec.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/step-up.controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Control Plane/auth-core/src/auth/step-up.controller.spec.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/approvals/step-up.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.step-up.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- step_up only_the_gateway_calls_decide_approval approval_value",
+     "outcome": "18 passed, 0 failed (before the last two edits: step_up_projected gate with its test, and a rustfmt wrap of a test assert)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- auth:: approval",
+     "outcome": "171 passed, 0 failed (before the last two edits)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- step_up only_the_gateway_calls_decide_approval approval_value auth:: http_routes::",
+     "outcome": "started in background, still compiling when I stopped; NOT verified against the final tree"
+    },
+    {
+     "command": "cd apps/Control Plane/auth-core && jest step-up.controller model-plane-token.controller interactive-retention-unavailable.controller",
+     "outcome": "3 suites, 41 passed, 0 failed (after the $context switch)"
+    },
+    {
+     "command": "cd apps/Control Plane/auth-core && jest (full suite)",
+     "outcome": "776 passed, 3 failed, 38 skipped; the only failing suite is deployment-contract.spec.ts (3 compose-text assertions on apps/Control Plane/docker-compose.yml, which this slice does not touch; not confirmed against HEAD)"
+    },
+    {
+     "command": "cd apps/Frontend Plane/verevonv3 && vitest run ChatMessages.step-up.test.tsx --pool=forks",
+     "outcome": "6 passed, 0 failed"
+    },
+    {
+     "command": "vitest run ChatMessages.approval-card / approval-locale / queue-controls / step-up tests + src/shared/approvals --pool=forks",
+     "outcome": "5 files, 45 passed, 0 failed"
+    },
+    {
+     "command": "tsc --noEmit -p tsconfig.app.json",
+     "outcome": "22 errors in the project, none in changed files (no step-up, ChatMessages or approvals matches)"
+    },
+    {
+     "command": "eslint on changed FE files and changed auth-core files; prettier --check on new auth-core files",
+     "outcome": "0 errors; only pre-existing solid/reactivity warnings in ChatMessages.tsx outside the new code"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway: the final model-gateway verification is still owed. Run from apps/Model Plane/rust with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: cargo test -q -p model-gateway --lib -- step_up only_the_gateway_calls_decide_approval approval_value auth:: http_routes::. The last two edits (step_up_projected and its test, plus a rustfmt wrap) were not compiled.",
+    "shared-edit apps/Control Plane/auth-core/src/auth/convex-token.service.ts (LF): in `type ModelPlaneJwtClaims = {` add `  stepUp?: { at: number; method: 'password' };` before the closing `};`; in issueModelPlaneToken's `const payload = {` add `      ...(claims.stepUp ? { step_up: claims.stepUp } : {}),` directly before the `      zdr,` line that follows the 'Interactive posture comes from Auth Core's exact organization policy' comment.",
+    "shared-edit apps/Control Plane/auth-core/src/app.module.ts (CRLF, keep CRLF): add `import { StepUpController } from './auth/step-up.controller';` after the ModelPlaneTokenController import, and `    StepUpController,` after `    ModelPlaneTokenController,` in the controllers array.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block, after the line `      MCP_TOOL_OBSERVATION_ENABLED: ${MCP_TOOL_OBSERVATION_ENABLED:-false}` (around line 789), add `      APPROVAL_STEP_UP_ENFORCED: ${APPROVAL_STEP_UP_ENFORCED:-off}` with a short comment that only the literal shadow or enforce turns it on.",
+    "needs_other_files apps/Frontend Plane/verevonv3/apps/gateway/src/domains/auth.rs (lead or BFF owner): add POST /api/v1/auth/step-up proxying to auth-core POST /api/v2/auth/step-up with the caller's cookie, forwarding the status and body verbatim; on success evict the caller's model-gateway audience token from the audience_tokens.rs cache; never log the request body. Also confirm domains/orchestration.rs forwards a 403 step_up_required body unchanged.",
+    "needs_other_files apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs, runtime_loop/mod.rs, grpc.rs and browser_events.rs: set cause.step_up_required for owner_effect_reserved, capability_high_risk with effect class destructive, and provider_write with a write class at each pause site.",
+    "needs_other_files apps/Model Plane/rust/services/model-gateway/src/grpc.rs: gate approve_approval (around line 1663) with the same step-up check; grpc_auth.rs Claims must first carry the step_up proof.",
+    "needs_other_files apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts (around lines 2150-2162): on a 403 step_up_required from decide, keep the card and re-open the password confirmation instead of dropping it.",
+    "needs_other_files the approval stylesheet: add .verevon-chat-approval__confirm, .verevon-chat-approval__confirm-label and .verevon-chat-approval__error.",
+    "integrator: reserve DecideApprovalRequest.step_up_verified (proposed tag 8) in the section 4.3 table, then session-core writes it into metadata.decision and the audit row. Not built here; no tag is reserved today."
+   ],
+   "deviations": [
+    "Path is POST /api/v2/auth/step-up, not /api/auth/step-up, because Better Auth owns /api/auth/* (precedent nats-auth.controller.ts).",
+    "step_up_verified is not recorded in metadata.decision or the audit row, because DecideApprovalRequest has no tag reserved in section 4.3.",
+    "The step-up claim is read through a flattened ModelTokenPayload in require_auth instead of a new Claims field, to avoid breaking about 20 Claims literals in other owners' test files.",
+    "The password is checked with Better Auth's context verifier (auth.$context.password.verify) instead of better-auth/crypto, which is ESM-only and failed under jest.",
+    "The FE asks for the password before a step-up grant (proactive) instead of retrying after a 403, because the decide callback is in a file this slice does not own; the reactive path is a lead_todo item.",
+    "cause.step_up_required is projected to clients only while the gate is enforce, so the prompt never appears where the gateway would not check the grant."
+   ],
+   "needs_other_files": [
+    "apps/Control Plane/auth-core/src/auth/convex-token.service.ts",
+    "apps/Control Plane/auth-core/src/app.module.ts",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/auth.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/audience_tokens.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/browser_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "the approval stylesheet under apps/Frontend Plane/verevonv3/src (file not yet located)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Apply the shared edit to convex-token.service.ts so issueModelPlaneToken emits `step_up`. Until it lands, the `stepUp` value passed in model-plane-token.controller.ts is dropped and no token carries the claim.",
+     "Apply the shared edit to app.module.ts to register StepUpController. Until it lands, POST /api/v2/auth/step-up does not exist at runtime.",
+     "Add APPROVAL_STEP_UP_ENFORCED (default off) to the model-gateway environment in apps/Model Plane/deploy/docker-compose.yml.",
+     "Build the BFF route POST /api/v1/auth/step-up (the FE helper confirmStepUp calls it) and evict the per-user model token cache in audience_tokens.rs when a step-up succeeds. Without the eviction, a decide right after a step-up presents the old cached token and is refused under enforce.",
+     "Live proof: rebuild auth-core, model-gateway and the frontend. Under enforce, a decide with no claim must return a typed 403 step_up_required, and a decide right after a step-up must return 200.",
+     "Check the full auth-core jest failing set against HEAD. Only deployment-contract.spec.ts fails (3 assertions on the compose text); neither that spec nor the compose file is modified."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No producer sets ApprovalCause.step_up_required: execution-core creates causes at its pause sites but never sets the step-up bit, so under APPROVAL_STEP_UP_ENFORCED=enforce nothing is refused, including owner_effect_reserved (tickets.create); needs the step-up set computed at agent.rs pause_for_approval, runtime_loop/mod.rs resolve_write_approval and gate returns, grpc.rs:959 and browser_events.rs require_approval."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The posture-auto path (execution-core runtime_loop/mod.rs auto_posture_decision_request, around line 2315) records a GRANTED decision for provider writes with the user's bearer, outside the HTTP gate, so enforce does not cover it; needs an owner decision on whether provider writes under auto posture keep needing no confirmation."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway gRPC approve_approval (grpc.rs around line 1663) persists grants through persist_approval_decision_authenticated with no step-up check, so the HTTP-only gate is bypassed; the gRPC auth path (grpc_auth.rs Claims) does not carry step_up."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "DecideApprovalRequest has no step_up_verified field and 4.3 reserves no tag for it, so session-core always writes metadata.decision.step_up_verified=false and the approval_decided audit row says false; the slice DoD (step_up_verified in metadata.decision and audit) is unmet until the integrator reserves a tag and session-core reads it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Wiring not yet live: convex-token.service.ts must emit the step_up claim (shared-edit), app.module.ts must register StepUpController (shared-edit), the BFF route POST /api/v1/auth/step-up must proxy to auth-core, and the BFF per-user model token cache (audience_tokens.rs, TTL minus 60 s) must be evicted on step-up success, otherwise a decide right after step-up presents a pre-step-up token and is refused again."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The parent decide handler (use-chat-controller.ts around line 2150) removes the card optimistically and does not handle a 403 step_up_required; a gateway refusal would drop the approval silently, so the parent must re-open the confirmation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "step_up_off_changes_nothing covers the switch parser only; no handler-level test proves the off path is unchanged, and no DB-backed test covers the credential account lookup query in step-up.controller.ts."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "only_the_gateway_calls_decide_approval is an inventory with a reviewed five-file allowlist that includes two ungated grant paths (runtime_loop/mod.rs and grpc.rs); the name overstates what it enforces until those close."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Password-only v1: accounts without a credential row (SSO or passkey only) get 403 STEP_UP_METHOD_UNAVAILABLE and cannot be granted under enforce; passkey and TOTP are not implemented (K3-22 accepted)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Step-up attempts are limited to 5 per user per 15 minutes through a Dragonfly counter, but failed attempts and successful step-ups are not audited and there is no lockout notice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The FE password confirmation is sent through the BFF; the BFF route must not log the request body (credential handling)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "No CSS exists for the new classes verevon-chat-approval__confirm, __confirm-label and __error (no owned stylesheet), so the confirmation form is unstyled."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Nothing live-proved: rebuild auth-core via scripts/run-control-plane.sh, model-gateway and the frontend; curl decide without a claim gives typed 403 under enforce, with a fresh step-up gives 200; psql confirms the record once the integrator tag exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every model token now passes through the flattened ModelTokenPayload decode in require_auth; all auth:: unit tests pass, but a live gateway proof is owed."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "Path is POST /api/v2/auth/step-up rather than the design's /api/auth/step-up because Better Auth owns /api/auth/* (precedent nats-auth.controller.ts); the step-up claim is read through ModelTokenPayload rather than a new Claims field because about 20 Claims literals in other owners' test files would break."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "APPROVAL_STEP_UP_ENFORCED is read per request and an unknown value silently stays off with no warning, unlike the execution-core ToolClassGate which logs once."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "deployment-contract.spec.ts shows 3 failing assertions in the full auth-core run; they read apps/Control Plane/docker-compose.yml, which this slice does not touch, so they look pre-existing but are not confirmed against HEAD."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Nothing in execution-core sets ApprovalCause.step_up_required (grep finds only test literals), so the gate refuses nothing under enforce until the producer slice sets it at each pause site."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway/src/grpc.rs approve_approval and the POSTURE_AUTO grant in execution-core runtime_loop/mod.rs both record grants outside the HTTP step-up gate. only_the_gateway_calls_decide_approval allowlists both, so the gate can be bypassed through them once it is on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "use-chat-controller.ts removes the approval card optimistically and does not handle a 403 step_up_required, so a refused grant (for example from a stale cached token) silently drops the approval instead of asking for the password again."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "DecideApprovalRequest has no step_up_verified field (no tag is reserved in 4.3), so metadata.decision and the approval_decided audit row cannot record that a step-up happened."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "step-up.controller.ts is a cookie-authenticated POST that checks a password, and nothing in this slice shows CSRF or origin protection. Failed and successful step-ups are not audited; only a counter of 5 per 15 minutes limits attempts, and successful attempts also count against it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No handler-level test of decide_approval proves the off and shadow paths are unchanged or that enforce returns the 403. The tests cover only the pure helpers (step_up_missing, the gate parser, step_up_projected) and the payload parse."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB-backed test covers credentialPasswordHash (the drizzle account lookup with providerId 'credential') in step-up.controller.ts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every verified model token is now decoded through ModelTokenPayload with #[serde(flatten)] Claims. The unit tests pass, but flatten changes serde's decoding path, and a live gateway proof with real tokens is still owed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Password-only v1: SSO or passkey accounts get 403 STEP_UP_METHOD_UNAVAILABLE and can never grant a step-up approval under enforce. K3-22 accepts this, but such orgs must stay on shadow."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The classes verevon-chat-approval__confirm, __confirm-label and __error have no CSS, so the confirmation form renders unstyled."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "approval_cause_value now projects step_up_required as false unless the gate is enforce. With no producer and no prior consumer this changes nothing today, but it is a deliberate projection rule the lead should know about."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "APPROVAL_STEP_UP_ENFORCED is read from the environment on every request and an unknown value silently means off; unlike other gates, there is no log line for it."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib -- step_up only_the_gateway_calls_decide_approval approval_value a_grant_needing a_denial_never a_stale_step_up (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "19 passed, 0 failed. All five plan-named tests exist and ran: a_grant_needing_step_up_without_the_claim_is_refused, a_denial_never_needs_step_up, a_stale_step_up_claim_is_refused, step_up_off_changes_nothing, only_the_gateway_calls_decide_approval.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (full crate compile check plus all lib tests, final tree)",
+      "outcome": "2393 passed, 0 failed, 4 ignored. The crate compiles with the final edits, including the step_up_projected gate.",
+      "passed": true
+     },
+     {
+      "command": "auth-core: npx jest step-up.controller model-plane-token.controller",
+      "outcome": "2 suites, 35 passed, 0 failed. Nest ERROR log lines are expected output from the fail-closed test.",
+      "passed": true
+     },
+     {
+      "command": "auth-core: npx jest (full suite)",
+      "outcome": "3 failed, 776 passed, 38 skipped. The only failing suite is src/auth/deployment-contract.spec.ts (3 assertions on compose text for apps/Control Plane/docker-compose.yml), which the slice does not own. Not diffed against HEAD, but the failing set is smaller than the 15 failures in 3 suites that the plan notes as pre-existing. step-up.controller.spec.ts and model-plane-token.controller.spec.ts pass.",
+      "passed": true
+     },
+     {
+      "command": "verevonv3: npx vitest run ChatMessages.step-up.test.tsx --pool=forks",
+      "outcome": "1 file, 6 passed, 0 failed.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "auth",
+    "authority"
+   ],
+   "notes": "Slice WS13-S5 (step-up for never-auto/high-risk) is built to the code and unit-test level with every switch off, but it is partial. Built: auth-core POST /api/v2/auth/step-up (password re-check through auth.$context.password.verify, 5 attempts per user per 15 min, 120 s proof in Dragonfly keyed by session id); readFreshStepUp wired into the model-plane token mint (the token carries step_up only through the convex-token.service shared edit); model-gateway: ModelTokenPayload with flattened identity (step_up parsed beside Claims, dev bypass inserts none), ApprovalStepUpGate off/shadow/enforce read from APPROVAL_STEP_UP_ENFORCED, decide refuses a grant whose cause.step_up_required lacks a fresh claim with typed 403 step_up_required (denials never need it), shadow counts approval_step_up_missing_total, and cause.step_up_required is projected to clients only while enforce; FE: confirmStepUp helper, and the approval card asks for the password before granting a step-up approval (reject never asks). Not done in this slice and needing other owners: nothing in the code sets step_up_required yet (execution-core), so enforce refuses nothing until that producer lands; the claim does not reach the token until the convex-token.service and app.module shared edits land; the BFF route and cache eviction do not exist; the parent decide handler does not re-prompt on a 403. Deviations: path /api/v2/auth/step-up instead of /api/auth/step-up (Better Auth owns /api/auth/*); no step_up_verified recorded in metadata.decision because DecideApprovalRequest has no tag reserved in 4.3; password taken from Better Auth's own context verifier instead of better-auth/crypto (ESM-only, broke jest). Working tree note: apps/Model Plane/rust/services/model-gateway/src/sse.rs has uncommitted changes from another slice (WS18-S2); I did not touch it and did not revert it. No DB tests written, no proto or migration changes, no live proof run."
+  },
+  {
+   "id": "WS18-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\apps\\gateway\\src\\domains\\spaces.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- the_space_append_retrieval_switch a_space_append_turn_retrieves a_forbidden_append_decision a_follow_up_keeps_todays a_first_turn_decision scoped_grounding_never_downgrades (run from apps/Model Plane/rust)",
+     "outcome": "started in background; log at scratchpad/ws18s2/mg_targeted.log; result NOT observed before this report, so it is unverified"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --bin verevon-gateway-rs -- domains::spaces::tests (run from apps/Frontend Plane/verevonv3/apps/gateway)",
+     "outcome": "started in background; log at scratchpad/ws18s2/bff_spaces.log; result NOT observed before this report, so it is unverified"
+    },
+    {
+     "command": "first background launch of the two commands",
+     "outcome": "failed with a bash syntax error before running anything (stray quote); re-launched correctly"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Confirm results: read scratchpad/ws18s2/mg_targeted.log and bff_spaces.log (both launched, neither observed); if either fails, fix before merge.",
+    "Wire MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL in apps/Model Plane/deploy/docker-compose.yml, model-gateway service block (around line 333, next to CHAT_DO_ATTACHMENTS_ENABLED): shared-edit apps/Model Plane/deploy/docker-compose.yml: add MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL: ${MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL:-false}.",
+    "Locate the BFF env wiring for GATEWAY_SPACE_APPEND_RETRIEVAL (not found in apps/Frontend Plane/verevonv3/docker-compose.yml) and set it false by default; set both switches true on staging only.",
+    "Rebuild the model-gateway and BFF images (lead-run), then the staging proof from the plan DoD: a project with a Space-only and an org-only document, the same question on turns 1 and 2, capture x-space-decision on both Data Plane requests and the citations; also a FORBIDDEN case. Do not enable in prod until evidence.",
+    "Before merge: DEC-06 D7 sign-off and Space plus Control acknowledgement, per the plan's gating decisions.",
+    "After the staging proof (K3-18): flip GATEWAY_SPACE_APPEND_RETRIEVAL default to true in each environment, documenting that =false re-exposes org documents only when MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL is also off."
+   ],
+   "deviations": [
+    "Second switch MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL added in sse.rs (default off), not in the plan row: needed because the Option-less String token cannot tell an absent decision from a FORBIDDEN one.",
+    "Code default is off for GATEWAY_SPACE_APPEND_RETRIEVAL; K3-18 asks for default on in every environment only after the staging proof, so the flip is a lead deploy step.",
+    "ZDR matrix row space_append_context (zdr_features.rs:89, Inert) and api/contracts/zdr-posture-matrix.json are not updated; with the MG switch on, ZDR follow-ups now use the append decision for retrieval."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/session_flow.rs (recommended: retrieval_decision_token Option<String> at line 142, String::new() to None at lines 172 and 283; then drop the MG switch)",
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (space_append_context Inert at line 89; ZDR matrix)",
+    "apps/Model Plane/rust/services/model-gateway/src/retrieval.rs (graph leg of retrieve_checked, load_graph_grounding, needs the Space decision)",
+    "apps/Model Plane/deploy/docker-compose.yml (model-gateway env line, see lead_todo)",
+    "api/contracts/zdr-posture-matrix.json (ZDR row update if the switch is enabled under ZDR)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Staging live proof from the plan DoD: same question on turns 1 and 2 in a project with a Space-only and an org-only document, x-space-decision captured on both Data Plane requests plus citations, and a FORBIDDEN append case; needs both GATEWAY_SPACE_APPEND_RETRIEVAL and MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL set to true on staging.",
+     "Compose wiring for both switches (Model Plane deploy/docker-compose.yml model-gateway block, and the BFF env), defaulting to false; image rebuilds are lead-run.",
+     "K3-18 default-on flip after the staging proof, plus DEC-06 D7 / Space and Control acknowledgement before merge."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "load_graph_grounding (model-gateway retrieval.rs ~963-1040, request built ~940-961) posts to /v1/retrieve/graph with the user bearer and x-org-id only and no space decision, so every scoped turn with a valid decision still receives org-wide graph entities and community summaries; fix is in unowned retrieval.rs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "inject_personal_thread_context (spaces.rs) returns Ok(()) when a follow-up omits space_ref, so the turn carries no decision and retrieves org-wide; the server never resolves the thread's Space (the plan's space_scope_for_thread helper is not built)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ZDR: zdr_features.rs:89 classifies space_append_context as Inert and the ZDR matrix is stale once the MG switch is on; decide refuse-vs-scope for ZDR follow-ups and update zdr-posture-matrix.json and zdr-contract-sync before enabling."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner/lead to choose between keeping the second MG switch and the preferred follow-up: make session_flow.rs ThreadSpaceContext.retrieval_decision_token Option<String> with #[serde(default)] (lines 142, 172, 283) and drop the MG switch so the BFF switch alone gives the kill-switch semantics K3-18 describes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the BFF switch on, every follow-up now makes one extra Control retrieval-decision call; a non-403 failure fails the follow-up turn (first-turn semantics), so measure Control latency and error rate before enabling."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No wire-level test proves x-space-decision reaches Data Plane on a follow-up: the notice_double in retrieval.rs records modes only; this needs the live proof."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Three near-identical names: space_retrieval_decision (Knowledge tab helper in spaces.rs, different decline semantics), space_retrieval_token (new turn helper) and space_retrieval_decision (sse.rs helper); rename before merge to avoid confusion."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "load_graph_grounding in model-gateway retrieval.rs posts /v1/retrieve/graph with no Space decision, so even a correctly scoped follow-up (and first turn) still gets org-wide graph entities and community summaries; that is outside this slice's files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P0",
+     "text": "inject_personal_thread_context returns Ok(()) with no context when a follow-up omits space_ref, so a client that drops space_ref on turn 2 gets org-wide retrieval; the server-side thread-to-Space resolution (space_scope_for_thread) is not built."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The second switch MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL departs from the plan row; it is safe (an absent token with the MG switch on deserializes to \"\" and suppresses grounding rather than widening it), but the K3-18 kill-switch meaning changes: BFF=false with MG=true suppresses follow-up grounding and does not re-expose org documents. The lead should choose this design or session_flow.rs retrieval_decision_token: Option<String>."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "zdr_features.rs still marks space_append_context Inert and api/contracts/zdr-posture-matrix.json is not updated, even though with the MG switch on the append context now scopes retrieval; update both before enabling."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Agentic/tool-loop knowledge searches on follow-ups pass only space_id (sse.rs ~1987, ~3155) and not the append retrieval decision; no test shows whether tool-round retrieval on turn 2 is Space-scoped."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No wire-level test proves x-space-decision reaches Data Plane on a follow-up turn; the MG tests cover only the pure selector space_retrieval_decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the BFF switch on, each follow-up adds a Control retrieval-decision call, and a non-403 failure fails the turn; measure Control latency and error rate on staging."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The BFF switch is read via std::env::var inside the request handler, not from AppState, which goes against the gateway's AppState-not-env pattern; append tests in other modules that do not take TEST_ENV_LOCK could race with the new tests."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Three near-identical names (space_retrieval_decision in spaces.rs for the Knowledge tab, space_retrieval_token in spaces.rs, and space_retrieval_decision in sse.rs) should be renamed to avoid confusion."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib -- the_space_append_retrieval a_space_append_turn_retrieves a_forbidden_append_decision a_follow_up_keeps_todays a_first_turn_decision scoped_grounding_never_downgrades (Model Plane/rust, CARGO_TARGET_DIR=C:/dev/mp-target-w2)",
+      "outcome": "compiled; 6 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q --bin verevon-gateway-rs -- domains::spaces::tests (verevonv3/apps/gateway)",
+      "outcome": "compiled; 113 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib (full lib, compile check of sse.rs)",
+      "outcome": "2392 passed, 0 failed, 4 ignored",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "Code edits are written; compilation and tests are NOT yet confirmed. Design deviation: the plan's literal design (space_context.or(space_append_context) with a String token) breaks switch-off byte-identity, because an absent token and an empty one both deserialize to \"\" and \"\" suppresses grounding, while today's absent-decision follow-up is an unscoped org-wide search. To keep switch-off identical without touching the unowned session_flow.rs, sse.rs gains a second strict MG switch MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL (default off) gating the append decision. BFF: GATEWAY_SPACE_APPEND_RETRIEVAL (strict == \"true\", default off) makes the append branch call retrieval-decision via the new helper space_retrieval_token; the first-turn path now uses the same helper with identical keys and semantics. Four sse.rs retrieval sites plus the verification site use space_retrieval_decision(space_context, space_append_context, enabled). Switch-off paths are byte-identical in both services. K3-18 says =false re-exposes org documents; with the MG switch on, BFF=false gives suppressed follow-ups instead, so re-exposure requires the MG switch off too."
+  }
+ ]
+}

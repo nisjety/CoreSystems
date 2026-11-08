@@ -1,0 +1,1801 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx
+index 382da7069..714e645c4 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.test.tsx	
+@@ -2,13 +2,14 @@
+ 
+ /**
+  * The thread goal bar (EP-7 S1): its actions follow the goal's status, it never takes focus, and the
+- * dialog's limits match the server's.
++ * dialog's limits match the server's. EP-7 S4 adds Keep going, its countdown and Stop.
+  */
+ 
+ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+ import { flush } from 'solid-js'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+ import type { ThreadGoal } from '@/shared/api/thread-goal-client'
++import type { GoalAutoContinueView } from '../lib/goal-pump'
+ import { GoalBar } from './GoalBar'
+ import { readGoalDraft } from './GoalDialog'
+ 
+@@ -89,6 +90,90 @@ describe('GoalBar', () => {
+   })
+ })
+ 
++describe('GoalBar Keep going (EP-7 S4)', () => {
++  function pump(overrides: Partial<GoalAutoContinueView> = {}): GoalAutoContinueView {
++    return {
++      available: () => true,
++      on: () => false,
++      countdown: () => null,
++      stopReason: () => null,
++      setOn: vi.fn(),
++      stop: vi.fn(),
++      ...overrides,
++    }
++  }
++
++  function mountAuto(current: ThreadGoal, autoContinue: GoalAutoContinueView) {
++    const view = render(() => (
++      <GoalBar
++        goal={current}
++        autoContinue={autoContinue}
++        onContinue={vi.fn()}
++        onEdit={vi.fn()}
++        onPause={vi.fn()}
++        onResume={vi.fn()}
++        onClear={vi.fn()}
++      />
++    ))
++    flush()
++    const toggle = () => view.container.querySelector<HTMLButtonElement>('[role="switch"]')
++    const stopButton = () => view.container.querySelector<HTMLButtonElement>('.verevon-chat-goal-bar__stop')
++    return { view, toggle, stopButton }
++  }
++
++  it('hides the toggle unless the server reports it available', () => {
++    expect(mountAuto(goal(), pump({ available: () => false })).toggle()).toBeNull()
++    cleanup()
++    // A paused or closed goal has nothing to keep going on.
++    expect(mountAuto(goal({ status: 'paused' }), pump()).toggle()).toBeNull()
++    cleanup()
++    expect(mountAuto(goal({ status: 'met' }), pump()).toggle()).toBeNull()
++  })
++
++  it('turns Keep going on and off as a switch', () => {
++    const off = pump()
++    const { toggle } = mountAuto(goal(), off)
++    expect(toggle()?.getAttribute('aria-checked')).toBe('false')
++    fireEvent.click(toggle()!)
++    expect(off.setOn).toHaveBeenCalledWith(true)
++    cleanup()
++    const on = pump({ on: () => true })
++    const second = mountAuto(goal(), on)
++    expect(second.toggle()?.getAttribute('aria-checked')).toBe('true')
++    fireEvent.click(second.toggle()!)
++    expect(on.setOn).toHaveBeenCalledWith(false)
++  })
++
++  it('shows the countdown with Stop, and Stop cancels it', () => {
++    const counting = pump({ on: () => true, countdown: () => 5 })
++    const { view, stopButton } = mountAuto(goal(), counting)
++    const timer = view.container.querySelector('[role="timer"]')
++    // Plain text in a timer role: not announced on every tick, and nothing moves.
++    expect(timer?.textContent).toMatch(/Fortsetter om 5 s|Continuing in 5 s/)
++    expect(timer?.getAttribute('aria-live')).toBeNull()
++    fireEvent.click(stopButton()!)
++    expect(counting.stop).toHaveBeenCalledTimes(1)
++  })
++
++  it('offers no Stop when nothing counts down, and names why the pump stopped', () => {
++    const stopped = pump({ stopReason: () => 'pending_approval' })
++    const { view, stopButton } = mountAuto(goal(), stopped)
++    expect(stopButton()).toBeNull()
++    const reason = view.container.querySelector('.verevon-chat-goal-bar__auto-stopped')
++    expect(reason?.getAttribute('data-reason')).toBe('pending_approval')
++    expect(reason?.textContent).toMatch(/godkjenning|approval/)
++  })
++
++  it('never takes focus when the countdown starts', () => {
++    const field = document.createElement('textarea')
++    document.body.append(field)
++    field.focus()
++    mountAuto(goal(), pump({ on: () => true, countdown: () => 5 }))
++    expect(document.activeElement).toBe(field)
++    field.remove()
++  })
++})
++
+ describe('readGoalDraft', () => {
+   it('drops blank criteria and holds the server limits', () => {
+     expect(readGoalDraft('  Ship it ', 'one\n\n two \n')).toEqual({
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx
+index bd8efb447..aec7a4d0f 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/GoalBar.tsx	
+@@ -1,6 +1,7 @@
+ import { For, Show, createSignal } from 'solid-js'
+ import type { ThreadGoal, ThreadGoalStatus } from '@/shared/api/thread-goal-client'
+ import { useI18n } from '@/shared/i18n'
++import type { GoalAutoContinueView, GoalPumpStopReason } from '../lib/goal-pump'
+ 
+ const STATUS_LABEL: Record<ThreadGoalStatus, { no: string; en: string }> = {
+   active: { no: 'Aktivt', en: 'Active' },
+@@ -11,6 +12,21 @@ const STATUS_LABEL: Record<ThreadGoalStatus, { no: string; en: string }> = {
+   blocked: { no: 'Stoppet', en: 'Blocked' },
+ }
+ 
++/** Why "Keep going" stopped (EP-7 S4), one closed reason each. */
++const STOP_LABEL: Record<GoalPumpStopReason, { no: string; en: string }> = {
++  pending_approval: { no: 'Stoppet: venter på godkjenning', en: 'Stopped: waiting for an approval' },
++  pending_question: { no: 'Stoppet: venter på svar', en: 'Stopped: waiting for an answer' },
++  plan_proposed: { no: 'Stoppet: en plan venter', en: 'Stopped: a plan is waiting' },
++  parked: { no: 'Stoppet: kjøringen er parkert', en: 'Stopped: the run is parked' },
++  failed: { no: 'Stoppet: runden feilet', en: 'Stopped: the turn failed' },
++  budget_reached: { no: 'Stoppet: budsjettet er brukt opp', en: 'Stopped: budget reached' },
++  turns_reached: { no: 'Stoppet: ingen runder igjen', en: 'Stopped: out of turns' },
++  met: { no: 'Stoppet: målet er nådd', en: 'Stopped: the goal is met' },
++  blocked: { no: 'Stoppet: målet står fast', en: 'Stopped: the goal is blocked' },
++  user_stopped: { no: 'Stoppet av deg', en: 'Stopped by you' },
++  hidden_tab: { no: 'Venter til fanen vises', en: 'Waiting until this tab is shown' },
++}
++
+ /** How much of the objective the collapsed bar shows; the rest is one click away. */
+ const COLLAPSED_CHARS = 120
+ 
+@@ -20,6 +36,12 @@ const COLLAPSED_CHARS = 120
+  * and Clear. Continue sends one turn toward the goal (`chat.continue_goal`); nothing here sends a
+  * turn on its own. The bar never takes focus: it sits in the dock's polite live region, and a goal
+  * must not pull the cursor out of the field the person is typing in.
++ *
++ * With `autoContinue` available (EP-7 S4) an active goal also offers "Keep going": after a turn the
++ * judge did not find met, the bar counts down five seconds and the controller sends the next turn;
++ * Stop cancels the countdown and turns it off, and the reason the pump stopped stays on the bar. The
++ * countdown is plain text in a timer role, which screen readers do not announce on every tick, and
++ * nothing in it moves, so there is no motion to reduce.
+  */
+ export function GoalBar(props: {
+   goal: ThreadGoal
+@@ -32,6 +54,8 @@ export function GoalBar(props: {
+   onPause: () => void
+   onResume: () => void
+   onClear: () => void
++  /** "Keep going" (EP-7 S4); hidden unless the server reports it available. */
++  autoContinue?: GoalAutoContinueView
+ }) {
+   const i18n = useI18n()
+   const [expanded, setExpanded] = createSignal(false)
+@@ -41,6 +65,7 @@ export function GoalBar(props: {
+     expanded() || !long() ? props.goal.objective : `${props.goal.objective.slice(0, COLLAPSED_CHARS).trimEnd()}…`
+   const status = () => STATUS_LABEL[props.goal.status]
+   const criteriaCount = () => props.goal.successCriteria.length
++  const auto = () => (props.goal.status === 'active' && props.autoContinue?.available() ? props.autoContinue : undefined)
+ 
+   return (
+     <div class="verevon-chat-goal-bar" data-status={props.goal.status} aria-busy={props.pending ? 'true' : undefined}>
+@@ -105,6 +130,41 @@ export function GoalBar(props: {
+           {i18n.tr('Fjern', 'Clear')}
+         </button>
+       </div>
++      <Show when={auto()}>
++        {(pump) => (
++          <div class="verevon-chat-goal-bar__auto">
++            <button
++              type="button"
++              role="switch"
++              class="verevon-chat-goal-bar__auto-toggle"
++              aria-checked={pump().on() ? 'true' : 'false'}
++              disabled={props.pending}
++              onClick={() => pump().setOn(!pump().on())}
++            >
++              {i18n.tr('Kjør videre', 'Keep going')}
++            </button>
++            <Show when={pump().countdown()}>
++              {(seconds) => (
++                <>
++                  <span class="verevon-chat-goal-bar__countdown" role="timer">
++                    {i18n.tr(`Fortsetter om ${seconds()} s`, `Continuing in ${seconds()} s`)}
++                  </span>
++                  <button type="button" class="verevon-chat-goal-bar__stop" onClick={() => pump().stop()}>
++                    {i18n.tr('Stopp', 'Stop')}
++                  </button>
++                </>
++              )}
++            </Show>
++            <Show when={pump().stopReason()}>
++              {(reason) => (
++                <span class="verevon-chat-goal-bar__auto-stopped" data-reason={reason()}>
++                  {i18n.tr(STOP_LABEL[reason()].no, STOP_LABEL[reason()].en)}
++                </span>
++              )}
++            </Show>
++          </div>
++        )}
++      </Show>
+       <Show when={props.error}>
+         {(message) => (
+           <p class="verevon-chat-goal-bar__error" role="status">
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts
+index cbecf209a..885b64ebf 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts	
+@@ -225,6 +225,15 @@ import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-dr
+ import { createSnapshotWriter, flushOnPageLifecycle, parseSnapshotThrottleMs } from '../lib/snapshot-throttle'
+ import { nextFollowState, virtualizeTranscript } from '../lib/transcript-window'
+ import { isToolCallRunning } from '../lib/stream-activity'
++import { selectDockedTrays } from '../lib/composer-trays'
++import {
++  nextGoalAction,
++  settledGoalOutcome,
++  type GoalAutoContinueView,
++  type GoalPumpAction,
++  type GoalPumpStopReason,
++  type SettledGoalTurn,
++} from '../lib/goal-pump'
+ 
+ /**
+  * WS09 S3. `VITE_CHAT_SNAPSHOT_THROTTLE_MS` is the cadence of the local transcript
+@@ -2737,9 +2746,10 @@ export function useChatController() {
+    * Sends one turn toward the active goal (`chat.continue_goal`) through the ordinary send path, so
+    * the transcript shows it as the person's message. It names the goal, and its mode follows
+    * `goalContinuationMode`; the composer's Do toggle is left as it was. The client decides nothing the
+-   * server does not check again.
++   * server does not check again. `auto` marks a turn the goal pump sent after its countdown (EP-7 S4,
++   * `goal_auto`); it grants nothing.
+    */
+-  const continueGoal = async () => {
++  const continueGoal = async (options: { auto?: boolean } = {}) => {
+     const goal = threadGoal()
+     const threadId = state.threadId
+     if (!goal || goal.status !== 'active' || !goalThreadAllowed(threadId) || goal.threadId !== threadId) return
+@@ -2749,11 +2759,154 @@ export function useChatController() {
+       liveGrant: Boolean(grant && !grantHasLapsed(grant)),
+       turns: state.turns,
+     })
++    const turnsBefore = state.turns.length
+     await sendContent(i18n.tr('Fortsett mot målet', 'Continue toward the goal'), undefined, {
+       goalId: goal.id,
++      ...(options.auto ? { goalAuto: true } : {}),
+       planModeOverride: mode === 'plan',
+       ...(mode === 'execute' ? { executeGranted: true } : {}),
+     })
++    // The send awaits the run's stream, so the goal turn has ended here.
++    recordSettledGoalTurn(threadId, turnsBefore, goal.turnsUsed)
++  }
++
++  // The goal pump (EP-7 S4, owner decisions D4 and D5): with "Keep going" on, a goal turn that
++  // completed and that the judge did not find met is followed, after a visible five-second countdown,
++  // by the next Continue. `nextGoalAction` decides; this only runs the countdown and sends. Every
++  // decision that waits on the person stops it, a hidden tab holds it, and leaving the thread or
++  // closing the tab ends it. The server's claim refuses the same cases on its own.
++  const [goalAutoOn, setGoalAutoOn] = createSignal(false)
++  const [goalUserStopped, setGoalUserStopped] = createSignal(false)
++  const [goalSettled, setGoalSettled] = createSignal<SettledGoalTurn | null>(null)
++  const [goalSentFor, setGoalSentFor] = createSignal<string | null>(null)
++  const [goalCountdownDoneFor, setGoalCountdownDoneFor] = createSignal<string | null>(null)
++  const [goalCountdown, setGoalCountdown] = createSignal<number | null>(null)
++  const [goalStopReason, setGoalStopReason] = createSignal<GoalPumpStopReason | null>(null)
++  const [parkedTurnId, setParkedTurnId] = createSignal<string | null>(null)
++  const [pageVisible, setPageVisible] = createSignal(document.visibilityState !== 'hidden')
++  let goalCountdownTimer: number | undefined
++
++  /** Records how the goal turn the last Continue sent ended, then reads the goal for its verdict. */
++  const recordSettledGoalTurn = (threadId: string, turnsBefore: number, turnsUsedAtSend: number) => {
++    if (state.threadId !== threadId) return
++    // Only a turn this send added: a send that was delivered into a live run adds none.
++    const turn = state.turns.slice(turnsBefore).filter((candidate) => candidate.role === 'assistant').at(-1)
++    if (!turn || turn.streaming) return
++    setGoalSettled({
++      turnId: turn.id,
++      outcome: settledGoalOutcome({
++        status: turn.status,
++        pendingApprovals: turn.pendingApprovals,
++        questionPending: pendingQuestion() !== null,
++        parked: parkedTurnId() === turn.id,
++      }),
++      turnsUsedAtSend,
++    })
++    setGoalStopReason(null)
++    void refreshThreadGoal(threadId)
++  }
++
++  const stopGoalCountdown = () => {
++    if (goalCountdownTimer !== undefined) window.clearInterval(goalCountdownTimer)
++    goalCountdownTimer = undefined
++    setGoalCountdown(null)
++  }
++
++  const startGoalCountdown = (seconds: number) => {
++    setGoalStopReason(null)
++    setGoalCountdown(seconds)
++    let left = seconds
++    goalCountdownTimer = window.setInterval(() => {
++      left -= 1
++      if (left > 0) {
++        setGoalCountdown(left)
++        return
++      }
++      stopGoalCountdown()
++      const settled = untrack(goalSettled)
++      if (settled) setGoalCountdownDoneFor(settled.turnId)
++    }, 1000)
++  }
++
++  const goalPumpAction = createMemo<GoalPumpAction>(() => {
++    const goal = threadGoal()
++    const settled = goalSettled()
++    const trays = selectDockedTrays({ turns: state.turns, queuedInputs: [] })
++    const approvals = trays.find((tray) => tray.kind === 'approval')
++    const latest = state.turns.filter((turn) => turn.role === 'assistant').at(-1)
++    return nextGoalAction({
++      goal: goal && goal.threadId === state.threadId ? goal : null,
++      settled,
++      pending: {
++        approvals: approvals?.kind === 'approval' ? approvals.approvals.length : 0,
++        questions: pendingQuestion() ? 1 : 0,
++        plan: trays.some((tray) => tray.kind === 'plan'),
++        parked: latest !== undefined && parkedTurnId() === latest.id,
++      },
++      autoOn: goalAutoOn(),
++      userStopped: goalUserStopped(),
++      visible: pageVisible(),
++      busy: state.status === 'streaming' || goalPending(),
++      sentForSettled: settled !== null && goalSentFor() === settled.turnId,
++      countdownElapsed: settled !== null && goalCountdownDoneFor() === settled.turnId,
++    })
++  })
++
++  createEffect(goalPumpAction, (action) => {
++    if (action.kind === 'countdown') {
++      if (goalCountdownTimer === undefined) startGoalCountdown(action.seconds)
++      return
++    }
++    stopGoalCountdown()
++    if (action.kind === 'stop') setGoalStopReason(action.reason)
++    if (action.kind === 'send') {
++      const settled = untrack(goalSettled)
++      if (!settled) return
++      // Marked before the send, so one settled turn is followed by one turn at most.
++      setGoalSentFor(settled.turnId)
++      void continueGoal({ auto: true })
++    }
++  })
++
++  // A pump belongs to the thread it was started on.
++  createEffect(
++    () => state.threadId,
++    () => {
++      stopGoalCountdown()
++      setGoalAutoOn(false)
++      setGoalUserStopped(false)
++      setGoalSettled(null)
++      setGoalSentFor(null)
++      setGoalCountdownDoneFor(null)
++      setGoalStopReason(null)
++      setParkedTurnId(null)
++    },
++  )
++
++  const onGoalPageVisibility = () => setPageVisible(document.visibilityState !== 'hidden')
++  document.addEventListener('visibilitychange', onGoalPageVisibility)
++  onCleanup(() => {
++    document.removeEventListener('visibilitychange', onGoalPageVisibility)
++    stopGoalCountdown()
++  })
++
++  /** "Keep going" on the goal bar (`chat.goal_auto_toggle`), offered only when the server says so. */
++  const goalAutoContinue: GoalAutoContinueView = {
++    available: () => threadGoal()?.autoContinueAvailable === true,
++    on: goalAutoOn,
++    countdown: goalCountdown,
++    stopReason: goalStopReason,
++    setOn: (on) => {
++      setGoalUserStopped(false)
++      setGoalStopReason(null)
++      if (!on) stopGoalCountdown()
++      setGoalAutoOn(on)
++    },
++    stop: () => {
++      stopGoalCountdown()
++      setGoalAutoOn(false)
++      setGoalUserStopped(true)
++    },
+   }
+ 
+   /**
+@@ -3171,6 +3324,8 @@ export function useChatController() {
+         // EP-7 S1: a goal's Continue turn names its goal and its own mode; no other send sets either,
+         // so every other turn keeps the composer's plan mode exactly as before.
+         goalId?: string
++        // EP-7 S4: the goal pump sent this Continue turn; only `continueGoal({ auto: true })` sets it.
++        goalAuto?: boolean
+         planModeOverride?: boolean
+       } = {},
+   ) => {
+@@ -3562,6 +3717,7 @@ export function useChatController() {
+           planMode: turnPlanMode(),
+           // The goal a Continue turn works toward (EP-7 S1); absent on every other turn.
+           ...(options.goalId ? { goalId: options.goalId } : {}),
++          ...(options.goalId && options.goalAuto ? { goalAuto: true } : {}),
+           // Only the turn `sendContent` validated above; the wire builder drops it
+           // again on any turn that cannot execute. It carries no rung.
+           ...(executeGrant ? { executeGranted: true } : {}),
+@@ -3714,6 +3870,10 @@ export function useChatController() {
+             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
+             setPendingQuestion(question)
+           },
++          onRunParked: () => {
++            // EP-7 S4: a parked run stops the goal pump; the pump never resumes a park.
++            setParkedTurnId(assistantId)
++          },
+           onResearchPlan: (plan) => {
+             // EP-2 S5. Only a plan this build asked for gets a card; a temporary chat never has one.
+             if (!researchPlanTurnEnabled() || isTemporaryThread(state.threadId ?? activeThreadId)) return
+@@ -5112,6 +5272,8 @@ export function useChatController() {
+     setGoalPaused,
+     clearGoal,
+     continueGoal,
++    // EP-7 S4: "Keep going" on the goal bar, its countdown and Stop.
++    goalAutoContinue,
+     rejectTurnPlan,
+     planApprovalPending,
+     planApprovalError,
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.test.ts
+new file mode 100644
+index 000000000..feb1b277c
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.test.ts	
+@@ -0,0 +1,139 @@
++import { describe, expect, it } from 'vitest'
++import {
++  GOAL_PUMP_COUNTDOWN_SECONDS,
++  GOAL_PUMP_STOP_REASONS,
++  nextGoalAction,
++  settledGoalOutcome,
++  type GoalPumpInput,
++  type GoalPumpStopReason,
++} from './goal-pump'
++
++/** A goal turn that completed with `not_met`: the one case in which the pump counts down. */
++function input(overrides: Partial<GoalPumpInput> = {}): GoalPumpInput {
++  return {
++    goal: { status: 'active', turnsUsed: 2, maxTurns: 10, lastVerdict: 'not_met' },
++    settled: { turnId: 'asst-2', outcome: 'completed', turnsUsedAtSend: 1 },
++    pending: { approvals: 0, questions: 0, plan: false, parked: false },
++    autoOn: true,
++    userStopped: false,
++    visible: true,
++    busy: false,
++    sentForSettled: false,
++    countdownElapsed: false,
++    ...overrides,
++  }
++}
++
++const NONE = { approvals: 0, questions: 0, plan: false, parked: false }
++
++describe('nextGoalAction', () => {
++  it('counts down after a completed turn the judge did not find met, then sends once', () => {
++    expect(nextGoalAction(input())).toEqual({ kind: 'countdown', seconds: GOAL_PUMP_COUNTDOWN_SECONDS })
++    expect(nextGoalAction(input({ goal: { status: 'active', turnsUsed: 2, maxTurns: 10, lastVerdict: 'unsure' } }))).toEqual({
++      kind: 'countdown',
++      seconds: 5,
++    })
++    expect(nextGoalAction(input({ countdownElapsed: true }))).toEqual({ kind: 'send' })
++    // One send per settled turn: once it went, the pump waits for the next turn to settle.
++    expect(nextGoalAction(input({ countdownElapsed: true, sentForSettled: true }))).toEqual({ kind: 'wait' })
++  })
++
++  const stops: [GoalPumpStopReason, Partial<GoalPumpInput>][] = [
++    ['pending_approval', { pending: { ...NONE, approvals: 1 } }],
++    ['pending_question', { pending: { ...NONE, questions: 1 } }],
++    ['plan_proposed', { pending: { ...NONE, plan: true } }],
++    ['parked', { pending: { ...NONE, parked: true } }],
++    ['pending_approval', { settled: { turnId: 'asst-2', outcome: 'awaiting_approval', turnsUsedAtSend: 1 } }],
++    ['pending_question', { settled: { turnId: 'asst-2', outcome: 'awaiting_input', turnsUsedAtSend: 1 } }],
++    ['parked', { settled: { turnId: 'asst-2', outcome: 'parked', turnsUsedAtSend: 1 } }],
++    ['failed', { settled: { turnId: 'asst-2', outcome: 'failed', turnsUsedAtSend: 1 } }],
++    ['failed', { settled: { turnId: 'asst-2', outcome: 'unknown', turnsUsedAtSend: 1 } }],
++    ['user_stopped', { settled: { turnId: 'asst-2', outcome: 'cancelled', turnsUsedAtSend: 1 } }],
++    ['budget_reached', { goal: { status: 'budget_reached', turnsUsed: 2, maxTurns: 10, lastVerdict: 'not_met' } }],
++    ['turns_reached', { goal: { status: 'turns_reached', turnsUsed: 10, maxTurns: 10, lastVerdict: 'not_met' } }],
++    ['turns_reached', { goal: { status: 'active', turnsUsed: 10, maxTurns: 10, lastVerdict: 'not_met' } }],
++    ['met', { goal: { status: 'met', turnsUsed: 2, maxTurns: 10, lastVerdict: 'met' } }],
++    ['met', { goal: { status: 'active', turnsUsed: 2, maxTurns: 10, lastVerdict: 'met' } }],
++    ['blocked', { goal: { status: 'blocked', turnsUsed: 2, maxTurns: 10, lastVerdict: 'blocked' } }],
++    ['blocked', { goal: { status: 'active', turnsUsed: 2, maxTurns: 10, lastVerdict: 'blocked' } }],
++    ['user_stopped', { userStopped: true }],
++    ['hidden_tab', { visible: false }],
++  ]
++
++  it.each(stops)('stops with %s', (reason, overrides) => {
++    expect(nextGoalAction(input(overrides))).toEqual({ kind: 'stop', reason })
++    // A stop never turns into a send when the countdown would have ended.
++    expect(nextGoalAction(input({ ...overrides, countdownElapsed: true })).kind).toBe('stop')
++  })
++
++  it('names every stop reason in the table', () => {
++    expect(new Set(stops.map(([reason]) => reason))).toEqual(new Set(GOAL_PUMP_STOP_REASONS))
++  })
++
++  it('stops for a decision that waits on the person before anything else the turn says', () => {
++    // A stale `met` from an earlier turn never outranks an approval that waits now.
++    const waiting = input({
++      pending: { ...NONE, approvals: 1 },
++      goal: { status: 'active', turnsUsed: 2, maxTurns: 10, lastVerdict: 'met' },
++    })
++    expect(nextGoalAction(waiting)).toEqual({ kind: 'stop', reason: 'pending_approval' })
++  })
++
++  it('reads a takeover that waits as a pending approval, and one that expired as failed, never met (round B C-B5)', () => {
++    // The turn waits on browser_human_assist: an approval row the person decides.
++    expect(
++      nextGoalAction(input({ settled: { turnId: 'asst-2', outcome: 'awaiting_approval', turnsUsedAtSend: 1 } })),
++    ).toEqual({ kind: 'stop', reason: 'pending_approval' })
++    // The takeover expired: the turn failed, and a `met` left on the goal by an earlier turn is not read.
++    const expired = input({
++      settled: { turnId: 'asst-3', outcome: 'failed', turnsUsedAtSend: 2 },
++      goal: { status: 'active', turnsUsed: 3, maxTurns: 10, lastVerdict: 'met' },
++    })
++    expect(nextGoalAction(expired)).toEqual({ kind: 'stop', reason: 'failed' })
++  })
++
++  it('pauses on a hidden tab and counts down again in full when it is shown', () => {
++    expect(nextGoalAction(input({ visible: false, countdownElapsed: true }))).toEqual({ kind: 'stop', reason: 'hidden_tab' })
++    expect(nextGoalAction(input({ visible: true }))).toEqual({ kind: 'countdown', seconds: GOAL_PUMP_COUNTDOWN_SECONDS })
++  })
++
++  it('waits while it has nothing to act on', () => {
++    expect(nextGoalAction(input({ autoOn: false }))).toEqual({ kind: 'wait' })
++    expect(nextGoalAction(input({ goal: null }))).toEqual({ kind: 'wait' })
++    expect(nextGoalAction(input({ busy: true }))).toEqual({ kind: 'wait' })
++    // The first goal turn is the person's Continue.
++    expect(nextGoalAction(input({ settled: null }))).toEqual({ kind: 'wait' })
++    // A paused goal is the person's own pause.
++    expect(nextGoalAction(input({ goal: { status: 'paused', turnsUsed: 2, maxTurns: 10, lastVerdict: 'not_met' } }))).toEqual({
++      kind: 'wait',
++    })
++  })
++
++  it('never continues without a fresh verdict', () => {
++    // The judge is off or has not answered.
++    expect(nextGoalAction(input({ goal: { status: 'active', turnsUsed: 2, maxTurns: 10 } }))).toEqual({ kind: 'wait' })
++    // The goal still shows the previous turn's verdict: its turn count has not moved past the send.
++    expect(
++      nextGoalAction(input({ settled: { turnId: 'asst-2', outcome: 'completed', turnsUsedAtSend: 2 } })),
++    ).toEqual({ kind: 'wait' })
++  })
++
++  it('lets the person stop a countdown', () => {
++    expect(nextGoalAction(input()).kind).toBe('countdown')
++    expect(nextGoalAction(input({ userStopped: true, autoOn: false }))).toEqual({ kind: 'stop', reason: 'user_stopped' })
++  })
++})
++
++describe('settledGoalOutcome', () => {
++  const base = { questionPending: false, parked: false }
++
++  it('reads how the turn ended from what the client saw', () => {
++    expect(settledGoalOutcome(base)).toBe('completed')
++    expect(settledGoalOutcome({ ...base, parked: true, pendingApprovals: [{}] })).toBe('parked')
++    expect(settledGoalOutcome({ ...base, pendingApprovals: [{}] })).toBe('awaiting_approval')
++    expect(settledGoalOutcome({ ...base, questionPending: true })).toBe('awaiting_input')
++    expect(settledGoalOutcome({ ...base, status: 'stopped' })).toBe('cancelled')
++    expect(settledGoalOutcome({ ...base, status: 'error' })).toBe('failed')
++    expect(settledGoalOutcome({ ...base, status: 'waiting' })).toBe('unknown')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.ts b/apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.ts
+new file mode 100644
+index 000000000..ff11c51e2
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/lib/goal-pump.ts	
+@@ -0,0 +1,223 @@
++/**
++ * The goal pump: attended auto-continue of a thread goal (EP-7 S4, owner decisions D4 and D5).
++ *
++ * With "Keep going" on, after a goal turn ends `completed` and the judge says `not_met` or
++ * `unsure`, the goal bar counts down five seconds ("Continuing in 5 s - Stop") and sends the next
++ * continuation turn through the ordinary send path. Each turn is a request of its own, made while
++ * the person has the thread open (D4); closing the tab stops the goal.
++ *
++ * This module is the decision only: pure data in, one action out, no timers and no sends. The
++ * controller runs the countdown and sends. The pump never approves, answers or resumes anything
++ * (D5): any decision that waits on the person stops it, and so does every cap, a met or blocked
++ * goal, a failed or parked turn, and Stop. A hidden tab holds the countdown and never sends, so
++ * "attended" means seen; the countdown starts again in full when the tab is shown. The server
++ * enforces the same rule on its own (`thread_goal_pending_decision`), for a stale or a hostile
++ * client, and caps claims at 30 per goal per hour.
++ */
++
++import type { ThreadGoal } from '@/shared/api/thread-goal-client'
++
++/** D4 default: the visible countdown before a turn the pump sends. */
++export const GOAL_PUMP_COUNTDOWN_SECONDS = 5
++
++/** Why the pump stopped. A closed set: the goal bar names each one. */
++export type GoalPumpStopReason =
++  | 'pending_approval'
++  | 'pending_question'
++  | 'plan_proposed'
++  | 'parked'
++  | 'failed'
++  | 'budget_reached'
++  | 'turns_reached'
++  | 'met'
++  | 'blocked'
++  | 'user_stopped'
++  | 'hidden_tab'
++
++export const GOAL_PUMP_STOP_REASONS: readonly GoalPumpStopReason[] = [
++  'pending_approval',
++  'pending_question',
++  'plan_proposed',
++  'parked',
++  'failed',
++  'budget_reached',
++  'turns_reached',
++  'met',
++  'blocked',
++  'user_stopped',
++  'hidden_tab',
++]
++
++/** How a goal turn ended, as the gateway classifies a finished Do run (EP-7 S2 settle outcomes). */
++export type GoalTurnOutcome =
++  | 'completed'
++  | 'failed'
++  | 'awaiting_approval'
++  | 'awaiting_input'
++  | 'parked'
++  | 'cancelled'
++  | 'unknown'
++
++/** The last goal turn that ended, and how many turns the goal had used when it was sent. */
++export type SettledGoalTurn = {
++  /** The assistant turn it ended in: the pump sends at most once per settled turn. */
++  turnId: string
++  outcome: GoalTurnOutcome
++  /** `goal.turnsUsed` when the turn was sent; a verdict counts only once the count moved past it. */
++  turnsUsedAtSend: number
++}
++
++/** What waits on the person on this thread, as the composer dock shows it. */
++export type GoalPumpPending = {
++  approvals: number
++  questions: number
++  plan: boolean
++  parked: boolean
++}
++
++export type GoalPumpInput = {
++  goal: Pick<ThreadGoal, 'status' | 'turnsUsed' | 'maxTurns' | 'lastVerdict'> | null
++  settled: SettledGoalTurn | null
++  pending: GoalPumpPending
++  /** "Keep going" is on. */
++  autoOn: boolean
++  /** The person pressed Stop since "Keep going" was last turned on. */
++  userStopped: boolean
++  /** `document.visibilityState` is not `hidden`. */
++  visible: boolean
++  /** A turn is running on the thread. */
++  busy: boolean
++  /** The pump already sent the turn that follows `settled`. */
++  sentForSettled: boolean
++  /** The countdown for `settled` ran to zero while the tab was shown. */
++  countdownElapsed: boolean
++}
++
++export type GoalPumpAction =
++  | { kind: 'wait' }
++  | { kind: 'countdown'; seconds: number }
++  | { kind: 'send' }
++  | { kind: 'stop'; reason: GoalPumpStopReason }
++
++const WAIT: GoalPumpAction = { kind: 'wait' }
++
++function stop(reason: GoalPumpStopReason): GoalPumpAction {
++  return { kind: 'stop', reason }
++}
++
++/** The stop a goal's own status names, or `null` while it may continue. */
++function statusStop(status: ThreadGoal['status']): GoalPumpStopReason | null {
++  switch (status) {
++    case 'met':
++      return 'met'
++    case 'blocked':
++      return 'blocked'
++    case 'budget_reached':
++      return 'budget_reached'
++    case 'turns_reached':
++      return 'turns_reached'
++    default:
++      return null
++  }
++}
++
++/** The stop a settled turn's outcome names, or `null` for a turn that completed. */
++function outcomeStop(outcome: GoalTurnOutcome): GoalPumpStopReason | null {
++  switch (outcome) {
++    case 'completed':
++      return null
++    case 'awaiting_approval':
++      return 'pending_approval'
++    case 'awaiting_input':
++      return 'pending_question'
++    case 'parked':
++      return 'parked'
++    case 'cancelled':
++      return 'user_stopped'
++    // A failed run, a takeover that expired (round B C-B5) and anything this build does not know
++    // read as failed: never as met, and never continued.
++    default:
++      return 'failed'
++  }
++}
++
++/**
++ * The pump's next action. The order is fixed: the person's own Stop first, then the goal's status,
++ * then anything waiting on the person, then how the last turn ended, the turn cap, the verdict, and
++ * only then the countdown and the send.
++ */
++export function nextGoalAction(input: GoalPumpInput): GoalPumpAction {
++  if (input.userStopped) return stop('user_stopped')
++  if (!input.autoOn || !input.goal || input.busy) return WAIT
++  const closed = statusStop(input.goal.status)
++  if (closed) return stop(closed)
++  // A paused goal is the person's own pause: nothing to stop, nothing to send.
++  if (input.goal.status !== 'active') return WAIT
++  if (input.pending.approvals > 0) return stop('pending_approval')
++  if (input.pending.questions > 0) return stop('pending_question')
++  if (input.pending.plan) return stop('plan_proposed')
++  if (input.pending.parked) return stop('parked')
++  // The first goal turn is always the person's Continue; the pump only follows a settled one.
++  if (!input.settled) return WAIT
++  const ended = outcomeStop(input.settled.outcome)
++  if (ended) return stop(ended)
++  const maxTurns = input.goal.maxTurns ?? 0
++  if (maxTurns > 0 && input.goal.turnsUsed >= maxTurns) return stop('turns_reached')
++  // The verdict must be the one for the settled turn: until the goal's turn count moved past the
++  // count at send, the verdict on the goal is the previous turn's, so the pump waits for the read.
++  if (input.goal.turnsUsed <= input.settled.turnsUsedAtSend) return WAIT
++  switch (input.goal.lastVerdict) {
++    case 'met':
++      return stop('met')
++    case 'blocked':
++      return stop('blocked')
++    case 'not_met':
++    case 'unsure':
++      break
++    // No verdict (the judge is off or has not answered): nothing to continue on.
++    default:
++      return WAIT
++  }
++  if (input.sentForSettled) return WAIT
++  if (!input.visible) return stop('hidden_tab')
++  if (input.countdownElapsed) return { kind: 'send' }
++  return { kind: 'countdown', seconds: GOAL_PUMP_COUNTDOWN_SECONDS }
++}
++
++/**
++ * How a finished goal turn ended, from what the client saw of it. A turn that left an approval or a
++ * question open stopped for the person; a parked run stopped on a recoverable failure; a turn the
++ * person stopped was cancelled. The server's claim is the authority either way.
++ */
++export function settledGoalOutcome(turn: {
++  status?: 'waiting' | 'stopped' | 'error'
++  pendingApprovals?: readonly unknown[]
++  questionPending: boolean
++  parked: boolean
++}): GoalTurnOutcome {
++  if (turn.parked) return 'parked'
++  if ((turn.pendingApprovals ?? []).length > 0) return 'awaiting_approval'
++  if (turn.questionPending) return 'awaiting_input'
++  if (turn.status === 'stopped') return 'cancelled'
++  if (turn.status === 'error') return 'failed'
++  // A turn still waiting for its first frame did not end in a way the client can read.
++  if (turn.status === 'waiting') return 'unknown'
++  return 'completed'
++}
++
++/**
++ * What the goal bar shows of the pump and the two things it can do there, read as accessors so the
++ * bar follows the controller. `available` is the server's word (`autoContinueAvailable` on the goal
++ * read): the toggle is hidden without it.
++ */
++export type GoalAutoContinueView = {
++  available: () => boolean
++  on: () => boolean
++  /** Seconds left before the pump sends, while it counts down. */
++  countdown: () => number | null
++  /** Why the pump stopped last, until "Keep going" is turned on again or a turn settles. */
++  stopReason: () => GoalPumpStopReason | null
++  setOn: (on: boolean) => void
++  /** Cancels a countdown and turns "Keep going" off. */
++  stop: () => void
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index ad0ec3836..4abba8615 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -845,6 +845,30 @@ describe('action registry', () => {
+     expect(go?.safeParse({ threadId: 't1' }).success).toBe(false)
+   })
+ 
++  it('registers Keep going as a person-only switch that grants nothing (EP-7-S4)', () => {
++    expect(getActionDescriptor('chat.goal_auto_toggle')).toMatchObject({
++      ownerPlane: 'model',
++      risk: 'medium',
++      requiresApproval: false,
++      reversible: true,
++    })
++    // A goal never continues itself: the model can neither run the pump nor turn it on.
++    expect(isModelExecutableAction('chat.goal_auto_toggle')).toBe(false)
++
++    const toggle = getActionDescriptor('chat.goal_auto_toggle')?.inputSchema
++    expect(toggle?.safeParse({ threadId: 't1', goalId: 'goal_1', on: true }).success).toBe(true)
++    expect(toggle?.safeParse({ threadId: 't1', goalId: 'goal_1', on: false }).success).toBe(true)
++    for (const input of [
++      { threadId: 't1', goalId: 'goal_1' },
++      { threadId: 't1', on: true },
++      { threadId: 't1', goalId: 'goal_1', on: 'true' },
++      // A switch carries no approval: the pump never decides anything for the person.
++      { threadId: 't1', goalId: 'goal_1', on: true, approve: true },
++    ]) {
++      expect(toggle?.safeParse(input).success).toBe(false)
++    }
++  })
++
+   it('registers artifact edit and restore as reversible person-only writes (EP-3-S4)', () => {
+     const save = getActionDescriptor('chat.save_artifact_revision')
+     const restore = getActionDescriptor('chat.restore_artifact_revision')
+@@ -1404,7 +1428,8 @@ describe('action registry', () => {
+     // +2 after EP-5-S7 registered chat.list_deck_templates and chat.apply_deck_template, the template picker.
+     // +4 after EP-7-S1 registered chat.set_goal, chat.update_goal, chat.clear_goal and chat.continue_goal.
+     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+-    expect(ids).toHaveLength(293)
++    // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
++    expect(ids).toHaveLength(294)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index b5be2a032..8f8c30fc2 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1315,6 +1315,17 @@ const chatContinueGoalInput = z
+   })
+   .strict()
+ 
++// "Keep going" on the goal bar (EP-7 S4): the person's own switch for the goal pump on one thread. It
++// is held in the open tab only and grants nothing: each turn the pump sends is claimed by the server,
++// which refuses while a decision waits on the person.
++const chatGoalAutoToggleInput = z
++  .object({
++    threadId: z.string().min(1).max(128),
++    goalId: z.string().min(1).max(128),
++    on: z.boolean(),
++  })
++  .strict()
++
+ // The org-admin schemas below all describe operations whose owner requires
+ // require_org_admin (or, for the two self-service deletion checkpoints,
+ // require_active_org) — enforced server-side, not by this schema. Getting the
+@@ -4509,6 +4520,17 @@ export const actionRegistry = [
+     inputSchema: chatContinueGoalInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.goal_auto_toggle',
++    label: 'Keep going toward the goal',
++    description: 'Turn the goal bar\'s "Keep going" on or off for the open conversation. While it is on, after a goal turn completes and the judge did not find the goal met, the bar counts down five seconds, with Stop, and sends the next Continue; a hidden tab never sends. It stops on any pending approval, question, proposed plan or parked run, on a failed turn, on a cap, and on a met or blocked goal, and it never approves anything. The server refuses a pump-sent turn with goal_auto_disabled while the feature is off and refuses every goal turn with thread_goal_pending_decision while a decision waits. Never model-executable: a goal never continues itself.',
++    ownerPlane: 'model',
++    risk: 'medium',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatGoalAutoToggleInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'audio.transcribe',
+     label: 'Transcribe audio',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts
+index ca8fbfe08..92761ce07 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts	
+@@ -257,6 +257,12 @@ export type ChatInvokeRequest = {
+   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+   /** The thread goal a Continue turn works toward (EP-7 S1). Sent as `goal_id` only when set, never on a zero-retention turn. */
+   goalId?: string
++  /**
++   * The goal pump sent this Continue turn after its countdown, not the person (EP-7 S4). Sent as
++   * `goal_auto` only beside a `goal_id`; it grants nothing and the gateway refuses it while
++   * auto-continue is off.
++   */
++  goalAuto?: boolean
+   content: string
+   model?: string
+   /** Explicit provider route for a user-owned model subscription. */
+@@ -2100,6 +2106,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
+     ...(deckTemplate ? { deck_template: deckTemplate } : {}),
+     // The goal of a Continue turn (EP-7 S1): omitted on every other turn, so an ordinary body is unchanged.
+     ...(request.goalId && !request.zdr ? { goal_id: request.goalId } : {}),
++    // A pump-sent Continue turn (EP-7 S4) says so, and only beside its goal; every other body is unchanged.
++    ...(request.goalId && request.goalAuto && !request.zdr ? { goal_auto: true } : {}),
+     attachments: request.attachments ?? [],
+     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
+     // nothing is pinned, so an ordinary turn's body is byte-identical to
+diff --git a/apps/Frontend Plane/verevonv3/tests/e2e/goal-auto-continue.spec.ts b/apps/Frontend Plane/verevonv3/tests/e2e/goal-auto-continue.spec.ts
+new file mode 100644
+index 000000000..220bc6fb0
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/tests/e2e/goal-auto-continue.spec.ts	
+@@ -0,0 +1,184 @@
++import { expect, test, type Page, type Route } from '@playwright/test'
++
++/**
++ * "Keep going" on the thread goal bar (EP-7 S4), in the browser against a mocked API.
++ *
++ * The chat stream, the goal read and the run's approvals are answered by this spec (`page.route`),
++ * so no model is called. The mocked goal plays the judge: after each goal turn it reports one more
++ * turn used and the verdict `not_met`, then `met` after the third. What is checked:
++ *
++ *  - with Keep going on, a completed goal turn is followed by a visible countdown and one more
++ *    Continue that says it was pump-sent (`goal_auto: true` beside `goal_id`), until the goal is met;
++ *  - an approval that waits on the person stops the pump, and nothing more is sent;
++ *  - Stop cancels a countdown, and nothing more is sent.
++ *
++ * The goal bar needs the gateway's goal routes, which this spec mocks, so any dev server serving
++ * this branch will do (5173 is the main checkout):
++ *
++ *   E2E_GOAL_AUTO=1 LOCAL_E2E_BASE_URL=http://localhost:5174 pnpm exec playwright test --project=chat tests/e2e/goal-auto-continue.spec.ts
++ */
++
++const ENABLED = process.env.E2E_GOAL_AUTO === '1'
++const STREAM_PATH = '/api/v1/chat/stream'
++const THREAD_ID = 'goal-thread-1'
++const GOAL_ID = 'goal_auto_1'
++const COMPOSER = 'form textarea'
++/** Longer than the five-second countdown, so a send that was going to happen has happened. */
++const PAST_COUNTDOWN_MS = 7_000
++
++/** One server-sent event: `event:` names the frame, `data:` carries its JSON payload. */
++function frame(event: string, data: Record<string, unknown>): string {
++  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
++}
++
++/** A turn that answers and completes; `paused` leaves its run waiting on an approval instead. */
++function turn(index: number, paused = false): string {
++  const runId = `run_goal_${index}`
++  return [
++    frame('connected', { ok: true, request_id: `goal-req-${index}`, thread_id: THREAD_ID, run_id: runId }),
++    frame('chunk', { delta: `Round ${index} of the work. ` }),
++    ...(paused ? [frame('step_update', { id: runId, status: 'paused', title: 'Approval' })] : []),
++    frame('done', { request_id: `goal-req-${index}`, done: true, model_used: 'balanced' }),
++  ].join('')
++}
++
++const json = (route: Route, status: number, body: unknown) =>
++  route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
++
++type Mocks = {
++  /** Every stream body the page sent. */
++  bodies: Record<string, unknown>[]
++  /** The goal turn (1-based) whose run waits on an approval, if any. */
++  approvalOnGoalTurn?: number
++  /** The run of that turn, once it was sent: the only run with an approval. */
++  pausedRunId?: string
++}
++
++/** The goal turns the page sent: every stream body that names the goal. */
++const goalTurns = (mocks: Mocks) => mocks.bodies.filter((body) => body.goal_id === GOAL_ID)
++
++async function mockApi(page: Page, mocks: Mocks) {
++  await page.route(`**${STREAM_PATH}`, (route) => {
++    if (route.request().method() !== 'POST') return route.continue()
++    const body = route.request().postDataJSON() as Record<string, unknown>
++    mocks.bodies.push(body)
++    const goalTurn = goalTurns(mocks).length
++    const paused = body.goal_id === GOAL_ID && goalTurn === mocks.approvalOnGoalTurn
++    if (paused) mocks.pausedRunId = `run_goal_${mocks.bodies.length}`
++    return route.fulfill({ status: 200, contentType: 'text/event-stream', body: turn(mocks.bodies.length, paused) })
++  })
++  await page.route(`**/api/v1/chat/threads/${THREAD_ID}/goal`, (route) => {
++    // The judge, played by the mock: one more turn used per goal turn, met after the third.
++    const used = goalTurns(mocks).length
++    const met = used >= 3
++    return json(route, 200, {
++      data: {
++        found: true,
++        autoContinueAvailable: true,
++        goal: {
++          id: GOAL_ID,
++          threadId: THREAD_ID,
++          objective: 'Find three EU suppliers with a website each',
++          successCriteria: ['Three suppliers', 'A website for each'],
++          status: met ? 'met' : 'active',
++          maxTurns: 10,
++          revision: 1,
++          tokensUsed: 0,
++          costUsedUsdMicros: 0,
++          turnsUsed: used,
++          ...(used > 0 ? { lastVerdict: met ? 'met' : 'not_met' } : {}),
++          createdAt: '2026-11-04T08:00:00Z',
++          updatedAt: '2026-11-04T08:00:00Z',
++        },
++      },
++    })
++  })
++  await page.route('**/api/v1/orchestration/runs/*/approvals', (route) => {
++    const runId = route.request().url().split('/runs/')[1]?.split('/')[0]
++    const approvals =
++      runId && runId === mocks.pausedRunId
++        ? [
++            {
++              id: 'appr_goal_1',
++              run_id: runId,
++              kind: 'APPROVAL_KIND_TOOL_CALL',
++              state: 'APPROVAL_STATE_REQUESTED',
++              reason: 'open a supplier site',
++            },
++          ]
++        : []
++    return json(route, 200, { data: { approvals } })
++  })
++}
++
++/** Opens a thread, waits for its goal bar and turns Keep going on. */
++async function openGoal(page: Page) {
++  await page.addInitScript(() => window.localStorage.setItem('verevon.locale', 'en'))
++  await page.goto('/chat')
++  const composer = page.locator(COMPOSER)
++  await expect(composer).toBeVisible()
++  await composer.fill('Find three EU suppliers')
++  await page.locator('form button[type="submit"]').click()
++  const bar = page.locator('.verevon-chat-goal-bar')
++  await expect(bar).toBeVisible()
++  const toggle = bar.getByRole('switch', { name: 'Keep going' })
++  await toggle.click()
++  await expect(toggle).toHaveAttribute('aria-checked', 'true')
++  return bar
++}
++
++test.describe('goal Keep going (EP-7-S4)', () => {
++  test.skip(!ENABLED, 'E2E_GOAL_AUTO=1 and a dev server serving this branch are needed')
++
++  test('three goal turns, the last two sent by the pump, then the goal is met', async ({ page }) => {
++    test.setTimeout(90_000)
++    const mocks: Mocks = { bodies: [] }
++    await mockApi(page, mocks)
++    const bar = await openGoal(page)
++
++    await bar.getByRole('button', { name: 'Continue', exact: true }).click()
++    await expect(bar.getByRole('timer')).toContainText('Continuing in')
++    await page.screenshot({ path: test.info().outputPath('goal-auto-countdown.png') })
++
++    await expect.poll(() => goalTurns(mocks).length, { timeout: 20_000 }).toBe(3)
++    const [first, second, third] = goalTurns(mocks)
++    // The person's Continue carries no mark; each pump-sent turn says so, beside its goal.
++    expect(first?.goal_auto).toBeUndefined()
++    expect(second?.goal_auto).toBe(true)
++    expect(third?.goal_auto).toBe(true)
++
++    await expect(bar.locator('.verevon-chat-goal-bar__status')).toHaveAttribute('data-status', 'met')
++    await page.waitForTimeout(PAST_COUNTDOWN_MS)
++    expect(goalTurns(mocks)).toHaveLength(3)
++  })
++
++  test('an approval that waits on the person stops the pump', async ({ page }) => {
++    test.setTimeout(60_000)
++    const mocks: Mocks = { bodies: [], approvalOnGoalTurn: 2 }
++    await mockApi(page, mocks)
++    const bar = await openGoal(page)
++
++    await bar.getByRole('button', { name: 'Continue', exact: true }).click()
++    await expect.poll(() => goalTurns(mocks).length, { timeout: 15_000 }).toBe(2)
++    await page.waitForTimeout(PAST_COUNTDOWN_MS)
++    // The pump never sends past the approval, and never decides it.
++    expect(goalTurns(mocks)).toHaveLength(2)
++    await expect(bar.getByRole('timer')).toHaveCount(0)
++  })
++
++  test('Stop cancels a countdown', async ({ page }) => {
++    test.setTimeout(60_000)
++    const mocks: Mocks = { bodies: [] }
++    await mockApi(page, mocks)
++    const bar = await openGoal(page)
++
++    await bar.getByRole('button', { name: 'Continue', exact: true }).click()
++    await expect(bar.getByRole('timer')).toBeVisible()
++    await bar.getByRole('button', { name: 'Stop', exact: true }).click()
++    await expect(bar.getByRole('timer')).toHaveCount(0)
++    await expect(bar.getByRole('switch', { name: 'Keep going' })).toHaveAttribute('aria-checked', 'false')
++    await expect(bar.locator('.verevon-chat-goal-bar__auto-stopped')).toHaveAttribute('data-reason', 'user_stopped')
++    await page.waitForTimeout(PAST_COUNTDOWN_MS)
++    expect(goalTurns(mocks)).toHaveLength(1)
++  })
++})
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/goal_auto.rs b/apps/Model Plane/rust/services/model-gateway/src/goal_auto.rs
+new file mode 100644
+index 000000000..7b5c7ccbb
+--- /dev/null
++++ b/apps/Model Plane/rust/services/model-gateway/src/goal_auto.rs	
+@@ -0,0 +1,155 @@
++//! Attended auto-continue of a thread goal (Wave 3 EP-7 S4, owner decisions D4 and D5).
++//!
++//! With "Keep going" on, the goal bar sends the next continuation turn itself after a visible
++//! countdown (D4): each such turn is an ordinary user-present request whose bearer is minted for
++//! it, and closing the tab stops the goal. The turn says so with `InvokeRequest.goal_auto`. The
++//! field grants nothing: it marks the run for audit (`runs.metadata.goal_auto`, stamped by
++//! session-core when the goal turn's run is bound, see [`mark`]) and is refused here unless the
++//! feature is on and the turn is a Do turn naming its goal. Admission stays session-core's: every
++//! goal turn, pump-sent or not, is claimed, and the claim refuses while an approval, question,
++//! proposed plan or park waits on the owner, or past 30 claims per goal per hour (D5).
++//!
++//! The switch is `MODEL_GATEWAY_GOAL_AUTO_CONTINUE`, default off. The goal bar offers the toggle
++//! only when `GET /v1/threads/:thread_id/goal` reports `autoContinueAvailable`, which is true only
++//! while this switch, the thread goals switch and the goal judge's switch are all on: without a
++//! verdict the pump has nothing to continue on.
++
++/// The switch. Opt-in: only the literal `true` enables it.
++pub const ENABLED_ENV: &str = "MODEL_GATEWAY_GOAL_AUTO_CONTINUE";
++
++/// The refusal of a pump-sent turn while auto-continue is not available.
++pub const DISABLED_CODE: &str = "goal_auto_disabled";
++
++/// The gRPC request header session-core reads when it binds a goal turn's run; it stamps the run
++/// `goal_auto`. Only the literal `true` counts. Session-core holds the same name.
++pub const GOAL_AUTO_HEADER: &str = "x-goal-auto";
++
++/// Whether the switch is on in this process. Read at each call, as the other turn switches are.
++#[must_use]
++pub fn enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
++}
++
++/// Whether the pump may run on this deployment: auto-continue, thread goals and the judge are all
++/// on. This is what the goal read reports as `autoContinueAvailable`.
++#[must_use]
++pub fn available() -> bool {
++    enabled() && crate::thread_goal_routes::enabled() && crate::goal_judge::goal_judge_enabled()
++}
++
++/// The typed refusal of a turn that says it was sent by the pump, or `None`. A turn without the
++/// mark is never refused here, so every other turn is what it was before the field existed.
++#[must_use]
++pub fn refusal(
++    goal_auto: bool,
++    available: bool,
++    agentic: bool,
++    goal_id: Option<&str>,
++) -> Option<(&'static str, &'static str)> {
++    if !goal_auto {
++        return None;
++    }
++    if !available {
++        return Some((
++            DISABLED_CODE,
++            "automatic goal continuation is not enabled on this deployment",
++        ));
++    }
++    // A pump turn continues a goal on a Do turn; anything else is a malformed request.
++    if !agentic || goal_id.map_or(true, |id| id.trim().is_empty()) {
++        return Some(("invalid_request", "goal_auto needs a Do turn naming its goal"));
++    }
++    None
++}
++
++/// Marks a session-core request as sent by the pump. A turn without the mark sends no header, so
++/// its request is byte-identical to before.
++pub fn mark<T>(request: &mut tonic::Request<T>, goal_auto: bool) {
++    if goal_auto {
++        request.metadata_mut().insert(
++            GOAL_AUTO_HEADER,
++            tonic::metadata::MetadataValue::from_static("true"),
++        );
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn goal_auto_refused_when_switch_off() {
++        assert_eq!(
++            refusal(true, false, true, Some("goal_1")).map(|(code, _)| code),
++            Some(DISABLED_CODE)
++        );
++        // Off, a turn without the mark is never refused, whatever else it carries.
++        assert_eq!(refusal(false, false, true, Some("goal_1")), None);
++        assert_eq!(refusal(false, false, false, None), None);
++    }
++
++    #[test]
++    fn goal_auto_needs_a_do_turn_naming_its_goal() {
++        assert_eq!(refusal(true, true, true, Some("goal_1")), None);
++        for (agentic, goal_id) in [(false, Some("goal_1")), (true, None), (true, Some("  "))] {
++            assert_eq!(
++                refusal(true, true, agentic, goal_id).map(|(code, _)| code),
++                Some("invalid_request"),
++                "{agentic} {goal_id:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn goal_auto_switch_reads_literal_true_only() {
++        assert!(!mp_contracts::loop_fold::switch_from(None));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("1")));
++        assert!(!mp_contracts::loop_fold::switch_from(Some("TRUE")));
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++    }
++
++    #[test]
++    fn goal_auto_marks_only_a_pump_turn() {
++        let mut plain = tonic::Request::new(());
++        mark(&mut plain, false);
++        assert!(plain.metadata().get(GOAL_AUTO_HEADER).is_none());
++        let mut pumped = tonic::Request::new(());
++        mark(&mut pumped, true);
++        assert_eq!(
++            pumped
++                .metadata()
++                .get(GOAL_AUTO_HEADER)
++                .and_then(|value| value.to_str().ok()),
++            Some("true")
++        );
++    }
++
++    #[test]
++    fn goal_auto_invoke_field_defaults_off() {
++        let plain: crate::http_routes::InvokeRequest =
++            serde_json::from_value(serde_json::json!({"content": "hi"})).unwrap();
++        assert!(!plain.goal_auto);
++        let pumped: crate::http_routes::InvokeRequest = serde_json::from_value(
++            serde_json::json!({"content": "hi", "goalId": "goal_1", "goalAuto": true}),
++        )
++        .unwrap();
++        assert!(pumped.goal_auto);
++    }
++
++    #[test]
++    fn goal_auto_check_sits_before_the_run_is_prepared() {
++        let source = include_str!("sse.rs").replace("\r\n", "\n");
++        let start = source
++            .find("pub async fn invoke_stream_sse(")
++            .expect("the invoke handler");
++        let rest = &source[start..];
++        let body = &rest[..rest.find("\n}\n").expect("the end of the handler")];
++        let check = body
++            .find("crate::goal_auto::refusal(")
++            .expect("the goal_auto check");
++        let prepare = body
++            .find("prepare_managed_run_authenticated_with_receipt(")
++            .expect("the run preparation");
++        assert!(check < prepare, "a goal_auto refusal leaves no run behind");
++    }
++}
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index bc949539d..f0d849b57 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -10446,6 +10446,13 @@ pub struct InvokeRequest {
+     /// is refused with the `thread_goal` feature whatever the switch says.
+     #[serde(default, alias = "goalId")]
+     pub goal_id: Option<String>,
++    /// Wave 3 EP-7 S4 — the turn was sent by the goal bar's "Keep going" pump after its countdown,
++    /// not typed. It grants nothing: it marks the run for audit (`runs.metadata.goal_auto`, through
++    /// [`crate::goal_auto::mark`]) and is refused `goal_auto_disabled` before any run exists unless
++    /// `MODEL_GATEWAY_GOAL_AUTO_CONTINUE` is on ([`crate::goal_auto::refusal`]). Every goal turn is
++    /// still claimed by session-core, which refuses while a decision waits on the owner.
++    #[serde(default, alias = "goalAuto")]
++    pub goal_auto: bool,
+ }
+ 
+ /// The switch of the wide-research entry (Wave 3 EP-2 S8). Opt-in: only the literal `true` enables
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index ae4fc3ca3..87d05f3e9 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -2746,6 +2746,17 @@ pub async fn invoke_stream_sse(
+             return error_stream(&request_id, PLAN_GRANT_UNAVAILABLE, PLAN_GRANT_UNAVAILABLE_MESSAGE, false);
+         }
+     }
++    // A turn the goal pump sent (Wave 3 EP-7 S4) is refused here, before any run exists, unless
++    // auto-continue is available and the turn is a Do turn naming its goal. A turn without the mark
++    // is never refused here: with MODEL_GATEWAY_GOAL_AUTO_CONTINUE off every other turn is as it was.
++    if let Some((code, message)) = crate::goal_auto::refusal(
++        req.goal_auto,
++        crate::goal_auto::available(),
++        agentic_requested,
++        req.goal_id.as_deref(),
++    ) {
++        return error_stream(&request_id, code, message, false);
++    }
+     // The thread goal (Wave 3 EP-7 S1), decided before any run exists: a Do turn recites the
+     // thread's active goal as data, and a Continue turn whose `goal_id` is not that goal is refused.
+     // With MODEL_GATEWAY_THREAD_GOALS_ENABLED off nothing is read and the run is what it was.
+diff --git a/apps/Model Plane/rust/services/session-core/src/thread_goals.rs b/apps/Model Plane/rust/services/session-core/src/thread_goals.rs
+index 620b7ce80..8e960acb4 100644
+--- a/apps/Model Plane/rust/services/session-core/src/thread_goals.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/thread_goals.rs	
+@@ -158,6 +158,9 @@ fn refuse_service_writer(caller: &VerifiedIdentity) -> Result<(), Status> {
+     Ok(())
+ }
+ 
++/// The pump guard every goal turn claim runs, and the audit mark of a pump-sent turn (EP-7 S4).
++mod claim_guard;
++
+ fn invalid(detail: &str) -> Status {
+     Status::invalid_argument(format!("{INVALID_GOAL}: {detail}"))
+ }
+diff --git a/apps/Model Plane/rust/services/session-core/src/thread_goals/claim_guard.rs b/apps/Model Plane/rust/services/session-core/src/thread_goals/claim_guard.rs
+new file mode 100644
+index 000000000..c5f57a543
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/src/thread_goals/claim_guard.rs	
+@@ -0,0 +1,463 @@
++//! The pump guard on a goal turn claim (Wave 3 EP-7 S4, owner decisions D4 and D5).
++//!
++//! The goal bar's "Keep going" pump sends the next continuation turn from the browser (D4), and a
++//! goal never auto-continues across a decision that waits on its owner (D5). The browser stops on
++//! its own, but the rule must hold for a stale tab or a hostile client too, so the claim that
++//! admits every goal turn (`ClaimGoalTurn`, EP-7 S2) runs [`refuse_unsettled_claim`] inside its
++//! transaction, after it has locked the goal row and before it numbers a turn. A claim is refused:
++//!
++//! - `failed_precondition` `thread_goal_pending_decision` while the thread holds an undecided
++//!   approval (a `browser_human_assist` takeover included), an unanswered question, a plan in
++//!   `proposed`, or a parked run. session-core reads its own tables, so no other plane is asked.
++//! - `resource_exhausted` `thread_goal_rate_limited` once the goal has made
++//!   [`MAX_CLAIMS_PER_HOUR`] claims in the last hour, whatever sent them.
++//!
++//! The guard holds for every claim, a person's Continue as well: the claim carries no field that
++//! says who sent it, and one that did could be forged. Nothing here grants anything; the pump never
++//! approves, answers or resumes (D5).
++//!
++//! A turn the pump sent is marked for audit: the gateway sends the claim's run binding with the
++//! [`GOAL_AUTO_HEADER`] request header, and the binding stamps `runs.metadata.goal_auto` with
++//! [`stamp_goal_auto`]. The mark grants nothing and is read by nothing that decides.
++
++use sqlx::{Postgres, Transaction};
++use tonic::Status;
++
++use super::internal;
++
++/// The refusal while a decision waits on the owner (D5). Strings, as the other goal refusals are.
++pub(crate) const PENDING_DECISION: &str = "thread_goal_pending_decision";
++/// The refusal past the claim rate.
++pub(crate) const RATE_LIMITED: &str = "thread_goal_rate_limited";
++/// D5 default: at most this many claims per goal in any hour. Ten turns a goal take well under it;
++/// a loop that settles turns as fast as it can is stopped by it.
++pub(crate) const MAX_CLAIMS_PER_HOUR: i64 = 30;
++
++/// The gRPC request header that marks a goal turn as sent by the pump. Only the literal `true`
++/// counts, as with the switches.
++pub(crate) const GOAL_AUTO_HEADER: &str = "x-goal-auto";
++
++/// What waits on the owner, in the order the guard names it.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum PendingDecision {
++    Approval,
++    Question,
++    ProposedPlan,
++    ParkedRun,
++}
++
++impl PendingDecision {
++    fn from_token(token: &str) -> Option<Self> {
++        match token {
++            "approval" => Some(Self::Approval),
++            "question" => Some(Self::Question),
++            "plan" => Some(Self::ProposedPlan),
++            "parked" => Some(Self::ParkedRun),
++            _ => None,
++        }
++    }
++}
++
++/// The first decision that waits on the owner of a thread, as one token, or NULL when none does.
++/// An approval or a question that has expired waits on nobody. A park counts while it is parked or
++/// being resumed: a resumed run is still the run in flight.
++const PENDING_DECISION_SQL: &str = "SELECT CASE
++        WHEN EXISTS (
++            SELECT 1 FROM approvals a JOIN runs r ON r.id = a.run_id
++             WHERE r.thread_id = $1
++               AND a.status = 'requested'
++               AND (a.expires_at IS NULL OR a.expires_at > now())) THEN 'approval'
++        WHEN EXISTS (
++            SELECT 1 FROM run_questions q
++             WHERE q.thread_id = $1
++               AND q.state = 'requested'
++               AND q.expires_at > now()) THEN 'question'
++        WHEN EXISTS (
++            SELECT 1 FROM plans p
++             WHERE p.thread_id = $1 AND p.status = 'proposed') THEN 'plan'
++        WHEN EXISTS (
++            SELECT 1 FROM run_loop_checkpoints c JOIN runs r ON r.id = c.run_id
++             WHERE r.thread_id = $1
++               AND c.kind = 'park'
++               AND c.state IN ('parked', 'resuming')) THEN 'parked'
++    END";
++
++/// The claims a goal made in the last hour. The claim ledger is `thread_goal_turns` (EP-7 S2): a
++/// refused claim writes no row, so only admitted turns count.
++const CLAIMS_LAST_HOUR_SQL: &str = "SELECT COUNT(*) FROM thread_goal_turns
++     WHERE goal_id = $1 AND claimed_at > now() - interval '1 hour'";
++
++const STAMP_GOAL_AUTO_SQL: &str = "UPDATE runs
++        SET metadata = COALESCE(metadata, '{}'::jsonb) || '{\"goal_auto\": true}'::jsonb,
++            updated_at = now()
++      WHERE id = $1 AND org_id = $2";
++
++fn pending_refusal(pending: Option<PendingDecision>) -> Result<(), Status> {
++    match pending {
++        Some(_) => Err(Status::failed_precondition(PENDING_DECISION)),
++        None => Ok(()),
++    }
++}
++
++fn rate_refusal(claims_last_hour: i64) -> Result<(), Status> {
++    if claims_last_hour >= MAX_CLAIMS_PER_HOUR {
++        return Err(Status::resource_exhausted(RATE_LIMITED));
++    }
++    Ok(())
++}
++
++/// The first decision that waits on the owner of `thread_id`, if any.
++pub(crate) async fn pending_decision(
++    tx: &mut Transaction<'_, Postgres>,
++    thread_id: &str,
++) -> Result<Option<PendingDecision>, Status> {
++    let token: Option<String> = sqlx::query_scalar(PENDING_DECISION_SQL)
++        .bind(thread_id)
++        .fetch_one(&mut **tx)
++        .await
++        .map_err(internal)?;
++    Ok(token.as_deref().and_then(PendingDecision::from_token))
++}
++
++/// The D5 guard and the claim rate, in that order. Call it in the claim's transaction once the goal
++/// row is locked (`FOR UPDATE`), so two claims on one goal cannot both read the same count.
++pub(crate) async fn refuse_unsettled_claim(
++    tx: &mut Transaction<'_, Postgres>,
++    thread_id: &str,
++    goal_id: &str,
++) -> Result<(), Status> {
++    pending_refusal(pending_decision(tx, thread_id).await?)?;
++    let claims: i64 = sqlx::query_scalar(CLAIMS_LAST_HOUR_SQL)
++        .bind(goal_id)
++        .fetch_one(&mut **tx)
++        .await
++        .map_err(internal)?;
++    rate_refusal(claims)
++}
++
++/// Whether the caller marked the request as sent by the pump.
++pub(crate) fn goal_auto_requested(metadata: &tonic::metadata::MetadataMap) -> bool {
++    metadata
++        .get(GOAL_AUTO_HEADER)
++        .and_then(|value| value.to_str().ok())
++        == Some("true")
++}
++
++/// Marks the bound run as a pump-sent goal turn (`runs.metadata.goal_auto = true`) for audit.
++pub(crate) async fn stamp_goal_auto(
++    tx: &mut Transaction<'_, Postgres>,
++    run_id: &str,
++    org_id: &str,
++) -> Result<(), Status> {
++    sqlx::query(STAMP_GOAL_AUTO_SQL)
++        .bind(run_id)
++        .bind(org_id)
++        .execute(&mut **tx)
++        .await
++        .map_err(internal)?;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::auth::VerifiedIdentity;
++    use mp_contracts::model_plane::v1 as pb;
++    use mp_ids::new_ulid;
++    use sqlx::PgPool;
++
++    #[test]
++    fn claim_guard_pending_decision_refuses_typed() {
++        assert!(pending_refusal(None).is_ok());
++        for pending in [
++            PendingDecision::Approval,
++            PendingDecision::Question,
++            PendingDecision::ProposedPlan,
++            PendingDecision::ParkedRun,
++        ] {
++            let refused = pending_refusal(Some(pending)).unwrap_err();
++            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
++            assert_eq!(refused.message(), PENDING_DECISION);
++        }
++    }
++
++    #[test]
++    fn claim_guard_tokens_are_closed() {
++        assert_eq!(PendingDecision::from_token("approval"), Some(PendingDecision::Approval));
++        assert_eq!(PendingDecision::from_token("question"), Some(PendingDecision::Question));
++        assert_eq!(PendingDecision::from_token("plan"), Some(PendingDecision::ProposedPlan));
++        assert_eq!(PendingDecision::from_token("parked"), Some(PendingDecision::ParkedRun));
++        assert_eq!(PendingDecision::from_token("granted"), None);
++        // Every token the query can answer is one the guard reads.
++        for token in ["'approval'", "'question'", "'plan'", "'parked'"] {
++            assert!(PENDING_DECISION_SQL.contains(token), "{token}");
++        }
++    }
++
++    #[test]
++    fn claim_guard_reads_only_live_decisions() {
++        // An expired approval or question waits on nobody, and a plan counts only while proposed.
++        assert!(PENDING_DECISION_SQL.contains("a.status = 'requested'"));
++        assert!(PENDING_DECISION_SQL.contains("a.expires_at IS NULL OR a.expires_at > now()"));
++        assert!(PENDING_DECISION_SQL.contains("q.state = 'requested'"));
++        assert!(PENDING_DECISION_SQL.contains("q.expires_at > now()"));
++        assert!(PENDING_DECISION_SQL.contains("p.status = 'proposed'"));
++        assert!(PENDING_DECISION_SQL.contains("c.state IN ('parked', 'resuming')"));
++    }
++
++    #[test]
++    fn claim_guard_rate_allows_thirty_an_hour() {
++        assert!(rate_refusal(0).is_ok());
++        assert!(rate_refusal(MAX_CLAIMS_PER_HOUR - 1).is_ok());
++        let refused = rate_refusal(MAX_CLAIMS_PER_HOUR).unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::ResourceExhausted);
++        assert_eq!(refused.message(), RATE_LIMITED);
++        assert!(CLAIMS_LAST_HOUR_SQL.contains("interval '1 hour'"));
++    }
++
++    #[test]
++    fn goal_auto_header_reads_literal_true_only() {
++        let mut metadata = tonic::metadata::MetadataMap::new();
++        assert!(!goal_auto_requested(&metadata));
++        for value in ["1", "TRUE", "yes", ""] {
++            metadata.insert(GOAL_AUTO_HEADER, value.parse().unwrap());
++            assert!(!goal_auto_requested(&metadata), "{value}");
++        }
++        metadata.insert(GOAL_AUTO_HEADER, "true".parse().unwrap());
++        assert!(goal_auto_requested(&metadata));
++        // The mark is an audit field only: it merges into the run's metadata and nothing else.
++        assert!(STAMP_GOAL_AUTO_SQL.contains("\"goal_auto\": true"));
++        assert!(STAMP_GOAL_AUTO_SQL.contains("WHERE id = $1 AND org_id = $2"));
++    }
++
++    // The database tests below run with `--ignored` against a disposable Postgres, as the other
++    // session-core database tests do. They call the guard the claim runs, in a transaction of
++    // their own; the claim's own tests (EP-7 S2) cover the turn it then numbers.
++
++    const ORG: &str = "org-goal-pump";
++    const OWNER: &str = "user-goal-pump";
++
++    struct Seeded {
++        pool: PgPool,
++        thread: String,
++        run: String,
++        goal: String,
++    }
++
++    async fn seeded() -> Seeded {
++        let pool =
++            PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
++                .await
++                .unwrap();
++        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
++        let thread = new_ulid();
++        sqlx::query(
++            "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
++        )
++        .bind(&thread)
++        .bind(ORG)
++        .bind(OWNER)
++        .execute(&pool)
++        .await
++        .unwrap();
++        let run = new_ulid();
++        sqlx::query(
++            "INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'g', $3, $4)",
++        )
++        .bind(&run)
++        .bind(&thread)
++        .bind(ORG)
++        .bind(OWNER)
++        .execute(&pool)
++        .await
++        .unwrap();
++        let goal = super::super::set_thread_goal(
++            &pool,
++            &VerifiedIdentity::user_for_test(ORG, OWNER),
++            pb::SetThreadGoalRequest {
++                thread_id: thread.clone(),
++                org_id: ORG.to_owned(),
++                objective: "Find three suppliers".to_owned(),
++                ..Default::default()
++            },
++        )
++        .await
++        .unwrap()
++        .goal
++        .unwrap()
++        .id;
++        Seeded {
++            pool,
++            thread,
++            run,
++            goal,
++        }
++    }
++
++    async fn guard(seed: &Seeded) -> Result<(), Status> {
++        let mut tx = seed.pool.begin().await.unwrap();
++        let result = refuse_unsettled_claim(&mut tx, &seed.thread, &seed.goal).await;
++        tx.rollback().await.unwrap();
++        result
++    }
++
++    fn assert_pending(result: Result<(), Status>) {
++        let refused = result.unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(refused.message(), PENDING_DECISION);
++    }
++
++    async fn seed_approval(seed: &Seeded, kind: &str, expires_in_secs: f64) {
++        sqlx::query(
++            "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id, expires_at)
++             VALUES ($1, $2, $3, 'requested', $4, $5, now() + make_interval(secs => $6))",
++        )
++        .bind(new_ulid())
++        .bind(&seed.run)
++        .bind(kind)
++        .bind(ORG)
++        .bind(OWNER)
++        .bind(expires_in_secs)
++        .execute(&seed.pool)
++        .await
++        .unwrap();
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_refused_with_pending_approval() {
++        let seed = seeded().await;
++        assert!(guard(&seed).await.is_ok(), "nothing waits on the owner yet");
++        // An expired approval waits on nobody.
++        seed_approval(&seed, "tool", -60.0).await;
++        assert!(guard(&seed).await.is_ok());
++        seed_approval(&seed, "tool", 600.0).await;
++        assert_pending(guard(&seed).await);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_refused_while_a_takeover_waits() {
++        // Round B C-B5: a goal turn waiting on a browser takeover is a pending approval, so the
++        // pump does not send past it; its expiry reaches the goal as a failed turn (EP-7 S2).
++        let seed = seeded().await;
++        seed_approval(&seed, "browser_human_assist", 1_800.0).await;
++        assert_pending(guard(&seed).await);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_refused_with_unanswered_question() {
++        let seed = seeded().await;
++        sqlx::query(
++            "INSERT INTO run_questions (id, run_id, thread_id, org_id, user_id, spec, expires_at)
++             VALUES ($1, $2, $3, $4, $5, '[]'::jsonb, now() + interval '1 hour')",
++        )
++        .bind(format!("q_{}", new_ulid()))
++        .bind(&seed.run)
++        .bind(&seed.thread)
++        .bind(ORG)
++        .bind(OWNER)
++        .execute(&seed.pool)
++        .await
++        .unwrap();
++        assert_pending(guard(&seed).await);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_refused_with_proposed_plan() {
++        let seed = seeded().await;
++        let plan = new_ulid();
++        sqlx::query(
++            "INSERT INTO plans (id, thread_id, run_id, status, org_id, user_id)
++             VALUES ($1, $2, $3, 'proposed', $4, $5)",
++        )
++        .bind(&plan)
++        .bind(&seed.thread)
++        .bind(&seed.run)
++        .bind(ORG)
++        .bind(OWNER)
++        .execute(&seed.pool)
++        .await
++        .unwrap();
++        assert_pending(guard(&seed).await);
++        // A plan the owner decided no longer waits.
++        sqlx::query("UPDATE plans SET status = 'approved' WHERE id = $1")
++            .bind(&plan)
++            .execute(&seed.pool)
++            .await
++            .unwrap();
++        assert!(guard(&seed).await.is_ok());
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_refused_with_parked_run() {
++        let seed = seeded().await;
++        sqlx::query(
++            "INSERT INTO run_loop_checkpoints
++                (run_id, org_id, user_id, seq, kind, state, pause_ref, park_reason,
++                 park_until, authority_digest, segment_no, ciphertext, fold_digest)
++             VALUES ($1, $2, $3, 1, 'park', 'parked', $4, 'upstream_unavailable',
++                     now() + interval '1 minute', 'auth-1', 1, 'x', $5)",
++        )
++        .bind(&seed.run)
++        .bind(ORG)
++        .bind(OWNER)
++        .bind(format!("park:{}:1", seed.run))
++        .bind("0".repeat(64))
++        .execute(&seed.pool)
++        .await
++        .unwrap();
++        assert_pending(guard(&seed).await);
++    }
++
++    /// A claim row of the S2 ledger, made `minutes_ago` minutes ago.
++    async fn claim_at(seed: &Seeded, turn_no: i64, minutes_ago: i32) {
++        sqlx::query(
++            "INSERT INTO thread_goal_turns (goal_id, turn_no, org_id, claimed_at, claim_expires_at)
++             VALUES ($1, $2, $3, now() - make_interval(mins => $4), now())",
++        )
++        .bind(&seed.goal)
++        .bind(i32::try_from(turn_no).unwrap())
++        .bind(ORG)
++        .bind(minutes_ago)
++        .execute(&seed.pool)
++        .await
++        .unwrap();
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn claim_rate_limited() {
++        let seed = seeded().await;
++        // One claim older than the hour, which no longer counts, then 29 inside it.
++        claim_at(&seed, 1, 61).await;
++        for turn_no in 2..=MAX_CLAIMS_PER_HOUR {
++            claim_at(&seed, turn_no, 1).await;
++        }
++        assert!(guard(&seed).await.is_ok(), "29 claims in the hour");
++        claim_at(&seed, MAX_CLAIMS_PER_HOUR + 1, 0).await;
++        let refused = guard(&seed).await.unwrap_err();
++        assert_eq!(refused.code(), tonic::Code::ResourceExhausted);
++        assert_eq!(refused.message(), RATE_LIMITED);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
++    async fn goal_auto_stamp_marks_the_run_only() {
++        let seed = seeded().await;
++        let mut tx = seed.pool.begin().await.unwrap();
++        stamp_goal_auto(&mut tx, &seed.run, "another-org").await.unwrap();
++        stamp_goal_auto(&mut tx, &seed.run, ORG).await.unwrap();
++        tx.commit().await.unwrap();
++        let marked: Option<bool> =
++            sqlx::query_scalar("SELECT (metadata->>'goal_auto')::boolean FROM runs WHERE id = $1")
++                .bind(&seed.run)
++                .fetch_one(&seed.pool)
++                .await
++                .unwrap();
++        assert_eq!(marked, Some(true));
++    }
++}

@@ -1,0 +1,9 @@
+## WS06-S7
+shared-edit apps/Control Plane/docker-compose.yml (org-core ORG_CORE_SERVICE_CREDENTIALS, line ~540): in the verevon-gateway principal change scopes to [... ,"org:erase:self","org:deletion:self","org:siem:manage:self"]; append the principal {"principal":"audit-core","audience":"org-core","token":"${AUDIT_ORG_CORE_SERVICE_TOKEN:?AUDIT_ORG_CORE_SERVICE_TOKEN is required}","scopes":["org:siem:read:any"]} as the last array element. Apply together with the rebuilt org-core image (an image that predates the scopes refuses the whole registry). A ready-made copy of the whole file with exactly these two edits is at C:\Users\IMAFER~1\AppData\Local\Temp\claude\C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b\0c471def-955a-414e-8256-870b2ff081a7\scratchpad\compose-with-siem.yml (diff it, do not copy it blindly).
+
+## WS06-S7
+shared-edit apps/Control Plane/docker-compose.yml (org-core environment block, beside ORG_CORE_SERVICE_CREDENTIALS): ORG_SIEM_DESTINATIONS_ENABLED: ${ORG_SIEM_DESTINATIONS_ENABLED:-0} ; ORG_CORE_SIEM_SEAL_KEY: ${ORG_CORE_SIEM_SEAL_KEY:-} ; ORG_CORE_SIEM_SEAL_KEY_ID: ${ORG_CORE_SIEM_SEAL_KEY_ID:-v1}. For S8 the audit-core side later presents AUDIT_ORG_CORE_SERVICE_TOKEN as its org-core token.
+
+## WS06-S7
+shared-edit apps/Control Plane/org-core/cmd/server/main.go (not in my ownership): inside the existing `if natsClient != nil { orgService.SetAuditPublisher(natsClient); go runGDPRAuditOutbox(...) }` block add `go runSIEMAuditOutbox(ctx, orgService, 5*time.Second)`, and add after runGDPRAuditOutbox a function runSIEMAuditOutbox that is a copy of runGDPRAuditOutbox calling service.FlushSIEMAuditOutbox(ctx, 100) and logging 'org-core SIEM audit outbox ...'. Without it destination changes are committed with their audit row but the row is never published. It must run regardless of the flag so rows pending at disable time still drain.
+

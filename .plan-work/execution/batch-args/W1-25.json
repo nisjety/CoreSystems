@@ -1,0 +1,95 @@
+{
+ "batchId": "W1-25",
+ "wave": 1,
+ "goal": "Wave 1 build: Tail-first paged ListConversation across planes (conditional); SPA paged transcript with load-earlier (conditional)",
+ "slices": [
+  {
+   "id": "WS09-S8",
+   "title": "Tail-first paged ListConversation across planes (conditional)",
+   "tag": "BUILD",
+   "summary": "Adds opt-in tail-first paging to the transcript read across session-core, model-gateway and the BFF: add-only ListConversationRequest.limit=6 and before_message_id=7 with ListConversationResponse.has_more=2, a clamped query that keeps audience_ceiling in the same WHERE, and validated limit and before forwarding. limit=0 (the default) keeps every other caller byte-identical; no migration; conditional per D5.",
+   "remaining": "Conditional (WS09 D5) on WS09-S1 long-thread numbers; DEC-29 fixes the cursor (before_message_id) if it is built. WS17-S8 treats it as a soft rebase, not a dependency.",
+   "files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/json_handlers.rs",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "apps/Model Plane/go/gen/model_plane/v1/sessions_grpc.pb.go",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/build.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_posture_matrix.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/scripts/tests/transcript-paging-proof.sh"
+   ],
+   "new_files": [
+    "apps/Model Plane/scripts/tests/transcript-paging-proof.sh"
+   ],
+   "test_commands": [
+    "cargo test -q -p session-core --all-targets",
+    "cargo test -p session-core --bin session-core list_conversation_pages -- --ignored --test-threads=1",
+    "cargo test -q -p model-gateway --all-targets thread_messages",
+    "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets canonical_messages thread_messages_url",
+    "buf lint",
+    "buf breaking \"apps/Model Plane/proto\" --against \"apps/Model Plane/proto/baseline.binpb\"",
+    "git diff HEAD -- \"apps/Model Plane/proto/model_plane/v1/sessions.proto\"",
+    "cd \"apps/Model Plane/go/services/capability-core\" && go build ./... && go test ./internal/sessionreview/..."
+   ],
+   "flag": "MODEL_GATEWAY_THREAD_MESSAGES_MAX_LIMIT",
+   "risk": [
+    "zdr",
+    "auth",
+    "authority"
+   ],
+   "importance": "sonnet",
+   "implementer": "sonnet",
+   "strict": true,
+   "depends_on": [
+    "WS01-S0",
+    "WS12-S2"
+   ],
+   "decisions_defaults": {
+    "DEC-29": "General tree: `parent_message_id` + `sibling_ordinal` + `threads.active_leaf_message_id` + denormalised `messages.on_active_path`; rewind moves the leaf, never deletes; Space threads get no versions. Index: expression GIN on `messages` in session-core, FTS `si",
+    "DEC-39": "Integrator reserves (section 2.6 row 1). Land the live ZDR + session-core wave (WS01 S0) before anyone edits `grpc.rs`, `auth.rs`, `sessions.proto`. CI: drop `branches` filters on `pull_request`, add integration branch to `push`. Add matrix row + CODEOWNERS fo",
+    "D5": "WS-local decision: the plan's recommended default in the WS09 section"
+   },
+   "notes": "Owner order 2026-10-26: this slice is optional, conditional or gated in the plan and the owner ordered it built now. Build it behind its own switch that defaults off (strict literal parser), so behaviour is byte-identical with the switch off; record the plan's condition or gate (the measurement, Q1/Q7, the owner decision) as an open item in depth_findings rather than resolving it yourself. Dependency notes: dropped WS17: deferred slice; soft rebase onto WS17-S1 if it is ever built."
+  },
+  {
+   "id": "WS09-S9",
+   "title": "SPA paged transcript with load-earlier (conditional)",
+   "tag": "BUILD",
+   "summary": "Consumes S8 in the SPA: getThreadMessages takes limit and beforeMessageId and returns hasMore, loadThread opens on a 100-message tail, and loadEarlier() prepends older turns with a scroll anchor; readSavedAnswer reads a 4-message tail. Behind VITE_CHAT_PAGED_TRANSCRIPT; the 120-turn local snapshot is unchanged.",
+   "remaining": "Follows WS09-S8 (conditional).",
+   "files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.paged-transcript.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts"
+   ],
+   "new_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.paged-transcript.test.ts"
+   ],
+   "test_commands": [
+    "pnpm exec vitest run src/features/chat/components/use-chat-controller.paged-transcript.test.ts src/features/chat/components/chat-normalizers.test.ts"
+   ],
+   "flag": "VITE_CHAT_PAGED_TRANSCRIPT",
+   "risk": [
+    "zdr"
+   ],
+   "importance": "sonnet",
+   "implementer": "sonnet",
+   "strict": true,
+   "depends_on": [
+    "WS09-S8",
+    "WS09-S1"
+   ],
+   "decisions_defaults": {
+    "DEC-29": "General tree: `parent_message_id` + `sibling_ordinal` + `threads.active_leaf_message_id` + denormalised `messages.on_active_path`; rewind moves the leaf, never deletes; Space threads get no versions. Index: expression GIN on `messages` in session-core, FTS `si",
+    "D7": "WS-local decision: the plan's recommended default in the WS09 section"
+   },
+   "notes": "Owner order 2026-10-26: this slice is optional, conditional or gated in the plan and the owner ordered it built now. Build it behind its own switch that defaults off (strict literal parser), so behaviour is byte-identical with the switch off; record the plan's condition or gate (the measurement, Q1/Q7, the owner decision) as an open item in depth_findings rather than resolving it yourself."
+  }
+ ]
+}

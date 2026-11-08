@@ -1,0 +1,1057 @@
+diff --git a/apps/Model Plane/rust/services/session-core/src/auth.rs b/apps/Model Plane/rust/services/session-core/src/auth.rs
+index f95729454..4eab7c2ef 100644
+--- a/apps/Model Plane/rust/services/session-core/src/auth.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/auth.rs	
+@@ -32,6 +32,8 @@ pub struct JwtVerifier {
+     data_plane_audience: Arc<str>,
+     leeway_secs: u64,
+     keys: Arc<HashMap<String, DecodingKey>>,
++    /// Whether an `api_key` token is a principal here ([`API_KEY_PRINCIPAL_ENV`]).
++    accept_api_key: bool,
+ }
+ 
+ impl fmt::Debug for JwtVerifier {
+@@ -42,6 +44,7 @@ impl fmt::Debug for JwtVerifier {
+             .field("audience", &self.audience)
+             .field("data_plane_audience", &self.data_plane_audience)
+             .field("leeway_secs", &self.leeway_secs)
++            .field("accept_api_key", &self.accept_api_key)
+             .field("key_count", &self.keys.len())
+             .finish()
+     }
+@@ -51,6 +54,124 @@ impl fmt::Debug for JwtVerifier {
+ enum PrincipalKind {
+     User,
+     Service,
++    /// EP-12 S4: an API key exchanged by Auth Core for a short-lived token. It exists only while
++    /// [`API_KEY_PRINCIPAL_ENV`] is on, and reaches only [`API_KEY_METHODS`].
++    ApiKey,
++}
++
++/// `SESSION_CORE_API_KEY_PRINCIPAL`: admit the `api_key` principal type (EP-12 S4). Default off;
++/// off, an `api_key` token is `unauthenticated` exactly as before.
++pub(crate) const API_KEY_PRINCIPAL_ENV: &str = "SESSION_CORE_API_KEY_PRINCIPAL";
++
++/// Whether the `api_key` switch is on. The repo's strict parser reads it: only the literal `true`.
++#[must_use]
++pub(crate) fn api_key_principal_enabled(raw: Option<&str>) -> bool {
++    mp_contracts::loop_fold::switch_from(raw)
++}
++
++/// `sub` of an `api_key` principal is this prefix plus its `key_id`. The shape rules below are
++/// model-gateway's and inference-core's `is_well_formed_api_key`, so one token reads the same in
++/// every Model Plane service.
++const API_KEY_SUBJECT_PREFIX: &str = "apikey:";
++const MAX_API_KEY_ID_LEN: usize = 128;
++const MAX_ACTING_USER_ID_LEN: usize = 256;
++
++/// Whether a row's `user_id` names an API key, which owns its threads and runs (EP-12 D2). Auth
++/// Core actor ids are base62, so a person's id never carries the `:` this prefix does.
++#[must_use]
++pub(crate) fn is_api_key_owner(user_id: &str) -> bool {
++    user_id.starts_with(API_KEY_SUBJECT_PREFIX)
++}
++
++/// The one scope Auth Core's API-key exchange grants for `aud=session-core` (EP-12 D3). A key
++/// token without it reaches no method.
++pub(crate) const API_KEY_SCOPE: &str = "agent:runs";
++
++/// The only RPCs an `api_key` principal may call, as gRPC paths, each with whether it writes
++/// durable state. A key creates and reads its own threads and runs and nothing else (EP-12 D2,
++/// D5): memory, approvals, Space, attention and every RPC added later are refused because they
++/// are not listed. A key's run is terminalized by model-gateway's own service credential, never
++/// by the key, so no terminal RPC is listed.
++pub(crate) const API_KEY_METHODS: &[(&str, bool)] = &[
++    ("/model_plane.v1.SessionCore/CreateThread", true),
++    ("/model_plane.v1.SessionCore/AppendMessage", true),
++    ("/model_plane.v1.SessionCore/StartRun", true),
++    ("/model_plane.v1.SessionCore/ListConversation", false),
++    ("/model_plane.v1.RunService/GetRun", false),
++    ("/model_plane.v1.RunService/ListRuns", false),
++    ("/model_plane.v1.RunService/CancelRun", true),
++];
++
++/// Whether `path` is one of [`API_KEY_METHODS`] and, when it is, whether it writes. Exact match
++/// only: no trimming, no case folding.
++#[must_use]
++fn api_key_method_allowed(path: &str) -> Option<bool> {
++    API_KEY_METHODS
++        .iter()
++        .find(|(method, _)| *method == path)
++        .map(|(_, writes)| *writes)
++}
++
++/// The gRPC path of the call being served, stamped by [`RpcPathStamp`]. tonic hands an
++/// interceptor the metadata and extensions of a call but not its URI, so the path rides as an
++/// extension that no client can set.
++#[derive(Clone, Debug)]
++struct RpcPath(Arc<str>);
++
++/// A served gRPC service whose interceptor can see which method is called. Only services that
++/// hold an [`API_KEY_METHODS`] entry are wrapped: on any other service the path is absent and
++/// [`JwtVerifier::intercept`] refuses a key, so a service stays closed to keys by default.
++#[derive(Clone)]
++pub(crate) struct RpcPathStamp<S>(S);
++
++impl<S> RpcPathStamp<S> {
++    pub(crate) fn new(inner: S) -> Self {
++        Self(inner)
++    }
++}
++
++impl<S, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for RpcPathStamp<S>
++where
++    S: tonic::codegen::Service<tonic::codegen::http::Request<B>>,
++{
++    type Response = S::Response;
++    type Error = S::Error;
++    type Future = S::Future;
++
++    fn poll_ready(
++        &mut self,
++        context: &mut std::task::Context<'_>,
++    ) -> std::task::Poll<Result<(), Self::Error>> {
++        self.0.poll_ready(context)
++    }
++
++    fn call(&mut self, mut request: tonic::codegen::http::Request<B>) -> Self::Future {
++        let path = RpcPath(Arc::from(request.uri().path()));
++        request.extensions_mut().insert(path);
++        self.0.call(request)
++    }
++}
++
++impl<S: tonic::server::NamedService> tonic::server::NamedService for RpcPathStamp<S> {
++    const NAME: &'static str = S::NAME;
++}
++
++/// Admit an `api_key` principal on one call: the method must be listed, the token must carry
++/// [`API_KEY_SCOPE`], and a ZDR key is refused on every write (EP-12 D6), since a key's threads
++/// and runs are durable rows by definition.
++#[allow(clippy::result_large_err)]
++fn authorize_api_key_call(caller: &VerifiedIdentity, path: Option<&str>) -> Result<(), Status> {
++    let Some(writes) = path.and_then(api_key_method_allowed) else {
++        return Err(Status::permission_denied("an API key may not call this method"));
++    };
++    if !caller.has_scope(API_KEY_SCOPE) {
++        return Err(Status::permission_denied("API key scope required"));
++    }
++    if writes && caller.zdr() {
++        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported("agent_api")
++            .grpc_status(tonic::Code::FailedPrecondition));
++    }
++    Ok(())
+ }
+ 
+ /// The `zdr_waiver` claim of a persistent token, after verification.
+@@ -108,6 +229,9 @@ pub struct VerifiedIdentity {
+     kind: PrincipalKind,
+     zdr: bool,
+     zdr_waiver: Option<ZdrWaiver>,
++    /// The person who owns an `api_key` principal: attribution only, never an owner (EP-12 D2).
++    /// `None` for every other principal.
++    acting_user_id: Option<Arc<str>>,
+ }
+ 
+ impl fmt::Debug for VerifiedIdentity {
+@@ -145,6 +269,41 @@ impl VerifiedIdentity {
+         self.kind == PrincipalKind::Service
+     }
+ 
++    /// Whether this credential is an `api_key` principal (EP-12 S4).
++    #[must_use]
++    pub fn is_api_key(&self) -> bool {
++        self.kind == PrincipalKind::ApiKey
++    }
++
++    /// The key id of an `api_key` principal; `None` for every other principal.
++    #[must_use]
++    pub fn api_key_id(&self) -> Option<&str> {
++        if self.is_api_key() {
++            self.principal_id.strip_prefix(API_KEY_SUBJECT_PREFIX)
++        } else {
++            None
++        }
++    }
++
++    /// The person who owns an `api_key` principal, for attribution; `None` for every other
++    /// principal. It is never an owner: nothing reads it to authorize a row.
++    #[must_use]
++    pub fn acting_user_id(&self) -> Option<&str> {
++        self.acting_user_id.as_deref()
++    }
++
++    /// The id the rows this caller owns carry in `user_id`: the person for a user, the key
++    /// principal `apikey:<key_id>` for an `api_key` (EP-12 D2), and `None` for a service. Kept
++    /// apart from [`Self::user_id`], which names a person only, so a key is never read as one.
++    #[must_use]
++    pub fn owner_id(&self) -> Option<&str> {
++        match self.kind {
++            PrincipalKind::User => self.user_id(),
++            PrincipalKind::ApiKey => Some(self.principal_id()),
++            PrincipalKind::Service => None,
++        }
++    }
++
+     #[must_use]
+     pub fn has_scope(&self, scope: &str) -> bool {
+         self.scopes.iter().any(|candidate| candidate == scope)
+@@ -179,7 +338,7 @@ impl VerifiedIdentity {
+         if user_id.trim().is_empty() {
+             return Err(Status::invalid_argument("user_id is required"));
+         }
+-        match self.user_id() {
++        match self.owner_id() {
+             Some(verified) if verified == user_id => Ok(()),
+             Some(_) => Err(Status::permission_denied("user access denied")),
+             None => Err(Status::permission_denied(
+@@ -211,6 +370,7 @@ impl VerifiedIdentity {
+             kind: PrincipalKind::User,
+             zdr,
+             zdr_waiver: None,
++            acting_user_id: None,
+         }
+     }
+ 
+@@ -257,6 +417,28 @@ impl VerifiedIdentity {
+             kind: PrincipalKind::Service,
+             zdr,
+             zdr_waiver: None,
++            acting_user_id: None,
++        }
++    }
++
++    /// An `api_key` identity shaped as the verifier shapes one: owned by `apikey:<key_id>`,
++    /// attributed to `acting_user_id`, holding [`API_KEY_SCOPE`], never a waiver.
++    #[cfg(test)]
++    pub(crate) fn api_key_for_test(
++        org_id: &str,
++        key_id: &str,
++        acting_user_id: &str,
++        zdr: bool,
++    ) -> Self {
++        Self {
++            org_id: Arc::from(org_id),
++            principal_id: Arc::from(format!("{API_KEY_SUBJECT_PREFIX}{key_id}")),
++            user_id: None,
++            scopes: Arc::from([API_KEY_SCOPE.to_owned()]),
++            kind: PrincipalKind::ApiKey,
++            zdr,
++            zdr_waiver: None,
++            acting_user_id: Some(Arc::from(acting_user_id)),
+         }
+     }
+ }
+@@ -491,6 +673,11 @@ pub fn authorize_owner_row(
+     intent: OwnerIntent,
+ ) -> Result<(), Status> {
+     caller.authorize_org(org_id)?;
++    // A key reaches only rows it owns. The org-wide read of a system-owned row is for the org's
++    // people and workloads, not for a credential that can only ever own its own threads (EP-12 S4).
++    if caller.is_api_key() {
++        return caller.authorize_user(user_id);
++    }
+     if is_system_run_owner(user_id) {
+         return match intent {
+             OwnerIntent::Read => Ok(()),
+@@ -617,6 +804,35 @@ struct Claims {
+     /// one connection. Parsed and checked by [`parse_zdr_waiver`].
+     #[serde(default)]
+     zdr_waiver: Option<serde_json::Value>,
++    /// `key_id`: the Better Auth key an `api_key` token was exchanged for. Read only while
++    /// [`API_KEY_PRINCIPAL_ENV`] is on. Kept as a raw value so a token that carries an odd one
++    /// decodes exactly as it did before the switch existed.
++    #[serde(default)]
++    key_id: Option<serde_json::Value>,
++    /// `acting_user_id`: the key's owner on an `api_key` token. Attribution only.
++    #[serde(default)]
++    acting_user_id: Option<serde_json::Value>,
++}
++
++/// The `api_key` shape model-gateway, inference-core and Auth Core agree on: a bounded printable
++/// `key_id`, `sub == "apikey:" + key_id`, an owner that is present, unpadded and not itself a key,
++/// and no person or service identity beside them.
++fn is_well_formed_api_key(claims: &Claims) -> bool {
++    let (Some(key_id), Some(owner)) = (
++        claims.key_id.as_ref().and_then(serde_json::Value::as_str),
++        claims.acting_user_id.as_ref().and_then(serde_json::Value::as_str),
++    ) else {
++        return false;
++    };
++    (1..=MAX_API_KEY_ID_LEN).contains(&key_id.len())
++        && key_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
++        && claims.sub.strip_prefix(API_KEY_SUBJECT_PREFIX) == Some(key_id)
++        && claims.user_id.is_empty()
++        && claims.service_id.is_empty()
++        && !owner.is_empty()
++        && owner.len() <= MAX_ACTING_USER_ID_LEN
++        && owner == owner.trim()
++        && !owner.starts_with(API_KEY_SUBJECT_PREFIX)
+ }
+ 
+ /// The wire shape of the `zdr_waiver` claim. Extra fields Auth Core may add
+@@ -668,7 +884,18 @@ fn required_env(name: &'static str) -> anyhow::Result<String> {
+ impl JwtVerifier {
+     /// Fetch and validate Auth Core verification material before serving.
+     pub async fn from_env() -> anyhow::Result<Self> {
+-        Self::from_config(AuthConfig::from_env()?).await
++        let accept_api_key =
++            api_key_principal_enabled(std::env::var(API_KEY_PRINCIPAL_ENV).ok().as_deref());
++        Ok(Self::from_config(AuthConfig::from_env()?)
++            .await?
++            .with_api_key_principal(accept_api_key))
++    }
++
++    /// Admit or refuse the `api_key` principal type. [`Self::from_config`] refuses it.
++    #[must_use]
++    pub(crate) fn with_api_key_principal(mut self, accept: bool) -> Self {
++        self.accept_api_key = accept;
++        self
+     }
+ 
+     pub(crate) async fn from_config(config: AuthConfig) -> anyhow::Result<Self> {
+@@ -694,6 +921,7 @@ impl JwtVerifier {
+             data_plane_audience: Arc::from(config.data_plane_audience),
+             leeway_secs: config.leeway_secs,
+             keys: Arc::new(keys),
++            accept_api_key: false,
+         })
+     }
+ 
+@@ -701,6 +929,12 @@ impl JwtVerifier {
+     pub fn intercept(&self, mut request: Request<()>) -> Result<Request<()>, Status> {
+         let token = extract_bearer(&request)?;
+         let identity = self.verify_token(token, self.audience.as_ref())?;
++        // A key is admitted here, before any handler runs, so a handler never sees a key on a
++        // method it was not reviewed for (EP-12 S4).
++        if identity.is_api_key() {
++            let path = request.extensions().get::<RpcPath>().map(|path| path.0.as_ref());
++            authorize_api_key_call(&identity, path)?;
++        }
+         request.extensions_mut().insert(identity);
+         Ok(request)
+     }
+@@ -735,7 +969,7 @@ impl JwtVerifier {
+         if claims.aud.as_str() != Some(audience) {
+             return Err(Status::unauthenticated("invalid caller credential"));
+         }
+-        validate_identity(claims)
++        validate_identity(claims, self.accept_api_key)
+     }
+ 
+     /// Verify the separately delegated Data Plane credential and bind it to the
+@@ -769,6 +1003,11 @@ impl JwtVerifier {
+             return Ok(None);
+         };
+         let delegated = self.verify_token(token, self.data_plane_audience.as_ref())?;
++        // A key reads no Data Plane knowledge (EP-12 D5) and is no person's delegation, so it
++        // neither delegates nor is delegated.
++        if caller.is_api_key() || delegated.is_api_key() {
++            return Err(Status::permission_denied("an API key carries no Data Plane delegation"));
++        }
+         // Every bearer of one request agrees on zero retention AND on the
+         // waiver: a waiver for one connection must never ride a grounding call
+         // that the caller's own posture does not carry.
+@@ -848,10 +1087,21 @@ fn extract_bearer(request: &Request<()>) -> Result<&str, Status> {
+ }
+ 
+ #[allow(clippy::result_large_err)]
+-fn validate_identity(claims: Claims) -> Result<VerifiedIdentity, Status> {
++fn validate_identity(claims: Claims, accept_api_key: bool) -> Result<VerifiedIdentity, Status> {
+     if claims.org_id.trim().is_empty() || claims.org_id.trim() != claims.org_id {
+         return Err(Status::unauthenticated("invalid caller credential"));
+     }
++    // While keys are admitted, a key id on any other type makes the token ambiguous. Off, the
++    // claim is not read, so every token is read exactly as before.
++    if accept_api_key && claims.principal_type != "api_key" && claims.key_id.is_some() {
++        return Err(Status::unauthenticated("invalid caller credential"));
++    }
++    // Decided before `scopes` moves out of the claims. An `api_key` token's `zdr` is the org's
++    // posture raised by the key's own flag, so a persistent key token of a ZDR org is not one
++    // Auth Core mints, and is refused like a person's token without its waiver.
++    let api_key_admitted = accept_api_key
++        && is_well_formed_api_key(&claims)
++        && (claims.zdr || claims.org_zdr != Some(true));
+     let zdr_waiver = parse_zdr_waiver(claims.zdr, claims.org_zdr, claims.zdr_waiver.as_ref())?;
+     let user_bound = matches!(claims.principal_type.as_str(), "" | "user");
+     // A waiver is a decision about one human's connection. A service credential
+@@ -881,6 +1131,7 @@ fn validate_identity(claims: Claims) -> Result<VerifiedIdentity, Status> {
+                 kind: PrincipalKind::User,
+                 zdr: claims.zdr,
+                 zdr_waiver,
++                acting_user_id: None,
+             })
+         }
+         "service"
+@@ -897,8 +1148,27 @@ fn validate_identity(claims: Claims) -> Result<VerifiedIdentity, Status> {
+                 kind: PrincipalKind::Service,
+                 zdr: claims.zdr,
+                 zdr_waiver: None,
++                acting_user_id: None,
+             })
+         }
++        // EP-12 S4, only while SESSION_CORE_API_KEY_PRINCIPAL is on; off, the type falls to the
++        // refusal below. The key principal owns what it creates and the person is attribution
++        // only, so `user_id` stays `None`. A waiver never reaches here: the check above refuses
++        // one on any token that is not user-bound.
++        "api_key" if api_key_admitted => Ok(VerifiedIdentity {
++            org_id: Arc::from(claims.org_id),
++            principal_id: Arc::from(claims.sub),
++            user_id: None,
++            scopes,
++            kind: PrincipalKind::ApiKey,
++            zdr: claims.zdr,
++            zdr_waiver: None,
++            acting_user_id: claims
++                .acting_user_id
++                .as_ref()
++                .and_then(serde_json::Value::as_str)
++                .map(Arc::from),
++        }),
+         _ => Err(Status::unauthenticated("invalid caller credential")),
+     }
+ }
+@@ -1081,6 +1351,7 @@ pub(crate) mod test_support {
+             data_plane_audience: Arc::from(DEFAULT_DATA_PLANE_AUDIENCE),
+             leeway_secs: 0,
+             keys: Arc::new(validated_keys(&jwks).expect("usable JWKS")),
++            accept_api_key: false,
+         }
+     }
+ 
+@@ -2229,4 +2500,355 @@ mod tests {
+         let scoped = VerifiedIdentity::service_for_test("org-1", &["session:write"], false);
+         assert!(authorize_owner_housekeeping(&scoped, "session:write").is_ok());
+     }
++
++    /// An `api_key` token as Auth Core's API-key exchange mints it for `aud=session-core`.
++    fn api_key_claims() -> Value {
++        let now = now();
++        json!({
++            "sub": "apikey:key-1", "iss": "auth-core", "aud": "session-core",
++            "iat": now, "nbf": now - 5, "exp": now + 120,
++            "org_id": "org-1", "principal_type": "api_key",
++            "key_id": "key-1", "acting_user_id": "user-1", "jti": "jti-1",
++            "scopes": [API_KEY_SCOPE], "zdr": false
++        })
++    }
++
++    fn api_key_verifier() -> JwtVerifier {
++        super::test_support::verifier("session-core").with_api_key_principal(true)
++    }
++
++    /// A call to `path` carrying `claims`, as [`RpcPathStamp`] hands it to the interceptor.
++    fn call_on(path: &str, claims: &Value) -> Request<()> {
++        let mut request = Request::new(());
++        request.metadata_mut().insert(
++            "authorization",
++            format!("Bearer {}", super::test_support::sign(claims, super::test_support::KID))
++                .parse()
++                .expect("bearer metadata"),
++        );
++        request.extensions_mut().insert(RpcPath(Arc::from(path)));
++        request
++    }
++
++    const START_RUN: &str = "/model_plane.v1.SessionCore/StartRun";
++
++    #[test]
++    fn api_key_shape_is_exact() {
++        let verifier = api_key_verifier();
++        let request = verifier
++            .intercept(call_on(START_RUN, &api_key_claims()))
++            .expect("a well-formed api key token");
++        let key = identity(&request).expect("identity installed");
++        assert!(key.is_api_key());
++        assert!(!key.is_service());
++        assert_eq!(key.principal_id(), "apikey:key-1");
++        assert_eq!(key.api_key_id(), Some("key-1"));
++        assert_eq!(key.acting_user_id(), Some("user-1"));
++        assert_eq!(key.owner_id(), Some("apikey:key-1"));
++        // The person is attribution only: nothing that reads `user_id` treats a key as them.
++        assert_eq!(key.user_id(), None);
++
++        let long_key = "k".repeat(129);
++        for (field, value) in [
++            ("sub", json!("apikey:key-2")),
++            ("sub", json!("key-1")),
++            ("key_id", json!("")),
++            ("key_id", json!("key 1")),
++            ("key_id", json!(long_key)),
++            ("key_id", Value::Null),
++            ("acting_user_id", json!("")),
++            ("acting_user_id", json!(" user-1")),
++            ("acting_user_id", json!("apikey:key-9")),
++            ("acting_user_id", json!("u".repeat(257))),
++            ("acting_user_id", Value::Null),
++            ("user_id", json!("user-1")),
++            ("service_id", json!("service:x")),
++            ("principal_type", json!("apikey")),
++            ("org_zdr", json!(true)),
++        ] {
++            let mut claims = api_key_claims();
++            if value.is_null() {
++                claims.as_object_mut().expect("claims object").remove(field);
++            } else {
++                claims[field] = value.clone();
++            }
++            assert_eq!(
++                verifier
++                    .intercept(call_on(START_RUN, &claims))
++                    .expect_err("a malformed key token is refused")
++                    .code(),
++                Code::Unauthenticated,
++                "{field} = {value}"
++            );
++        }
++
++        // While keys are admitted, a key id on a person's token makes it ambiguous.
++        let mut user_with_key = user_claims("session-core");
++        user_with_key["key_id"] = json!("key-1");
++        assert_eq!(
++            verifier
++                .intercept(call_on(START_RUN, &user_with_key))
++                .expect_err("an ambiguous token is refused")
++                .code(),
++            Code::Unauthenticated
++        );
++    }
++
++    #[test]
++    fn api_key_refused_when_switch_off() {
++        let verifier = super::test_support::verifier("session-core");
++        assert_eq!(
++            verifier
++                .intercept(call_on(START_RUN, &api_key_claims()))
++                .expect_err("off, a key token is not a principal")
++                .code(),
++            Code::Unauthenticated
++        );
++        // Off, a person's token is read exactly as before, a stray key id included.
++        let mut user_with_key = user_claims("session-core");
++        user_with_key["key_id"] = json!("key-1");
++        let request = verifier
++            .intercept(call_on(START_RUN, &user_with_key))
++            .expect("unchanged while the switch is off");
++        let user = identity(&request).expect("identity installed");
++        assert!(!user.is_api_key());
++        assert_eq!(user.user_id(), Some("user-1"));
++        assert_eq!(user.owner_id(), Some("user-1"));
++    }
++
++    #[test]
++    fn api_key_principal_parser_takes_only_literal_true() {
++        for raw in ["true", " true "] {
++            assert!(api_key_principal_enabled(Some(raw)), "{raw:?}");
++        }
++        for raw in [None, Some(""), Some("1"), Some("on"), Some("yes"), Some("false")] {
++            assert!(!api_key_principal_enabled(raw), "{raw:?}");
++        }
++    }
++
++    /// Every RPC in every proto file, as a gRPC path. Read from the sources, so an RPC added
++    /// later is in the list without anyone touching this test.
++    fn every_rpc_path() -> Vec<String> {
++        fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
++            for entry in std::fs::read_dir(dir).expect("proto directory is readable") {
++                let path = entry.expect("proto directory entry").path();
++                if path.is_dir() {
++                    walk(&path, files);
++                } else if path.extension().is_some_and(|extension| extension == "proto") {
++                    files.push(path);
++                }
++            }
++        }
++        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../proto");
++        let mut files = Vec::new();
++        walk(&root, &mut files);
++        let mut paths = Vec::new();
++        for file in files {
++            let source = std::fs::read_to_string(&file).expect("proto source is readable");
++            let mut package = "";
++            let mut service = "";
++            for line in source.lines().map(str::trim) {
++                if let Some(rest) = line.strip_prefix("package ") {
++                    package = rest.trim_end_matches(';').trim();
++                } else if let Some(rest) = line.strip_prefix("service ") {
++                    service = rest.split_whitespace().next().unwrap_or_default();
++                } else if let Some(rest) = line.strip_prefix("rpc ") {
++                    let method = rest.split('(').next().unwrap_or_default().trim();
++                    paths.push(format!("/{package}.{service}/{method}"));
++                }
++            }
++        }
++        paths
++    }
++
++    #[test]
++    fn api_key_method_allow_list_is_closed() {
++        let key = VerifiedIdentity::api_key_for_test("org-1", "key-1", "user-1", false);
++        let paths = every_rpc_path();
++        assert!(paths.len() > API_KEY_METHODS.len(), "the proto sources were read");
++        // Every listed method is a real RPC, so a rename cannot silently empty the list.
++        for (method, _) in API_KEY_METHODS {
++            assert!(
++                paths.iter().any(|path| path.as_str() == *method),
++                "{method} is not an RPC"
++            );
++        }
++        let mut admitted = Vec::new();
++        for path in &paths {
++            match authorize_api_key_call(&key, Some(path)) {
++                Ok(()) => admitted.push(path.as_str()),
++                Err(status) => assert_eq!(status.code(), Code::PermissionDenied, "{path}"),
++            }
++        }
++        admitted.sort_unstable();
++        admitted.dedup();
++        let mut expected: Vec<&str> = API_KEY_METHODS.iter().map(|(method, _)| *method).collect();
++        expected.sort_unstable();
++        assert_eq!(admitted, expected);
++        for path in [
++            "/model_plane.v1.SessionCore/StartScheduledRun",
++            "/model_plane.v1.ManagedRunLifecycle/RecordTerminalOutcome",
++            "/model_plane.v1.SessionCore/CreateThread/",
++            "/model_plane.v1.sessioncore/CreateThread",
++            "",
++        ] {
++            assert_eq!(api_key_method_allowed(path), None, "{path:?}");
++        }
++
++        // A service that is not stamped hands the interceptor no path, and a key is refused.
++        let verifier = api_key_verifier();
++        let mut unstamped = call_on(START_RUN, &api_key_claims());
++        unstamped.extensions_mut().remove::<RpcPath>();
++        assert_eq!(
++            verifier
++                .intercept(unstamped)
++                .expect_err("no path, no admission")
++                .code(),
++            Code::PermissionDenied
++        );
++        for unlisted in [
++            "/model_plane.v1.SessionCore/ListThreads",
++            "/model_plane.v1.SessionCore/GetContextAssembly",
++            "/model_plane.v1.RunService/ResolveApprovalAuthority",
++        ] {
++            assert_eq!(
++                verifier
++                    .intercept(call_on(unlisted, &api_key_claims()))
++                    .expect_err("an unlisted method is refused")
++                    .code(),
++                Code::PermissionDenied,
++                "{unlisted}"
++            );
++        }
++
++        // A key token without the exchange's scope reaches nothing.
++        let mut unscoped = api_key_claims();
++        unscoped["scopes"] = json!(["session:write"]);
++        assert_eq!(
++            verifier
++                .intercept(call_on(START_RUN, &unscoped))
++                .expect_err("the agent:runs scope is required")
++                .code(),
++            Code::PermissionDenied
++        );
++    }
++
++    #[test]
++    fn api_key_never_carries_a_waiver() {
++        let verifier = api_key_verifier();
++        let mut waived = api_key_claims();
++        waived["org_zdr"] = json!(true);
++        waived["zdr_waiver"] = json!({
++            "version": WAIVER_CONTRACT_VERSION,
++            "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
++            "connection": "conn-a",
++            "ack_id": "ack-1",
++        });
++        assert_eq!(
++            verifier
++                .intercept(call_on(START_RUN, &waived))
++                .expect_err("a key has no connection to waive")
++                .code(),
++            Code::Unauthenticated
++        );
++        let key = VerifiedIdentity::api_key_for_test("org-1", "key-1", "user-1", false);
++        assert!(key.zdr_waiver().is_none());
++    }
++
++    #[test]
++    fn zdr_api_key_write_is_refused() {
++        let verifier = api_key_verifier();
++        let mut zdr = api_key_claims();
++        zdr["zdr"] = json!(true);
++        zdr["org_zdr"] = json!(true);
++        for (method, writes) in API_KEY_METHODS {
++            let result = verifier.intercept(call_on(method, &zdr));
++            if *writes {
++                assert_typed(
++                    &result.expect_err("a ZDR key writes nothing"),
++                    Code::FailedPrecondition,
++                    mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED,
++                    Some("agent_api"),
++                );
++            } else {
++                assert!(result.is_ok(), "{method}: a read stores nothing");
++            }
++        }
++        // The handlers' own write gate refuses a ZDR key as well.
++        let key = VerifiedIdentity::api_key_for_test("org-1", "key-1", "user-1", true);
++        assert_eq!(
++            authorize_operation(&key, "session:write")
++                .expect_err("a ZDR credential never writes")
++                .code(),
++            Code::FailedPrecondition
++        );
++    }
++
++    #[test]
++    fn api_key_owns_only_its_own_rows() {
++        let key = VerifiedIdentity::api_key_for_test("org-1", "key-1", "user-1", false);
++        for intent in [OwnerIntent::Read, OwnerIntent::Mutate] {
++            assert!(authorize_owner_row(&key, "org-1", "apikey:key-1", intent).is_ok());
++            // Not the person who owns the key, not another key, not a system run, not another org.
++            for owner in ["user-1", "apikey:key-2", "service:orchestrator-core"] {
++                assert_eq!(
++                    authorize_owner_row(&key, "org-1", owner, intent)
++                        .expect_err("a key reaches only its own rows")
++                        .code(),
++                    Code::PermissionDenied,
++                    "{owner}"
++                );
++            }
++            assert!(authorize_owner_row(&key, "org-2", "apikey:key-1", intent).is_err());
++        }
++        // A key cannot own a system run, and the person cannot reach the key's rows.
++        assert!(authorize_system_run_owner(&key).is_err());
++        assert!(is_api_key_owner(key.owner_id().expect("a key owns rows")));
++        assert!(!is_api_key_owner("user-1"));
++        assert!(!is_api_key_owner("service:orchestrator-core"));
++        let person = VerifiedIdentity::user_for_test("org-1", "user-1");
++        assert_eq!(
++            authorize_owner_row(&person, "org-1", "apikey:key-1", OwnerIntent::Read)
++                .expect_err("a key thread is not its owner's chat")
++                .code(),
++            Code::PermissionDenied
++        );
++    }
++
++    #[tokio::test]
++    async fn rpc_path_stamp_hands_the_path_to_the_interceptor() {
++        use tonic::codegen::{http, Service as _};
++
++        #[derive(Clone)]
++        struct Capture;
++        impl tonic::codegen::Service<http::Request<()>> for Capture {
++            type Response = Option<String>;
++            type Error = std::convert::Infallible;
++            type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
++
++            fn poll_ready(
++                &mut self,
++                _: &mut std::task::Context<'_>,
++            ) -> std::task::Poll<Result<(), Self::Error>> {
++                std::task::Poll::Ready(Ok(()))
++            }
++
++            fn call(&mut self, request: http::Request<()>) -> Self::Future {
++                std::future::ready(Ok(request
++                    .extensions()
++                    .get::<RpcPath>()
++                    .map(|path| path.0.to_string())))
++            }
++        }
++
++        let request = http::Request::builder()
++            .uri(format!("http://session-core{START_RUN}"))
++            .body(())
++            .expect("request");
++        let seen = RpcPathStamp::new(Capture)
++            .call(request)
++            .await
++            .expect("infallible");
++        assert_eq!(seen.as_deref(), Some(START_RUN));
++    }
+ }
+diff --git a/apps/Model Plane/rust/services/session-core/src/grpc.rs b/apps/Model Plane/rust/services/session-core/src/grpc.rs
+index 7a44dd650..9f8371dc4 100644
+--- a/apps/Model Plane/rust/services/session-core/src/grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/grpc.rs	
+@@ -5949,7 +5949,9 @@ pub(crate) async fn append_message_in_tx_as(
+     // thread extracts nothing and records no dream run.
+     let contained =
+         crate::space::memory_scope::thread_is_contained(thread.2.as_deref(), space_kind.as_deref());
+-    let candidates = if conversation_only || post_kind == "post" { Vec::new() } else if contained {
++    // EP-12 D2: an API key has no memory, so its threads extract nothing for anyone.
++    let key_owned = crate::auth::is_api_key_owner(&thread.1);
++    let candidates = if conversation_only || post_kind == "post" || key_owned { Vec::new() } else if contained {
+         crate::space::memory_scope::record_contained("append_extract");
+         // EP-8 S6: with Space memory switched on, what the room states is kept for the room
+         // (`scope = 'space'`, stamped with this message's audience), never for its owner; off, the
+@@ -7068,6 +7070,19 @@ pub(crate) async fn start_run_inner(
+     req: pb::StartRunRequest,
+     requested_run_id: Option<String>,
+     retention: crate::retention_receipt::RunRetention,
++) -> Result<Response<pb::StartRunResponse>, Status> {
++    start_run_inner_stamped(pool, req, requested_run_id, retention, None).await
++}
++
++/// [`start_run_inner`] for a run an API key starts: `api_key` names the key in
++/// the run's origin stamp (EP-12 S4). Only `start_run` passes one, from the
++/// verified caller.
++pub(crate) async fn start_run_inner_stamped(
++    pool: &PgPool,
++    req: pb::StartRunRequest,
++    requested_run_id: Option<String>,
++    retention: crate::retention_receipt::RunRetention,
++    api_key: Option<crate::run_origin_stamp::ApiKeyStamp<'_>>,
+ ) -> Result<Response<pb::StartRunResponse>, Status> {
+     use crate::retention_receipt::{self, RunRetention};
+     let requested_run_id = requested_run_id.filter(|value| !value.trim().is_empty());
+@@ -7145,7 +7160,7 @@ pub(crate) async fn start_run_inner(
+     .bind(retention.class.as_str())
+     .bind(retention.ack_id())
+     .bind(retention.connection_id())
+-    .bind(crate::run_origin_stamp::origin_at_birth(&req.user_id, inherited_origin))
++    .bind(crate::run_origin_stamp::origin_at_birth(&req.user_id, inherited_origin, api_key))
+     .fetch_optional(&mut *tx)
+     .await
+     .map_err(|e| Status::internal(e.to_string()))?;
+@@ -8832,7 +8847,8 @@ impl SessionCore for SessionService {
+             // workflow (`runs.thread_id` is NOT NULL REFERENCES threads(id)), so
+             // the same allowlisted principals may own a thread. The scope is
+             // shared with start_run: the thread exists only to hold the run.
+-            let user_id = match caller.user_id() {
++            // An API key owns the threads it creates (EP-12 D2); its owner id is the key.
++            let user_id = match caller.owner_id() {
+                 Some(user_id) => user_id.to_owned(),
+                 None => authorize_system_run_owner(&caller)?,
+             };
+@@ -8889,7 +8905,8 @@ impl SessionCore for SessionService {
+             // workflow fired by cron has no person — a Temporal activity can only
+             // present a service credential, and auth-core mints no user
+             // delegation — so an allowlisted service may own the run itself.
+-            let owner = match caller.user_id() {
++            // An API key owns its runs like a person, in its own threads only (EP-12 D2).
++            let owner = match caller.owner_id() {
+                 Some(user_id) => {
+                     authorize_thread_owner(
+                         &self.pool,
+@@ -8926,7 +8943,8 @@ impl SessionCore for SessionService {
+             // waived; a system owner is a service credential, which carries no
+             // waiver, so its run is persistent.
+             let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
+-            start_run_inner(&self.pool, req, None, retention).await
++            let api_key = crate::run_origin_stamp::ApiKeyStamp::of(&caller);
++            start_run_inner_stamped(&self.pool, req, None, retention, api_key).await
+         }
+         .await;
+         record_metrics("start_run", started, result.is_ok());
+@@ -12472,9 +12490,13 @@ pub async fn serve(
+             .await;
+     }
+ 
++    // EP-12 S4: the two services that hold `api_key` methods hand their interceptor the called
++    // path; a key is refused on every service that is not stamped.
++    let session_core = SessionCoreServer::with_interceptor(session.clone(), auth.clone());
++    let run_service = RunServiceServer::with_interceptor(runs, auth.clone());
+     tonic::transport::Server::builder()
+         .add_service(health_service)
+-        .add_service(SessionCoreServer::with_interceptor(session.clone(), auth.clone()))
++        .add_service(crate::auth::RpcPathStamp::new(session_core))
+         .add_service(AttentionServiceServer::with_interceptor(session, auth.clone()))
+         .add_service(ManagedRunLifecycleServer::with_interceptor(
+             managed_lifecycle,
+@@ -12576,7 +12598,7 @@ pub async fn serve(
+             crate::eventlog_grpc::EventLogService::new(event_log_pool),
+             auth.clone(),
+         ))
+-        .add_service(RunServiceServer::with_interceptor(runs, auth))
++        .add_service(crate::auth::RpcPathStamp::new(run_service))
+         .serve(addr)
+         .await?;
+ 
+diff --git a/apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs b/apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs
+index 4868732c5..8d1f3497c 100644
+--- a/apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/run_origin_stamp.rs	
+@@ -9,10 +9,16 @@
+ //! inserts the child, in the child's org, and a stamp outside the closed token
+ //! set is never copied. With the switch off, every run is stamped as it always
+ //! was.
++//!
++//! EP-12 S4: a run an `api_key` principal starts is stamped `api`, naming the
++//! key and the person who owns it. The key owns the run (D2); the person is
++//! named here as attribution only, never as an owner.
+ 
+ use mp_contracts::run_origin::{RunOrigin, ORIGIN_METADATA_KEY};
+ use tonic::Status;
+ 
++use crate::auth::VerifiedIdentity;
++
+ /// The switch that makes a child run inherit its parent's origin. Default off.
+ pub(crate) const INHERIT_ENV: &str = "SESSION_RUN_ORIGIN_INHERIT";
+ 
+@@ -23,16 +29,51 @@ pub(crate) fn inherit_enabled(raw: Option<&str>) -> bool {
+     mp_contracts::loop_fold::switch_from(raw)
+ }
+ 
++/// The `runs.metadata` key naming the API key that started a run.
++pub(crate) const API_KEY_ID_METADATA_KEY: &str = "api_key_id";
++/// The `runs.metadata` key naming the person who owns that key. Attribution only.
++pub(crate) const API_KEY_OWNER_METADATA_KEY: &str = "api_key_owner";
++
++/// The API key that starts a run, as the run's stamp names it.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) struct ApiKeyStamp<'a> {
++    key_id: &'a str,
++    owner: &'a str,
++}
++
++impl<'a> ApiKeyStamp<'a> {
++    /// The stamp of a verified `api_key` caller; `None` for every other caller.
++    #[must_use]
++    pub(crate) fn of(caller: &'a VerifiedIdentity) -> Option<Self> {
++        Some(Self {
++            key_id: caller.api_key_id()?,
++            owner: caller.acting_user_id()?,
++        })
++    }
++}
++
+ /// The `runs.metadata` stamp of a new run. A run that inherits an origin carries
+-/// that token. Any other run keeps the stamp it has always had: `chat` for a
+-/// person, and none for a system owner.
++/// that token, and a run an API key starts is otherwise stamped `api`. Any other
++/// run keeps the stamp it has always had: `chat` for a person, and none for a
++/// system owner. A key's run names the key and its owner whichever token it
++/// carries, so an inherited token still wins without losing who started the run.
+ #[must_use]
+-pub(crate) fn origin_at_birth(user_id: &str, inherited: Option<RunOrigin>) -> serde_json::Value {
+-    match inherited {
+-        Some(origin) => serde_json::json!({ ORIGIN_METADATA_KEY: origin.as_str() }),
+-        None if crate::auth::is_system_run_owner(user_id) => serde_json::json!({}),
+-        None => serde_json::json!({ ORIGIN_METADATA_KEY: RunOrigin::Chat.as_str() }),
++pub(crate) fn origin_at_birth(
++    user_id: &str,
++    inherited: Option<RunOrigin>,
++    api_key: Option<ApiKeyStamp<'_>>,
++) -> serde_json::Value {
++    let mut stamp = match (inherited, api_key) {
++        (Some(origin), _) => serde_json::json!({ ORIGIN_METADATA_KEY: origin.as_str() }),
++        (None, Some(_)) => serde_json::json!({ ORIGIN_METADATA_KEY: RunOrigin::Api.as_str() }),
++        (None, None) if crate::auth::is_system_run_owner(user_id) => serde_json::json!({}),
++        (None, None) => serde_json::json!({ ORIGIN_METADATA_KEY: RunOrigin::Chat.as_str() }),
++    };
++    if let (Some(key), Some(fields)) = (api_key, stamp.as_object_mut()) {
++        fields.insert(API_KEY_ID_METADATA_KEY.to_owned(), key.key_id.into());
++        fields.insert(API_KEY_OWNER_METADATA_KEY.to_owned(), key.owner.into());
+     }
++    stamp
+ }
+ 
+ /// The origin token a child run inherits from `parent_run_id`, or `None` when
+@@ -163,14 +204,17 @@ mod tests {
+             .await
+             .expect("the parent is read");
+         assert_eq!(inherited, Some(RunOrigin::Api));
+-        assert_eq!(origin_at_birth(&user, inherited), json!({"origin": "api"}));
++        assert_eq!(
++            origin_at_birth(&user, inherited, None),
++            json!({"origin": "api"})
++        );
+ 
+         let switched_off = inherited_origin(&mut connection, &org, &api_parent, false)
+             .await
+             .expect("no read is an answer, not an error");
+         assert_eq!(switched_off, None);
+         assert_eq!(
+-            origin_at_birth(&user, switched_off),
++            origin_at_birth(&user, switched_off, None),
+             json!({"origin": "chat"})
+         );
+ 
+@@ -190,11 +234,11 @@ mod tests {
+     fn child_inherits_parent_origin_when_switch_on() {
+         // An inherited token is stamped whoever owns the child.
+         assert_eq!(
+-            origin_at_birth("user-123", Some(RunOrigin::Api)),
++            origin_at_birth("user-123", Some(RunOrigin::Api), None),
+             json!({"origin": "api"})
+         );
+         assert_eq!(
+-            origin_at_birth("service:orchestrator-core", Some(RunOrigin::Schedule)),
++            origin_at_birth("service:orchestrator-core", Some(RunOrigin::Schedule), None),
+             json!({"origin": "schedule"})
+         );
+     }
+@@ -202,9 +246,12 @@ mod tests {
+     #[test]
+     fn switch_off_stamp_is_todays_stamp() {
+         // Without an inherited token, a run is stamped exactly as before EP-12 S1.
+-        assert_eq!(origin_at_birth("user-123", None), json!({"origin": "chat"}));
+         assert_eq!(
+-            origin_at_birth("service:orchestrator-core", None),
++            origin_at_birth("user-123", None, None),
++            json!({"origin": "chat"})
++        );
++        assert_eq!(
++            origin_at_birth("service:orchestrator-core", None, None),
+             json!({})
+         );
+     }
+@@ -216,7 +263,7 @@ mod tests {
+         let unknown = RunOrigin::from_metadata(&json!({"origin": "sheduled"}));
+         assert_eq!(unknown, None);
+         assert_eq!(
+-            origin_at_birth("user-123", unknown),
++            origin_at_birth("user-123", unknown, None),
+             json!({"origin": "chat"})
+         );
+     }
+@@ -224,11 +271,42 @@ mod tests {
+     #[test]
+     fn system_owner_without_parent_stays_unstamped() {
+         assert_eq!(
+-            origin_at_birth("service:orchestrator-core", None),
++            origin_at_birth("service:orchestrator-core", None, None),
+             json!({})
+         );
+     }
+ 
++    #[test]
++    fn api_key_run_is_stamped_api_with_attribution() {
++        let key = VerifiedIdentity::api_key_for_test("org-1", "key-1", "user-1", false);
++        let stamp = ApiKeyStamp::of(&key);
++        assert_eq!(
++            stamp,
++            Some(ApiKeyStamp {
++                key_id: "key-1",
++                owner: "user-1"
++            })
++        );
++        assert_eq!(
++            origin_at_birth("apikey:key-1", None, stamp),
++            json!({"origin": "api", "api_key_id": "key-1", "api_key_owner": "user-1"})
++        );
++        // An inherited token still wins for a child run, and the key stays named.
++        assert_eq!(
++            origin_at_birth("apikey:key-1", Some(RunOrigin::Schedule), stamp),
++            json!({"origin": "schedule", "api_key_id": "key-1", "api_key_owner": "user-1"})
++        );
++        // A person and a service are not keys: their stamps are unchanged.
++        let person = VerifiedIdentity::user_for_test("org-1", "user-1");
++        let service = VerifiedIdentity::service_for_test("org-1", &[], false);
++        assert_eq!(ApiKeyStamp::of(&person), None);
++        assert_eq!(ApiKeyStamp::of(&service), None);
++        assert_eq!(
++            origin_at_birth("user-1", None, ApiKeyStamp::of(&person)),
++            json!({"origin": "chat"})
++        );
++    }
++
+     #[test]
+     fn inherit_parser_takes_only_literal_true() {
+         for raw in ["true", " true ", "TRUE"] {

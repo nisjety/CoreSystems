@@ -1,0 +1,917 @@
+{
+ "batchId": "W2-24",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS27-S2",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib --no-run (run in apps/Model Plane/rust, after the four fixes)",
+     "outcome": "FAILED to compile, exit 101. Only two errors, both in WS17-S8 files I do not own: E0609 no field message_tree_client on AppState at src/http_routes.rs:10476 (src/state.rs defines no such field); E0063 missing include_inactive in the ListConversationRequest initializer at src/run_context.rs:516. No error was reported in sse.rs, sse_events.rs, tool_loop.rs or tests/usage_meter_contract.rs. This is type-check evidence only: borrow-check and test execution were not reached."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (full lib suite)",
+     "outcome": "NOT RUN, blocked by the compile errors above."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test usage_meter_contract",
+     "outcome": "NOT RUN, blocked: the lib target does not compile."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test zdr_feature_table",
+     "outcome": "NOT RUN, blocked: the lib target does not compile."
+    },
+    {
+     "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+     "outcome": "ok, sse taxonomy up to date (27 events)."
+    },
+    {
+     "command": "cd apps/Model Plane/go/services/cost-core && go test ./...",
+     "outcome": "ok, all packages (cached; no Go change in this round)."
+    },
+    {
+     "command": "Python simulation of the new source-order guard against current src/sse.rs (not a cargo test)",
+     "outcome": "verification marker index 108526 precedes the single sink.overhead_usage() read at 128565; no env::var in the guarded handler body. This only checks the logic the Rust test will run."
+    },
+    {
+     "command": "python3 line-ending check of src/sse.rs and tests/usage_meter_contract.rs",
+     "outcome": "sse.rs has 0 CRLF and all LF (unchanged style); usage_meter_contract.rs is uniformly CRLF (1025 of 1025 lines)."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "BLOCKER, owned by WS17-S8, not this slice: apps/Model Plane/rust/services/model-gateway/src/run_context.rs line 516 (ListConversationRequest literal) needs include_inactive: false. apps/Model Plane/rust/services/model-gateway/src/http_routes.rs line 10476 reads state.message_tree_client, which AppState (src/state.rs) does not define. Fix both, then from apps/Model Plane/rust run with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: cargo test -q -p model-gateway --lib ; cargo test -q -p model-gateway --test usage_meter_contract ; cargo test -q -p model-gateway --test zdr_feature_table.",
+    "After the blocker clears, confirm these pass: sse::execute_turn_tests::the_overhead_is_read_after_the_verification_pass; sse::tests::a_recorded_overhead_call_reaches_the_frame_and_its_row; sse::execute_turn_tests::the_execute_gate_runs_before_any_run_exists; sse::zdr_provenance_tests::a_zdr_answer_ends_with_one_usage_frame_that_names_its_provider_and_no_content; usage_meter_contract chat_envelopes_carry_run_id.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add beside line 359 in the model-gateway environment block (MODEL_GATEWAY_ZDR_STREAM_COST line): MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}",
+    "Unchanged from the previous report, still required: the golden chain (lead_todo 2 there), the ledger ADR entry (lead_todo 4 there), lead-run docker evidence (lead_todo 5 there), and the D3/D4 decision (lead_todo 6 there)."
+   ],
+   "deviations": [
+    "Fix 2 uses a helper outside the handler (the reviewer's option 1), not an AppState field. The fallback turn function at sse.rs ~8037 also switched to the helper so the switch has one env reader. This is one line beyond the minimal fix.",
+    "The overhead read moved from before latency_ms to just before the ledger block (~4996). Nothing else between the old and new positions consumed overhead.",
+    "The env-form helper is named turn_usage_complete_switch(), while the injected form keeps the earlier name turn_usage_complete_enabled(lookup). The repo's *_enabled()/*_enabled_with() pattern is not followed exactly, to avoid renaming call sites in the test module."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/run_context.rs (line 516 ListConversationRequest literal missing include_inactive; WS17-S8, compile blocker)",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (line 10476 state.message_tree_client; WS17-S8, compile blocker)",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs (only if the AppState field is added; not in WS17-S8's listed files)",
+    "apps/Model Plane/docs/decisions/ledger.md (ADR entry; text in the previous report's lead_todo 4)",
+    "apps/Model Plane/deploy/docker-compose.yml (shared-edit line in lead_todo)",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json and .sha256, scripts/tests/zdr-contract-sync.test.sh, apps/Frontend Plane/verevonv3/src/shared/api/contracts/*, and chat-event-payloads.generated.ts (golden chain, unchanged from the previous report)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/api/contracts/sse-event-payloads.json (plus its .sha256 pin, the SPA's vendored copy under apps/Frontend Plane/verevonv3/src/shared/api/contracts/, chat-event-payloads.generated.ts and the pinned digest in apps/Model Plane/scripts/tests/zdr-contract-sync.test.sh): the lib unit test sse_events::payload_contract::sse_event_payload_golden FAILS. The cause is this slice's three new Usage keys: calls and unpriced_calls ('always') and cost_by_category ('optional'). I regenerated the golden in an isolated copy with MP_UPDATE_GOLDEN=1, and the only diff is those 18 added lines. These files are outside the slice's ownership, so the lead must run the golden chain (MP_UPDATE_GOLDEN=1 cargo test -p model-gateway --lib sse_event_payload_golden, then refresh the sha256, the vendored copy, the generated TS and the zdr-contract-sync digest). Until that runs, the lib suite is red because of this slice."
+    ],
+    "dod_gaps": [
+     "The worktree's model-gateway lib does not compile because of WS17-S8's in-flight edits, which this slice does not own: http_routes.rs:10476 uses state.message_tree_client, which AppState does not define (SetActiveLeaf is on MessageTreeService), and run_context.rs:516 ListConversationRequest is missing include_inactive. I verified WS27-S2 on a scratch copy with both lines patched. The lead must fix them in the tree and rerun: cargo test -p model-gateway --lib, --test usage_meter_contract, --test zdr_feature_table.",
+     "Live proof (lead, docker): a 3-round tool turn whose frame equals the provider-reported sum; with the switch off, ledger row count unchanged; with it on, N+1 rows carrying run_id and GET /api/v1/cost/run?run_id= non-empty.",
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: model-gateway env gains MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false} (from the implementer's lead_todo).",
+     "The ADR entry in apps/Model Plane/docs/decisions/ledger.md must list the overhead calls left unmetered (title and follow-up, compaction summary, deep-research plan and synthesis, unchosen word-range candidates). The plan row requires this and it is lead-owned.",
+     "DEC-18 / WS27-D5 (billing attribution) must be confirmed before MODEL_GATEWAY_TURN_USAGE_COMPLETE is flipped anywhere."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives judge_sources or resample_answer through the handler under the switch. The new source-order guard is a text check, and the frame test covers the sink-to-frame path only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "chat_envelopes_carry_run_id expects exactly four rows. If the mock answer triggers the verification pass, an overhead row (-o1) is added and the count becomes five. Unverified until the lib builds."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The helper-based env read satisfies the guard by moving the read out of the handler. The plan-store style (read once in AppState) needs state.rs, which this slice does not own. Lead to choose before the switch is flipped anywhere."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No rebuilt-stack proof yet (carried forward): a three-round tool turn's frame equal to the provider sum, GET /api/v1/cost/run non-empty with the switch on, and ledger row counts equal with the switch off versus on. Lead-run only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Money gaps carried forward: title and follow-up calls after the frame; the compaction summary call; deep research plan and synthesis; word-range repair candidates other than the chosen one; and an error exit after tool rounds drops that phase's usage."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Owner or lead must accept D3 and D4 before the switch is flipped: the ungated cumulative frame changes default-turn totals with the switch off, and a no-call turn states null cost (carried forward)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Helper naming differs from the repo's *_enabled()/*_enabled_with() convention (see deviations)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No test drives judge_sources or resample_answer through invoke_stream_sse with a verification pass. the_overhead_is_read_after_the_verification_pass is a source-text order check, and a_recorded_overhead_call_reaches_the_frame_and_its_row covers only the sink-to-frame path."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "An error or early exit after tool rounds emits no cumulative usage frame and no per-round rows, so the tool-phase spend of a failed turn is still unmetered."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, run_id is stamped from session_run_for_terminal.run_id / run.run_id without a non-empty check. A turn whose run was never created would publish rows with run_id \"\", which the cost-core run endpoint cannot join."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The cumulative frame ships ungated, as the plan intends (D7). With the switch off, default turns now show tool-round tokens and cost in the frame while the ledger row stays answer-only, so frame and ledger disagree until the switch is on. A turn whose answer made no provider call now states cost_basis null instead of Some(basis) (D3/D4). The owner must accept both."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The frame's cost_basis is now turn.basis from the meter. It is None for a mixed-basis turn, where it used to be the route's basis, and older clients that key on cost_basis presence will see no basis."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "use-chat-controller.ts onUsage already replaces the turn fields, so no change was needed, but calls/unpricedCalls/costByCategory are parsed by chat-client.ts and not stored on the turn. S4 (RunCostMeter) will need them on Message."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's overhead_calls_are_recorded_once was written as a lib unit test in sse.rs rather than in tests/usage_meter_contract.rs, and only exercises RichEventSink directly, not a real turn."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "turn_usage_complete_switch() / turn_usage_complete_enabled(lookup) do not follow the repo's *_enabled()/*_enabled_with() naming, and the switch is read from the environment per turn rather than held on AppState."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The plan's test command `cargo test -q -p model-gateway --lib tool_loop usage sse_events` is invalid cargo syntax, because cargo takes one filter. Section 6.4 should give one command per filter or run the whole --lib."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib tool_loop usage sse_events (plan form)",
+      "outcome": "Invalid cargo syntax: error: unexpected argument 'usage' found (cargo takes one TESTNAME). Could not run as written. The lib does not compile anyway.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --lib --no-run (compile check)",
+      "outcome": "FAILED, exit 101. Two errors, both outside this slice: E0609 no field message_tree_client on AppState at src/http_routes.rs:10476; E0063 missing include_inactive in ListConversationRequest at src/run_context.rs:516. No errors in sse.rs, sse_events.rs or tool_loop.rs, but borrow-check and tests were not reached.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test usage_meter_contract",
+      "outcome": "Not run: the lib fails to compile with the same two errors (message_tree_client, include_inactive).",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test zdr_feature_table",
+      "outcome": "Not run: blocked by the same lib compile errors (the usage_meter_contract build hit them, and the lib is a shared dependency).",
+      "passed": false
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/cost-core && go test ./...",
+      "outcome": "ok, all packages pass (cached); telemetry has no test files.",
+      "passed": true
+     },
+     {
+      "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+      "outcome": "ok: sse taxonomy up to date (27 events).",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Frontend Plane/verevonv3 && pnpm vitest run --pool=threads chat-client.test.ts use-chat-controller.recovery.test.ts",
+      "outcome": "2 test files passed, 151 tests passed.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "money",
+    "audit",
+    "zdr"
+   ],
+   "notes": "Fix 1 (sse.rs invoke_stream_sse): the early `let overhead = sink.overhead_usage();` (was ~line 4183) is removed. The read now sits just before the ledger-row block (~line 4996), after the verification pass, which is the only recorder of judge and resample overhead, and before turn_usage (~5058). New test sse::tests::a_recorded_overhead_call_reaches_the_frame_and_its_row (~line 14462): records one overhead call, drives it through turn_usage and turn_call_rows, and asserts calls 2, input 542, output 57, the priced total, and the row key ...-USAGE_ENVELOPE-o1 with its tokens. New source-order guard sse::execute_turn_tests::the_overhead_is_read_after_the_verification_pass (~line 21910), which checks that the single read follows the ChatEvent::Verification emission inside the handler.\n\nFix 2 (env read): the handler no longer contains env::var (the guarded body ends at line 5437). New helper turn_usage_complete_switch() (~line 12536) reads the environment through turn_usage_complete_enabled. The handler (~line 4999) and the fallback turn function (~line 8037) both call it, so there is one reader. This is the reviewer's first option. The AppState option would need state.rs, which this slice does not own.\n\nFix 3: sse::zdr_provenance_tests expected key list (~lines 16567 and 16577) now includes calls and unpriced_calls, per D8.\n\nFix 4: tests/usage_meter_contract.rs chat_envelopes_carry_run_id (lines 943-948) now expects four rows, r1 to r3 then the answer row, and reads the run id from rows[3]. Edited by a script that refuses non-uniform line endings, so CRLF is preserved.\n\nStatus: the four fixes are applied and reviewed, but no Rust test has run. The lib does not compile because of WS17-S8's in-flight edits, which I did not touch. Once those land, the lead must rerun the commands in lead_todo."
+  },
+  {
+   "id": "WS17-S8",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions_grpc.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0061_message_versions.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0061_message_versions.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/message_tree.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/main.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/message_search.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/sessionreview/transcript.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/sessionreview/transcript_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/history-foundation-proof.sh"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "FAILED to compile, exit 101, so no test ran. Exactly the two reviewer errors: E0609 no field message_tree_client on state::AppState (http_routes.rs:10476) and E0063 missing field include_inactive in ListConversationRequest (run_context.rs:516). The shared edits that fix them were not applied here (see lead_todo 1 and 2)."
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core message_tree",
+     "outcome": "ok, exit 0: 9 passed, 0 failed, 6 ignored (the DB tests need DATABASE_URL and were not run)."
+    }
+   ],
+   "db_tests_written": [
+    "message_tree::tests::legacy_thread_materializes_chain_once",
+    "message_tree::tests::switch_sibling_moves_flags_and_leaf",
+    "message_tree::tests::nested_edit_of_non_final_message_keeps_both_branches",
+    "message_tree::tests::rewind_to_ancestor_is_reversible",
+    "message_tree::tests::stale_expected_leaf_conflicts",
+    "message_tree::tests::active_run_blocks_switch",
+    "conversation_page_db_tests::list_conversation_default_equals_legacy_for_unversioned_threads",
+    "conversation_page_db_tests::context_assembly_ignores_inactive_branch",
+    "dreaming::tests::dreaming_ignores_inactive_branch"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs (CRLF file: keep CRLF; apply bottom-up so the line numbers hold): (e) after the line `            state.message_search_client = message_search_client;` in both from-env branches (lines 786 and 839) add `            state.message_tree_client = message_tree_client;`; (d) after the 5-line block that starts `        let message_search_client = MessageSearchClient::new(Self::lazy_channel(` and ends `        )?);` (lines 577-581) add `        let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(`, then `            \"SESSION_CORE_URL\",`, `            \"SESSION_CORE_ADDR\",`, `            \"http://localhost:9091\",`, then `        )?);`; (c) in `pub fn new()`, after `            message_search_client: MessageSearchClient::new(session_channel.clone()),` (line 419) add `            message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),`; (b) in `pub struct AppState`, after `    pub message_search_client: MessageSearchClient<Channel>,` (line 105) add the doc line `    /// Session Core's MessageTree service on the session_client endpoint (WS17-S8).` and `    pub message_tree_client: MessageTreeServiceClient<Channel>,`; (a) in the `use mp_contracts::model_plane::v1::{...}` list, after `    memory_service_client::MemoryServiceClient,` (line 18) add `    message_tree_service_client::MessageTreeServiceClient,`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/run_context.rs (LF file): in the `ListConversationRequest {` literal in load_history (line 516, no ..Default::default()), after the line `            space_read_decision_token: String::new(),` (line 522) add `            include_inactive: false,`. This is the proto3 default, so the bytes sent do not change.",
+    "After lead_todo 1 and 2: `cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib` must pass, including the module thread_messages_page_tests (4 new tests). Any new error from that build goes back to this slice as a new round.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: (a) in the session-core environment, after `      SESSION_CORE_MESSAGE_SEARCH_ENABLED: ${SESSION_CORE_MESSAGE_SEARCH_ENABLED:-false}` (line 910), add a WS17-S8 comment and `      SESSION_CORE_MESSAGE_VERSIONS_ENABLED: ${SESSION_CORE_MESSAGE_VERSIONS_ENABLED:-false}`; (b) in the model-gateway environment, after `      MODEL_GATEWAY_SEND_RECEIPTS: ${MODEL_GATEWAY_SEND_RECEIPTS:-true}` (line 325), add a WS17-S8 comment and `      MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED: ${MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED:-false}`. Both default off; set them together.",
+    "DB tests on a disposable Postgres, one at a time (they set SESSION_CORE_MESSAGE_VERSIONS_ENABLED process-wide): `cd 'apps/Model Plane/rust' && DATABASE_URL=<disposable> cargo test -p session-core --bin session-core message_tree::tests -- --ignored --test-threads=1`, then the same flags for conversation_page_db_tests::list_conversation_default_equals_legacy_for_unversioned_threads, conversation_page_db_tests::context_assembly_ignores_inactive_branch and dreaming::tests::dreaming_ignores_inactive_branch.",
+    "Before migration 0061 runs on a populated messages table: build idx_messages_parent (thread_id, parent_message_id WHERE parent_message_id IS NOT NULL) and idx_messages_thread_active (thread_id, sequence WHERE on_active_path) CONCURRENTLY out of band. The migration's IF NOT EXISTS then skips them.",
+    "Rebuild session-core and model-gateway (not done here): `bash \"apps/Model Plane/scripts/compose.sh\" up -d --no-deps --build session-core model-gateway`, then `bash \"apps/Model Plane/scripts/tests/history-foundation-proof.sh\"` with the switch off (its S8 section is database-only). The versioned branch and rewind proof needs a session bearer for the gateway route and is not in the script.",
+    "Owner or integrator decisions: keep MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED or derive versions_enabled another way; keep idx_messages_thread_active; the zdr-posture-matrix.json row shape for SetActiveLeaf (N7), with its .sha256 and the pin at scripts/tests/zdr-contract-sync.test.sh:102; record MessageTreeService and the flag-on tree semantics in the 4.3 and DEC-29 ledger entries."
+   ],
+   "deviations": [
+    "SetActiveLeaf lives in a separate MessageTreeService, not in SessionCore as the 4.3 table says. Adding it to SessionCore breaks five SessionCore test mocks, and it follows the MessageSearch precedent.",
+    "The Service suffix (MessageTreeService) keeps the buf lint ratchet from growing.",
+    "Migration 0061 builds its two indexes plainly, not CONCURRENTLY. sqlx runs a migration as one batch and PostgreSQL refuses CREATE INDEX CONCURRENTLY inside a batch (see depth finding and lead_todo 5).",
+    "Gateway switch MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED added beyond the slice's flag field, because versions_enabled must come from the gateway process. Default off, strict parser.",
+    "zdr-posture-matrix.json row for SetActiveLeaf (N7) not added: no existing row shape evaluates a route refusal, and a new one changes a cross-plane golden and the pin at scripts/tests/zdr-contract-sync.test.sh:102. Enforcement is in code.",
+    "The unpaged ListConversation uses the paged query (LIMIT i64::MAX, then reversed), so the active-path filter and the tree columns live in one SQL.",
+    "The Go reader drops a turn only when sibling_count > 0 and on_active_path is false, because proto3 never sends false.",
+    "SetActiveLeaf semantics are decided here, not in the plan: a target on the active path is a rewind (the leaf becomes the target); any other target is a version switch (the leaf becomes the newest descendant of the target). Recorded in the proto comment and in message_tree.rs."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/state.rs: model-gateway lib and lib tests do not compile. The error is E0609, no field `message_tree_client` on AppState, raised at http_routes.rs:10476. The fix is to add `message_tree_service_client::MessageTreeServiceClient` to the mp_contracts use list, add a `pub message_tree_client: MessageTreeServiceClient<Channel>` field, initialise it in `new()` from `session_channel.clone()`, and add it to both from-env branches with the SESSION_CORE_URL/ADDR lazy channel, exactly as the implementer's lead_todo 1 says. The file is CRLF and must stay CRLF. It is a shared file, so the lead applies the edit.",
+     "apps/Model Plane/rust/services/model-gateway/src/run_context.rs: E0063, missing field `include_inactive` in the ListConversationRequest literal in load_history (line 516). The fix is to add `include_inactive: false,`. That is the proto3 default, so the bytes on the wire do not change. It is a shared file, so the lead applies the edit (lead_todo 2).",
+     "After both edits, `cd 'apps/Model Plane/rust' && cargo test -p model-gateway --all-targets` must compile and pass, including the four new thread_messages_page_tests. The gateway half of the slice (branch route, version fields, versions_enabled) has never been compiled past these errors or run."
+    ],
+    "dod_gaps": [
+     "Run the DB tests on a disposable Postgres with --test-threads=1: 6 message_tree::tests, conversation_page_db_tests (2) and dreaming_ignores_inactive_branch. None of the tree SQL has ever run against Postgres.",
+     "Live evidence from the plan row: rebuild session-core and model-gateway with the switch on; use the gateway route to branch a seeded thread; show ListConversation default against include_inactive; run a Dreaming tick and a compaction to show that neither reads an inactive branch. A session bearer is needed. Not done.",
+     "shared-edit docker-compose.yml: SESSION_CORE_MESSAGE_VERSIONS_ENABLED and MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED, both defaulting to false (lead_todo 4).",
+     "Build idx_messages_parent and idx_messages_thread_active CONCURRENTLY out of band before migration 0061 runs on a populated messages table.",
+     "Owner or ledger: record that SetActiveLeaf lives in a new MessageTreeService and not in SessionCore, and record the rewind and switch semantics, in the 4.3 and DEC-29 ledger entries."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Gateway half has no run evidence. The lib test build fails before any test runs, so branch_thread and the four new thread_messages_page_tests (a_transcript_without_versions_keeps_its_shape, a_versioned_turn_says_where_it_sits_among_its_versions, a_branch_refusal_maps_to_the_code_the_client_acts_on, the_gateway_reports_versions_only_when_its_switch_is_on) are unrun. Read-only checks only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "E0609 in branch_thread stops rustc from checking the rest of that chain, and E0063 taints load_history, so neither body has been type-checked or borrow-checked past these errors. Reading found no mismatch or borrow problem. The first real check is the lib test build after the shared edits."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "the_gateway_reports_versions_only_when_its_switch_is_on only checks that Some(true) serialises. The switch-to-field mapping at http_routes.rs:10429 (message_versions_enabled().then_some(true)) is not exercised by any test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The 9 DB tests are written but not run; they need a disposable Postgres. The SQL in link_chain, record_append, set_active_leaf and the flag-on append path has never executed against Postgres."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 0061 builds idx_messages_parent and idx_messages_thread_active without CONCURRENTLY, so boot takes a SHARE lock on messages while they build. Build both CONCURRENTLY out of band before it runs on a populated database."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The zdr-posture-matrix.json row for SetActiveLeaf (N7), its .sha256 and the pin at scripts/tests/zdr-contract-sync.test.sh:102 are not added. The matrix has no row shape for a durable-mutation refusal. Enforcement is in code: authorize_operation refuses session:write for ZDR credentials, and MG require_non_zdr_durable_mutation returns 412. zdr_refusal_inventory.rs [live-only] does not list SetActiveLeaf."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED must match SESSION_CORE_MESSAGE_VERSIONS_ENABLED. If they disagree, the client shows the switcher while the branch route answers 503. Owner or lead to keep it or derive versions_enabled another way."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "GET /v1/threads/{id}/messages cannot ask for inactive turns, so WS17-S9's switcher has no sibling ids. S9 must add the parameter or a sibling listing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "append_scheduled_result_in_tx (session-core grpc.rs) inserts a turn without tree bookkeeping. On a versioned thread that turn stays on the active path until the next tree operation repairs the leaf."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The reader scan is textual and covers grpc.rs, dreaming.rs and message_search.rs only. loop_checkpoint.rs thread_position_locked (an unfiltered MAX(sequence) watermark, intentional) and memory_control.rs:574 (an existence check) are outside it. Neither returns content."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "idx_messages_thread_active is partial on on_active_path. While every row is TRUE it duplicates idx_messages_thread_id, so each insert writes two indexes. Owner decision whether to keep it, since the plan names it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "SetActiveLeaf loads every turn of the thread (O(n)) and returns the whole active path. Fine for a user action, slow and large for a very long thread."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Plan deviation: SetActiveLeaf is in MessageTreeService, not SessionCore. Record it in the 4.3 ledger entry and DEC-29, with the flag-on semantics: rewind moves the leaf, and Space and waived threads keep no tree."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "A first-turn edit (WS17-S9) creates a root sibling. The stale check treats a parentless turn after the leaf as stale, so S9 should make the new root sibling the leaf when it writes it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "sse.rs (around 6351 and 8819) and tool_loop.rs (3778) already set include_inactive: false. This slice did not write them and they compile; the owning slice should confirm."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "buf lint ratchet: 72 keys are absent from the committed baseline. None name this slice's additions."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "zdr-posture-matrix.json, an owned file, has no row for SetActiveLeaf, so the ZDR refusal is enforced only in code (authorize_operation session:write, and MG require_non_zdr_durable_mutation returning 412) and no contract golden pins it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "versions_enabled comes from a second switch, MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED, that must match the session-core switch: if they differ, the UI shows the switcher while the branch route returns 503/FAILED_PRECONDITION."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway handler reads MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED with std::env::var on each request (http_routes.rs:10320), not from AppState. That pattern has raced under parallel gateway tests before."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "GET /v1/threads/{id}/messages cannot ask for inactive turns, so WS17-S9's version switcher has no sibling ids to switch to."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "append_scheduled_result_in_tx in session-core grpc.rs inserts a turn without tree bookkeeping, so on a versioned thread the active leaf is stale until the next tree operation."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 0061 builds both indexes non-concurrently, so applying it takes a SHARE lock on messages for the duration of the index build."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test exercises the mapping from the switch to versions_enabled (message_versions_enabled().then_some(true)), and the reader-filter contract scan does not cover loop_checkpoint.rs or memory_control.rs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "SetActiveLeaf loads every turn of the thread and returns the full active path, which is O(n) for very long threads."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "`cargo fmt --all -- --check` fails across about 150 files. Most are pre-existing and outside this slice; message_tree.rs is fmt-clean."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -p session-core --all-targets (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "Compiles. Four test binaries all ok: 669 passed 0 failed 256 ignored (bin), then 4, 9 and 4 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --all-targets",
+      "outcome": "FAILED to compile (lib and lib test). E0609: no field message_tree_client on AppState (http_routes.rs:10476). E0063: missing field include_inactive in ListConversationRequest (run_context.rs:516). No tests ran. Neither run_context.rs nor state.rs is modified in git status, so the shared edits from the implementer's lead_todo 1 and 2 are still unapplied.",
+      "passed": false
+     },
+     {
+      "command": "cargo fmt --all -- --check",
+      "outcome": "Reports diffs in about 150 files across the workspace, including many files this slice did not touch (mp-content-safety, mp-contracts, execution-core, inference-core). The slice-owned new file message_tree.rs passes rustfmt --check on its own. dreaming.rs, grpc.rs, main.rs and http_routes.rs also show fmt diffs, but I did not check whether those diffs are on lines the slice added. The command as written does not pass.",
+      "passed": false
+     },
+     {
+      "command": "cd capability-core && go build ./... && go test ./internal/sessionreview/...",
+      "outcome": "go build exit 0. go test ok for internal/sessionreview (cached result).",
+      "passed": true
+     },
+     {
+      "command": "buf lint (run from apps/Model Plane/proto)",
+      "outcome": "Exits 0, but prints a long list of documentation-comment warnings. I saw only the tail, which was verified_outcome.proto, not sessions.proto, and I did not check whether any warning is new for this slice. Run from the Model Plane root it fails to resolve imports, because buf.yaml lives in proto/.",
+      "passed": true
+     },
+     {
+      "command": "field-number diff of sessions.proto against HEAD (B.1 N2)",
+      "outcome": "git diff -U0 on sessions.proto shows zero removed lines, so the change is additive only. I did not do a field-number-level comparison.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p session-core --bin session-core message_tree -- --ignored (DB tests)",
+      "outcome": "Not run. It needs DATABASE_URL pointing at a disposable Postgres, and none was available. The non-ignored message_tree tests ran inside the session-core all-targets run above.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "Reviewer fix 1 (state.rs, run_context.rs) was not applied by this slice. Both files are outside this slice's ownership. The fix text both asks for the shared edits and says the lead applies them, so I followed the ownership rule and returned the exact lines as lead_todo 1 and 2. Re-running model-gateway --lib gives the same two errors and nothing else, and no test runs. The gateway half of the slice (branch route, version fields, versions_enabled) therefore has no compiled or run evidence, and the slice stays partial until the lead applies 1 and 2 and the lib tests pass. Read-only checks this round, none of them a compile: branch_thread's types match SetActiveLeafRequest and SetActiveLeafResponse (sessions.proto 1924-1944), BranchThreadBody and BranchThreadResponse, session_thread_error, HttpJsonError, Claims.org_id and authenticated_session_request (http_routes.rs:820, which returns Result of Request and HttpJsonError). The four new tests' expected JSON matches the serde attributes on ThreadMessage, ThreadMessageVersion and ListThreadMessagesResponse. session-core registers message_tree_service_server::MessageTreeServiceServer (grpc.rs:22 and 9880), which confirms the client module name in lead_todo 1(a). Among ListConversationRequest literals in model-gateway, only run_context.rs:516 lacks include_inactive. The SessionMessage literals (context_reattach.rs:175, tests/e2e_invoke_chain_test.rs:1449) use ..Default::default(). Line endings: state.rs is CRLF, run_context.rs and http_routes.rs are LF. I re-ran only the two commands above. The round-1 results were not re-run because no file they cover changed: the full session-core bin suite (669 passed, 256 ignored), capability-core go build, vet and test, buf breaking and lint, the proto additivity check, py_compile, rustfmt on message_tree.rs and bash -n on the proof script. I edited no file this round, so files_changed is the round-1 list. No DB test, docker or live proof was run."
+  },
+  {
+   "id": "WS26-S7",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/gateway.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc_auth.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/screening_client.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/mcp_gateway.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/compaction_parity_contract.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p execution-core --lib provenance screening_client (as written in the row)",
+     "outcome": "not run as written: cargo rejects two positional test filters ('unexpected argument screening_client'). Re-run with the separator: see next line."
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib -- provenance screening_client",
+     "outcome": "PASS: 24 passed, 0 failed (includes the 10 new screening_client tests: rpc_failure_keeps_local_verdict, withhold_replaces_output_before_render, zdr_run_never_calls_the_rpc, taint_set_on_flag, a_verdict_only_tightens_the_local_verdict, a_verdict_about_other_content_is_ignored, only_external_results_the_local_scan_covered_are_asked, without_a_transport_the_local_verdict_stands, only_the_literal_true_enables_the_verdict, no_dispatch_tool_symbol_in_screening_client)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib (full suite, regression for runtime_loop seam and browser tests)",
+     "outcome": "PASS: 1474 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test compaction_parity_contract",
+     "outcome": "PASS: 12 passed, 0 failed (includes the new the_screening_rpc_leg_names_the_same_trust_table; one assertion of my own was wrong on the first run and was corrected)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test autonomy_ladder_contract",
+     "outcome": "PASS: 11 passed, 0 failed (must stay green: green)"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test cross_service_loop_contract / --test provider_read_contract / --test zdr_mcp_golden / --test runtime_loop_test",
+     "outcome": "PASS: 9 / 5 / 3 / 9 passed, 0 failed (integration binaries that read or exercise the changed seam)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib grpc::screen_content",
+     "outcome": "NOT RUN: the model-gateway lib test target does not compile in this shared worktree. Errors come from sibling uncommitted edits, not from grpc.rs or grpc_auth.rs: 18 errors in the sse.rs test module (turn_usage, frame_cost_usd, turn_usage_complete_enabled, turn_call_rows, ListConversationRequest.include_inactive, StatedCost.by_category). The non-test check (cargo check -q -p model-gateway --lib) fails with 2 errors: http_routes.rs:10476 (AppState.message_tree_client missing) and run_context.rs:516 (ListConversationRequest.include_inactive missing). Both are sibling-owned."
+    },
+    {
+     "command": "git diff -U0 gateway.proto | count removed lines",
+     "outcome": "0 removed lines, 38 insertions: the proto change is purely additive; no existing tag touched"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on screening_client.rs",
+     "outcome": "clean (exit 0)"
+    },
+    {
+     "command": "rustfmt --check on grpc.rs, mcp_gateway.rs, provenance.rs, runtime_loop/mod.rs, compaction_parity_contract.rs",
+     "outcome": "no hunks inside the slice's own code; the remaining hunks are pre-existing formatting in unrelated code, left untouched"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Model-gateway verification is blocked by sibling uncommitted edits in this worktree. Once the batch compiles, run: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib grpc::screen_content. Current blockers: http_routes.rs:10476 (AppState.message_tree_client missing), run_context.rs:516 (ListConversationRequest.include_inactive missing), and the sse.rs test module (turn_usage, frame_cost_usd, turn_usage_complete_enabled, turn_call_rows, StatedCost.by_category).",
+    "Regenerate the checked-in bindings for the gateway.proto change (38 additive lines, ScreenContent RPC and two messages): buf generate for apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go and gateway_grpc.pb.go, and for apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/gateway_pb2.py. Regenerate in one pass with the batch, since sessions.proto and its generated files are also changed in the tree.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (execution-core service environment): declare CONTENT_SAFETY_SCREEN_RPC with default false. Not edited here: the file is not owned by this slice.",
+    "shared-edit apps/Model Plane/docs/CONTENT_SAFETY.md: add a Do-mode section (switch CONTENT_SAFETY_SCREEN_RPC, ZDR skip, fail-open to local, tighten-only merge, withhold before render, taint, the deviations listed above). Not edited here.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add the WS26-S7 entry, recording the deviations (for every covered external result, inline switch gating, no ZDR refusal on the service identity, the #[path] attachment).",
+    "Live proof, lead-run, after the stack is rebuilt (model-gateway and execution-core images): org mode enforce, CONTENT_SAFETY_SCREEN_RPC=true and CONTENT_SAFETY_SEMANTIC_INLINE=true on the dev stack; a real Do step reading a fixture page with a deterministic marker and a paraphrase. Capture the step output stub, the gateway ScreenContent log (counts and hash only), and mp_exec_screening_taint_total. Expect the paraphrase not to be caught from Do until depth finding 1 is closed.",
+    "Optional tidy-up: move 'pub(crate) mod screening_client;' from provenance.rs into src/lib.rs. Then update the two runtime_loop call sites (crate::provenance::screening_client::...) and the path used by the parity test. The #[path] attribute must go with it."
+   ],
+   "deviations": [
+    "The row says the Do seam calls the gateway for 'external + Clean'. Built: for every external result whose local scan covered the full payload (Clean or Flagged). Reason: the summary says external and browser results call the RPC, CONTENT_SAFETY.md says enforce withholds a deterministic flag, and a Clean-only trigger would leave Do weaker than chat under enforce. The gateway spends no classifier call on a non-Clean result, so the extra cost is one hop.",
+    "The inline switch CONTENT_SAFETY_SEMANTIC_INLINE gates the Do screen the way it gates chat: switch off gives the deterministic verdict and no withhold. Unlike chat, the withhold does not require an inference bearer (Do has none); the bearer only enables the classifier call (budget 1 versus 0).",
+    "ScreenContent refuses only a non-service caller. A ZDR service identity is not refused, unlike ProxyMcpTool's require_explicit_zdr_contract; the classifier is skipped instead.",
+    "The screening module is attached from provenance.rs with #[path = \"screening_client.rs\"] because the crate root (src/lib.rs) is not owned by this slice.",
+    "The browser lifecycle function (browser_execution_to_step_outcome) became async and takes user_id; its two sync tests became #[tokio::test]. The render seam sets screening_taint to the old READ_PROVIDER rule OR the verdict taint.",
+    "Verdict fields are label strings (posture, trust_class, semantic_outcome, mode) to match the other proto status fields; flags carry rule ids only.",
+    "The client rejects a verdict whose content_hash is not the BLAKE3 of the payload it sent, so a verdict can only apply to the bytes it screened. The row does not name this check."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs (optional: move the screening_client module declaration here; currently attached from provenance.rs with #[path])",
+    "apps/Model Plane/deploy/docker-compose.yml (declare CONTENT_SAFETY_SCREEN_RPC=false for execution-core)",
+    "apps/Model Plane/docs/CONTENT_SAFETY.md (Do-mode section)",
+    "apps/Model Plane/docs/decisions/ledger.md (WS26-S7 entry)",
+    "apps/Model Plane/go/gen/model_plane/v1/gateway.pb.go and gateway_grpc.pb.go (buf generate; not hand-edited)",
+    "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/gateway_pb2.py (buf generate; not hand-edited)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "model-gateway's `cargo test -p model-gateway --lib grpc::screen_content` has not run anywhere. Two compile errors in sibling-owned files block the crate: http_routes.rs:10476 (AppState.message_tree_client) and run_context.rs:516 (ListConversationRequest.include_inactive). The lead must run the test once the W2-24 batch compiles. rustc's type-check reported no error in grpc.rs or grpc_auth.rs.",
+     "buf generate is still needed for gateway.proto (Go gateway.pb.go and gateway_grpc.pb.go, Python gateway_pb2.py). The proto is ahead of its checked-in bindings.",
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: add CONTENT_SAFETY_SCREEN_RPC=false to the execution-core service. Also needed: the docs/CONTENT_SAFETY.md Do-mode section and a WS26-S7 entry in docs/decisions/ledger.md.",
+     "Live proof is lead-run and needs docker. Rebuild model-gateway and execution-core, then run a real Do web.read or browser_agent step on a fixture page with org mode enforce and CONTENT_SAFETY_SCREEN_RPC=true. Capture the step output stub, the gateway ScreenContent log (counts and hash only) and mp_exec_screening_taint_total."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Do runs forward no inference credential, so the gateway gives the classifier a zero budget from Do and the semantic (paraphrase) pass never runs on the Do path; the row's 'same verdict as chat' evidence cannot pass until execution-core holds a service inference credential for interactive runs (the scheduled path has ScheduledInferenceTokenProvider; interactive Do has none)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway's ZDR decision for a Do verdict rests on the request's zdr flag combined with the execution service token's zdr claim; confirm that Auth Core stamps the org's ZDR posture on that token before any classifier call can run from Do."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "fail_mode:degraded is not applied on the Do side when the RPC is refused, times out or is unreachable: the local verdict stands whatever the org set, so the row's parenthetical holds only when the gateway answers."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Under enforce, a ZDR Do run never asks the gateway, so a locally flagged web result is framed but not withheld; chat's ZDR path still withholds a deterministic flag (CONTENT_SAFETY.md, ZDR section). Needs a decision before enforce is switched on for ZDR orgs."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Nothing is live-proven. The Do withhold, the WS13 taint hold and the counters need the evidence the row lists: rebuild model-gateway and execution-core, run a real Do step on a fixture page with org mode enforce, and capture the step output stub, the gateway ScreenContent log (counts and hash only) and mp_exec_screening_taint_total."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway handler's auth path (the real interceptor and the capability-core policy read) is not exercised by any test; the unit tests cover the pure verdict function and the caller gate only. The model-gateway tests themselves have not run (see tests_run)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "A flagged or degraded external result now taints the run, so WS13 holds web_fetch and execute_provider_action for approval after a flagged web read on Do runs with the switch on. WS13 owns whether that hold is wanted for web results, not only connector reads."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "enforce_screen records into the shared counter mp_gateway_injection_screen_total, so Do calls add skipped-capped and skipped-not-clean counts to the chat dashboards."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Enforce on Do needs the capability bearer. Without x-capability-authorization the gateway cannot read the org policy and caps the mode at tighten, so an enforce org silently gets tighten on Do runs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Results close to the 4 MiB screening bound may exceed the gateway's default gRPC decode limit and fail silently to the local verdict. Check the gateway server's max decoding message size, or lower the screening cutoff for the RPC."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each external Do result now costs one gRPC round trip with up to a 3 s wait. Measure p95 added latency before the switch goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The 3 s deadline itself is untested: only the error and mismatch paths are covered, and nothing covers a verdict that arrives late."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "The #[path] attachment in provenance.rs should move to src/lib.rs once that file is owned; the two runtime_loop call sites and the provenance paths must change with it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "docs/CONTENT_SAFETY.md needs a Do-mode section (switch, ZDR skip, fail-open, taint, counters) and docs/decisions/ledger.md needs a WS26-S7 entry. Neither file is owned by this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The 10 screen_content_tests in model-gateway/src/grpc.rs have never compiled or run. The gateway half of the slice (caller gate, verdict function, enforce and ZDR branches) has no test evidence until the batch builds."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Interactive Do forwards no inference bearer, so ScreenContent always gives the classifier a zero budget from Do. The paraphrase (semantic) pass never runs on Do, so the row's 'same verdict as chat' live evidence cannot pass yet."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "On the Do side, fail_mode:degraded is not applied when the RPC fails or times out: screen_result always keeps the local verdict. The row's 'fail_mode:degraded makes local posture Degraded' holds only when the gateway answers."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "screen_result skips the RPC on ZDR runs. Under enforce, a locally flagged external result on a ZDR Do run is therefore framed but never withheld, while chat's ZDR path still withholds a deterministic flag. This needs an owner decision before enforce is switched on for ZDR orgs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Withhold on the gateway also requires CONTENT_SAFETY_SEMANTIC_INLINE: with it off, screen_verdict returns withhold=false even under enforce. This matches chat's framed path, but turning on the Do switch alone never withholds."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When x-capability-authorization cannot be minted (the error is silently ignored in mcp_gateway.rs screen_content), the gateway caps the mode at tighten. An enforce org then silently gets tighten on Do."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Payloads near the 4 MiB local scan bound may exceed tonic's default 4 MiB decode limit on the gateway server. They would then fail open to the local verdict without a clear signal."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No test drives the 3 s SCREEN_DEADLINE (a slow fake transport), and no test pins that the gateway and execution-core content_hash functions agree. Both are BLAKE3 hex today but are duplicated in the two crates."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "With the switch on, screening_taint is now set for any flagged or degraded external result, not only READ_PROVIDER results. WS13 will then hold web_fetch and provider actions after a flagged web read. WS13 should confirm it wants that."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "screening_client is attached through #[path] from provenance.rs because lib.rs is not owned by this slice. Move it to lib.rs and update the two runtime_loop call sites when that file is in scope."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p execution-core --lib -- provenance screening_client (the row's two-filter form is rejected by cargo; the separator form is used)",
+      "outcome": "PASS: 24 passed, 0 failed, 1450 filtered out. This covers the slice's named tests, including rpc_failure_keeps_local_verdict, withhold_replaces_output_before_render, zdr_run_never_calls_the_rpc, taint_set_on_flag and no_dispatch_tool_symbol_in_screening_client.",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test compaction_parity_contract",
+      "outcome": "PASS: 12 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --test autonomy_ladder_contract",
+      "outcome": "PASS: 11 passed, 0 failed. This suite had to stay green.",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p model-gateway --lib (compile check of the gateway crate the slice touched: grpc.rs and grpc_auth.rs)",
+      "outcome": "FAIL: 2 compile errors. E0609 at http_routes.rs:10476 (AppState has no field message_tree_client) and E0063 at run_context.rs:516 (missing field include_inactive in ListConversationRequest). Neither file is owned by this slice. The final tail shows no error in grpc.rs or grpc_auth.rs, but the crate does not build.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p model-gateway --lib grpc::screen_content",
+      "outcome": "NOT RUN: the model-gateway lib does not compile (the two errors above), so the gateway ScreenContent handler tests cannot run. This is the slice's own gateway test, so the gateway half is unverified. The implementer also reports that the test target fails separately in the sse.rs test module.",
+      "passed": false
+     },
+     {
+      "command": "execution-core compile check (implied by the passing lib and integration test builds)",
+      "outcome": "PASS: the lib and the two test binaries built and ran.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "auth",
+    "policy",
+    "zdr"
+   ],
+   "notes": "Built the Do-mode screening leg end to end, behind CONTENT_SAFETY_SCREEN_RPC (strict literal true, default off). With the switch off, the output, provenance and screening_taint are unchanged: the local verdict is returned untouched.\n\nProto: rpc ScreenContent next to Health, plus ScreenContentRequest (fields 1-7) and ScreenContentResponse (fields 1-8). Verdict only, no content field. Additive; Go and Python bindings still need buf generate.\n\nGateway (grpc.rs): ScreenContent handler. The caller must pass authorize_request(RpcAccess::Tool) and be a service identity. It reads the org policy with the forwarded capability bearer (absent: env mode capped at tighten, screening on). It calls enforce_screen with a classifier budget of 1 only when the inline switch is on and an inference bearer was forwarded; otherwise the budget is 0 and no classifier call is made. The response carries posture, trust class, semantic outcome, withhold, content hash, rule ids and mode.\n\nAuth answer, read from grpc_auth.rs: the ProxyMcpTool path carries the execution service's own Auth Core token (GatewayTokens, org-scoped, scopes gateway:read and tools:execute) as the authorization header, and the gateway gate is RpcAccess::Tool plus a service-only check. ScreenContent reuses that exact gate, so no gate change was needed. The capability bearer rides as x-capability-authorization and is verified by capability-core. Only an inference_bearer() accessor was added to grpc_auth.rs.\n\nExecution-core: screening_client.rs (new). screen_result asks only for external results whose local scan covered the full payload (Clean or Flagged), never on ZDR, with a 3 s deadline. It fails open to the local verdict on error, timeout, or a content_hash mismatch. The merge is tighten-only. A withhold replaces the output before render. taint is set when the merged result is audit-worthy and the verdict was consulted. The module is attached from provenance.rs with #[path] (see needs_other_files). The browser lifecycle function and the render seam now use it.\n\nLimits: the model-gateway side is unverified (see tests_run). The Do path has no inference credential yet, so the semantic pass cannot run from Do (depth finding 1)."
+  },
+  {
+   "id": "WS19-S9",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/builtin_skills.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/skills.rs (edited: builtin overlay in SkillStore::new/list/get, keyword-only scoring for builtins, builtin_office flag field, #[path] module declaration)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/builtin_skills_contract.rs (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/Dockerfile (edited: COPY skills/office/ /opt/verevon/skills/office/)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/docx/SKILL.md (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/xlsx/SKILL.md (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/pptx/SKILL.md (new)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/skills/office/pdf/SKILL.md (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q --lib in a scratch harness crate outside the workspace: src/lib.rs includes the live model-gateway src/ownership.rs and src/skills.rs by path; dependencies pinned to a copy of the workspace Cargo.lock; CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0",
+     "outcome": "49 passed, 0 failed. Includes the 10 new builtin_skills unit tests and the existing skills.rs and ownership.rs suites with the switch off. Harness and lock copy deleted afterwards."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib builtin_skills (workspace)",
+     "outcome": "Not compiled: 9 E0063 errors in files owned by other slices (http_routes.rs, run_context.rs, sse.rs, tool_loop.rs: ListConversationRequest.include_inactive; sse_events::ChatEvent calls, cost_by_category, unpriced_calls). None in skills.rs or builtin_skills.rs. An earlier E0046 on grpc.rs cleared when another slice landed screen_content."
+    },
+    {
+     "command": "rustfmt --edition 2021 --check src/skills.rs src/builtin_skills.rs tests/builtin_skills_contract.rs",
+     "outcome": "Clean (new files formatted with rustfmt; skills.rs had no diffs)."
+    },
+    {
+     "command": "python3 sanity check: execution-core Dockerfile contains the exact COPY line; each SKILL.md front-matter name equals the registered name; body sizes",
+     "outcome": "All true. Bodies 1,341 to 1,463 chars, under the one-third-of-budget cap of 2,566."
+    },
+    {
+     "command": "Not run: cargo test -q -p model-gateway --test builtin_skills_contract; --test skill_budget_contract; full --lib suite; zdr_feature_table",
+     "outcome": "Blocked by the workspace compile break above. The contract test's assertions were checked by the Python sanity step only."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/Dockerfile: in the builder stage, after line 43 (`COPY rust/ rust/`, before `WORKDIR /app/rust`), add `COPY skills/office/ /app/skills/office/`. Required before the gateway image builds: builtin_skills.rs embeds the four SKILL.md files with include_str!, and this Dockerfile copies only rust/ and proto/.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment, after line 320 (`SKILL_FILE_TOOL_ENABLED: ${SKILL_FILE_TOOL_ENABLED:-false}`), add a comment line `      # WS19-S9: first-party Office skills (docx, xlsx, pptx, pdf) listed for every org. Off by default; only the literal`, a second comment line `      # `true` turns it on.`, and the variable line `      BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/lib.rs (optional; replaces the #[path] workaround): add `pub mod builtin_skills;` after `pub mod budget;`. Then in skills.rs delete the #[path] comment, the attribute, the module line and the blank line after the mp_contracts use block; make the field `builtin_office` pub(crate); change the four `builtin_skills::` calls (SkillStore::new, list, get, score) to `crate::builtin_skills::`; and give the builtin tests a pub(crate) SkillStore constructor, because the test module stops being a child of skills and cannot set private fields. Re-run the lib tests after this.",
+    "check, no edit proposed: .dockerignore's `*.md` pattern matches root-level files only, so skills/office/**/SKILL.md stays in both image build contexts. Confirm with a build-context listing before the first image build.",
+    "after the shared tree compiles (blocked now by E0063 errors in http_routes.rs, run_context.rs, sse.rs and tool_loop.rs from other slices): from `apps/Model Plane/rust`, run `CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib builtin_skills`, then `--lib skills::`, `--test builtin_skills_contract` and `--test skill_budget_contract`.",
+    "lead live proof, after rebuilding model-gateway and execution-core (this slice ran no docker): with BUILTIN_OFFICE_SKILLS_ENABLED=true, an Ask turn asking for an Excel budget should inject a `## Skill: Excel (xlsx)` block, and a code_interpreter call should be able to read /opt/verevon/skills/office/xlsx/SKILL.md. With the flag off, nothing should change."
+   ],
+   "deviations": [
+    "The plan row's references/, templates/ and scripts/ subdirectories are not created, because they are outside the owned file list.",
+    "The builtin module is declared from skills.rs with a #[path] attribute, because lib.rs is outside this slice's files (see lead_todo item 3).",
+    "Builtins are a read-time overlay in SkillStore::list and get, not per-org writes; the switch is read once in SkillStore::new.",
+    "Builtins are matched by name and trigger keywords only, not by body, which is a scoring change for builtin skills only.",
+    "The contract test checks the execution-core Dockerfile COPY line but not the gateway Dockerfile, which is a shared edit; adding that check now would leave a red test until the lead applies it.",
+    "SKILL.md Deliver wording is conditional on an office_checks line being present."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "The gateway image cannot build until the lead adds `COPY skills/office/ /app/skills/office/` to apps/Model Plane/rust/services/model-gateway/Dockerfile (builder stage, after `COPY rust/ rust/`). builtin_skills.rs uses include_str! to embed ../../../../skills/office/*/SKILL.md, and the builder stage copies only rust/ and proto/.",
+     "The lead must add `BUILTIN_OFFICE_SKILLS_ENABLED: ${BUILTIN_OFFICE_SKILLS_ENABLED:-false}` to the model-gateway environment in deploy/docker-compose.yml. Until then the switch cannot be set through deploy.",
+     "Run the workspace tests once the other slices' compile errors are fixed (http_routes.rs:10379 and run_context.rs:516 missing include_inactive; http_routes.rs:10473 no message_tree_client on AppState). The commands are `cargo test -p model-gateway --lib builtin_skills`, `--lib skills::`, `--test builtin_skills_contract`, `--test skill_budget_contract` and zdr_feature_table.",
+     "Live proof after rebuilding both images with the flag on: 'make an Excel budget' injects the `## Skill: Excel (xlsx)` block, /opt/verevon/skills/office/xlsx/SKILL.md is readable from code_interpreter, and the tool chain capture plus the verification pass are recorded. Also confirm nothing changes with the flag off.",
+     "Not met: the DoD step 'model reads references/'. The references/, templates/ and scripts/ subdirectories from the plan row are not in this slice's owned file list, so they were not created."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway image build fails at include_str! until the shared model-gateway Dockerfile COPY (lead_todo item 1) lands; the failure is loud, not silent."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The switch has no compose line yet (lead_todo item 2), so it cannot be set through deploy; it is off by default."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The workspace runs of builtin_skills_contract, skill_budget_contract, the full lib suite and zdr_feature_table are not done; the 49-test harness covers only skills.rs, ownership.rs and builtin_skills.rs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Keyword matching is substring-based (a request word counts if it is a substring of a name or keyword), so 'power' matches PowerPoint and 'budget' matches Excel in PowerPoint requests; tune the trigger keywords against a labelled request corpus before the flag goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Builtin skills are a gateway-side overlay, while the ownership matrix section 4.5 says capability-core owns the skills registry with no second registry; the owner must rule whether this overlay or a capability-core registry is the target."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The plan row's references/, templates/ and scripts/ subdirectories are not created (outside the owned file list), so the DoD step 'model reads references/' is not met; the bodies are self-contained at 1,341 to 1,463 chars each."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "reattach_skill reads only session-core's list, so a truncated builtin block that tells the model to call reattach_skill cannot find the skill; this needs a tool_loop.rs change outside this slice."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "With the flag on, builtins appear in ListSkills for every org, including the composer's / picker; per-org opt-out is not built and needs a product decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The verifier is off by default, so most turns will have no office_checks line; the SKILL.md wording is now conditional, but the model's actual claims need a live check."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The DoD live evidence (injected block, tool chain, verification pass) is not done and is left to the lead after a rebuild."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The #[path] declaration in skills.rs is a workaround for lib.rs being outside this slice; see lead_todo item 3 for the migration."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "skills() clones the four OnceLock-cached skills on every list and get; negligible at this size, and an Arc would avoid it if it ever shows in a profile."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The gateway image build is broken for every deploy, whatever the flag says. include_str! in builtin_skills.rs reads paths outside rust/, and model-gateway/Dockerfile copies only rust/ and proto/, so the shared Dockerfile COPY must land before the next gateway image build."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Trigger keywords use substring matching with no stemming. Generic words such as 'budget', 'letter', 'deck' and 'slide' will inject Office skills into turns that do not want a file, so tune them against a labelled request corpus before the flag goes on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No contract test pins the gateway Dockerfile COPY of skills/office. If that line is missing or regresses, the image build fails at compile time and the contract test does not catch it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The builtins are a gateway-side read-time overlay in SkillStore::list/get, not per-org registration in a capability-core registry. The owner should confirm this against the ownership matrix's single skills registry rule."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "reattach_skill (tool_loop.rs) reads only session-core's ListAgentSkills. A truncated builtin block that points the model at reattach_skill cannot find the builtin."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "is_builtin() keys on source_path starting 'builtin:office/' whatever the flag says. A stored skill with that prefix would get keyword-only scoring even with the switch off, and an operator upsert under a builtin id shadows the builtin. Learned skills cannot carry the prefix today."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "skills.rs declares builtin_skills through a #[path] attribute because lib.rs is outside this slice. Move it to `pub mod builtin_skills;` in lib.rs (lead_todo item 3)."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p model-gateway --lib builtin_skills (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "Did not compile: 3 errors, none in skills.rs or builtin_skills.rs. E0063 missing include_inactive on ListConversationRequest at http_routes.rs:10379 and run_context.rs:516; E0609 no field message_tree_client on AppState at http_routes.rs:10473.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p model-gateway",
+      "outcome": "Same 3 errors; model-gateway lib does not compile. The errors come from other slices' sessions.proto and message-tree work.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p model-gateway --test builtin_skills_contract",
+      "outcome": "Blocked by the same 3 lib compile errors; the test did not run.",
+      "passed": false
+     },
+     {
+      "command": "Dockerfile and file presence check",
+      "outcome": "execution-core/Dockerfile line 126 has `COPY skills/office/ /opt/verevon/skills/office/`. The four SKILL.md files exist under apps/Model Plane/skills/office/{docx,xlsx,pptx,pdf}.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Built the four first-party Office skills (docx, xlsx, pptx, pdf) as image-baked SKILL.md text. With BUILTIN_OFFICE_SKILLS_ENABLED set to the literal true (read once in SkillStore::new), every org's catalogue lists them as a read-time overlay in SkillStore::list and get. Nothing is written per org, so a learned refresh cannot prune them. Builtins match by name and trigger keywords only (skills::score uses name plus tags for them), because body prose would pull all four into most turns. Switch off: no builtins, and the score path is unchanged for every non-builtin skill. The execution-core Dockerfile copies skills/office to /opt/verevon/skills/office, and the contract test pins that line and the embedded bytes to the files. SKILL.md Deliver wording now treats office_checks as conditional, since the verifier is off by default. Not done: the gateway image build needs the shared Dockerfile COPY in lead_todo before it will succeed. The workspace lib run is blocked by other slices' in-progress code. No live proof was run, and no commit or push was made."
+  }
+ ]
+}

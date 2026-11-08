@@ -1,0 +1,283 @@
+//! quarry-runtime — the engine.
+//!
+//! Owns: driver selection, static fetch, browser execution, action runtime,
+//! transform/output packaging, retry/block/escalation, artifact writes,
+//! fingerprint/diff, page-level progress events.
+//!
+//! Donor: `internal/driver/`, `internal/scraper/`, `internal/pipeline/`,
+//! parts of `internal/crawl/runner.go`.
+
+pub mod action_cost;
+pub mod fleet;
+pub mod action_runtime;
+pub mod agent_loop;
+pub mod ai_formats;
+pub mod ai_scrape;
+pub mod ai_verify;
+pub mod answer;
+pub mod artifact_store;
+pub mod browser_driver;
+pub mod browser_egress_proxy;
+pub mod browser_procedure;
+pub mod capture;
+pub mod cas_store;
+pub mod challenge;
+pub mod dns_guard;
+pub mod driver;
+pub mod driver_plan;
+pub mod driver_registry;
+pub mod egress_broker;
+pub mod escalation;
+pub mod event_bus;
+pub mod events;
+pub mod host_scheduler;
+pub mod intent_classifier;
+pub mod nats_event_bus;
+pub mod page_extract;
+pub mod page_image;
+pub mod page_renderer;
+
+pub mod agent_memory;
+pub mod autoprompt;
+pub mod autoscale;
+pub mod cached_profile_store;
+pub mod content_route;
+pub mod crawl_filter;
+pub mod crawl_frontier;
+pub mod crawl_ranker;
+pub mod crawl_signals;
+pub mod data_plane_http;
+pub mod deep_research;
+pub mod fallback_driver;
+pub mod fetch;
+pub mod fingerprint_rotation;
+pub mod fusion;
+pub mod grant_validator;
+pub mod envelope_profile_store;
+pub mod profile_blob_store;
+pub mod profile_crypto;
+pub mod profile_keys;
+pub mod org_erasure;
+pub mod profile_backfill;
+#[cfg(feature = "grpc")]
+pub mod grpc;
+#[cfg(feature = "http3")]
+pub mod http3;
+pub mod hybrid;
+pub mod ingest_client;
+pub mod job_pricing;
+pub mod lease_pool;
+pub mod local_index;
+#[cfg(feature = "postgres-queue")]
+pub mod migrations;
+pub mod mp_client;
+pub mod observation;
+pub mod observation_redaction;
+pub mod otp_ic_client;
+pub mod otp_source;
+pub mod pipeline;
+pub mod policy_gate;
+pub mod planner;
+pub mod policy;
+pub mod proxy_affinity;
+#[cfg(feature = "postgres-queue")]
+pub mod postgres_baseline_store;
+#[cfg(feature = "postgres-queue")]
+pub mod postgres_event_history;
+#[cfg(feature = "postgres-queue")]
+pub mod postgres_profile_store;
+#[cfg(feature = "postgres-queue")]
+pub mod postgres_queue;
+#[cfg(feature = "postgres-queue")]
+pub mod postgres_step_receipts;
+// One schema per test for the postgres_* store tests (see the module doc).
+#[cfg(all(test, feature = "postgres-queue"))]
+mod postgres_test_support;
+pub mod proxy_pool;
+pub mod request_context;
+pub mod publisher;
+pub mod request_queue;
+pub mod rerank;
+pub mod retry;
+pub mod robots_cache;
+pub mod robots_gate;
+pub mod s3_profile_store;
+pub mod serp;
+pub mod service_tokens;
+pub mod smart_router;
+pub mod source_registrar;
+pub mod step_receipts;
+pub mod structured_extract;
+pub mod target_repair;
+#[cfg(feature = "test-site")]
+pub mod test_site;
+pub mod tls_driver;
+#[cfg(test)]
+mod token_request_contract;
+pub mod transport_fallback_driver;
+pub mod usage;
+pub mod vector_index;
+pub mod vision;
+
+pub use action_runtime::{ActionResult, ActionRuntime};
+pub use agent_loop::{AgentLoop, AgentLoopResult, LoopTermination};
+pub use agent_memory::{redact_sensitive, AgentScratchpad};
+pub use ai_formats::{AiFormatRunner, JsonRequest, JsonResult, QueryResult, SummaryResult};
+pub use answer::{
+    AnswerPipeline, AnswerRequest, AnswerResult, Citation, ClosureFetcher, MarkdownFetcher,
+    SimpleHttpMarkdownFetcher,
+};
+pub use autoprompt::{ModelPlaneQueryRewriter, QueryRewriter};
+pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
+pub use browser_driver::BrowserDriverAdapter;
+pub use browser_egress_proxy::PinnedBrowserEgressProxy;
+pub use browser_procedure::{compare_replay, compile_procedure, BrowserProcedure, ReplayDecision};
+pub use crawl_frontier::{
+    CrawlFrontier, FrontierCheckpoint, FrontierConfigSnapshot, FrontierEntry,
+};
+pub use crawl_ranker::{CrawlRanker, LexicalRanker, ModelPlaneRanker, RankedUrl};
+pub use crawl_signals::{
+    pair as crawl_signals_pair, CrawlSignal, CrawlSignalsConsumer, CrawlSignalsProducer,
+};
+pub use deep_research::{
+    ResearchArtifacts, ResearchExecutor, ResearchStatus, ResearchTask, ResearchTaskEnvelope,
+    ResearchTaskResult,
+};
+pub use driver::{BrowserMeta, Driver, DriverSelection};
+pub use driver_plan::DriverPlan;
+pub use driver_registry::DriverRegistry;
+pub use egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
+pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
+pub use events::{EventSink, ReplayGap, ReplaySubscription, RingLimits};
+pub use fallback_driver::FallbackDriver;
+pub use fetch::StaticDriver;
+pub use fingerprint_rotation::is_block_status;
+pub use fusion::{rrf_fuse, RRF_K};
+pub use grant_validator::{
+    GrantValidation, GrantValidator, HttpGrantValidator, NoopGrantValidator,
+};
+pub use host_scheduler::{BadKind, HostScheduler, HostStats, SchedulerConfig, SlotPermit};
+pub use hybrid::HybridSearchProvider;
+pub use ingest_client::IngestClient;
+pub use intent_classifier::{
+    CachedClassifier, HybridClassifier, IntentClassifier, MpIntentClassifier, RuleClassifier,
+};
+pub use lease_pool::RuntimeLeasePool;
+pub use local_index::{LocalDocument, TantivyLocalIndex};
+pub use mp_client::{
+    ModelPlaneClient, ModelPlaneInvokeRequest, ModelPlaneInvokeResponse, ModelPlanePlanner,
+};
+pub use nats_event_bus::{NatsConfig, NatsEventBus};
+pub use observation::build_dom_summary;
+pub use pipeline::{DocRouting, InlineParts, InlineRequest, PageRunner};
+pub use policy_gate::PolicySecurityEngine;
+pub use planner::{MockPlanner, Planner, PlannerDecision};
+pub use policy::{
+    policy_fingerprint, record_determinism_inputs, BlockPolicy, CheckpointPolicy, Determinism,
+    DeterminismIdentity, DiscoveryPolicy, ExtractionPolicy, FetchPolicy, RetryPolicy, RunPolicy,
+};
+#[cfg(feature = "postgres-queue")]
+pub use postgres_step_receipts::PostgresStepReceiptStore;
+pub use publisher::EventPublisher;
+pub use quarry_tls::TlsProfile;
+pub use request_queue::{InMemoryRequestQueue, Priority, QueueStats, QueuedRequest, RequestQueue};
+pub use rerank::{
+    DataPlaneSearchReranker, RerankContext, RerankEpoch, RerankOutcome, RerankReport, RerankStatus,
+    RerankingSearchProvider, SearchReranker,
+};
+pub use retry::{backoff_delay, classify, execute_with_retry, wait, IdempotencyKey, RetryClass};
+pub use robots_cache::{origin_key, RobotsCache, RobotsFetch, RobotsFetcher, RobotsState};
+pub use robots_gate::{
+    RobotsDecision, RobotsEnforceMode, RobotsEnforcement, RobotsGate, RobotsGateConfig,
+    RobotsStats, UnreachablePolicy, ROBOTS_PRODUCT_TOKENS,
+};
+pub use s3_profile_store::S3ProfileStore;
+pub use serp::{
+    BraveSearch, FallbackSearchProvider, SearXNGSearch, SearchOptions, SearchProvider,
+    SearchResult, SerperSearch, StractSearch,
+};
+pub use smart_router::{
+    classify_intent, QueryIntent, RouterConfig, SmartSearchRouter, SmartSearchRouterBuilder,
+};
+pub use step_receipts::{AgentRunCheckpoint, AgentRunStatus};
+pub use step_receipts::{
+    InMemoryStepReceiptStore, ReceiptBuilder, StepOutcome, StepReceipt, StepReceiptStore,
+};
+pub use structured_extract::StructuredExtractClient;
+pub use tls_driver::TlsProfileDriver;
+pub use transport_fallback_driver::TransportFallbackDriver;
+pub use usage::{
+    metrics as usage_metrics, BrowserMetricsMode, NatsUsageMeter, NoopUsageMeter, UsageEvent,
+    UsageIdError, UsageMeter,
+};
+pub use vector_index::{DataPlaneVectorIndex, NoopVectorIndex, VectorHit, VectorIndex};
+pub use vision::{
+    SidecarVisualProcessor, VisualChangeArtifact, VisualObservationArtifact,
+    VisualObservationInput, VisualObservationProcessor, VisualObservationResult,
+    VisualPreprocessInput, VisualPreprocessResult, VisualProcessorOptions, VisualRegion,
+};
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use quarry_browser::{BrowserDriver, BrowserDriverCapabilities, BrowserSession, SessionInner};
+    use quarry_core::error::QuarryResult;
+    use quarry_core::lease::BrowserLease;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    /// In-crate stand-in for the local, fully governed Chromium driver. It is
+    /// the test double the runtime's own execution paths are exercised
+    /// against, so it must advertise the same visual-evidence capability the
+    /// real `ChromiumoxideDriver` does — `ObservationRunner::execute` refuses
+    /// `Screenshot`/`Pdf` actions on any driver that does not claim it.
+    /// Capabilities it genuinely cannot honour (notably
+    /// `atomic_target_actions`, whose verified-target path this mock does not
+    /// implement) stay at the deny-by-default value.
+    pub struct MockBrowserDriver;
+
+    #[async_trait]
+    impl BrowserDriver for MockBrowserDriver {
+        fn capabilities(&self) -> BrowserDriverCapabilities {
+            BrowserDriverCapabilities {
+                full_visual_fidelity: true,
+                ..BrowserDriverCapabilities::default()
+            }
+        }
+
+        async fn configure_egress_policy(
+            &self,
+            _session: &BrowserSession,
+            _policy: quarry_browser::BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
+            Ok(BrowserSession {
+                lease: lease.clone(),
+                tab_pin: None,
+                inner: Arc::new(Mutex::new(SessionInner::default())),
+            })
+        }
+        async fn release(&self, _session: BrowserSession) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn goto(&self, _session: &BrowserSession, _url: &str) -> QuarryResult<()> {
+            Ok(())
+        }
+        async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::from_static(b"<html><body>mock</body></html>"))
+        }
+        async fn screenshot(
+            &self,
+            _session: &BrowserSession,
+            _full_page: bool,
+        ) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+        async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
+            Ok(Bytes::new())
+        }
+    }
+}

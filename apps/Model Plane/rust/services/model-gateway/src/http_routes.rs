@@ -8,7 +8,13 @@ use std::{convert::Infallible, env, fmt::Write as _};
 use axum::{
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    http::{
+        header::{
+            CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE, REFERRER_POLICY,
+            X_CONTENT_TYPE_OPTIONS,
+        },
+        HeaderMap, HeaderValue, StatusCode,
+    },
     middleware,
     response::{
         sse::{Event as SseEvent, Sse},
@@ -359,6 +365,8 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
         .merge(crate::thread_goal_routes::router())
+        // One read-only review of a text, as a run (F-t3-086); 404 `review_run_disabled` while its switch is off.
+        .merge(crate::review_run_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
         .merge(crate::thread_export_routes::router())
         // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
@@ -446,6 +454,12 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/runs/:run_id/timing", get(get_run_timing))
         // EP-14 S7: one model call's request snapshot, owner only, D3-filtered by Session Core.
         .route("/v1/runs/:run_id/requests/:call_seq", get(get_run_request))
+        // P2 (the computer panel's owner read): one page of a process's output for the run that
+        // started it. Owner only, under the caller's own Space read decision.
+        .route(
+            "/v1/runs/:run_id/processes/:pid/output",
+            get(get_run_process_output),
+        )
         // Run event SSE
         .route("/v1/runs/:run_id/events", get(sse::run_events_sse))
         // Browser reasoning: Model Plane proposes one safe browser action from
@@ -720,6 +734,9 @@ fn proxy_routes() -> Router<AppState> {
         // The HTML app an MCP tool declares, read with the viewer's authority and never stored
         // (Wave 3 EP-4 S8); 404 while MCP_APPS_ENABLED is off.
         .route("/v1/mcp-apps/resource", get(get_mcp_app_resource))
+        // The same app as the document its frame loads, with the frame's content security policy
+        // in it (Wave 4 W4-D M1c); 404 while MCP_APPS_ENABLED is off.
+        .route("/v1/mcp-apps/frame", get(get_mcp_app_frame))
         // A read tool an MCP App calls on its own server, as the run's owner, through execution-core's
         // ExecuteStep (Wave 3 EP-4 S10); 404 while MCP_APP_TOOL_CALLS is off.
         .route("/v1/mcp-apps/tool-call", post(post_mcp_app_tool_call))
@@ -757,7 +774,7 @@ async fn deck_templates_listing(
             "no such route",
         ));
     }
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(
@@ -812,7 +829,8 @@ async fn get_mcp_app_resource(
 }
 
 /// The app document `tool` on `server_id` declares, `{data: {uri, html, needs_network}}`
-/// (`crate::mcp_apps`). With the switch off the route is a 404 as if it did not exist, decided
+/// (`crate::mcp_apps`), with `csp` and `network_origins` added while `MCP_APPS_NETWORK_ENABLED` is on
+/// (`crate::mcp_app_csp`). With the switch off the route is a 404 as if it did not exist, decided
 /// before anything else. A zero-retention bearer is refused before any read, with feature
 /// `mcp_execution`: the read egresses to the MCP server as a tool call does. The org and the viewer
 /// come from the verified claims only; the registry is refreshed from capability-core with the
@@ -831,7 +849,28 @@ async fn mcp_app_resource(
             "no such route",
         ));
     }
-    if claims.zdr {
+    let (server_id, tool, bearer) = app_read_checks(&claims, bearer, &query)?;
+    let resource = read_viewer_app(&state, &claims, &bearer, server_id, tool).await?;
+    let network = if crate::mcp_apps::network_enabled() {
+        let origins = mcp_app_granted_origins(&state, &claims, &bearer).await;
+        Some(crate::mcp_app_csp::build(&resource.declared, &origins))
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "data": crate::mcp_apps::resource_body(&resource, network.as_ref()),
+    })))
+}
+
+/// The checks every app read makes before anything is read, shared by the resource and the frame: a
+/// zero-retention caller is refused with feature `mcp_execution`, the server and the tool must be named, and
+/// the viewer's capability credential must be present. Returns the trimmed names and the credential.
+fn app_read_checks<'query>(
+    claims: &Claims,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: &'query McpAppResourceQuery,
+) -> Result<(&'query str, &'query str, VerifiedCapabilityBearer), HttpJsonError> {
+    if crate::zdr_posture::zdr_or_refuse(claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(
@@ -854,7 +893,8 @@ async fn mcp_app_resource(
             "server_id and tool are required",
         ));
     }
-    let Some(Extension(bearer)) = bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
+    let Some(Extension(bearer)) =
+        bearer.filter(|Extension(bearer)| !bearer.as_str().trim().is_empty())
     else {
         return Err(run_trace_error(
             StatusCode::UNAUTHORIZED,
@@ -862,6 +902,19 @@ async fn mcp_app_resource(
             "reading an MCP app needs a verified capability credential",
         ));
     };
+    Ok((server_id, tool, bearer))
+}
+
+/// The app `tool` declares on `server_id`, read with the viewer's authority (`crate::mcp_apps`) for the resource and
+/// the frame alike: the registry is refreshed from capability-core with the viewer's credential, and the server's
+/// stored OAuth token is used when it has one.
+async fn read_viewer_app(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+    server_id: &str,
+    tool: &str,
+) -> Result<std::sync::Arc<crate::mcp_apps::AppResource>, HttpJsonError> {
     if let Err(error) = crate::runtime_registries::hydrate_mcp_registry(
         &state.mcp,
         &state.ownership,
@@ -887,7 +940,7 @@ async fn mcp_app_resource(
         server_id,
     )
     .await;
-    let resource = crate::mcp_apps::read_app_resource(
+    crate::mcp_apps::read_app_resource(
         &state.mcp,
         &state.ownership,
         crate::mcp_apps::AppResourceCache::global(),
@@ -898,14 +951,83 @@ async fn mcp_app_resource(
         oauth_token.as_deref(),
     )
     .await
-    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))?;
-    Ok(Json(json!({
-        "data": {
-            "uri": resource.uri,
-            "html": resource.html,
-            "needs_network": resource.needs_network,
-        }
-    })))
+    .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))
+}
+
+/// The origins the org grants an app's frame (`crate::org_agent_policy`). Callers read them only while
+/// `MCP_APPS_NETWORK_ENABLED` is on.
+async fn mcp_app_granted_origins(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedCapabilityBearer,
+) -> Vec<String> {
+    crate::org_agent_policy::mcp_app_network_origins(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        bearer.as_str(),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Wave 4 W4-D M1c: `GET /v1/mcp-apps/frame` - an MCP tool's app, as the document its frame loads.
+// ---------------------------------------------------------------------------
+
+/// `GET /v1/mcp-apps/frame` - see [`mcp_app_frame`].
+async fn get_mcp_app_frame(
+    state: State<AppState>,
+    claims: Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    query: Query<McpAppResourceQuery>,
+) -> Result<Response, HttpJsonError> {
+    mcp_app_frame(state, claims, bearer, query, crate::mcp_apps::enabled()).await
+}
+
+/// The app `tool` on `server_id` declares, as the document an app frame loads: the app's own markup behind the
+/// frame's policy (`crate::mcp_app_csp`). The policy is in the document's `<meta>`; the response carries `sandbox`
+/// and `frame-ancestors`, which a `<meta>` cannot. The policy is the no-network one while `MCP_APPS_NETWORK_ENABLED`
+/// is off, so the frame is what the SPA draws today; with the switch on it grants the origins the org allows. The
+/// checks, the cache and the read are those of `mcp_app_resource`. With `MCP_APPS_ENABLED` off the route is a 404
+/// as if it did not exist.
+async fn mcp_app_frame(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    Query(query): Query<McpAppResourceQuery>,
+    enabled: bool,
+) -> Result<Response, HttpJsonError> {
+    if !enabled {
+        return Err(run_trace_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "no such route",
+        ));
+    }
+    let (server_id, tool, bearer) = app_read_checks(&claims, bearer, &query)?;
+    let resource = read_viewer_app(&state, &claims, &bearer, server_id, tool).await?;
+    let origins = if crate::mcp_apps::network_enabled() {
+        mcp_app_granted_origins(&state, &claims, &bearer).await
+    } else {
+        Vec::new()
+    };
+    let policy = crate::mcp_app_csp::build(&resource.declared, &origins).policy;
+    Ok((
+        [
+            (CONTENT_TYPE, "text/html; charset=utf-8"),
+            (
+                CONTENT_SECURITY_POLICY,
+                "sandbox allow-scripts; frame-ancestors 'self'",
+            ),
+            (X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (REFERRER_POLICY, "no-referrer"),
+            (CACHE_CONTROL, "no-store"),
+        ],
+        crate::mcp_app_csp::frame_document(&policy, &resource.html),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -970,7 +1092,7 @@ async fn mcp_app_tool_call(
             "no such route",
         ));
     }
-    if claims.zdr || claims.zdr_waiver.is_some() {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(
@@ -1341,7 +1463,7 @@ fn invoke_inference_error(
 /// Attach the separately verified `aud=inference-core` credential to one
 /// downstream RPC. A verified compact JWT uses only metadata-safe characters;
 /// validation happens in the auth middleware before this type can exist.
-fn authenticated_inference_request<T>(
+pub(crate) fn authenticated_inference_request<T>(
     value: T,
     bearer: &VerifiedInferenceBearer,
 ) -> tonic::Request<T> {
@@ -2024,6 +2146,7 @@ async fn approval_preview(
     Path(approval_id): Path<String>,
     enabled: bool,
 ) -> Result<Json<Value>, HttpJsonError> {
+    crate::zdr_posture::continuation_gate(&claims)?;
     if !enabled {
         return Err(run_trace_error(
             StatusCode::NOT_FOUND,
@@ -2031,7 +2154,6 @@ async fn approval_preview(
             "the approval preview is not available",
         ));
     }
-    crate::zdr_posture::continuation_gate(&claims)?;
     let response = state
         .orchestration_client
         .clone()
@@ -2637,7 +2759,7 @@ async fn get_run_timing(
     bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
@@ -2735,7 +2857,7 @@ async fn run_request_inspection(
             "no such route",
         ));
     }
-    if claims.zdr {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
         return Err((
             StatusCode::FORBIDDEN,
             Json(mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection").json_body()),
@@ -8123,6 +8245,8 @@ async fn read_process_output(
                 space_id: space_ref,
                 space_read_decision_ref: query.space_read_decision_ref.unwrap_or_default(),
                 space_read_decision_token: query.space_read_decision_token.unwrap_or_default(),
+                // The Space-level read names no run; the owner route below does.
+                run_id: String::new(),
             },
             &bearer,
         )?)
@@ -8143,6 +8267,298 @@ async fn read_process_output(
         "gap_before": response.gap_before,
         "retained_from_seq": response.retained_from_seq,
     })))
+}
+
+/// Query of the owner read of one process's output. The Space and its decision travel with the
+/// request for the reason `ProcessesQuery` gives: sandbox-manager verifies the decision against the
+/// Space the caller names, never against whatever the row says.
+#[derive(Debug, Deserialize)]
+struct RunProcessOutputQuery {
+    space_ref: Option<String>,
+    space_read_decision_ref: Option<String>,
+    space_read_decision_token: Option<String>,
+    after_seq: Option<i64>,
+    max_bytes: Option<i64>,
+}
+
+/// Session Core's ownership answer for a run-scoped read. A typed refusal keeps its catalogue code.
+/// A caller who does not own the run and a run that does not exist read the same, as 404.
+fn run_owner_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return grpc_status_to_http(status);
+    }
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => {
+            run_trace_error(StatusCode::NOT_FOUND, "run_not_found", "no such run")
+        }
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// Sandbox-manager's answer to a run-scoped output read. A process of another run, a process of
+/// another Space and no process at all read the same, so the answer says nothing about which it was.
+fn process_output_status_to_http(status: &tonic::Status) -> HttpJsonError {
+    match status.code() {
+        tonic::Code::NotFound => run_trace_error(
+            StatusCode::NOT_FOUND,
+            "process_not_found",
+            "no such process in this run",
+        ),
+        _ => grpc_status_to_http(status),
+    }
+}
+
+/// `GET /v1/runs/:run_id/processes/:pid/output?space_ref=&space_read_decision_ref=&space_read_decision_token=&after_seq=&max_bytes=`
+/// — one page of the output of a process its own run started (P2, the owner read path).
+///
+/// Both checks must pass. Session Core's durable ownership record proves the caller owns the run, as
+/// a run-scoped mutation does. Sandbox-manager then admits only a process of that run, in the Space the
+/// caller names, under the caller's own Space read decision. A zero-retention caller is refused before
+/// anything is read, with feature `run_inspection`, as the timing route refuses it, because process
+/// output is retained content.
+async fn get_run_process_output(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    sandbox: VerifiedSandboxBearer,
+    Path((run_id, process_id)): Path<(String, String)>,
+    Query(query): Query<RunProcessOutputQuery>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(
+                mp_contracts::zdr_refusal::Refusal::feature_not_supported("run_inspection")
+                    .json_body(),
+            ),
+        ));
+    }
+    let run_id = run_id.trim();
+    if !valid_trace_run_id(run_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "run_id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let process_id = process_id.trim();
+    if !valid_trace_run_id(process_id) {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_process_id",
+            "process id must be 1 to 64 characters of [A-Za-z0-9_-]",
+        ));
+    }
+    let space_ref = require_url_safe_space_ref(query.space_ref.as_deref())?;
+    let decision_ref = query
+        .space_read_decision_ref
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let decision_token = query
+        .space_read_decision_token
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    if decision_ref.is_empty() || decision_token.is_empty() {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "space_read_decision_required",
+            "space_read_decision_ref and space_read_decision_token are required",
+        ));
+    }
+    let after_seq = query.after_seq.unwrap_or(0);
+    let max_bytes = query.max_bytes.unwrap_or(0);
+    if after_seq < 0 || max_bytes < 0 {
+        return Err(run_trace_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "after_seq and max_bytes must not be negative",
+        ));
+    }
+
+    session_flow::require_durable_run_owner_with_token(
+        &state,
+        run_id,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|status| run_owner_status_to_http(&status))?;
+
+    let response = state
+        .sandbox_client
+        .clone()
+        .read_process_output(authenticated_sandbox_request(
+            ReadProcessOutputRequest {
+                process_id: process_id.to_owned(),
+                after_seq,
+                max_bytes,
+                space_id: space_ref,
+                space_read_decision_ref: decision_ref,
+                space_read_decision_token: decision_token,
+                run_id: run_id.to_owned(),
+            },
+            &sandbox,
+        )?)
+        .await
+        .map_err(|status| process_output_status_to_http(&status))?
+        .into_inner();
+
+    Ok(Json(json!({
+        "data": {
+            "process_id": process_id,
+            "state": process_state_name(response.state),
+            "exit_code": response.exit_code,
+            "end_reason": (!response.end_reason.is_empty()).then(|| response.end_reason.clone()),
+            "gap_before": response.gap_before,
+            "retained_from_seq": response.retained_from_seq,
+            "chunks": response.chunks.iter().map(|chunk| json!({
+                "seq": chunk.seq,
+                "stream": process_stream_name(chunk.stream),
+                "text": String::from_utf8_lossy(&chunk.content),
+                "ends_with_newline": chunk.ends_with_newline,
+            })).collect::<Vec<_>>(),
+        },
+        "meta": {
+            "next_cursor": response.next_cursor,
+            "has_more": response.has_more,
+        },
+    })))
+}
+
+#[cfg(test)]
+mod run_process_output_route_tests {
+    use super::*;
+
+    use axum::{body::Body, http::Request as HttpRequest};
+    use tower::ServiceExt;
+
+    const VALID_QUERY: &str =
+        "space_ref=space-1&space_read_decision_ref=read-1&space_read_decision_token=token";
+
+    fn claims(zdr: bool) -> Claims {
+        serde_json::from_value(json!({
+            "sub": "user-a", "iss": "auth-core", "exp": 4_102_444_800_i64, "org_id": "org-a",
+            "user_id": "user-a", "principal_type": "user", "zdr": zdr
+        }))
+        .expect("claims")
+    }
+
+    fn app(zdr: bool, with_sandbox_bearer: bool) -> Router {
+        let mut router = Router::new()
+            .route(
+                "/v1/runs/:run_id/processes/:pid/output",
+                get(get_run_process_output),
+            )
+            .with_state(AppState::new())
+            .layer(Extension(claims(zdr)))
+            .layer(Extension(crate::auth::VerifiedSessionBearer::for_test(
+                "session-core-bearer",
+            )));
+        if with_sandbox_bearer {
+            router = router.layer(Extension(VerifiedSandboxBearer::for_test(
+                "sandbox-manager-bearer",
+            )));
+        }
+        router
+    }
+
+    async fn get_json(router: Router, uri: &str) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(HttpRequest::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_zdr_caller_is_refused_before_anything_is_read() {
+        let uri = format!("/v1/runs/run_1/processes/proc_1/output?{VALID_QUERY}");
+        let (status, body) = get_json(app(true, true), &uri).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_sandbox_bearer_is_required() {
+        let uri = format!("/v1/runs/run_1/processes/proc_1/output?{VALID_QUERY}");
+        let (status, _) = get_json(app(false, false), &uri).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn malformed_ids_and_cursors_are_refused_before_any_rpc() {
+        let cases = [
+            (
+                format!("/v1/runs/run.1/processes/proc_1/output?{VALID_QUERY}"),
+                "invalid_run_id",
+            ),
+            (
+                format!("/v1/runs/run_1/processes/proc.1/output?{VALID_QUERY}"),
+                "invalid_process_id",
+            ),
+            (
+                "/v1/runs/run_1/processes/proc_1/output?space_ref=space%26x&space_read_decision_ref=read-1&space_read_decision_token=token".to_owned(),
+                "",
+            ),
+            (
+                format!("/v1/runs/run_1/processes/proc_1/output?{VALID_QUERY}&after_seq=-1"),
+                "invalid_cursor",
+            ),
+        ];
+        for (uri, code) in cases {
+            let (status, body) = get_json(app(false, true), &uri).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+            if !code.is_empty() {
+                assert_eq!(body["error"]["code"], code, "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_without_a_space_decision_is_refused_before_any_rpc() {
+        let (status, body) = get_json(
+            app(false, true),
+            "/v1/runs/run_1/processes/proc_1/output?space_ref=space-1",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "space_read_decision_required");
+    }
+
+    #[test]
+    fn an_unowned_or_missing_run_reads_as_no_run_and_an_outage_stays_an_outage() {
+        for refused in [
+            tonic::Status::permission_denied("run access denied"),
+            tonic::Status::not_found("run not found"),
+        ] {
+            let (status, body) = run_owner_status_to_http(&refused);
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body.0["error"]["code"], "run_not_found");
+        }
+        let (status, _) =
+            run_owner_status_to_http(&tonic::Status::unavailable("run ownership unavailable"));
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn another_runs_process_reads_as_no_process_in_this_run() {
+        let (status, body) =
+            process_output_status_to_http(&tonic::Status::not_found("process not found"));
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.0["error"]["code"], "process_not_found");
+        let (status, _) =
+            process_output_status_to_http(&tonic::Status::permission_denied("decision refused"));
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
 }
 
 /// Lifetime of the thread lease a workspace read acquires. Execution-core's own
@@ -13015,6 +13431,7 @@ async fn list_models(
 
     // One catalogue snapshot prices the whole listing, and none is taken while the switch is off.
     let rates = crate::catalogue_prices::snapshot_for_listing(&state.pricing).await;
+    let context_refs_on = crate::context_refs::enabled();
     let models: Vec<ModelDescriptor> = resp
         .models
         .into_iter()
@@ -13022,12 +13439,14 @@ async fn list_models(
             let price = rates.as_ref().and_then(|rates| {
                 crate::catalogue_prices::model_price(rates, &m.id, &m.provider, &m.modality)
             });
+            let features =
+                crate::context_refs::catalogue_features(m.features, &m.modality, context_refs_on);
             ModelDescriptor {
                 id: m.id,
                 provider: m.provider,
                 modality: m.modality,
                 streaming: m.streaming,
-                features: m.features,
+                features,
                 privacy_tier: privacy_tier_label(m.privacy_tier),
                 residency: m.residency,
                 effort_levels: m.effort_levels,
@@ -14695,6 +15114,9 @@ struct BranchThreadBody {
     /// The leaf the client last displayed. A move against a newer leaf is refused with
     /// 409 `active_leaf_stale`, so the client reloads before it moves again.
     expected_leaf_message_id: String,
+    /// Land on the target itself, not the newest turn beneath it: the undo of a rewind (WS17 S9).
+    #[serde(default)]
+    exact: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -14737,6 +15159,7 @@ async fn branch_thread(
                 thread_id: thread_id.to_owned(),
                 target_message_id: body.target_message_id,
                 expected_leaf_message_id: body.expected_leaf_message_id,
+                exact: body.exact,
             },
             &bearer,
         )?)
@@ -19397,7 +19820,7 @@ mod durable_trace_projection_tests {
 #[cfg(test)]
 // The inference-core stand-in answers with `tonic::Status`, as the trait does.
 #[allow(clippy::result_large_err)]
-mod speech_route_tests {
+pub(crate) mod speech_route_tests {
     //! The two audio routes, `/v1/ai/dictate` and `/v1/ai/speech`: zero
     //! retention reaches inference-core on every speech call, and their body
     //! limit is raised without touching any other route.
@@ -19427,7 +19850,7 @@ mod speech_route_tests {
     /// refuses speech that asks for zero retention. `attested` stands for a
     /// future attested deployment that serves ZDR speech.
     #[derive(Clone, Default)]
-    pub(super) struct SpeechInference {
+    pub(crate) struct SpeechInference {
         attested: bool,
         /// When set, `infer` answers with this instead of the clean-up stand-in (the ai_chat tests).
         reply: Arc<Mutex<Option<pb::InferResponse>>>,
@@ -19457,11 +19880,11 @@ mod speech_route_tests {
             self.synthesize.lock().expect("synthesis capture").clone()
         }
 
-        pub(super) fn answering(&self, reply: pb::InferResponse) {
+        pub(crate) fn answering(&self, reply: pb::InferResponse) {
             *self.reply.lock().expect("reply setting") = Some(reply);
         }
 
-        pub(super) fn cleanups(&self) -> Vec<pb::InferRequest> {
+        pub(crate) fn cleanups(&self) -> Vec<pb::InferRequest> {
             self.infer.lock().expect("clean-up capture").clone()
         }
     }
@@ -19662,7 +20085,7 @@ mod speech_route_tests {
     }
 
     /// An `AppState` whose inference client talks to `inference`.
-    pub(super) async fn state_with(inference: SpeechInference) -> AppState {
+    pub(crate) async fn state_with(inference: SpeechInference) -> AppState {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind inference stand-in");
@@ -19708,7 +20131,7 @@ mod speech_route_tests {
         }
     }
 
-    pub(super) fn bearer() -> VerifiedInferenceBearer {
+    pub(crate) fn bearer() -> VerifiedInferenceBearer {
         VerifiedInferenceBearer::for_test("inference-test-bearer")
     }
 
@@ -21037,6 +21460,7 @@ mod model_access_route_tests {
     struct AccessInference {
         asked: Arc<Mutex<Vec<pb::GetModelAccessRequest>>>,
         refusal: Arc<Mutex<Option<tonic::Status>>>,
+        listed: Arc<Mutex<Vec<pb::ModelInfo>>>,
     }
 
     impl AccessInference {
@@ -21046,6 +21470,11 @@ mod model_access_route_tests {
 
         fn refuse_with(&self, status: tonic::Status) {
             *self.refusal.lock().expect("refusal setting") = Some(status);
+        }
+
+        /// The catalogue `GET /v1/models` lists through this stand-in.
+        fn list_models_with(&self, models: Vec<pb::ModelInfo>) {
+            *self.listed.lock().expect("catalogue setting") = models;
         }
     }
 
@@ -21117,7 +21546,11 @@ mod model_access_route_tests {
             &self,
             _request: tonic::Request<pb::ListModelsRequest>,
         ) -> Result<tonic::Response<pb::ListModelsResponse>, tonic::Status> {
-            unused()
+            let models = self.listed.lock().expect("catalogue setting").clone();
+            Ok(tonic::Response::new(pb::ListModelsResponse {
+                models,
+                ..Default::default()
+            }))
         }
 
         async fn synthesize_speech(
@@ -21397,6 +21830,158 @@ mod model_access_route_tests {
         assert_eq!(body["error"]["code"], "model_access_unavailable");
         assert!(!body.to_string().contains("node-3"));
     }
+
+    /// `GET /v1/models` names a chat model's list price only while the catalogue switch is on, joined
+    /// from cost-core's catalogue by model id. The listing is served either way (EP-13-S1).
+    mod list_models_price_tests {
+        use super::*;
+        use crate::catalogue_prices::SwitchOn;
+        use crate::pricing::PricingCache;
+        use serial_test::serial;
+        use std::time::{Duration, Instant};
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        fn chat(id: &str, provider: &str) -> pb::ModelInfo {
+            pb::ModelInfo {
+                id: id.to_owned(),
+                provider: provider.to_owned(),
+                modality: "chat".to_owned(),
+                streaming: true,
+                ..Default::default()
+            }
+        }
+
+        fn rates() -> Value {
+            json!({ "rates": [
+                { "model": "default", "input_per_million": 3.0, "output_per_million": 15.0, "currency": "USD" },
+                { "model": "claude-sonnet", "input_per_million": 3.0, "output_per_million": 15.0, "currency": "USD" },
+                { "model": "gpt-4o-mini", "input_per_million": 0.15, "output_per_million": 0.6, "currency": "USD" },
+            ]})
+        }
+
+        /// A cost-core stand-in that expects `calls` pricing fetches, each answered after `delay`.
+        async fn cost_core(calls: u64, delay: Option<Duration>) -> MockServer {
+            let server = MockServer::start().await;
+            let mut response = ResponseTemplate::new(200).set_body_json(rates());
+            if let Some(delay) = delay {
+                response = response.set_delay(delay);
+            }
+            Mock::given(method("GET"))
+                .and(path("/api/v1/pricing"))
+                .respond_with(response)
+                .expect(calls)
+                .mount(&server)
+                .await;
+            server
+        }
+
+        async fn listing(models: Vec<pb::ModelInfo>, cost_core: &MockServer) -> Value {
+            let inference = AccessInference::default();
+            inference.list_models_with(models);
+            let mut state = state_with(inference).await;
+            state.pricing = PricingCache::new(Some(cost_core.uri()), reqwest::Client::new());
+            let Json(body) = list_models(State(state), Extension(claims("org-1")), bearer())
+                .await
+                .expect("the listing is served");
+            serde_json::to_value(&body).expect("the listing serializes")
+        }
+
+        fn price_of(body: &Value, id: &str) -> Option<Value> {
+            body["models"]
+                .as_array()
+                .expect("the models")
+                .iter()
+                .find(|model| model["id"] == id)
+                .and_then(|model| model.get("price").cloned())
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn list_models_serves_no_price_and_fetches_no_catalogue_while_the_switch_is_off() {
+            std::env::remove_var(crate::catalogue_prices::CATALOGUE_PRICES_ENV);
+            let cost_core = cost_core(0, None).await;
+            let body = listing(
+                vec![
+                    chat("claude-sonnet-5-5", "anthropic"),
+                    chat("gpt-4o-mini", "openai"),
+                ],
+                &cost_core,
+            )
+            .await;
+            let models = body["models"].as_array().expect("the models");
+            assert_eq!(models.len(), 2);
+            assert!(
+                models.iter().all(|model| model.get("price").is_none()),
+                "{body}"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn list_models_prices_exact_and_prefix_chat_models_and_never_the_default_row() {
+            let _on = SwitchOn::new();
+            let cost_core = cost_core(1, None).await;
+            let body = listing(
+                vec![
+                    chat("claude-sonnet-5-5", "anthropic"),
+                    chat("gpt-4o-mini", "openai"),
+                    chat("a-model-the-catalogue-does-not-list", "azure"),
+                    pb::ModelInfo {
+                        id: "gpt-image-1".to_owned(),
+                        provider: "openai".to_owned(),
+                        modality: "image".to_owned(),
+                        ..Default::default()
+                    },
+                ],
+                &cost_core,
+            )
+            .await;
+            assert_eq!(
+                price_of(&body, "claude-sonnet-5-5"),
+                Some(
+                    json!({ "input_per_million": 3.0, "output_per_million": 15.0, "currency": "USD", "source": "prefix" })
+                ),
+            );
+            assert_eq!(
+                price_of(&body, "gpt-4o-mini"),
+                Some(
+                    json!({ "input_per_million": 0.15, "output_per_million": 0.6, "currency": "USD", "source": "exact" })
+                ),
+            );
+            assert_eq!(price_of(&body, "a-model-the-catalogue-does-not-list"), None);
+            assert_eq!(price_of(&body, "gpt-image-1"), None);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn list_models_lists_every_model_unpriced_when_cost_core_hangs() {
+            let _on = SwitchOn::new();
+            let cost_core = cost_core(1, Some(Duration::from_secs(5))).await;
+            let started = Instant::now();
+            let body = listing(
+                vec![
+                    chat("claude-sonnet-5-5", "anthropic"),
+                    chat("gpt-4o-mini", "openai"),
+                ],
+                &cost_core,
+            )
+            .await;
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            let models = body["models"].as_array().expect("the models");
+            assert_eq!(models.len(), 2);
+            assert!(
+                models.iter().all(|model| model.get("price").is_none()),
+                "{body}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -21539,6 +22124,29 @@ mod thread_messages_page_tests {
         ));
         assert_eq!(busy.0, StatusCode::CONFLICT);
         assert_eq!(busy.1 .0["error"]["code"], "history_branch_refused");
+    }
+
+    #[test]
+    fn a_branch_body_is_a_version_switch_unless_it_asks_for_an_exact_landing() {
+        let switch: BranchThreadBody = serde_json::from_value(serde_json::json!({
+            "targetMessageId": "m2",
+            "expectedLeafMessageId": "m4",
+        }))
+        .expect("a switch body parses");
+        assert!(!switch.exact);
+        let undo: BranchThreadBody = serde_json::from_value(serde_json::json!({
+            "targetMessageId": "m2",
+            "expectedLeafMessageId": "m4",
+            "exact": true,
+        }))
+        .expect("an undo body parses");
+        assert!(undo.exact);
+        assert!(serde_json::from_value::<BranchThreadBody>(serde_json::json!({
+            "targetMessageId": "m2",
+            "expectedLeafMessageId": "m4",
+            "threadId": "other",
+        }))
+        .is_err());
     }
 
     #[test]
@@ -23205,6 +23813,19 @@ mod approval_preview_route_tests {
         assert_eq!(status, expected_status);
         assert_eq!(body, expected, "the typed refusal of a decision, before any lookup");
         assert!(body["error"]["code"].is_string());
+    }
+
+    /// The gate runs before the switch, as it does for a decision: a zero-retention bearer gets the
+    /// typed refusal even while the preview is off, never the switch's 404.
+    #[tokio::test]
+    async fn preview_route_refuses_zdr_token_before_the_switch() {
+        let (status, body) =
+            get_json(app(true), "/off/v1/orchestration/approvals/appr_1/preview").await;
+        let (expected_status, Json(expected)) =
+            crate::zdr_posture::continuation_gate(&claims(true))
+                .expect_err("a ZDR bearer is refused");
+        assert_eq!(status, expected_status);
+        assert_eq!(body, expected, "the gate decides first, not the switch");
     }
 
     #[test]

@@ -1,0 +1,1001 @@
+{
+ "batchId": "W2-34",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS17-S6",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions_grpc.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0059_thread_fork_lineage.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0059_thread_fork_lineage.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/thread_fork.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/main.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ForkAction.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/ForkAction.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core thread_fork (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "ok, exit 0: 4 passed, 6 ignored (the DB tests)"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core (full bin unit suite)",
+     "outcome": "ok, exit 0: 724 passed, 0 failed, 288 ignored"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib",
+     "outcome": "FAILED to compile, exit 101: one error, error[E0609] no field thread_fork_client on type state::AppState at http_routes.rs:11182. Blocked by lead_todo 0. fork_route_tests (http_routes.rs:16770) did not run."
+    },
+    {
+     "command": "cargo test --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --all-targets",
+     "outcome": "ok, exit 0: 6 test-result blocks, all ok, 0 failed. fork_handler_tests::a_fork_carries_its_source_and_a_thread_that_is_not_forked_carries_none and fork_body_reads_camel_case_and_refuses_unknown_fields pass; the DurableThreadSummary literals compile."
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat/components/ForkAction.test.tsx src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx",
+     "outcome": "ok: 2 files, 22 passed (ForkAction 4; organizer 18, including the 2 new lineage tests)"
+    },
+    {
+     "command": "node node_modules/vitest/vitest.mjs run on the 8 src/shared/api/chat-client*.test.ts files",
+     "outcome": "ok: 8 files, 180 passed"
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on ChatSidebarOrganizer.tsx, its test, ForkAction.tsx, its test, chat-client.ts, ChatMessages.tsx",
+     "outcome": "exit 0: 0 errors; 10 solid/reactivity warnings, all in ChatMessages.tsx at lines this slice does not change"
+    },
+    {
+     "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "exit 2: 22 error lines, 21 in src/shared/api/quarry-client.ts and 1 in src/shared/api/schedule-contract.test.ts. None in files this slice touches; quarry-client.ts is unchanged in git. Same count as the earlier run."
+    },
+    {
+     "command": "go test ./... and go vet ./... in apps/Model Plane/go/gen",
+     "outcome": "ok: model_plane/v1 ok (cached), test exit 0; vet exit 0"
+    },
+    {
+     "command": "python -m pytest -q tests in apps/Model Plane/python/mp-events-py (scratch venv: protobuf 7.36.2, pydantic, blake3, pytest)",
+     "outcome": "ok: 15 passed"
+    },
+    {
+     "command": "protoc 35.1 --python_out on the HEAD sessions.proto, compared with the checked-in HEAD sessions_pb2.py",
+     "outcome": "byte-identical: the local generator reproduces the checked-in stub, so the regenerated sessions_pb2.py is the same generator output"
+    },
+    {
+     "command": "scratch-only import check: all model_plane/v1 protos regenerated into a copy of mp_events/_gen, then import sessions_pb2 (copy deleted afterwards)",
+     "outcome": "ok: imports; ForkThreadRequest fields 1-4, ForkThreadResponse fields 1-2, ThreadSummary.forked_from_thread_id = 19, ThreadForkService present, serialize round trip ok"
+    }
+   ],
+   "db_tests_written": [
+    "fork_copies_active_path_up_to_message (thread_fork::tests)",
+    "fork_emits_one_thread_forked_event_and_no_message_appended (thread_fork::tests)",
+    "fork_is_owner_bound (thread_fork::tests)",
+    "fork_refuses_space_waived_and_zdr (thread_fork::tests)",
+    "fork_of_a_path_past_the_cap_is_refused (thread_fork::tests; cap 5,000)",
+    "fork_is_refused_while_the_switch_is_off (thread_fork::tests; needs SESSION_CORE_THREAD_FORK_ENABLED unset)",
+    "dreaming_skips_copied_rows (dreaming::tests)"
+   ],
+   "lead_todo": [
+    "0. shared-edit apps/Model Plane/rust/services/model-gateway/src/state.rs (CRLF file: keep CRLF). This is the reviewer's Fix 1. It was NOT applied here because state.rs is outside this slice's ownership and the batch rules say to hand shared lines back. Edits: (a) in the use list after `    message_tree_service_client::MessageTreeServiceClient,` add `    thread_fork_service_client::ThreadForkServiceClient,`. (b) In AppState after `    pub message_tree_client: MessageTreeServiceClient<Channel>,` add `    /// Session Core's ThreadFork service on the session_client endpoint (WS17-S6).` and `    pub thread_fork_client: ThreadForkServiceClient<Channel>,`. (c) In the main constructor after `            message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),` add `            thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),`. (d) In the lazy builder, after the complete `let message_tree_client = MessageTreeServiceClient::new(Self::lazy_channel(` ... `)?);` block, add with 8 spaces of indent: `let thread_fork_client = ThreadForkServiceClient::new(Self::lazy_channel(` then `            \"SESSION_CORE_URL\",` then `            \"SESSION_CORE_ADDR\",` then `            \"http://localhost:9091\",` then `        )?);`. (e) After each of the two `            state.message_tree_client = message_tree_client;` lines add `            state.thread_fork_client = thread_fork_client;`. Then run `cargo test -q -p model-gateway --lib` and `cargo test -q -p model-gateway --all-targets` (fork_route_tests at http_routes.rs:16770).",
+    "1. shared-edit apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts (LF). Needed before the lineage chip can show. (a) In ChatThreadHistoryItem, after the `  origin?: string` line (the first one, about line 70), add `  /** The thread this one was copied from (WS17 S6). Set once when the copy is made, so it carries forward (see withForkLineageCarry). */` and `  forkedFromThreadId?: string`. (b) In ChatThreadHistoryInput, after its `  origin?: string` line (about line 90), add `  /** Omit to leave the stored lineage untouched (see withForkLineageCarry). */` and `  forkedFromThreadId?: string`. (c) In normalizeHistoryInput, after the origin spread line, add `    ...(normalizeOptionalText(input.forkedFromThreadId) ? { forkedFromThreadId: normalizeOptionalText(input.forkedFromThreadId) } : {}),`. (d) In upsertChatThreadHistory replace `  const resolved = withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, current), current), current), current), current)` with `  const resolved = withForkLineageCarry(withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, current), current), current), current), current), current)`. (e) In replaceChatThreadHistory replace `    collected.push(withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored), matchingStored), matchingStored), matchingStored))` with `    collected.push(withForkLineageCarry(withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored), matchingStored), matchingStored), matchingStored), matchingStored))`. (f) After the closing brace of withOriginCarry add a JSDoc (`Lineage carry, mirroring withOriginCarry: a copy's source is set once, when it is forked, so a local write that does not mention it must keep the stored lineage.`) and the function `function withForkLineageCarry(item: ChatThreadHistoryItem, current: ChatThreadHistoryItem | undefined): ChatThreadHistoryItem { if (item.forkedFromThreadId === undefined && current?.forkedFromThreadId) return { ...item, forkedFromThreadId: current.forkedFromThreadId }; return item }`, written in the file's multi-line style. (g) In isChatThreadHistoryItem, change the origin validation line to end with ` &&` and add `    (record.forkedFromThreadId === undefined || typeof record.forkedFromThreadId === 'string')`. Then run chat-thread-history.test.ts and ChatSidebarOrganizer.test.tsx.",
+    "2. shared-edit apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (LF). Builds the thread-menu Fork item and feeds the organizer its forkedThreadIds set. Not applied, not typechecked here. (a) In the '@/shared/icons' import list, after `  Folder,` add `  GitBranch,`. (b) In the '@/shared/api/chat-client' import list, after `  deleteChatThread,` add `  forkChatThread,` and `  getThreadMessages,`. (c) After the `} from '@/features/chat/lib/chat-thread-history'` line add `import { threadForkEnabled } from '@/features/chat/components/ForkAction'`. (d) In ChatSidebarPanel, after `  const attentionGroups = createMemo(() => attentionSectionRows(attention(), visibleSessions()))` add `  // Copies of another chat: the organizer shows a Forked chip on each (WS17 S6).` and `  const forkedThreadIds = createMemo(() => new Set(visibleSessions().filter((item) => item.forkedFromThreadId).map((item) => item.threadId)))`. (e) In ChatSidebarPanel, before `  const sessionRow = (item: ChatThreadHistoryItem, onMoveToProject?: () => void) => (` add the function `forkThread`: `const forkThread = async (threadId: string) => { setError(null); try { const messages = await getThreadMessages(threadId); const latestReply = [...messages].reverse().find((message) => message.role === 'assistant'); if (!latestReply) { setError(i18n.tr('Samtalen har ingen svar å forgrene fra ennå.', 'This chat has no reply to fork from yet.')); return } const forked = await forkChatThread(threadId, { fromMessageId: latestReply.id }); await refreshServerSessions(); if (forked?.threadId) openThread(forked.threadId) } catch (reason) { setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke forgrene samtalen.', en: 'Could not fork the conversation.' })) } }`, written across lines with a short JSDoc (a server refusal is shown; the list is refreshed so the copy appears). (f) In function ChatSessionMenu's props type, after `  onArchive: () => void` add `  onFork: () => void`. (g) In sessionRow's `<ChatSessionMenu` JSX, after `          onArchive={() => void archiveThread(item.threadId)}` add `          onFork={() => void forkThread(item.threadId)}`. (h) In ChatSessionMenu's menu markup, directly after the Archive `<li role=\"presentation\">` block (the one calling props.onArchive()), add `<Show when={threadForkEnabled()}>` wrapping an `<li role=\"presentation\">` with `<button type=\"button\" role=\"menuitem\" class=\"core-chat-session__menu-item\" onClick={(event) => { event.stopPropagation(); close(false); props.onFork() }}>` containing `<GitBranch class=\"size-3.5\" />` and `{i18n.tr('Forgren samtalen', 'Fork chat')}`. (i) In the <ChatSidebarOrganizer ...> props, after the onLoadMore prop, add `forkedThreadIds={forkedThreadIds()}`. After applying, run CoreSidebar.chat-sessions.test.tsx and tsc6.",
+    "3. shared-edit apps/Model Plane/rust/services/session-core/src/message_search.rs (LF). After line 66 (`      AND m.on_active_path`) in the candidates WHERE clause, add `      AND (m.copied_from_message_id IS NULL OR NULLIF($7, '') IS NOT NULL)`. Without it, owner search and RECALL return copied turns as duplicates. Then write search_excludes_copied_rows_unless_thread_scoped beside it and rerun the session-core unit suite.",
+    "4. Python stub set (outside ownership, regenerate by the lead). The regenerated sessions_pb2.py is correct, but in-repo it still cannot be imported: attention_pb2.py does not exist, although sessions.proto imports attention.proto and HEAD's sessions_pb2.py already imports it (pre-existing break); and runs.proto defines RunContextStatus, which runs_pb2.py lacks (runs.proto last changed in 6184c2df0, WS20-S5). Other stubs were not checked. Fix: run `protoc -I \"apps/Model Plane/proto\" --python_out=\"apps/Model Plane/python/mp-events-py/src/mp_events/_gen\" model_plane/v1/<name>.proto` for every v1 proto (protoc 35.1 reproduces the checked-in HEAD sessions stub byte-for-byte). This rewrites stubs owned by other slices, so the lead decides. Verified in a scratch copy with every v1 stub regenerated: the sessions stub imports and exposes the fork messages, forked_from_thread_id = 19, and ThreadForkService.",
+    "5. DB tests (lead runs them, disposable DATABASE_URL, from apps/Model Plane/rust): cargo test -p session-core --bin session-core fork_ -- --ignored --test-threads=1, then cargo test -p session-core --bin session-core dreaming_skips_copied_rows -- --ignored --test-threads=1. Migration 0059 runs at boot through sqlx::migrate!.",
+    "6. Live proof, images and flags (lead). Rebuild session-core, model-gateway and the BFF gateway. Extend apps/Model Plane/scripts/tests/history-foundation-proof.sh with a fork step (not done). Keep SESSION_CORE_THREAD_FORK_ENABLED and VITE_CHAT_THREAD_FORK unset in every environment until the P1 depth findings are closed.",
+    "7. ZDR matrix (lead decision). apps/Model Plane/api/contracts/zdr-posture-matrix.json and its .sha256 are unchanged. The file holds posture decision rows, not an RPC inventory. Decide the row shape for N7 (ForkThread refuses zero-retention and waived tokens), then update the matrix and its checksum.",
+    "8. Not run here: Playwright e2e `pnpm test:e2e -- chat-history` (needs the stack). pnpm was not used because it tries to install; vitest, eslint and tsc6 were run through node_modules binaries."
+   ],
+   "deviations": [
+    "Fix 1 was not applied. The reviewer asked for the state.rs edit, but state.rs is not in this slice's owned list and the batch rules say to hand shared lines back, so the exact lines are in lead_todo 0. model-gateway therefore still fails to compile in this worktree, with a single error (E0609).",
+    "The lineage chip takes a forkedThreadIds set prop, computed in CoreSidebar, instead of reading item.forkedFromThreadId inside the organizer. This follows the existing starredThreadIds and unreadThreadIds pattern and keeps the organizer typechecking and testable before the shared edit lands.",
+    "The chip and the thread-menu Fork item are gated by VITE_CHAT_THREAD_FORK, the same switch as the per-message action, so with the switch off nothing new renders.",
+    "The thread-menu Fork forks the whole thread from its latest assistant reply, then refreshes the list and opens the copy. The plan names no anchor for a whole-thread fork.",
+    "sessions_pb2.py was generated with the local protoc 35.1 rather than the remote BSR python plugin, because no BSR call was made. The output is byte-identical to the checked-in HEAD stub, so the generator version matches.",
+    "Earlier deviations still stand: ForkThread is its own gRPC service (ThreadForkService), not an RPC on SessionCore; the owner check is stricter than OwnerIntent::Read and refuses service credentials; memory_mode is copied; Dreaming filters copied rows only in load_pending_messages; copied turns keep created_at and leave the tree columns at defaults; session_key is fork:<new id>; the switch check runs after the session:write refusal; the frontend gate is VITE_CHAT_THREAD_FORK; ListThreads gained the forked_from_thread_id column."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs (lead_todo 0: Fix 1, the AppState client)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts (lead_todo 1: forkedFromThreadId carry)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (lead_todo 2: thread-menu Fork and forkedThreadIds)",
+    "apps/Model Plane/rust/services/session-core/src/message_search.rs (lead_todo 3: copied-row predicate)",
+    "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/attention_pb2.py and the rest of the v1 python stub set (lead_todo 4: pre-existing gaps)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/state.rs (shared edit by the lead, CRLF kept): add `thread_fork_service_client::ThreadForkServiceClient` to the import list, a `pub thread_fork_client: ThreadForkServiceClient<Channel>` field on AppState, and set it in the main constructor, in the lazy builder (SESSION_CORE_URL / SESSION_CORE_ADDR / http://localhost:9091) and at both `state.message_tree_client = message_tree_client;` sites, exactly as in the implementer's lead_todo 0. Why: http_routes.rs:11182 `fork_thread` uses `state.thread_fork_client`, so `cargo check -p model-gateway --lib --tests` fails with E0609 (I reproduced this: exit 101). The model-gateway crate does not build, and the plan's `cargo test -p model-gateway --all-targets`, including fork_route_tests, cannot run. After the edit, run `cargo test -q -p model-gateway --lib fork_` and `--all-targets`.",
+     "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts and apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (shared edits by the lead, owned by no slice here or by WS16-S7): apply lead_todo 1, which adds the forkedFromThreadId field, normalisation, withForkLineageCarry and validation, and lead_todo 2, which adds the thread-menu Fork item, forkThread, and the forkedThreadIds memo passed to ChatSidebarOrganizer. Then run chat-thread-history.test.ts, CoreSidebar.chat-sessions.test.tsx and tsc6 -p tsconfig.app.json. Why: the row's FE deliverables 'thread-menu Fork' and 'lineage chip' are missing today. The organizer's chip is fed an empty set, so it never renders, and no thread-menu Fork exists."
+    ],
+    "dod_gaps": [
+     "Real-PG tests not run (no DATABASE_URL, docker forbidden): `cargo test -p session-core --bin session-core fork_ -- --ignored --test-threads=1` and `dreaming_skips_copied_rows -- --ignored --test-threads=1`. Migration 0059 runs at boot through sqlx::migrate!.",
+     "Playwright `pnpm test:e2e -- chat-history` (fork, then continue) not run; it needs the stack.",
+     "Live proof: rebuild session-core, model-gateway and the BFF. Extend the owned apps/Model Plane/scripts/tests/history-foundation-proof.sh (unchanged) so it forks from message 4 of 10, reads both transcripts, deletes the source, reads the fork, and runs a Dreaming tick that shows no new agent_memory rows.",
+     "The ZDR golden rows (zdr_posture_matrix.json plus .sha256, owned but unchanged, and the live-only zdr_posture_matrix.rs / zdr_refusal_inventory.rs) need the lead's decision on the row shape for ForkThread: refused for a zero-retention credential, refused for waived content.",
+     "Python stub set: the in-repo sessions_pb2.py cannot be imported, because attention_pb2.py is absent and runs_pb2.py lacks RunContextStatus. HEAD already fails the same way. The lead decides whether to regenerate every v1 stub (lead_todo 4).",
+     "Keep SESSION_CORE_THREAD_FORK_ENABLED and VITE_CHAT_THREAD_FORK unset everywhere until the P1 findings below are closed."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "ForkAction is mounted in ChatMessages without onForked, and the action does not refresh the sidebar. A successful per-message fork opens nothing, and the copy appears only after a reload or a later refresh. Wire onForked (open the copy, refresh the list) before the flag is enabled; this needs use-chat-controller.ts, which this slice does not own."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The model-gateway fork route (fork_thread in http_routes.rs; fork_route_tests at line 16770) has not compiled or run in this worktree. Blocked by lead_todo 0."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The copied-row predicate in message_search.rs is not applied (lead_todo 3). Owner search and RECALL return copied turns as duplicates until it lands. search_excludes_copied_rows_unless_thread_scoped is not written."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The in-repo python stub set cannot import sessions_pb2: attention_pb2.py is absent, and runs_pb2.py lacks RunContextStatus. HEAD already fails the same way. No test catches it, because the python tests do not import sessions_pb2. Any Python consumer of ForkThread will fail at import."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Copied turns carry source metadata that may reference Quarry artifact ids, and authorization of those ids on fork is not determined. Verify before enabling SESSION_CORE_THREAD_FORK_ENABLED."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The lineage chip placement is unverified in a browser. The organizer row wrapper is block-level and the chip is inline-flex, so the chip sits on its own line above the row, as the unread dot does. Check on a second dev server before the flag flips."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The thread-menu Fork and the per-message Fork need the server message id of the latest assistant reply. A legacy row without message_id falls back to a client id (msg-N) in normalizeThreadMessages; the server answers not_found, which the UI shows as the generic refusal."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The thread-menu Fork item does not hide when the server answers history_fork_disabled, unlike ForkAction. It shows 'Could not fork the conversation.' while the server switch is off."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Until lead_todo 1 and 2 land, no lineage chip renders, because the organizer receives an empty forkedThreadIds set."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "ForkThread stores the title without a server-side length cap; only the frontend action contract caps it at 96 characters."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The copy is one INSERT ... SELECT over at most 5,000 turns, with the source row locked FOR UPDATE for its whole duration. Its cost at the cap is untested."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "browser.pb.go and browser_grpc.pb.go differ from the checked-in copies under the native generator. That drift predates this slice and was not touched."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "ChatMessages.tsx mounts <ForkAction> without onForked, and ForkAction neither navigates nor refreshes the sidebar, so a successful 'Fork from here' visibly does nothing until a reload; wire onForked (open copy + refresh list) via the chat controller before the flag flips."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "message_search.rs lacks the `copied_from_message_id IS NULL unless thread-scoped` predicate, and search_excludes_copied_rows_unless_thread_scoped is missing (lead_todo 3, a shared file), so owner search and RECALL return copied turns as duplicates once forks exist."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The row's delete UX 'N forks keep their own copy' is not implemented anywhere, and no API returns a source thread's fork count. The plan names deleting_source_leaves_fork_and_deleting_fork_leaves_source, and that test is not written in thread_fork.rs."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "copy_turns copies messages.metadata verbatim, and it may reference Quarry artifact ids. Whether the fork owner may access those ids through the new thread has not been determined; the plan says to verify this before enabling."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The thread-menu Fork item in lead_todo 2 does not hide when the server answers history_fork_disabled (ForkAction does), so it shows a generic error while only the server switch is off."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The ForkThread title has no server-side length cap in session-core, MG or the BFF; only the frontend zod contract limits it to 96 characters."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The copy holds the source thread's FOR UPDATE row lock across an INSERT ... SELECT of up to 5,000 turns, and its latency at the cap is untested. Appends to the source block for that whole time."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The fork's sequence order depends on the serial default being assigned in ORDER BY c.pos order during INSERT ... SELECT. It holds in practice, but only fork_copies_active_path_up_to_message (ignored DB test) checks it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "ForkThread ships as a separate ThreadForkService rather than an rpc on SessionCore as the row wrote (mirrors MessageTreeService); additive and at ThreadSummary tag 19 per section 4.3 final, proto diff removes nothing."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The 0059 migration comment says the plain CREATE INDEX 'scans an empty index'. In fact it scans the whole threads table under a write-blocking lock. That is acceptable at current sizes, but the comment is wrong."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p session-core --bin session-core (CARGO_INCREMENTAL=0, target C:/dev/mp-target-w2)",
+      "outcome": "ok: 724 passed, 0 failed, 288 ignored. The ignored set includes the DB-backed fork_ tests and dreaming_skips_copied_rows.",
+      "passed": true
+     },
+     {
+      "command": "DATABASE_URL=<disposable> cargo test -p session-core --bin session-core fork_ / dreaming_skips_copied_rows -- --ignored --test-threads=1",
+      "outcome": "Not run. No DATABASE_URL is set in this environment and docker is forbidden, so the DB-backed fork tests (copy, owner-bound, event, refusals, cap, flag-off) are unverified here.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p model-gateway --all-targets",
+      "outcome": "FAIL: the lib and lib test targets do not compile. error[E0609]: no field `thread_fork_client` on type `AppState` at http_routes.rs:11182. This is the lead's pending shared-edit to model-gateway/src/state.rs. The fork_route_tests did not run. An earlier run got as far as the effort_ladder_contract integration test, which failed 10 of 14 because it reads a stale baked-in path under scratchpad\\mpcopy\\...\\sse.rs. That looks like a stale-target issue, not this slice.",
+      "passed": false
+     },
+     {
+      "command": "cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+      "outcome": "ok: every test result block passed, 0 failed (1053, 1, 7, 13, 3 and 1 passed).",
+      "passed": true
+     },
+     {
+      "command": "vitest run --pool=threads ForkAction.test.tsx ChatSidebarOrganizer.test.tsx",
+      "outcome": "ok: 2 files, 22 passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "eslint on ForkAction.tsx, its test, chat-client.ts and ChatSidebarOrganizer.tsx",
+      "outcome": "ok: no errors or warnings printed.",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "22 error TS lines in total, none in ForkAction, chat-client.ts, ChatMessages, ChatSidebarOrganizer or chat-history. This matches the implementer's report of 22 existing errors in quarry-client.ts and schedule-contract.test.ts. The slice-touched files are clean, but the command exits non-zero, so pnpm typecheck as a whole fails on those 22.",
+      "passed": false
+     },
+     {
+      "command": "pnpm test:e2e -- chat-history (tests/e2e/chat-history.spec.ts)",
+      "outcome": "Not run. It needs a running stack and browser, and docker is forbidden.",
+      "passed": false
+     },
+     {
+      "command": "buf lint (in apps/Model Plane/proto)",
+      "outcome": "exit 100 with 1672 output lines, 230 of them in sessions.proto. These are mostly missing-comment rules and appear to be the existing baseline. The only ThreadSummary line is 'ThreadSummary should have a non-empty comment', at sessions.proto:1222. No findings mention ForkThread messages or fields. I did not diff against HEAD's lint output, so this is not a strict no-regression proof.",
+      "passed": false
+     },
+     {
+      "command": "sessions.proto field-number diff against HEAD (B.1 N2)",
+      "outcome": "ok: the diff has zero removed lines. It adds ThreadSummary.forked_from_thread_id = 19, ForkThreadRequest 1-4, ForkThreadResponse 1-2 and a new ThreadForkService. The field-assignment count goes from 494 to 501 (+7), which matches. Nothing was renumbered or removed.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "auth",
+    "data-loss"
+   ],
+   "notes": "Round 2 (reviewer fixes). Fix 3 is done: sessions_pb2.py is regenerated with the same generator that reproduces the HEAD stub byte-for-byte, and it contains ForkThreadRequest/Response, the ThreadForkService and ThreadSummary.forked_from_thread_id = 19. Fix 2 is partly done: the lineage chip is built in the owned organizer with two tests (both pass). The thread-menu Fork and the forkedFromThreadId carry are written as exact shared edits in lead_todo 1 and 2, not applied, and not typechecked here. Fix 1 is not applied because state.rs is outside ownership; lead_todo 0 has the exact lines, and model-gateway still fails with the single E0609. Session-core (724 unit tests) and the gateway --all-targets suite both pass with exit 0. Frontend: the touched files pass vitest and eslint with 0 errors; the 22 tsc6 errors are all in untouched files. Go test and vet pass; the python tests pass (15), but the in-repo stub cannot be imported (lead_todo 4). No docker, no DB harness, no commits, no pushes, and no cargo target other than C:/dev/mp-target-w2. The scratch copies were removed. Not run: the DB tests (forbidden here, listed), model-gateway tests (blocked), and Playwright e2e (needs the stack). Earlier notes stand: the migration 0059 pair, thread_fork.rs and the Dreaming filter are unchanged this round."
+  },
+  {
+   "id": "WS22-S4",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\runtime_loop\\mod.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\sandbox_lease.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\workspace_hydrate.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\workspace_sync.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+     "outcome": "exit 0; test result: ok. 1587 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 302.82s. Two tests (executor::tests::a_hung_child_is_killed_at_the_timeout, runtime_loop::agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused) are slow on this Windows host (over 60 s and 77 s) and pass in the full run; neither touches the changed code."
+    },
+    {
+     "command": "execution_core test binary (built by the run above) with filter workspace_sync::tests",
+     "outcome": "14 passed, 0 failed, including space_overlay_is_recorded_after_each_inline_step, a_space_step_without_a_credential_records_nothing_and_says_so, the_write_through_switch_is_on_only_for_the_literal_enabled, a_persistence_free_step_never_writes_through"
+    },
+    {
+     "command": "execution_core test binary with filter sandbox_lease::tests",
+     "outcome": "13 passed, 0 failed"
+    },
+    {
+     "command": "execution_core test binary with filter workspace_hydrate::tests",
+     "outcome": "12 passed, 0 failed"
+    },
+    {
+     "command": "execution_core test binary with filter space_overlay_tests",
+     "outcome": "1 passed, 0 failed: runtime_loop::space_overlay_tests::space_path_flag_off_is_byte_identical"
+    },
+    {
+     "command": "cargo test -q -p execution-core --all-targets (batch command)",
+     "outcome": "not run: the batch's Windows rule names --lib for execution-core, and its non-lib targets have pre-existing failures; no integration target was run"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: insert above the entry '## 2026-10-27 - WS04-S9: ...' (line 25) this block: '## 2026-10-31 - Space overlay write-through per inline step, behind a switch (WS22-S4)' then a blank line, then 'EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled (execution-core, default off) records each inline Space code_interpreter step's changed files as the run's overlay through SnapshotSandbox before the step returns. is_syncable keeps the staged program, the scratch directories, the attachments mount and oversized files out of it; the run-end release applies the same filter only while the switch is on. The run's baseline never moves, so every changed file keeps the base hash the run hydrated, which the promote compare-and-swap relies on. Honest limit (DEC-24, option (a)): no caller promotes the overlay into the Space, so it is visible only to its own lease, and the workspace part says durability run_overlay. Deletions are not recorded on the Space path, and a redacted Space file is not reported as redacted there.'",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core service environment, add the line 'EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH: ${EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH:-}' (empty means off). WS22-S3 edits the same file in this batch, so coordinate the two hunks.",
+    "Live proof, not run by this slice (rebuild execution-core with compose.sh and the live env chain): with the switch off, a Space inline turn returns no workspace part. With EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled, a turn that asks code_interpreter to create notes.txt must return a workspace part with scope space, state synced and durability run_overlay; the sandbox-manager workspace_files overlay rows for that lease must hold notes.txt and no _verevon_main.py row. A ZDR Space turn must be refused up front and write no overlay row.",
+    "Commit only the four owned files. The worktree carries sibling-slice edits (apps/Application Plane/docker-compose.yml, the verevonv3 gateway shared.rs, model-gateway tool_loop.rs and tools.rs, sessions.proto and sessions.pb.go) that are not part of this slice."
+   ],
+   "deviations": [
+    "The switch literal is `enabled`, exact match, following the plan's common-flags vocabulary and this batch's flag line. The general rule's 'only the literal true' does not apply to this switch; the compose env line must default to empty.",
+    "release_sandbox_lease_if_any keeps its signature and control flow, which the row says must stay. Its helper upload_and_discard_workspace now calls record_workspace_overlay and applies the is_syncable filter only while the switch is on; with the switch off the call is the unfiltered diff_and_upload as before.",
+    "The baseline is never moved after a record. The row does not say this; I chose it so base_hash remains the hash the run hydrated, which the promote compare-and-swap relies on. The cost is that each record re-sends the whole overlay.",
+    "The write-through is wired only on the code_interpreter Space arm, under the workspace lock. The row's 'open' is the existing ensure_space_workspace hydrate, not a new call. Workspace write tools and process_* steps do not write through.",
+    "Beyond the two named tests I added three small tests: the credential-less record, the literal-enabled parser, and the persistence-free gate. I also added record_space_overlay in mod.rs, write_through_applies, space_part, record_workspace_overlay, and diff_and_upload_syncable with diff_and_upload_where in workspace_hydrate.rs.",
+    "On a credential failure the workspace part is refused with cause commit_failed and carries no durability field."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Live proof on a rebuilt execution-core (compose.sh with the live env chain). With the switch off, a Space inline code_interpreter turn returns no workspace part. With EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH=enabled, the turn returns scope space, state synced and durability run_overlay, and the lease's workspace_files overlay rows hold the created file with no _verevon_main.py row. A ZDR Space turn is refused up front and writes no overlay row.",
+     "The compose env line goes in apps/Model Plane/deploy/docker-compose.yml with an empty default: EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH: ${EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH:-}. Coordinate it with WS22-S3's hunk in the same file.",
+     "The ledger entry with the DEC-24 honest limit goes in apps/Model Plane/docs/decisions/ledger.md (a shared file; the lead applies the implementer's lead_todo text).",
+     "Commit only the four owned execution-core files. The worktree also holds sibling-slice edits."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Live proof owed on a rebuilt execution-core: with the switch enabled, a Space inline turn that creates a file gets a space workspace part and the lease's overlay rows hold the file, with no _verevon_main.py row; with the switch off the result has no workspace part."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Deleted files never reach the overlay because SnapshotRequest has no deletion list, so a file a run removes keeps its overlay row; a future promote caller would resurrect it in the Space, so a tombstone contract is needed before any promote caller exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each record re-reads the whole hydrated tree and re-sends every changed file because the baseline cannot move; a committed-hash map on HydratedWorkspace (state.rs, not an owned file) would make records incremental before the switch is enabled on large Spaces."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The overlay is keyed by lease id (UpsertOverlay is called with l.ID), so after an execution-core restart the new lease cannot see the earlier overlay rows; the write-through persists them but the run does not read them back, and a rule for re-reading a prior lease's overlay is undecided."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The Space workspace part has no redacted_paths, while the thread path reports them, so a Space file redacted before upload is saved without the model being told."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Workspace write tools (the WS24 workspace_write rung) and process_* steps do not write through, so their edits reach the overlay only at run end, which an inline run never reaches; decide whether the write-through extends to execute_workspace_tool writes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "release_sandbox_lease_if_any does not take the run's workspace lock, so a release racing an in-flight Space code_interpreter step can remove the directory under it; the record then reports refused and that step's edits are not saved (no crash, no leak)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "space_path_flag_off_is_byte_identical assumes EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH is unset in the test process because the switch is read once per process; CI must not export it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No live or DB proof yet that a ZDR Space turn never reaches record_space_overlay; the Space ZDR refusal sits up front in grpc.rs, and zdr_refusal_inventory names no site for the Space overlay record."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The plan's common-flags note and this batch's flag line use the value enabled, while the general rule says only the literal true enables; this slice follows the plan with an exact enabled match, and the owner should confirm the vocabulary before the compose env line is wired."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "is_syncable excludes only attachments/ directories, so a planted top-level regular file named attachments is still recorded; StagedInputs removes that name before staging and on drop, so the case is narrow."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The doc comment on release_sandbox_lease_if_any still names only diff_and_upload, while under the switch it reaches diff_and_upload_syncable."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The non-lib execution-core targets (the batch's --all-targets command) were not run, per the Windows rule in the batch."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "SnapshotRequest carries no deletion list, so a file a Space run deletes keeps its overlay row; a tombstone contract is needed before any promote caller exists, or a promote would resurrect deleted files."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Not yet proven on a live stack: a switched-on Space inline step writes overlay rows queried by lease, and a switched-off step yields no workspace part."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "record_workspace_overlay passes the SnapshotSandbox reason \"code_interpreter run end\" for the per-step record too, so audit rows for mid-run step records are mislabelled as run-end snapshots."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Every per-step record re-reads, re-redacts, re-hashes and re-sends every changed file, because the baseline never moves; this cost grows with Space size and should be addressed before enabling on large Spaces."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "diff_and_upload redacts before hashing, so a Space file that trips a scrub pattern is recorded in redacted form, and the space workspace part reports no redacted_paths, so the model is not told."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "release_sandbox_lease_if_any does not take the run workspace lock, so a release racing an in-flight Space step can remove the directory under the per-step record; that step's record then reports refused."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "space_path_flag_off_is_byte_identical depends on EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH being unset in the test process, because the switch is read once into a OnceLock; CI must not export it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives execute_step_inner's code_interpreter Space arm end to end to show that zdr || waived reaches record_space_overlay as persistence_free; only the pure write_through_applies gate is unit-tested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Workspace write tools and process_* steps do not write through, so their Space edits reach the overlay only at run end, which an inline ExecuteStep run never reaches."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The switch uses the exact literal enabled, as the slice flag line and the plan row specify, not the general literal-true rule; the owner should confirm the vocabulary."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The doc comment on upload_and_discard_workspace / release_sandbox_lease_if_any still describes only the unfiltered diff_and_upload, while under the switch it uses diff_and_upload_syncable."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The plan's --all-targets command was only compiled with --no-run, not executed, following the batch's Windows --lib rule for execution-core."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p execution-core --lib (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+      "outcome": "1587 passed, 0 failed, 0 ignored, 301.94s",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib -- space_overlay workspace_sync sandbox_lease workspace_hydrate",
+      "outcome": "40 passed, 0 failed (includes space_overlay_is_recorded_after_each_inline_step and space_path_flag_off_is_byte_identical)",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --all-targets --no-run (compile check of every target)",
+      "outcome": "exit 0; only dead-code warnings (e.g. execute_step_with_subagent, decision_closer)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "data-loss",
+    "authority"
+   ],
+   "notes": "WS22-S4 is built in the four owned files. In the code_interpreter arm of runtime_loop/mod.rs, a Space step now calls record_space_overlay after the step, still under the run's workspace lock. When EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH is exactly \"enabled\" and the step is neither zero-retention nor waived, workspace_sync::record_space_step uploads the changed files, filtered by is_syncable, and records them through SnapshotSandbox with each file's hydrated base hash. A successful result then gains a workspace part: scope space, state synced with durability run_overlay, or state refused with cause commit_failed. The baseline is never moved, so a record repeats the whole overlay and base_hash stays the Space-level hash. The run-end release keeps its unfiltered upload when the switch is off and uses the same filter when it is on. With the switch off, nothing extra runs and the step result is returned unchanged. No proto, migration, docker, DB harness or live proof was touched or run. The live proof, the ledger entry and the compose env line are in lead_todo. Sibling slices have uncommitted edits in the same worktree (apps/Application Plane/docker-compose.yml, the verevonv3 gateway shared.rs, model-gateway tool_loop.rs and tools.rs, sessions.proto and sessions.pb.go). They are not mine and I did not touch them, so stage only the four owned files."
+  },
+  {
+   "id": "WS16-S7",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Application Plane/docker-compose.yml",
+    "apps/Application Plane/notification-core/README.md"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Application Plane/notification-core' && go test ./...",
+     "outcome": "PASS, exit 0: 11 packages ok, the rest have no test files; several results came from the Go build cache, keyed on unchanged sources."
+    },
+    {
+     "command": "cd 'apps/Application Plane/notification-core' && go vet ./...",
+     "outcome": "PASS, exit 0, no output."
+    },
+    {
+     "command": "cd 'apps/Model Plane/go/services/capability-core' && go test ./...",
+     "outcome": "PASS, exit 0: 32 packages ok."
+    },
+    {
+     "command": "cd 'apps/Model Plane/go/services/capability-core' && go vet ./...",
+     "outcome": "PASS, exit 0, no output."
+    },
+    {
+     "command": "python3 'apps/Model Plane/scripts/gen-sse-event-taxonomy.py' --check",
+     "outcome": "PASS, exit 0: 'sse taxonomy up to date (29 events)'."
+    },
+    {
+     "command": "cd 'apps/Model Plane/rust' && cargo test --workspace --no-fail-fast",
+     "outcome": "NOT RUN: this slice changes no Rust file, and the batch rules limit Windows cargo to per-crate --lib runs; the lead runs this close-out gate."
+    },
+    {
+     "command": "cargo test --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --all-targets",
+     "outcome": "NOT RUN: this slice changes no BFF file."
+    },
+    {
+     "command": "cd 'apps/Frontend Plane/verevonv3' && pnpm verify",
+     "outcome": "NOT RUN: this slice changes no frontend file; the depth register records D2-764 (action-surface contract red at HEAD) and the W2-33 commit records 22 pre-existing tsc errors."
+    },
+    {
+     "command": "YAML parse of apps/Application Plane/docker-compose.yml and docker compose config",
+     "outcome": "NOT RUN: no YAML parser is installed here and docker is out of bounds for this batch; the four new lines were checked by hand for indentation against their neighbours (LF file, no tabs)."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core environment, directly after the line SESSION_CORE_ATTENTION_SWEEP_SECONDS (about line 947), add: '      # WS16-S5: the per-user attention stream. Off by default; only the literal true turns it on.' then '      SESSION_CORE_ATTENTION_STREAM_ENABLED: ${SESSION_CORE_ATTENTION_STREAM_ENABLED:-false}' then '      SESSION_CORE_ATTENTION_TICK_SECONDS: ${SESSION_CORE_ATTENTION_TICK_SECONDS:-5}'. The default 5 matches the code (DEFAULT_TICK_SECONDS).",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the capability-core environment, directly after the line CRON_CONTRACT_GUARDS_ENABLED (about line 1744), add: '      # WS16-S4: RUN_ATTENTION becomes a typed notification. Off by default; turn NOTIFICATION_NATIVE_TYPES_ENABLED on first.' then '      CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: ${CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED:-false}' then '      ATTENTION_NOTIFY_COALESCE_SECONDS: ${ATTENTION_NOTIFY_COALESCE_SECONDS:-60}' then '      CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED: ${CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED:-false}' (WS20-S7's switch in the same block, not in this slice's flip list). The 60 s default matches DefaultAttentionCoalesce. Keep every value at its default; no flip in this step.",
+    "shared-edit docs/master-ownership-matrix.md (the tracked file; match by text, not line): in the session-core row replace 'Threads, runs, checkpoints, memory index, compaction, context assembly |' with 'Threads, runs, checkpoints, plans, approvals, attention state, memory index, compaction, context assembly |'; in the orchestrator-core row (about line 130) replace 'tasks/cron, approvals, recovery |' with 'tasks/cron, recovery |'. This is the DEC-11 MASTER edit: approvals are session-core rows (CAPM line 55 already says so).",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: insert after the row beginning '| Run metadata + lifecycle' (about line 54) this row: '| Attention state: **session-core**; delivery: **notification-core** | **session-core** (attention.rs: derivation, unseen marker, RUN_ATTENTION outbox rows); **notification-core** (Application Plane: notifications, native rows, sealed Web Push subscriptions) | Postgres | derived on read; sweeper writes outbox rows; capability-core run-watch consumer | NATS run-events | source-verified, switches off |'",
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: insert before the heading '## Critical blocked behavior' (about line 250) this section: '## WS16 attention state (2026-10-31): source-verified, every switch off' then 'The attention state, the rail and badge, the typed RUN_ATTENTION events, the notification path, the per-user stream and Web Push are built behind switches that all default off: SESSION_CORE_ATTENTION_ENABLED, SESSION_CORE_ATTENTION_EVENTS_ENABLED, SESSION_CORE_ATTENTION_STREAM_ENABLED, CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED, NOTIFICATION_NATIVE_TYPES_ENABLED and NOTIFICATION_WEB_PUSH_ENABLED. No compose file turns one on, and no slice has live evidence. The attention capability stays source_only until candidate and rollback evidence exists.'",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: append at the end of the file: '## Wave 2 batch W2-34: the WS16 close-out (2026-10-31)' then '**Status: built and unit-tested, every switch off by default, no switch flipped, nothing live-verified.**' then these bullets: (1) '**Attention close-out (WS16-S7), partial.** Every WS16 switch stays off in every compose file. The run-status chip, legacyStateFromRunStatus and the flag-off branches are retired only after the flips, because they still serve the UI with the switches off. Proposed flip order, one switch per commit after its live proof and with no open P0 or P1 in the depth register against it: SESSION_CORE_ATTENTION_ENABLED, SESSION_CORE_ATTENTION_EVENTS_ENABLED, NOTIFICATION_NATIVE_TYPES_ENABLED, CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED, SESSION_CORE_ATTENTION_STREAM_ENABLED, NOTIFICATION_WEB_PUSH_ENABLED.' (2) '**Decisions recorded (WS16-D1, D2, D3, D9).** WS16-D1: session-core owns the attention enum, its derivation and the typed RUN_ATTENTION events (DEC-11). WS16-D2: the native adapter for the attention and scheduled-run types lives in notification-core (DEC-38). WS16-D3: the per-user stream is hosted in the session-core hub and relayed verbatim by the BFF (DEC-38); the SPACE confirmation is still open. WS16-D9: the orchestrator-core typed publisher has no caller and stays unused; the session-core outbox is the typed path.' (3) '**Precedence not yet ruled (DEC-11).** The built order is needs_approval > needs_input > plan_ready > working > failed > completed > archived > idle, in session-core and in the FE ATTENTION_PRECEDENCE. DEC-11 records failed above running. The failed-versus-working ruling is the owner's (D2-815, D2-820); the built order stands until session-core, the FE constant and attention-state.test.ts change together.' (4) '**Approvals owner.** Plans, approvals and the attention state are session-core rows, so the master matrix no longer lists approvals under orchestrator-core.'",
+    "DECISION FOR THE LEAD (not applied): DEC-11's default orders failed above running; the built order puts working above failed. Either apply the default in apps/Model Plane/rust/services/session-core/src/attention.rs precedence() (swap the Working and Failed ranks) with its order test, plus the FE ATTENTION_PRECEDENCE in attention-state.ts and attention-state.test.ts, or record the built order as the ruling in DEC-11 and the ledger. Record whichever is chosen in the ledger entry above.",
+    "shared-edit apps/Application Plane/.env.example (optional documentation, not a flip): after the NOTIFICATION_DELIVERY_WORKER_LEASE line add NOTIFICATION_NATIVE_TYPES_ENABLED=false and NOTIFICATION_WEB_PUSH_ENABLED=false as placeholders. No VAPID key and no subscription key belongs in this file; run-application-plane.sh generates them.",
+    "lead: check that no notification-core env file (never read by this slice) sets NOTIFICATION_NATIVE_TYPES_ENABLED to true; the new compose default false overrides such a value.",
+    "lead: commit the two owned files, apps/Application Plane/docker-compose.yml and apps/Application Plane/notification-core/README.md, with a Conventional Commit message; the other uncommitted files in this worktree belong to other slices of this batch.",
+    "lead: record the depth_findings in docs/plans/model-plane-depth-register.md under a W2-34 heading with the same kinds and severities.",
+    "lead: run the close-out gates on the committed tree: cargo test --workspace --no-fail-fast (Linux, or per crate with --lib on Windows), cargo test --manifest-path apps/gateway/Cargo.toml --all-targets, and pnpm verify with pnpm_config_verify_deps_before_run=false. Expect the pre-existing reds (D2-764 and the tsc errors); record them rather than fixing them in this slice.",
+    "lead: after the shared edits, check that apps/Application Plane/docker-compose.yml and apps/Model Plane/deploy/docker-compose.yml parse (docker compose config on each stack, not docker compose up).",
+    "lead: the flips and the S1 to S6 evidence bundle are a later step: flip one switch per commit, each after its live proof and after its open P1 rows close, in the order written in the ledger entry. No default changes in this batch."
+   ],
+   "deviations": [
+    "No switch was flipped and no legacy code was deleted, where the row asks for both: the register's open P1 rows block each flip, and the legacy readers still serve the flag-off UI.",
+    "Added the NOTIFICATION_NATIVE_TYPES_ENABLED pass-through to the Application Plane compose with default false. The row names it only as a flip target, but the pass-through is needed before any flip, and the service already read the variable.",
+    "Ledger, matrix, status and deploy-compose changes are given as shared-edit lines, as the batch notes require. The master matrix path in the batch notes (apps/master-ownership-matrix.md) does not exist in this worktree; the tracked file is docs/master-ownership-matrix.md.",
+    "The README's 'one class' sentence now includes the WS20-S7 scheduled-run notice, which is also a native type in notification-core.",
+    "DEC-11 precedence: the batch decisions_defaults quote DEC-11's failed-above-running order, but S1 built working above failed. The built order was kept, and the conflict is recorded for the lead because changing it needs session-core attention.rs, which this slice does not own.",
+    "CoreShell.tsx, CoreSidebar.tsx, chat-organization.ts and attention-state.ts were read and left unchanged. Each change the row names depends on a flip or on the DEC-11 and cadence decisions."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/agents/components/AgentRunConsole.tsx (legacyStateFromRunStatus reader at line 2147; must move before the legacy function can be deleted)",
+    "apps/Frontend Plane/verevonv3/src/features/spaces/lib/space-thread-presentation.ts (legacyStateFromRunStatus reader at line 30)",
+    "apps/Frontend Plane/verevonv3/src/shared/chat/thread-status.ts and thread-status.test.ts (WS15 shim; its delegation assertion names CoreSidebar.tsx and chat-organization.ts)",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-thread-history.ts (ChatThreadHistoryItem needs attentionState before chat-organization can read the server state)",
+    "apps/Model Plane/rust/services/session-core/src/attention.rs (precedence() and its order test, only if the lead applies the DEC-11 default)",
+    "apps/Model Plane/deploy/docker-compose.yml (shared, lead)",
+    "apps/Model Plane/docs/capability-ownership-matrix.md (shared, lead)",
+    "apps/Model Plane/docs/decisions/ledger.md (shared, lead)",
+    "apps/Model Plane/MODEL_PLANE_STATUS.md (shared, lead)",
+    "docs/master-ownership-matrix.md (shared, lead; the batch names apps/master-ownership-matrix.md, absent in this worktree)",
+    "apps/Application Plane/.env.example (optional documentation, lead)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Flipping each S1-S6 switch in dev compose: the row says 'after its evidence', and that evidence (rebuilt services plus live flows) needs docker and a live stack, so only the lead can do it.",
+     "Retiring the legacy run-status chip, legacyStateFromRunStatus and the fallback-era timers has to wait for the flips. Two of the function's readers (AgentRunConsole.tsx, space-thread-presentation.ts) are outside this slice's owned files.",
+     "The dated S1-S6 evidence bundle is a live lead run.",
+     "The ledger, CAPM, MASTER matrix, MODEL_PLANE_STATUS and Model Plane deploy compose edits are shared files. The lead applies them from the implementer's lead_todo. The batch names apps/master-ownership-matrix.md, which does not exist here; the tracked file is docs/master-ownership-matrix.md.",
+     "DEC-11 precedence ruling (failed vs working) needs the owner or lead. It touches session-core attention.rs and the frontend constant, which this slice does not own.",
+     "Close-out gates not run by me: cargo test --workspace, gateway cargo --all-targets, and pnpm verify. The worktree also holds other slices' uncommitted Rust and frontend edits, so a result now would not be this slice's. The lead runs them on the committed tree, together with docker compose config for both compose files."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "SESSION_CORE_ATTENTION_ENABLED stays off: D2-738, D2-739 and D2-740 are open live-proof rows against it, and D2-733 to D2-737 are open test-gap or risk rows, so the flip waits for the lead's live proof."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "SESSION_CORE_ATTENTION_EVENTS_ENABLED stays off: D2-751, D2-752, D2-755 and D2-756 are open design risks (no high-water mark, no lock between the read and the insert, no still-requested re-check) and D2-754 and D2-757 need live proof."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The rail and tab badge (S2, which has no switch of its own) stay dark while SESSION_CORE_ATTENTION_ENABLED is off: D2-787, D2-789 and D2-791 to D2-794 are open live-proof rows, and the attention-sidebar e2e spec has not run."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "NOTIFICATION_NATIVE_TYPES_ENABLED and CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED stay off: D2-796 to D2-803 are open, covering the missing still-requested re-check, the owner's gate decisions and the switch order that D2-799 and D2-803 describe."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "SESSION_CORE_ATTENTION_STREAM_ENABLED stays off: D2-833 and D2-837 ask the owner to confirm the navbar cadence, D2-834 needs DEC-38 D3 confirmed by Application Plane and Space, and D2-838 and D2-839 need live proof."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "NOTIFICATION_WEB_PUSH_ENABLED stays off: D2-860 (the queued delivery worker never pushes), D2-861 (subscriptions outlive a purged organisation) and D2-863 (Chrome's visible-window rule) are open, as are D2-862, D2-864 and D2-865; the P0 D2-859 is closed in f959e921b."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The run-status chip, legacyStateFromRunStatus and the flag-off branches stay in place because they still serve the UI with the attention switches off; the function has four live readers, of which CoreSidebar.tsx:1106 and chat-organization.ts:57 are owned and AgentRunConsole.tsx:2147 and space-thread-presentation.ts:30 are not."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-11 orders failed above running, but session-core attention.rs precedence() and the FE ATTENTION_PRECEDENCE both put working above failed; the owner rules on it (D2-815, D2-820). The batch decisions_defaults quote DEC-11, but the built code and its tests pin the other order, and changing it needs session-core edits outside this slice's ownership."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The dated S1 to S6 evidence bundle is not produced: it needs rebuilt session-core, model-gateway, capability-core, notification-core, the BFF and the production SPA, with each flow shown live, which is a lead run that waits on the open P1 rows above."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "CoreShell's navbar timers already fall back on their own, because navbarRefreshDelayMs runs the legacy 60/180 s cadence only without a live stream, so no CoreShell edit was made; the flag-off arm and the cadence inversion in D2-833 are decided with the flip."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The new notification-core compose line overrides any NOTIFICATION_NATIVE_TYPES_ENABLED value in notification-core's env_file, which this slice did not read, so the lead must confirm that no env file sets it to true before the commit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Three close-out gates named by the row were not run: cargo test --workspace and the BFF cargo test (no Rust or BFF file changed here, and Windows non-lib targets fail pre-existing) and pnpm verify (no frontend file changed; D2-764 and the 22 tsc errors recorded by the W2-33 commit are red at HEAD)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The compose files were not parsed by a YAML tool because none is installed here; the new lines match their neighbours' indentation, so docker compose config on each stack is the lead's check."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "After the flips, retire the legacy in this order: delete the chip (CoreSidebar.tsx:818 use and the definition at :1096-1113), move chat-organization.ts:57-58 to the server state (which needs attentionState on ChatThreadHistoryItem in chat-thread-history.ts, not owned here), move AgentRunConsole.tsx:2147 and space-thread-presentation.ts:30, then delete legacyStateFromRunStatus and update thread-status.test.ts and attention-state.test.ts."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "ATTENTION_PRECEDENCE in attention-state.ts has no production reader, only the two tests that pin its order, so it can be removed or kept once the DEC-11 ruling is recorded."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The notification-core README describes the Web Push gate as built, including the scheduled-run outcomes that push; notifyPush now gates them to the waiting outcomes, which answers the payload.outcome gate in D2-843 and D2-847, but those rows stay open until the owner closes them, and the migration 017 push default must be checked before the push switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The row asks for the flips and the legacy retirement, but neither was delivered. Both are blocked on live evidence and on open P1 depth rows against all six WS16 switches, so WS16-S7 stays partial until the lead's flip run."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-11 orders failed above running, but session-core precedence() and the frontend ATTENTION_PRECEDENCE put working above failed. The batch decisions_defaults quote DEC-11's order, so the owner or lead must either change the code or record the built order as the ruling."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The new compose line NOTIFICATION_NATIVE_TYPES_ENABLED: ${NOTIFICATION_NATIVE_TYPES_ENABLED:-false} takes precedence over notification-core's env_file. If an env file currently sets it to true, a recreate silently turns native delivery off; the lead should confirm before the commit."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The Application Plane compose has not been parsed by a tool. By inspection, the 4 added lines (3 comments and 1 key) match the indentation of the keys around them, so the lead's docker compose config is the remaining check."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The README now calls the Web Push gate built and adds a production-blocker paragraph. Its claims match the code (service.go scheduledRunOutcomeType and the needs_review/paused_* set, config.go strict == \"true\"), but D2-843/D2-847 stay open until the owner closes them."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd apps/Application Plane/notification-core && go test ./...",
+      "outcome": "PASS: 11 packages ok, the rest have no test files. Results came from the Go build cache.",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Application Plane/notification-core && go vet ./...",
+      "outcome": "PASS: exit 0, no output.",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Model Plane/go/services/capability-core && go test ./...",
+      "outcome": "PASS: 32 packages ok, exit 0. Results came from the Go build cache.",
+      "passed": true
+     },
+     {
+      "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+      "outcome": "PASS: sse taxonomy up to date (29 events).",
+      "passed": true
+     },
+     {
+      "command": "cd apps/Model Plane/rust && cargo test --workspace --no-fail-fast",
+      "outcome": "NOT RUN. The slice changes no Rust file. The batch rules limit Windows cargo to per-crate --lib runs, and the worktree has uncommitted Rust edits from other slices, so a workspace result would not be this slice's.",
+      "passed": false
+     },
+     {
+      "command": "cd apps/Frontend Plane/verevonv3 && pnpm verify",
+      "outcome": "NOT RUN. The slice changes no frontend file. The register records pre-existing failures: D2-764 (action-surface contract red at HEAD) and 22 tsc errors.",
+      "passed": false
+     },
+     {
+      "command": "cd apps/Frontend Plane/verevonv3 && cargo test --manifest-path apps/gateway/Cargo.toml --all-targets",
+      "outcome": "NOT RUN. The slice changes no gateway file, and the gateway chat files are modified by other slices.",
+      "passed": false
+     },
+     {
+      "command": "YAML parse of apps/Application Plane/docker-compose.yml",
+      "outcome": "NOT RUN: the python yaml module is missing and docker is forbidden. I read the git diff instead. It adds 3 comment lines and 1 key, NOTIFICATION_NATIVE_TYPES_ENABLED: ${NOTIFICATION_NATIVE_TYPES_ENABLED:-false}, at the same indentation as the neighbouring key. It looks well-formed.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "WS16-S7 is partial by design; the flips and the legacy retirement cannot be done safely in this batch. Done here: the notification-core README (CRLF kept) now describes the native gate and the Web Push gate as built, including the scheduled-run outcomes that push, the switch order, the fixed wake-up payload and the sealed subscriptions; the Application Plane compose passes NOTIFICATION_NATIVE_TYPES_ENABLED through with default false (the switch was read by the service but had no compose line). Not done, and why: no switch was flipped (the depth register holds open P1 rows against all six WS16 switches, and each flip needs live evidence the wave cannot produce); the legacy run-status chip and legacyStateFromRunStatus were not deleted (they still serve the UI with the attention switches off, and the function has readers outside the owned files); CoreShell's timers already fall back through navbarRefreshDelayMs, so no edit was needed; the DEC-11 precedence conflict was not resolved because its default needs session-core attention.rs, which this slice does not own; the dated evidence bundle is a lead run. The ledger, matrix, status and deploy-compose edits are given as shared-edit lines. The worktree holds uncommitted changes from other slices of this batch (WS17-S6, WS22-S3, WS22-S4); none was touched. Ownership note: the batch notes name apps/master-ownership-matrix.md, which this worktree does not have; the tracked file is docs/master-ownership-matrix.md."
+  },
+  {
+   "id": "WS22-S3",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tools.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\apps\\gateway\\src\\domains\\chat\\shared.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib tools",
+     "outcome": "ok: 70 passed, 0 failed, 2499 filtered out (includes code_interpreter_forwards_thread_id_to_execute_step and ephemeral_result_declares_no_persistence)."
+    },
+    {
+     "command": "Full model-gateway lib suite run as the test binary linked at 11:55 (target/debug/deps/model_gateway-1419cfdc89a15834.exe), because the later rebuild fails on a sibling slice's in-progress edit",
+     "outcome": "ok: 2565 passed, 0 failed, 4 ignored; both named tests ok. Caveat: this binary predates a comment-only edit in tool_loop.rs and the sibling edit; no rebuild was possible."
+    },
+    {
+     "command": "cargo test --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --all-targets --no-fail-fast (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0, run from repo root)",
+     "outcome": "exit 0: 1078 passed, 0 failed, 1 ignored across all result blocks. Re-run by name, all ok: bff_mints_sandbox_bearer_for_a_personal_turn_only_when_enabled_and_not_zdr, the_sandbox_credential_is_minted_only_for_a_space_scoped_turn_while_the_switch_is_off, a_sandbox_credential_is_offered_to_a_personal_turn_only_while_switched_on_and_not_zdr, the_thread_workspace_switch_is_on_only_for_the_exact_word_true."
+    },
+    {
+     "command": "cargo test -q -p model-gateway --all-targets (non-lib targets)",
+     "outcome": "NOT RUN. The model-gateway lib-test build fails at 12:07 with error[E0609]: no field thread_fork_client on type state::AppState at src/http_routes.rs:11182. That file is another slice's in-progress WS17-S6 edit (129 added lines); state.rs has no such field. Integration tests context_recovery_contract and provider_read_contract were not run; grep shows they assert no code_interpreter text."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml: in the gateway service environment, after line 157 (BROWSER_DO_ENABLED: ${BROWSER_DO_ENABLED:-false}), add a comment (WS22-S3: mint the sandbox-manager credential for a personal non-ZDR turn; off by default; only the literal true) and SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway service environment (block 191-869), after the SANDBOX_MANAGER_AUTH_AUDIENCE line (638), add SANDBOX_THREAD_WORKSPACE_ENABLED: ${SANDBOX_THREAD_WORKSPACE_ENABLED:-false}.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the execution-core environment (block 1246-1619; environment at 1265), add EXECUTION_CORE_THREAD_WORKSPACE: ${EXECUTION_CORE_THREAD_WORKSPACE:-false}. This is WS22-S2's pass-through, which is still missing; keep it false.",
+    "Batch blocker, not mine: WS17-S6's in-progress edit in apps/Model Plane/rust/services/model-gateway/src/http_routes.rs (line 11182 uses state.thread_fork_client, which state.rs does not define) breaks the model-gateway lib-test build. Once it lands, re-run from apps/Model Plane/rust: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib, then cargo test -q -p model-gateway --all-targets.",
+    "Live proof (lead, needs rebuilt images; run only in the dev stack with the three switches on, then switch them back off): rebuild model-gateway, the BFF gateway, execution-core and sandbox-manager. (1) Turn 1 creates notes.txt with code_interpreter; turn 2 in a new run on the same thread prints it. Check both SSE transcripts, the workspace fields, and SELECT path,content_hash FROM thread_workspace_files. (2) A second user in the same org sees nothing. (3) A Space thread writes no thread rows. (4) A ZDR turn gets no bearer and the typed refusal. (5) Restart execution-core between turns; the file is still readable.",
+    "Keep SANDBOX_THREAD_WORKSPACE_ENABLED, SANDBOX_MANAGER_THREAD_WORKSPACE and EXECUTION_CORE_THREAD_WORKSPACE off. The DEC-23 gates in depth_findings must be settled first."
+   ],
+   "deviations": [
+    "The honest fallback is also gated in model-gateway by SANDBOX_THREAD_WORKSPACE_ENABLED, which the row named for the BFF only. This keeps switch-off output byte-identical; compose must pass the variable to model-gateway too.",
+    "State tokens: the row's set is synced|conflict|refused, so ephemeral and space fallbacks use refused plus a typed cause (zero_retention, no_thread_credential, unavailable, not_written_through). The fallback omits conflicts, matching execution-core's own refused shape.",
+    "ZDR for the credential rule uses turn_requests_zdr (header or body), so the three BFF call sites stay unchanged. The Space path still mints regardless of ZDR (pre-existing); the row's literal 'ZDR turns mint no bearer' is applied to the personal path only.",
+    "turn_requests_zdr also marks the tracing span on ZDR turns (log redaction only, no wire change).",
+    "The lazy mint (only when the tool list offers code_interpreter) is not built, because the BFF cannot see the model-gateway tool list.",
+    "Doc comments that said 'Space-scoped only' were updated in tool_loop.rs and shared.rs; the same stale comments in files I do not own are listed under needs_other_files."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/auth.rs lines 280-288: the VerifiedSandboxBearer doc says the bearer is present only on a Space-scoped turn (stale; doc-only).",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs lines 1857 and 1909: 'Present only for a Space-scoped turn' comments (stale; doc-only).",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs around line 11780: comment about the Space-scoped sandbox bearer (verify-only file; left unchanged)."
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Lead shared-edits to both compose files: SANDBOX_THREAD_WORKSPACE_ENABLED for the BFF gateway and for model-gateway, and EXECUTION_CORE_THREAD_WORKSPACE for execution-core, all defaulting to false.",
+     "Re-run cargo test -q -p model-gateway --lib and --all-targets in the shared tree once WS17-S6's http_routes.rs/state.rs edit compiles.",
+     "Live proof with all four images rebuilt and the flags on in the dev stack, then switched back off: (1) turn 1 writes notes.txt and turn 2 (new run, same thread) reads it, with both SSE transcripts, the workspace fields and the thread_workspace_files rows; (2) a second user in the same org sees nothing; (3) a Space thread writes no thread rows; (4) a ZDR turn gets the typed refusal; (5) the file survives an execution-core restart between turns.",
+     "Pre-existing zdr_refusal_inventory failure on browser_run.rs:1038 (from HEAD c85c8f962, not this slice) needs an owner."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "get_audience_token deliberately does not cache model-service tokens ('Mint on every request'), so with the switch on every non-ZDR personal turn adds one auth-core round trip; measure this before default-on, and consider the lazy mint or a cache keyed by session generation and active org."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The minted bearer lasts about the auth-core TTL (300 s default), so a later code_interpreter call in a long agentic turn may present an expired bearer and fail with an error instead of degrading to ephemeral; the degrade path covers only an absent bearer (not verified against execution-core's exp handling)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-23 (a) names an org flag and quota on the delegated bearer, and (b) requires the Control decision model.thread.sandbox_workspace before default-on and before billed or persistent compute; this slice gates only on env switches."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The model-gateway lib-test build fails on the shared worktree from 11:58 because WS17-S6 references state.thread_fork_client from http_routes.rs without the state.rs field; no model-gateway test can compile until that lands."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The five live evidence items in lead_todo (cross-turn persistence, second-user isolation, no Space thread rows, ZDR typed refusal, restart survival) are not run; docker was not allowed."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "model-gateway reads the BFF switch name for the honest fallback field; if compose does not pass it to model-gateway, the fallback silently stays absent while the switch is on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The unavailable cause (bearer present, execution-core attached nothing) cannot tell execution-core's switch off from a silent non-attach, and the Space not_written_through fallback must give way to S4's own workspace object when S4 is on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Space turns still receive the sandbox credential regardless of ZDR (pre-existing); execution-core refuses the ZDR Space step, so the literal ZDR rule was not applied to the Space path. The owner should decide."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "thread_id comes from the request body and is not checked against the caller's thread ownership here; sandbox-manager's owner-keyed rows should isolate it, but no test shows that a foreign thread id yields an empty or refused workspace."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers execution-core's real attached workspace part passing through model-gateway (the MG test uses a fake execution-core returning '{}'), and the SSE transcript of the fallback is not asserted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The code_interpreter tool description does not tell the model that files persist across turns in a personal thread, and the refused state on ephemeral results could read as a failed call; model-facing wording is a product decision."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "A waived run reaches the fallback as cause unavailable rather than zero_retention because model-gateway cannot see waivers; waiver minting is off (DEC-32), so there is no current exposure."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Stale Space-only comments remain in auth.rs, upstream.rs and sse.rs (listed in needs_other_files), and the credential path (turn_requests_zdr) and the streams path (effective_zdr) compute ZDR differently; both fail closed, but they should be unified."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The shared worktree's model-gateway crate does not compile (http_routes.rs:11182 uses state.thread_fork_client, from WS17-S6, with no AppState field), so this slice was verified only in an isolated copy with http_routes.rs at HEAD; re-run the model-gateway lib and all-targets tests in the tree once WS17-S6 lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The BFF judges ZDR by turn_requests_zdr (x-zdr header or body zdr only), so a turn that is ZDR by org policy but sent without the flag still mints the sandbox-manager bearer. model-gateway's effective zdr still keeps the thread_id out, but the row's literal 'ZDR turns mint no bearer' does not hold for org-policy ZDR."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "With SANDBOX_THREAD_WORKSPACE_ENABLED on, every non-ZDR personal turn makes one uncached auth-core round trip whether or not code_interpreter is offered (the lazy mint was not built); measure this before default-on."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The minted bearer lives about 300 s, so a long agentic turn's later code_interpreter call may present an expired bearer and fail instead of degrading to ephemeral."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "DEC-23's org flag, quota and the Control decision model.thread.sandbox_workspace are not enforced; the path is gated only by env switches, which must stay off until those land."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "None of the five live evidence items from the row (cross-turn persistence, second-user isolation, no Space thread rows, ZDR typed refusal, restart survival) has been run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The honest-workspace fallback in model-gateway reads SANDBOX_THREAD_WORKSPACE_ENABLED, but the Model Plane compose does not pass that variable to model-gateway yet (lead shared-edit), so the field silently stays absent there even when the BFF switch is on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Space turns still mint the sandbox bearer regardless of ZDR (pre-existing); execution-core refuses the ZDR Space step, but the owner should confirm this is acceptable under the row's ZDR clause."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test passes execution-core's real attached thread workspace part (scope thread, state synced or conflict, with conflicts) through model-gateway end to end; the MG tests use a fake execution-core returning '{}'."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test shows that a thread_id from the request body naming another user's thread gets an empty or refused workspace; isolation rests on sandbox-manager's owner-keyed rows."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The BFF test sets SANDBOX_THREAD_WORKSPACE_ENABLED=true process-wide under TEST_ENV_LOCK, but handler tests that reach sandbox_token without that lock could see it switched on mid-run and get a flaky extra mint."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Stale 'Space-scoped only' bearer comments remain in model-gateway auth.rs (about lines 280-288), BFF upstream.rs (about lines 1857 and 1909) and sse.rs (about line 11780); the credential path (turn_requests_zdr) and the streams path (effective_zdr) should share one ZDR helper."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cd 'apps/Model Plane/rust' && cargo test -q -p model-gateway --lib tools",
+      "outcome": "FAILED to compile: error[E0609] no field thread_fork_client on type state::AppState at services/model-gateway/src/http_routes.rs:11182 (another slice's WS17-S6 edit, not owned by WS22-S3). Tests not run.",
+      "passed": false
+     },
+     {
+      "command": "cd 'apps/Model Plane/rust' && cargo test -q -p model-gateway --all-targets",
+      "outcome": "NOT RUN: same compile error blocks the crate.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p model-gateway (compile check of touched crate)",
+      "outcome": "FAILED: same E0609 at http_routes.rs:11182, so even the non-test lib does not compile. The slice's own files could not be compile-verified in this tree.",
+      "passed": false
+     },
+     {
+      "command": "cargo test --manifest-path 'apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml' --all-targets --no-fail-fast",
+      "outcome": "PASS: result blocks 1053+1+7+13+3+1 passed, 0 failed (1 ignored).",
+      "passed": true
+     },
+     {
+      "command": "Named test: bff_mints_sandbox_bearer_for_a_personal_turn_only_when_enabled_and_not_zdr",
+      "outcome": "PASS (1 passed, 0 failed).",
+      "passed": true
+     },
+     {
+      "command": "Named tests: code_interpreter_forwards_thread_id_to_execute_step, ephemeral_result_declares_no_persistence",
+      "outcome": "NOT RUN: model-gateway does not compile (WS17-S6 blocker).",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "auth",
+    "zdr",
+    "authority"
+   ],
+   "notes": "Built: (1) BFF sandbox_token mints the aud=sandbox-manager credential for a personal turn only when SANDBOX_THREAD_WORKSPACE_ENABLED is exactly \"true\" and the turn is not ZDR (body zdr or x-zdr header, via turn_requests_zdr). Space turns are unchanged. The signature is unchanged, so ag_ui.rs, streams.rs and json_handlers.rs needed no edit. (2) model-gateway handle_code_interpreter takes thread_id (tool_loop.rs passes it). ExecuteStepRequest.thread_id (existing tag 13) is set only for a personal, non-ZDR call that holds the sandbox bearer; every other path sends \"\" as before. (3) With SANDBOX_THREAD_WORKSPACE_ENABLED=\"true\" (read once, literal only), a code_interpreter result that execution-core did not attach a workspace part to gets one: scope ephemeral with state refused, cause zero_retention | no_thread_credential | unavailable, and note \"files are not kept after this call\"; or scope space with state refused, cause not_written_through. execution-core's own thread workspace part passes through unchanged. With the switch off the output is returned byte for byte. Provenance is unchanged (unscreened). sse.rs is verify-only: no edit needed, since it has no ExecuteStepRequest literal and forwards the bearer as before. No proto or migration change. No default was flipped; all switches stay off. No DB tests written. Live proof and the compose wiring were not run (lead)."
+  }
+ ]
+}

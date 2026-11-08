@@ -6,6 +6,8 @@
 //! rates. The switch `MODEL_GATEWAY_CATALOGUE_PRICES` is off by default: with it
 //! off no catalogue is fetched for a listing and the JSON is what it was before.
 
+use std::time::Duration;
+
 use serde::Serialize;
 
 use crate::pricing::{CostBasis, PriceSource, PricingCache, RateSnapshot};
@@ -24,15 +26,42 @@ fn enabled_from(raw: Option<&str>) -> bool {
     raw.map(str::trim) == Some("true")
 }
 
+/// The longest one listing waits for its catalogue. A cost-core that is down or
+/// slow costs a listing this much at most: the models are listed unpriced, and
+/// the cache fills on the next pricing call that reaches cost-core.
+pub const LISTING_PRICE_BUDGET: Duration = Duration::from_millis(250);
+
 /// The catalogue one listing is priced against. It is taken once per request,
 /// because a per-model refresh would fetch again for every model while the
 /// catalogue is empty. `None` while the switch is off: nothing is priced and
-/// nothing is fetched.
+/// nothing is fetched. `None` too when the catalogue is not in hand within
+/// [`LISTING_PRICE_BUDGET`].
 pub async fn snapshot_for_listing(pricing: &PricingCache) -> Option<RateSnapshot> {
-    if enabled() {
-        Some(pricing.snapshot().await)
-    } else {
-        None
+    if !enabled() {
+        return None;
+    }
+    tokio::time::timeout(LISTING_PRICE_BUDGET, pricing.snapshot())
+        .await
+        .ok()
+}
+
+/// Turns the switch on for one test and off again when the guard drops, so a
+/// failed assertion cannot leave it on for the next test.
+#[cfg(test)]
+pub(crate) struct SwitchOn;
+
+#[cfg(test)]
+impl SwitchOn {
+    pub(crate) fn new() -> Self {
+        std::env::set_var(CATALOGUE_PRICES_ENV, "true");
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for SwitchOn {
+    fn drop(&mut self) {
+        std::env::remove_var(CATALOGUE_PRICES_ENV);
     }
 }
 
@@ -81,8 +110,9 @@ pub fn model_price(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
 
     use axum::{routing::get, Json, Router};
     use serial_test::serial;
@@ -101,6 +131,14 @@ mod tests {
 
     /// A cost-core stand-in that serves `body` on `/api/v1/pricing` and counts the fetches.
     async fn cost_core(body: serde_json::Value) -> (PricingCache, Arc<AtomicUsize>) {
+        cost_core_that_may_hang(body, Arc::new(AtomicBool::new(false))).await
+    }
+
+    /// [`cost_core`], except that while `hang` is set a fetch is answered only after five seconds.
+    async fn cost_core_that_may_hang(
+        body: serde_json::Value,
+        hang: Arc<AtomicBool>,
+    ) -> (PricingCache, Arc<AtomicUsize>) {
         let fetches = Arc::new(AtomicUsize::new(0));
         let counter = fetches.clone();
         let app = Router::new().route(
@@ -108,8 +146,12 @@ mod tests {
             get(move || {
                 let counter = counter.clone();
                 let body = body.clone();
+                let hang = hang.clone();
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
+                    if hang.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                     Json(body)
                 }
             }),
@@ -198,5 +240,49 @@ mod tests {
         for id in ["a-model-the-catalogue-does-not-list", "default"] {
             assert_eq!(model_price(&rates, id, "azure", "chat"), None, "{id}");
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn listing_gives_up_on_a_hung_catalogue_at_the_budget() {
+        let _on = SwitchOn::new();
+        let (cache, _) =
+            cost_core_that_may_hang(catalogue(), Arc::new(AtomicBool::new(true))).await;
+        let started = Instant::now();
+        assert!(snapshot_for_listing(&cache).await.is_none());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn listing_takes_a_fast_catalogue_within_the_budget() {
+        let _on = SwitchOn::new();
+        let (cache, fetches) =
+            cost_core_that_may_hang(catalogue(), Arc::new(AtomicBool::new(false))).await;
+        let rates = snapshot_for_listing(&cache)
+            .await
+            .expect("a fast catalogue is in hand");
+        let price = model_price(&rates, "claude-sonnet-5-5", "anthropic", "chat")
+            .expect("a prefix key is priced");
+        assert_eq!(price.source, "prefix");
+        assert_eq!(fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_listing_that_missed_the_budget_is_served_by_the_next() {
+        let _on = SwitchOn::new();
+        let hang = Arc::new(AtomicBool::new(true));
+        let (cache, _) = cost_core_that_may_hang(catalogue(), hang.clone()).await;
+        assert!(snapshot_for_listing(&cache).await.is_none());
+        hang.store(false, Ordering::SeqCst);
+        let rates = snapshot_for_listing(&cache)
+            .await
+            .expect("the next listing has the catalogue");
+        assert!(model_price(&rates, "gpt-4o-mini", "openai", "chat").is_some());
     }
 }

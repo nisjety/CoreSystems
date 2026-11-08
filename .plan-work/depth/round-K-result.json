@@ -1,0 +1,77 @@
+[
+ {
+  "key": "mg-active-stream-gauge-guard",
+  "rows": [],
+  "title": "mg-active-stream-gauge-guard",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib gateway_metrics",
+    "outcome": "1 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib active_stream",
+    "outcome": "2 passed, 0 failed (source-scan test plus guard test)",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib (full)",
+    "outcome": "2363 passed, 0 failed, 4 ignored. No failures, so there is no failing set to diff against HEAD.",
+    "passed": true
+   },
+   {
+    "command": "cargo check -q -p model-gateway --all-targets",
+    "outcome": "exit 0, no warnings or errors",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Lead decision: the early returns between the open (sse.rs ~1467) and the producer spawn (~2624) include vision_stream (~1818), image_gen_stream (~1836), agentic_run_stream (~1898), replay_cached_stream (~1503) and attach_to_original (~1513/1553). Each hands back its own spawned stream. The guard now drops at those returns, so those streams no longer count toward gateway_active_streams. Before the change they added 1 and never removed it, a permanent leak, so this is strictly better than HEAD. It does change what the gauge covers: it now counts only main-handler streams. To count those streams for their whole life, the guard has to be threaded into the three helpers, which also changes their test call sites. That is a follow-up, not a blocker for D1-795.",
+   "Test (c) was not built. No lib test runs invoke_stream_sse to a stopped frame. The stop, cancel and panic paths are covered only by RAII drop semantics plus the source-scan test that pins the guard inside the producer task. The live WS04-S9 two-replica case 1 should be rerun to confirm A's gauge returns to 0 after a peer stop.",
+   "The gauge comes down when the producer task ends, not when the client disconnects. If the task keeps running after the receiver is dropped (send errors ignored), the stream stays counted until that work finishes. This is bounded, with no permanent leak.",
+   "The ACTIVE_STREAMS_MIRROR test counter is process-wide. It is safe only while no other lib test opens a guard in parallel, as its doc comment says. The unit test also asserts on the local-recorder gauge, so the proof does not depend on the mirror alone.",
+   "Line endings: gateway_metrics.rs is CRLF in the working tree and LF in the HEAD blob (autocrlf normalisation), and git diff shows no whole-file churn. sse.rs stays LF. Git warns that sse.rs LF will become CRLF the next time Git touches it; that comes from repository attributes, not from this change."
+  ],
+  "db_tests": [
+   "none written: the change needs no database-backed test"
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "Lead decision needed before committing: confirm that the vision, image-generation, agentic, replay and attach streams should stop counting toward gateway_active_streams, or ask for the guard to be threaded into their spawned tasks. The threaded version also needs the three test call sites updated. Known gap: no lib test covers the stopped-frame path end to end; the stop path is covered only by the drop semantics and the source-scan test.",
+  "summary": "Coding for mg-active-stream-gauge-guard is written but NOT yet verified. gateway_metrics.rs (CRLF kept, 184/184 lines): removed the bare stream_opened/stream_closed functions and added pub struct ActiveStreamGuard with a private field, #[must_use] open() that increments gateway_active_streams, and Drop that decrements it once. A cfg(test) AtomicI64 mirror is updated by open/drop, and a unit test reads the real gauge through PrometheusBuilder::build_recorder plus metrics::with_local_recorder (already in the dependency tree, no new crate). sse.rs (LF kept): the single stream_opened call became `let active_stream = gateway_metrics::ActiveStreamGuard::open();` at the same point, and the producer task spawned at ~2622 begins with `let _active_stream = active_stream;`, so it drops when that task ends on any path. The three manual stream_closed calls (completed path ~4684, run_infer_fallback completed usage ~7645, its error path ~7786) were removed; run_infer_fallback is called from inside the producer (~3555), so it is covered. Early returns after the open that return an error, refusal, replay or attach stream drop the guard at return. Source-scan test active_stream_gauge_has_one_owner_in_the_handler added in execute_turn_tests. Test (c) (full stream to a stopped frame) was NOT built: no lib test runs invoke_stream_sse or asserts a stopped frame. Decision for lead: vision_stream (~1816), image_gen_stream (~1834), agentic_run_stream (~1896), replay_cached_stream (~1501) and attach_to_original (~1511/1551) hand back their own spawned streams, so the guard drops at those returns and they no longer move the gauge at all; before, each added 1 and never removed it. Counting them for their lifetime needs the guard threaded into those helpers, which changes three signatures and test call sites at ~16637, ~18474 and ~19786. Also: the packet's files list named these two files, but the task text said '(none)'; I followed the packet record."
+ },
+ {
+  "key": "ec-durable-loop-contract-pause-needle",
+  "rows": [],
+  "title": "ec-durable-loop-contract-pause-needle",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test durable_loop_contract (cwd apps/Model Plane/rust)",
+    "outcome": "31 passed; 0 failed; 0 ignored (195s). Only pre-existing warnings.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The guard checks that both negated terms appear in the persistent argument. It does not check the operator joining them, so `!req.zdr || !ctx.route.is_waived()` would still pass. The coder disclosed this and the old guard had the same gap.",
+   "The bare `run_pause_mode(` branch reads the flag at argument index 0, and no mutation exercises it. If agent.rs switched back to the bare wrapper, that path is correct by reading the code but has never been proven red.",
+   "No mutation renames the call site to a third name. If that happened, the existing count check (exactly one call) would still catch it, with a 'calls ... 0 times' message.",
+   "The file is LF in the HEAD blob, but core.autocrlf=true warns that git will convert it to CRLF. The lead should confirm the committed blob stays LF."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Test-only change, no deploy and no env change. The task text listed \"Files you may edit: (none)\", but the packet's files field names only durable_loop_contract.rs, so I followed the packet. git warns that LF will be replaced by CRLF for this file because core.autocrlf=true in this checkout. The HEAD blob is LF, so that warning is not from this edit. The lead commits.",
+  "summary": "Packet ec-durable-loop-contract-pause-needle (D1-796) is fixed in the test file only; no production code changed. The source-text guard's needle `\\brun_pause_mode\\s*\\(` matched zero calls after commit 484e27425, because agent.rs:4319 calls `super::resume::run_pause_mode_with(`. The guard now (1) matches `\\brun_pause_mode(_with)?\\s*\\(` with the `_with` suffix captured, so both names and path-qualified calls are found, and still requires exactly one call in agent.rs; (2) reads the persistent flag as argument index 1 for `_with` (its RunGate comes first) and index 0 for the bare cfg(test) wrapper, using the file's existing `call_arguments` helper (cuts read over the blanked source); (3) requires each term to be negated, `!...zdr` and `!...is_waived()`. Point 3 is a tightening: the old check was a substring test, so `req.zdr && !ctx.route.is_waived()` used to pass. Messages now name run_pause_mode_with, and the StoreProof gate label near line 4418 says run_pause_mode_with. The every_guard mutation test keeps the `!req.zdr` mutation and adds `req.zdr && !ctx.route.is_waived()`; both must produce the \"not-ZDR AND not-waived\" violation. Residual gap, not fixed: the guard checks that both negated terms appear, not the operator joining them, so `!req.zdr || !ctx.route.is_waived()` still passes. Closing that would need an expression parser. Line endings stay LF, matching the HEAD blob. Nothing was committed."
+ }
+]

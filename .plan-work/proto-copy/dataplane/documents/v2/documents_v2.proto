@@ -1,0 +1,130 @@
+syntax = "proto3";
+
+package dataplane.documents.v2;
+
+option go_package = "github.com/triodelab/dataplane/gen/go/documents/v2";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message Document {
+  string document_id = 1;
+  string org_id      = 2;
+  string source      = 3;
+  string type        = 4;
+  string title       = 5;
+  string content     = 6;
+  string status      = 7;
+  google.protobuf.Struct metadata = 8;
+
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp deleted_at = 11;
+
+  string zdr_classification = 12;
+  optional string zdr_reason = 13;
+}
+
+message DocumentIndexStatus {
+  string document_id = 1;
+  string org_id = 2;
+  int32  chunk_count = 3;
+  string chunk_status = 4;
+  string embed_status = 5;
+  int32  embeddings_synced = 6;
+  string vector_status = 7;
+  google.protobuf.Timestamp last_indexed_at = 8;
+  optional string error_message = 9;
+}
+
+message GetDocumentIndexStatusRequest {
+  string document_id = 1;
+  string org_id = 2;
+}
+
+message GetDocumentIndexStatusResponse {
+  DocumentIndexStatus status = 1;
+}
+
+message IngestPolicy {
+  string zdr_mode = 1;
+  string index_schedule = 2;
+  bool   ephemeral_only = 3;
+}
+
+message IngestStatusRequest {
+  string org_id = 1;
+}
+
+message IngestStatusResponse {
+  IngestPolicy policy = 1;
+  bool is_active = 2;
+  google.protobuf.Timestamp next_batch_window = 3;
+}
+
+message GetDocumentRequest {
+  string document_id = 1;
+  string org_id = 2;
+}
+
+message GetDocumentResponse {
+  Document document = 1;
+}
+
+message ListDocumentsRequest {
+  string org_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+  string type = 4;
+}
+
+message ListDocumentsResponse {
+  repeated Document documents = 1;
+  int32 total = 2;
+}
+
+message CreateDocumentRequest {
+  string org_id = 1;
+  string source = 2;
+  string type = 3;
+  string title = 4;
+  string content = 5;
+  google.protobuf.Struct metadata = 6;
+  string zdr_classification = 7;
+  optional IngestPolicy ingest_policy = 8;
+}
+
+message CreateDocumentResponse {
+  Document document = 1;
+}
+
+message DeleteDocumentRequest {
+  string document_id = 1;
+  string org_id = 2;
+}
+
+message DeleteDocumentResponse {
+  bool success = 1;
+}
+
+message BulkIngestRequest {
+  string org_id = 1;
+  repeated CreateDocumentRequest documents = 2;
+  optional IngestPolicy ingest_policy = 3;
+}
+
+message BulkIngestResponse {
+  int32 accepted = 1;
+  int32 rejected = 2;
+  repeated string document_ids = 3;
+}
+
+service DocumentService {
+  rpc GetDocument(GetDocumentRequest) returns (GetDocumentResponse);
+  rpc ListDocuments(ListDocumentsRequest) returns (ListDocumentsResponse);
+  rpc CreateDocument(CreateDocumentRequest) returns (CreateDocumentResponse);
+  rpc DeleteDocument(DeleteDocumentRequest) returns (DeleteDocumentResponse);
+  rpc BulkIngest(BulkIngestRequest) returns (BulkIngestResponse);
+  rpc GetDocumentIndexStatus(GetDocumentIndexStatusRequest) returns (GetDocumentIndexStatusResponse);
+  rpc GetIngestStatus(IngestStatusRequest) returns (IngestStatusResponse);
+}

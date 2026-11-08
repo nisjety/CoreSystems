@@ -1,0 +1,1620 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx b/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx
+index d4d39c608..548b2f64f 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx	
+@@ -15,6 +15,7 @@ vi.mock('@/features/customize/AgentModesSection', async (importOriginal) => {
+   return { ...actual, AgentModesSection: () => 'Agent mode section' }
+ })
+ vi.mock('@/features/customize/HooksSection', () => ({ HooksSection: () => 'Hooks section' }))
++vi.mock('@/features/customize/OrgWebAccessSection', () => ({ OrgWebAccessSection: () => 'Web access section' }))
+ vi.mock('@/features/settings/components/McpServersSection', () => ({ McpServersSection: () => 'MCP section' }))
+ vi.mock('@/features/settings/components/SkillsSection', () => ({ SkillsSection: () => 'Skills section' }))
+ vi.mock('@/features/settings/components/OrgInstructionsSection', () => ({ OrgInstructionsSection: () => 'Instructions section' }))
+@@ -56,7 +57,7 @@ describe('CustomizeHub', () => {
+ 
+     // The stubs are bare text, so the check reads the page rather than one element.
+     await waitFor(() => expect(document.body.textContent).toContain('Agent mode section'))
+-    for (const section of ['Hooks section', 'MCP section', 'Skills section', 'Instructions section', 'Plugins section']) {
++    for (const section of ['Web access section', 'Hooks section', 'MCP section', 'Skills section', 'Instructions section', 'Plugins section']) {
+       expect(document.body.textContent).toContain(section)
+     }
+   })
+@@ -68,6 +69,7 @@ describe('CustomizeHub', () => {
+ 
+     expect(await screen.findByText('Customize is not switched on for this deployment yet.')).toBeTruthy()
+     expect(screen.queryByText('Agent mode section')).toBeNull()
++    expect(screen.queryByText('Web access section')).toBeNull()
+     expect(screen.queryByText('Hooks section')).toBeNull()
+     expect(screen.queryByText('MCP section')).toBeNull()
+   })
+diff --git a/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx b/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx
+index 9e3fb2043..d2bf4edad 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx	
+@@ -8,6 +8,7 @@ import { PluginsSection } from '@/features/settings/components/PluginsSection'
+ import { SkillsSection } from '@/features/settings/components/SkillsSection'
+ import { AgentModesSection, orgAgentPolicyAvailable } from '@/features/customize/AgentModesSection'
+ import { HooksSection } from '@/features/customize/HooksSection'
++import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
+ 
+ /**
+  * The Customize hub (WS25-S11): where an organisation shapes what its agents may do. It composes the existing
+@@ -50,6 +51,7 @@ export default function CustomizeHub() {
+         </Match>
+         <Match when={available() === true}>
+           <AgentModesSection />
++          <OrgWebAccessSection />
+           <HooksSection />
+           <McpServersSection />
+           <SkillsSection />
+diff --git a/apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.test.tsx b/apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.test.tsx
+new file mode 100644
+index 000000000..38029d748
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.test.tsx	
+@@ -0,0 +1,98 @@
++// @vitest-environment jsdom
++
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
++import { I18nProvider } from '@/shared/i18n'
++import { clearSession, markSessionOnboardingComplete, setSessionUser } from '@/shared/session/session-store'
++
++function jsonResponse(data: unknown, status = 200): Response {
++  return new Response(JSON.stringify(data), {
++    headers: { 'Content-Type': 'application/json' },
++    status,
++  })
++}
++
++function signIn(role: 'admin' | 'member') {
++  setSessionUser({ id: 'user_1', email: 'user@example.com', name: 'User', emailVerified: true })
++  flush()
++  markSessionOnboardingComplete({ id: 'org_1', name: 'Acme AS', role })
++  flush()
++}
++
++const STORED = {
++  org_id: 'org_1',
++  revision: 4,
++  digest: 'd4',
++  settings: { mode_cap: 'read_only', 'web.mode': 'live', 'web.paid_providers': 'on' },
++}
++
++type Call = { method: string; path: string; body: unknown }
++
++/** Answers the policy route: a GET reads the stored document, a PUT is answered by `put`. Every call is recorded. */
++function stubPolicy(stored: unknown = STORED, put: () => Response = () => jsonResponse({ ...STORED, revision: 5 })): Call[] {
++  const calls: Call[] = []
++  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = new URL(String(input), 'http://localhost')
++    const method = init?.method ?? 'GET'
++    calls.push({ method, path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined })
++    return method === 'PUT' ? put() : jsonResponse(stored)
++  }))
++  return calls
++}
++
++beforeEach(() => {
++  window.localStorage.setItem('verevon.locale', 'en')
++})
++
++afterEach(() => {
++  cleanup()
++  clearSession()
++  vi.unstubAllGlobals()
++})
++
++describe('OrgWebAccessSection', () => {
++  it('an admin turns web access off and saves the whole document at the revision it read', async () => {
++    signIn('admin')
++    const calls = stubPolicy()
++
++    render(() => <I18nProvider><OrgWebAccessSection /></I18nProvider>)
++    const mode = (await screen.findByRole('combobox', { name: /Web access for agents/ })) as HTMLSelectElement
++    expect(mode.value).toBe('live')
++    fireEvent.change(mode, { target: { value: 'off' } })
++    flush()
++    fireEvent.click(screen.getByRole('button', { name: 'Save web access' }))
++    flush()
++
++    await waitFor(() => expect(calls.some((call) => call.method === 'PUT')).toBe(true))
++    const put = calls.find((call) => call.method === 'PUT')
++    expect(put?.path).toBe('/api/v1/org/agent-policy')
++    // The server takes an omitted key as its default, so the settings this section does not change go back as stored.
++    expect(put?.body).toEqual({
++      revision: 4,
++      settings: { mode_cap: 'read_only', 'web.mode': 'off', 'web.paid_providers': 'on' },
++    })
++  })
++
++  it('a member sees the switches locked, with no save control', async () => {
++    signIn('member')
++    stubPolicy()
++
++    render(() => <I18nProvider><OrgWebAccessSection /></I18nProvider>)
++    const paid = (await screen.findByRole('combobox', { name: /Paid search services/ })) as HTMLSelectElement
++
++    expect(paid.disabled).toBe(true)
++    expect(screen.queryByRole('button', { name: 'Save web access' })).toBeNull()
++  })
++
++  it('reads a web mode the server would not enforce as off, never as live', async () => {
++    signIn('admin')
++    stubPolicy({ ...STORED, settings: { 'web.mode': 'cached_only' } })
++
++    render(() => <I18nProvider><OrgWebAccessSection /></I18nProvider>)
++    const mode = (await screen.findByRole('combobox', { name: /Web access for agents/ })) as HTMLSelectElement
++
++    expect(mode.value).toBe('off')
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.tsx b/apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.tsx
+new file mode 100644
+index 000000000..45b9bd7e3
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/customize/OrgWebAccessSection.tsx	
+@@ -0,0 +1,216 @@
++import { createMemo, createSignal, Show } from 'solid-js'
++import { ShieldCheck } from '@/shared/icons'
++import { ApiError, requestJson } from '@/shared/api/http'
++import { createResource } from '@/shared/lib/create-resource-compat'
++import { translateApiError, useI18n } from '@/shared/i18n'
++import { SectionHeader, SettingsButton, SettingsSelect } from '@/features/settings/components/settings-ui'
++import { getSession } from '@/shared/session/session-store'
++import { hasWorkspaceAdminAccess } from '@/shared/session/access'
++
++/**
++ * The organisation's web access (Wave 3 EP-9 W2): whether its agents may use the public web at all, and whether a
++ * paid search provider may serve them. Both are keys of the organisation agent policy that capability-core holds
++ * (DEC-14), read and written through the gateway's `/api/v1/org/agent-policy` routes, the routes the agent mode
++ * section uses.
++ *
++ * A write replaces the whole document, so this section sends every setting as it is stored and changes only its two
++ * switches. A saved switch takes effect only where the deployment has switched policy enforcement on, and the copy
++ * says so instead of implying the switch already holds.
++ *
++ * Members see the switches read-only with a locked badge, as the agent mode section shows them.
++ */
++
++type I18nText = { tr: (noText: string, enText: string) => string }
++
++const WEB_MODES = ['off', 'live'] as const
++const PAID_PROVIDER_SWITCHES = ['off', 'on'] as const
++
++type WebMode = (typeof WEB_MODES)[number]
++type PaidProviderSwitch = (typeof PAID_PROVIDER_SWITCHES)[number]
++
++/** The two switches this section writes. */
++type WebSwitches = { webMode: WebMode; paidProviders: PaidProviderSwitch }
++
++/** The stored document: every setting the server holds, as it answers. */
++type OrgAgentPolicyDocument = {
++  org_id: string
++  revision: number
++  digest: string
++  settings: Record<string, unknown>
++}
++
++const POLICY_PATH = '/api/v1/org/agent-policy'
++
++/**
++ * Reads the switches the way the server enforces them: a key the document omits takes its default (live, on), and a
++ * value this build does not read takes the fail-closed value (off). The section never shows a switch looser than the
++ * one in force.
++ */
++function readWebSwitches(settings: Record<string, unknown>): WebSwitches {
++  const webMode: WebMode = !('web.mode' in settings) || settings['web.mode'] === 'live' ? 'live' : 'off'
++  const paidProviders: PaidProviderSwitch =
++    !('web.paid_providers' in settings) || settings['web.paid_providers'] === 'on' ? 'on' : 'off'
++  return { webMode, paidProviders }
++}
++
++function getOrgAgentPolicy(): Promise<OrgAgentPolicyDocument> {
++  return requestJson<OrgAgentPolicyDocument>(POLICY_PATH)
++}
++
++/** Replaces the whole document at `revision`: every setting but the two switches goes back as it is stored. */
++function saveWebSwitches(doc: OrgAgentPolicyDocument, switches: WebSwitches): Promise<OrgAgentPolicyDocument> {
++  return requestJson<OrgAgentPolicyDocument>(POLICY_PATH, {
++    method: 'PUT',
++    body: JSON.stringify({
++      revision: doc.revision,
++      settings: { ...doc.settings, 'web.mode': switches.webMode, 'web.paid_providers': switches.paidProviders },
++    }),
++  })
++}
++
++function saveFailure(error: unknown, i18n: I18nText): string {
++  if (error instanceof ApiError && error.status === 409) {
++    return i18n.tr(
++      'Policyen er endret etter at du åpnet den. Last siden på nytt og prøv igjen.',
++      'The policy changed after you opened it. Reload the page and try again.',
++    )
++  }
++  return translateApiError(error, i18n.tr, {
++    no: 'Kunne ikke lagre nettilgangen.',
++    en: 'Could not save web access.',
++  })
++}
++
++function webModeLabel(mode: WebMode, i18n: I18nText): string {
++  return mode === 'live'
++    ? i18n.tr('På: agentene kan søke på nettet og hente sider', 'On: agents may search the web and fetch pages')
++    : i18n.tr('Av: agentene bruker ikke nettet', 'Off: agents do not use the web')
++}
++
++function paidProvidersLabel(value: PaidProviderSwitch, i18n: I18nText): string {
++  return value === 'on'
++    ? i18n.tr('Tillatt: betalte søketjenester kan brukes', 'Allowed: paid search services may be used')
++    : i18n.tr('Ikke tillatt: bare gratis søketjenester', 'Not allowed: free search services only')
++}
++
++export function OrgWebAccessSection() {
++  const i18n = useI18n()
++  const session = getSession()
++  const isAdmin = createMemo(() => hasWorkspaceAdminAccess(session))
++
++  const [stored, { refetch }] = createResource(() => getOrgAgentPolicy())
++
++  // `undefined` until an admin edits: the stored switches are then what is shown.
++  const [draft, setDraft] = createSignal<WebSwitches | undefined>(undefined)
++  const [saving, setSaving] = createSignal(false)
++  const [saved, setSaved] = createSignal(false)
++  const [problem, setProblem] = createSignal<string | null>(null)
++
++  const shown = createMemo<WebSwitches | undefined>(() => {
++    const edited = draft()
++    if (edited) return edited
++    const doc = stored()
++    return doc ? readWebSwitches(doc.settings) : undefined
++  })
++
++  const edit = (change: Partial<WebSwitches>) => {
++    const base = shown()
++    if (!base) return
++    setSaved(false)
++    setDraft({ ...base, ...change })
++  }
++
++  const save = async () => {
++    const doc = stored()
++    const next = shown()
++    if (!isAdmin() || !doc || !next || saving()) return
++    setSaving(true)
++    setProblem(null)
++    setSaved(false)
++    try {
++      await saveWebSwitches(doc, next)
++      setDraft(undefined)
++      setSaved(true)
++    } catch (error) {
++      setProblem(saveFailure(error, i18n))
++    } finally {
++      setSaving(false)
++    }
++    await Promise.allSettled([refetch()])
++  }
++
++  return (
++    <section class="verevon-settings-section">
++      <SectionHeader
++        title={i18n.tr('Nettilgang', 'Web access')}
++        description={i18n.tr(
++          'Om agentene i organisasjonen kan bruke nettet, og om betalte søketjenester kan brukes for dem. Når nettilgangen er av, får agentene ingen nettverktøy, og en chat sier hvorfor.',
++          'Whether the agents in your organisation may use the public web, and whether paid search services may serve them. With web access off, agents are offered no web tools, and a chat says why.',
++        )}
++      />
++
++      <Show when={!isAdmin()}>
++        <p class="verevon-settings-subnote">
++          <ShieldCheck size={14} aria-hidden="true" />{' '}
++          {i18n.tr(
++            'Bare organisasjonsadministratorer kan endre nettilgangen. Du ser verdiene som gjelder for deg.',
++            'Only organisation administrators can change web access. You see the values that apply to you.',
++          )}
++        </p>
++      </Show>
++
++      <Show when={stored.error}>
++        <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
++          {i18n.tr('Kunne ikke laste nettilgangen.', 'Could not load web access.')}
++        </p>
++      </Show>
++
++      <Show when={stored.loading && !shown()}>
++        <p class="verevon-settings-subnote" role="status" aria-busy="true">
++          {i18n.tr('Laster nettilgangen…', 'Loading web access…')}
++        </p>
++      </Show>
++
++      <Show when={shown()}>
++        {(current) => (
++          <div class="verevon-settings-panel">
++            <SettingsSelect
++              id="customize-web-mode"
++              label={i18n.tr('Nettilgang for agentene', 'Web access for agents')}
++              value={current().webMode}
++              disabled={!isAdmin() || saving()}
++              options={WEB_MODES.map((mode) => ({ value: mode, label: webModeLabel(mode, i18n) }))}
++              onChange={(event) => edit({ webMode: event.currentTarget.value as WebMode })}
++            />
++            <SettingsSelect
++              id="customize-web-paid"
++              label={i18n.tr('Betalte søketjenester', 'Paid search services')}
++              value={current().paidProviders}
++              disabled={!isAdmin() || saving()}
++              options={PAID_PROVIDER_SWITCHES.map((value) => ({ value, label: paidProvidersLabel(value, i18n) }))}
++              onChange={(event) => edit({ paidProviders: event.currentTarget.value as PaidProviderSwitch })}
++            />
++          </div>
++        )}
++      </Show>
++
++      <Show when={isAdmin()}>
++        <div class="verevon-settings-actions">
++          <p>{problem() ?? (saved() ? i18n.tr('Nettilgangen er lagret.', 'Web access is saved.') : '')}</p>
++          <div>
++            <SettingsButton variant="primary" disabled={!draft() || saving()} onClick={() => void save()}>
++              {i18n.tr('Lagre nettilgang', 'Save web access')}
++            </SettingsButton>
++          </div>
++        </div>
++      </Show>
++
++      <p class="verevon-settings-subnote">
++        {i18n.tr(
++          'Lagrede verdier gjelder bare der plattformen har slått på håndheving av agentpolicyen.',
++          'A saved value applies only where the deployment has switched policy enforcement on.',
++        )}
++      </p>
++    </section>
++  )
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index 3b856958c..a49c6dcd9 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -1045,12 +1045,34 @@ describe('action registry', () => {
+       expect(isModelExecutableAction(id), id).toBe(false)
+       expect(registered(id)?.description ?? '', id).toContain('model-executable')
+     }
+-    for (const id of ['org.set_agent_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
++    for (const id of ['org.set_agent_policy', 'org.set_web_policy', 'org.create_hook', 'org.update_hook', 'org.delete_hook']) {
+       expect(registered(id), id).toMatchObject({ risk: 'high' })
+     }
+     expect(registered('org.preview_effective_policy')).toMatchObject({ risk: 'low' })
+   })
+ 
++  it('registers the organization web access switch as a model-plane action the model cannot execute', () => {
++    expect(registered('org.set_web_policy'), 'org.set_web_policy').toMatchObject({
++      ownerPlane: 'model',
++      requiresApproval: false,
++      reversible: true,
++    })
++    expect(isModelExecutableAction('org.set_web_policy')).toBe(false)
++    expect(registered('org.set_web_policy')?.description ?? '').toContain('model-executable')
++  })
++
++  it('takes the two web switches from the client, never cached_only, and no organization', () => {
++    const setWeb = registered('org.set_web_policy')?.inputSchema
++
++    expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on' }).success).toBe(true)
++    expect(setWeb?.safeParse({ revision: 4, webMode: 'live', paidProviders: 'off' }).success).toBe(true)
++    // cached_only is reserved on the server until Quarry ships it, so the client does not offer it.
++    expect(setWeb?.safeParse({ revision: 0, webMode: 'cached_only', paidProviders: 'on' }).success).toBe(false)
++    // The revision is required, and the organization is the session's, never the body's.
++    expect(setWeb?.safeParse({ webMode: 'off', paidProviders: 'on' }).success).toBe(false)
++    expect(setWeb?.safeParse({ revision: 0, webMode: 'off', paidProviders: 'on', orgId: 'org_1' }).success).toBe(false)
++  })
++
+   it('takes the closed policy settings and no organization from the client, and never a reserved key', () => {
+     const setPolicy = registered('org.set_agent_policy')?.inputSchema
+ 
+@@ -1453,7 +1475,8 @@ describe('action registry', () => {
+     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+     // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
+     // +1 after EP-7-S4 registered chat.goal_auto_toggle, the goal bar's Keep going switch.
+-    expect(ids).toHaveLength(295)
++    // +1 after EP-9-W2 registered org.set_web_policy, the organization's web access switch.
++    expect(ids).toHaveLength(296)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index a557d67fe..e48c379c0 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1480,6 +1480,16 @@ const orgSetAgentPolicyInput = z
+   })
+   .strict()
+ 
++// The organization's web switches (Wave 3 EP-9 W2): public web access for its agents, and whether a paid search
++// provider may serve them. Both are written together. `cached_only` is reserved on the server and so is not offered.
++const orgSetWebPolicyInput = z
++  .object({
++    revision: z.number().int().min(0),
++    webMode: z.enum(['off', 'live']),
++    paidProviders: z.enum(['off', 'on']),
++  })
++  .strict()
++
+ const orgPreviewEffectivePolicyInput = z.object({}).strict()
+ 
+ // A tool matcher is empty or "*" for any tool, a tool name, or a name ending in one "*" (hook/mod.rs).
+@@ -3450,6 +3460,17 @@ export const actionRegistry = [
+     inputSchema: orgSetAgentPolicyInput,
+     outputSchema: orgAgentPolicyOutput,
+   },
++  {
++    id: 'org.set_web_policy',
++    label: 'Set organization web access',
++    description: 'Turn public web access for the organization\'s agents off or on, and allow or forbid paid search providers for them. Takes the revision it was read at and is refused if the policy has changed since, and keeps every other agent-policy setting as it is stored. With web access off, agents are offered no web search, page fetch or crawl, and a chat turn says why. Takes effect only where the deployment has switched policy enforcement on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
++    ownerPlane: 'model',
++    risk: 'high',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: orgSetWebPolicyInput,
++    outputSchema: orgAgentPolicyOutput,
++  },
+   {
+     id: 'org.preview_effective_policy',
+     label: 'Preview effective agent policy',
+diff --git a/apps/Model Plane/api/contracts/org-agent-policy-schema.json b/apps/Model Plane/api/contracts/org-agent-policy-schema.json
+index c01fd4fc8..f36e713d6 100644
+--- a/apps/Model Plane/api/contracts/org-agent-policy-schema.json	
++++ b/apps/Model Plane/api/contracts/org-agent-policy-schema.json	
+@@ -1,7 +1,7 @@
+ {
+   "contract": "org-agent-policy-schema",
+   "version": 1,
+-  "description": "The closed key schema of the org agent policy registry (WS25-S7, DEC-14). Read by mp-contracts org_agent_policy and by capability-core internal/api org_agent_policy; each consumer tests its own table against this file. A key with status reserved accepts only its default; a write of anything else is refused not_enforced. Values run from the strictest to the loosest; a write looser than the platform ceiling is refused exceeds_platform_ceiling.",
++  "description": "The closed key schema of the org agent policy registry (WS25-S7, DEC-14). Read by mp-contracts org_agent_policy and by capability-core internal/api org_agent_policy; each consumer tests its own table against this file. A key with status reserved accepts only its default; a write of anything else is refused not_enforced. A row may also list reserved_values: tokens of its order refused not_enforced while the key itself is enforced (web.mode's cached_only, until Quarry ships it). Values run from the strictest to the loosest; a write looser than the platform ceiling is refused exceeds_platform_ceiling.",
+   "settings": [
+     {
+       "key": "mode_cap",
+@@ -82,6 +82,23 @@
+       "default": "8",
+       "fail_closed_value": "0",
+       "status": "enforced"
++    },
++    {
++      "key": "web.mode",
++      "kind": "enum",
++      "strictness_order": ["off", "cached_only", "live"],
++      "default": "live",
++      "fail_closed_value": "off",
++      "status": "enforced",
++      "reserved_values": ["cached_only"]
++    },
++    {
++      "key": "web.paid_providers",
++      "kind": "enum",
++      "strictness_order": ["off", "on"],
++      "default": "on",
++      "fail_closed_value": "off",
++      "status": "enforced"
+     }
+   ],
+   "refusals": ["unknown_key", "invalid_value", "not_enforced", "exceeds_platform_ceiling"]
+diff --git a/apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256 b/apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256
+index 718dcad8b..a113db76a 100644
+--- a/apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256	
++++ b/apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256	
+@@ -1 +1 @@
+-631e4457738183453b33dbcc98348a639dbbf463fb346785244cf2b4f0973fbe *org-agent-policy-schema.json
++e0c445e1d27045782e6f72ce456fb9c7bf60476c5f7c87f57f3a90febd085719  *org-agent-policy-schema.json
+\ No newline at end of file
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go
+index d033405aa..eee406941 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go	
+@@ -58,12 +58,13 @@ func OrgAgentPolicyAPIFromLookup(lookup func(string) string) bool {
+ // orgAgentSetting is one row of the closed key schema. It mirrors the SETTINGS table of
+ // mp-contracts/src/org_agent_policy.rs; the golden test below holds the two together.
+ type orgAgentSetting struct {
+-	key       string
+-	kind      string
+-	order     []string
+-	def       string
+-	failClose string
+-	reserved  bool
++	key            string
++	kind           string
++	order          []string
++	def            string
++	failClose      string
++	reserved       bool
++	reservedValues []string
+ }
+ 
+ var orgAgentPolicySettings = []orgAgentSetting{
+@@ -79,6 +80,11 @@ var orgAgentPolicySettings = []orgAgentSetting{
+ 	// Wave 3 EP-2 S8 (D5): the wide-research item cap, a whole number from 0 (wide research off)
+ 	// to 16. The gateway enforces it when a wide-research run starts.
+ 	{key: "research.max_fan_out_items", kind: "integer", order: orgAgentCountOrder(16), def: "8", failClose: "0"},
++	// Wave 3 EP-9 W2: the org's web switch. `off` withholds public web access from both agent loops;
++	// `cached_only` is reserved (refused not_enforced) until Quarry can answer from its cache alone.
++	{key: "web.mode", kind: "enum", order: []string{"off", "cached_only", "live"}, def: "live", failClose: "off", reservedValues: []string{"cached_only"}},
++	// Wave 3 EP-9 W2: whether a paid search provider may serve the org's agents.
++	{key: "web.paid_providers", kind: "enum", order: []string{"off", "on"}, def: "on", failClose: "off"},
+ }
+ 
+ // orgAgentCountOrder is the strictness order of an integer key: "0" to max, smallest first,
+@@ -172,6 +178,9 @@ func validateOrgAgentSettings(written map[string]any, ceiling map[string]string)
+ 		if def.reserved && token != def.def {
+ 			return nil, &orgAgentRefuseNotEnforced
+ 		}
++		if slices.Contains(def.reservedValues, token) {
++			return nil, &orgAgentRefuseNotEnforced
++		}
+ 		bound, ok := ceiling[def.key]
+ 		if !ok {
+ 			bound = def.order[len(def.order)-1]
+diff --git a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go
+index 877112912..f9d95fa8c 100644
+--- a/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go	
++++ b/apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go	
+@@ -7,6 +7,7 @@ import (
+ 	"net/http/httptest"
+ 	"os"
+ 	"reflect"
++	"slices"
+ 	"strings"
+ 	"testing"
+ 
+@@ -176,6 +177,9 @@ func TestOrgAgentPolicyValidationRefusesBeforeTheRegistryIsTouched(t *testing.T)
+ 		{name: "a fan-out cap that is a fraction", body: `{"settings":{"research.max_fan_out_items":8.5}}`, status: http.StatusBadRequest, code: "invalid_value"},
+ 		{name: "a negative fan-out cap", body: `{"settings":{"research.max_fan_out_items":-1}}`, status: http.StatusBadRequest, code: "invalid_value"},
+ 		{name: "a fan-out cap past sixteen", body: `{"settings":{"research.max_fan_out_items":17}}`, status: http.StatusBadRequest, code: "invalid_value"},
++		{name: "a reserved web mode", body: `{"settings":{"web.mode":"cached_only"}}`, status: http.StatusUnprocessableEntity, code: "not_enforced"},
++		{name: "a web mode outside its order", body: `{"settings":{"web.mode":"full"}}`, status: http.StatusBadRequest, code: "invalid_value"},
++		{name: "a paid switch written as a bool", body: `{"settings":{"web.paid_providers":true}}`, status: http.StatusBadRequest, code: "invalid_value"},
+ 	}
+ 	for _, tc := range tests {
+ 		t.Run(tc.name, func(t *testing.T) {
+@@ -347,8 +351,31 @@ func TestOrgAgentPolicyFanOutItemsIsATightenOnlyCount(t *testing.T) {
+ 	}
+ }
+ 
++// The org's web switches (EP-9 W2) are two enforced keys: web access takes off or live, paid search
++// takes off or on, and cached_only is refused until Quarry ships it. A write looser than the ceiling is refused.
++func TestOrgAgentPolicyWebSwitchesTakeOffOrLive(t *testing.T) {
++	ceiling := loosestOrgAgentCeiling()
++	for _, body := range []map[string]any{
++		{"web.mode": "off"},
++		{"web.mode": "live", "web.paid_providers": "off"},
++	} {
++		if _, refusal := validateOrgAgentSettings(body, ceiling); refusal != nil {
++			t.Fatalf("%v refused: %s", body, refusal.code)
++		}
++	}
++	settings, refusal := validateOrgAgentSettings(map[string]any{"web.mode": "off"}, ceiling)
++	if refusal != nil || settings["web.paid_providers"] != "on" {
++		t.Fatalf("settings = %v, refusal = %v; paid search should take its default on", settings, refusal)
++	}
++	strict := loosestOrgAgentCeiling()
++	strict["web.mode"] = "off"
++	if _, refusal := validateOrgAgentSettings(map[string]any{"web.mode": "live"}, strict); refusal == nil || refusal.code != "exceeds_platform_ceiling" {
++		t.Fatalf("live under an off ceiling = %v, want exceeds_platform_ceiling", refusal)
++	}
++}
++
+ // The golden holds the schema as data. This table must match it key by key, in order,
+-// with the same kinds, orders, defaults, fail-closed values and status.
++// with the same kinds, orders, defaults, fail-closed values, status and reserved values.
+ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
+ 	raw, err := os.ReadFile("../../../../../api/contracts/org-agent-policy-schema.json")
+ 	if err != nil {
+@@ -362,6 +389,7 @@ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
+ 			Default         string   `json:"default"`
+ 			FailClosedValue string   `json:"fail_closed_value"`
+ 			Status          string   `json:"status"`
++			ReservedValues  []string `json:"reserved_values"`
+ 		} `json:"settings"`
+ 		Refusals []string `json:"refusals"`
+ 	}
+@@ -381,6 +409,9 @@ func TestOrgAgentPolicySchemaMatchesTheGolden(t *testing.T) {
+ 			row.Default != def.def || row.FailClosedValue != def.failClose || row.Status != status {
+ 			t.Fatalf("key %s differs from the golden row %+v", def.key, row)
+ 		}
++		if !slices.Equal(row.ReservedValues, def.reservedValues) {
++			t.Fatalf("reserved values of %s differ from the golden: %v", def.key, row.ReservedValues)
++		}
+ 	}
+ 	codes := []string{orgAgentRefuseUnknownKey.code, orgAgentRefuseInvalidValue.code, orgAgentRefuseNotEnforced.code, orgAgentRefuseExceedsCeiling.code}
+ 	if !reflect.DeepEqual(golden.Refusals, codes) {
+diff --git a/apps/Model Plane/proto/model_plane/v1/execution.proto b/apps/Model Plane/proto/model_plane/v1/execution.proto
+index e100f92c1..7fbb860b9 100644
+--- a/apps/Model Plane/proto/model_plane/v1/execution.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/execution.proto	
+@@ -304,6 +304,24 @@ message OrgPolicyContext {
+   int64 policy_revision = 2;
+   // Digest of the policy document the rules came from. Empty until WS25 S7.
+   string policy_digest = 3;
++  // The org's web switches for this run (Wave 3 EP-9 W2; additive). Absent while the org policy does not bind
++  // web access (ORG_AGENT_POLICY_MODE is off or shadow, or the org has no policy held), so the run is exactly as
++  // it was before the field existed. execution-core withholds the public web tools when it says "off".
++  WebPolicyContext web = 4;
++}
++
++// WebPolicyContext is the org's web switches for one Do run (Wave 3 EP-9 W2; additive). Execution-core reads
++// `mode` to withhold the public web tools and to refuse a call to one; the other fields are attribution.
++message WebPolicyContext {
++  // The org's web mode the run was admitted under: "live" offers the web tools, "off" withholds them. Any
++  // other value is read as "off", so a mode this build does not know can only narrow the run.
++  string mode = 1;
++  // Whether a paid search provider may serve the org's agents. Execution-core's web search names no paid
++  // provider, so this is carried for attribution and is not enforced in the Do loop.
++  bool paid_providers = 2;
++  // The org policy revision the switches were read at. Zero when the policy was not held and the fail-closed
++  // switches apply (an enforced org the gateway could not read takes "off").
++  int64 revision = 3;
+ }
+ 
+ // ConnectorScope names the Integration Core connections one run may read (build plan WS23 S4).
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs b/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs
+index 2b096be91..bb34c8664 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs	
+@@ -6,7 +6,8 @@
+ //! written, the value enforcement falls back to when a stored value cannot be read, and
+ //! whether the key is enforced yet or reserved for a later stream. A reserved key takes
+ //! only its default; anything else is refused as `not_enforced` rather than stored and
+-//! silently ignored. capability-core validates writes against this table and
++//! silently ignored. A key that is enforced may still reserve single values
++//! (`reserved_values`), refused the same way. capability-core validates writes against this table and
+ //! `api/contracts/org-agent-policy-schema.json` pins it, so a key added on one side and
+ //! not the other fails a test.
+ //!
+@@ -100,6 +101,10 @@ pub struct SettingDef {
+     pub default: &'static str,
+     pub fail_closed_value: &'static str,
+     pub status: Status,
++    /// Tokens of `strictness_order` this build does not enforce yet. A write of one is refused
++    /// `not_enforced` while the key itself is enforced, so a value is never stored and then
++    /// silently ignored. Empty for a key whose every token is enforced.
++    pub reserved_values: &'static [&'static str],
+ }
+ 
+ pub const SETTINGS: &[SettingDef] = &[
+@@ -110,6 +115,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "auto",
+         fail_closed_value: "lockdown",
+         status: Status::Enforced,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "rung_cap",
+@@ -118,6 +124,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "danger_full_access",
+         fail_closed_value: "read_only",
+         status: Status::Enforced,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "lockdown",
+@@ -126,6 +133,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "false",
+         fail_closed_value: "true",
+         status: Status::Enforced,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "ext.mcp_servers",
+@@ -134,6 +142,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "any",
+         fail_closed_value: "none",
+         status: Status::Enforced,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "ext.skills",
+@@ -142,6 +151,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "any",
+         fail_closed_value: "none",
+         status: Status::Reserved,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "ext.plugins",
+@@ -150,6 +160,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "any",
+         fail_closed_value: "none",
+         status: Status::Reserved,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "mcp_tool_approval",
+@@ -158,6 +169,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "trust_annotations",
+         fail_closed_value: "approved_only",
+         status: Status::Enforced,
++        reserved_values: &[],
+     },
+     SettingDef {
+         key: "user_hooks",
+@@ -166,6 +178,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "allowed",
+         fail_closed_value: "denied",
+         status: Status::Reserved,
++        reserved_values: &[],
+     },
+     // WS08-S8 / DEC-37: the per-org opt-in for durable reference uploads. Reserved until a
+     // consumer enforces it (the WS25-S9 policy client, behind a CHAT_REFERENCE_UPLOADS_ENABLED
+@@ -177,6 +190,7 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "off",
+         fail_closed_value: "off",
+         status: Status::Reserved,
++        reserved_values: &[],
+     },
+     // Wave 3 EP-2 S8 (D5): the wide-research item cap. Enforced by the gateway when a run starts
+     // (behind WIDE_RESEARCH_ENTRY_ENABLED), which sends it to execution-core as the run's
+@@ -191,6 +205,29 @@ pub const SETTINGS: &[SettingDef] = &[
+         default: "8",
+         fail_closed_value: "0",
+         status: Status::Enforced,
++        reserved_values: &[],
++    },
++    // Wave 3 EP-9 W2: the org's web switch. `off` withholds public web access from every agent path
++    // (the inline loop and the Do loop); `cached_only` is reserved until Quarry can answer from its
++    // cache alone, so a write of it is refused rather than stored. Fail-closed is `off`.
++    SettingDef {
++        key: "web.mode",
++        kind: Kind::Enum,
++        strictness_order: &["off", "cached_only", "live"],
++        default: "live",
++        fail_closed_value: "off",
++        status: Status::Enforced,
++        reserved_values: &["cached_only"],
++    },
++    // Wave 3 EP-9 W2: whether a paid search provider may serve the org's agents. Fail-closed is `off`.
++    SettingDef {
++        key: "web.paid_providers",
++        kind: Kind::Enum,
++        strictness_order: &["off", "on"],
++        default: "on",
++        fail_closed_value: "off",
++        status: Status::Enforced,
++        reserved_values: &[],
+     },
+ ];
+ 
+@@ -265,6 +302,9 @@ pub fn validate(input: &Map<String, Value>, ceiling: &Ceiling) -> Result<Setting
+         if def.status == Status::Reserved && token != def.default {
+             return Err(Refusal::NotEnforced);
+         }
++        if def.reserved_values.contains(&token.as_str()) {
++            return Err(Refusal::NotEnforced);
++        }
+         let loosest = def.strictness_order.last().copied().unwrap_or(def.default);
+         let bound = ceiling.get(def.key).copied().unwrap_or(loosest);
+         if rank(def, &token) > rank(def, bound) {
+@@ -566,6 +606,60 @@ mod tests {
+         assert_eq!(def.status, Status::Enforced);
+     }
+ 
++    #[test]
++    fn org_agent_policy_web_mode_defaults_to_live_and_refuses_cached_only() {
++        let settings = defaults();
++        assert_eq!(settings["web.mode"], json!("live"));
++        assert_eq!(settings["web.paid_providers"], json!("on"));
++        assert_eq!(
++            validate(&doc(&json!({"web.mode": "cached_only"})), &loosest_ceiling()),
++            Err(Refusal::NotEnforced),
++            "cached_only is reserved until Quarry ships it"
++        );
++        for mode in ["off", "live"] {
++            assert!(
++                validate(&doc(&json!({"web.mode": mode})), &loosest_ceiling()).is_ok(),
++                "{mode} is enforced"
++            );
++        }
++        assert_eq!(
++            validate(&doc(&json!({"web.mode": "full"})), &loosest_ceiling()),
++            Err(Refusal::InvalidValue)
++        );
++    }
++
++    #[test]
++    fn org_agent_policy_web_mode_off_is_stricter_than_live_under_a_ceiling() {
++        let mut ceiling = loosest_ceiling();
++        ceiling.insert("web.mode", "off");
++        assert_eq!(
++            validate(&doc(&json!({"web.mode": "live"})), &ceiling),
++            Err(Refusal::ExceedsPlatformCeiling)
++        );
++        assert!(validate(&doc(&json!({"web.mode": "off"})), &ceiling).is_ok());
++    }
++
++    #[test]
++    fn org_agent_policy_web_paid_providers_takes_off_or_on_and_nothing_else() {
++        for token in ["off", "on"] {
++            assert!(
++                validate(
++                    &doc(&json!({"web.paid_providers": token})),
++                    &loosest_ceiling()
++                )
++                .is_ok(),
++                "{token}"
++            );
++        }
++        assert_eq!(
++            validate(
++                &doc(&json!({"web.paid_providers": true})),
++                &loosest_ceiling()
++            ),
++            Err(Refusal::InvalidValue)
++        );
++    }
++
+     #[test]
+     fn org_agent_policy_refusal_codes_are_the_closed_vocabulary() {
+         let codes: Vec<&str> = Refusal::ALL.iter().map(|refusal| refusal.code()).collect();
+diff --git a/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs b/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs
+index b11007573..583395fc4 100644
+--- a/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs	
++++ b/apps/Model Plane/rust/crates/mp-contracts/tests/org_agent_policy_golden.rs	
+@@ -42,6 +42,13 @@ fn org_agent_policy_schema_matches_the_golden_key_by_key() {
+             def.key
+         );
+         assert_eq!(row["status"], def.status.as_str(), "status of {}", def.key);
++        // A row without the field reserves no value; with it, the golden lists the values the key refuses.
++        let reserved: Vec<&str> = row["reserved_values"].as_array().map_or_else(Vec::new, |list| {
++            list.iter()
++                .map(|token| token.as_str().expect("a reserved value is text"))
++                .collect()
++        });
++        assert_eq!(reserved, def.reserved_values, "reserved values of {}", def.key);
+     }
+ }
+ 
+diff --git a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs
+index 22e5610ce..331fde4c3 100644
+--- a/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
++++ b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs	
+@@ -259,6 +259,41 @@ fn offered_among<'a>(offered: &'a BTreeSet<String>, names: &[&'static str]) -> V
+         .collect()
+ }
+ 
++/// The public-web tools an org's `web.mode=off` withholds from a Do run (Wave 3 EP-9 W2): web search and fetch with
++/// their aliases, and the crawl tools, which read public sites through Quarry as well.
++const ORG_WEB_TOOLS: &[&str] = &[
++    "web_search",
++    "web_fetch",
++    "web.search",
++    "web.read",
++    crate::web_tools::CRAWL_SITE_TOOL,
++    crate::web_tools::MAP_TOOL,
++    crate::web_tools::BATCH_TOOL,
++];
++
++/// Whether the run's org turned web access off. A run the gateway did not stamp with a web switch keeps its web access,
++/// as it did before the switch existed. A stamped run is withheld unless its mode is `live`, so a mode this build does
++/// not know narrows the run rather than widening it.
++fn org_web_off(req: &pb::RunAgentRequest) -> bool {
++    req.org_policy
++        .as_ref()
++        .and_then(|policy| policy.web.as_ref())
++        .is_some_and(|web| web.mode != "live")
++}
++
++/// Takes the public-web tools out of an offered set, for a run whose org turned web access off.
++fn withhold_org_web_tools(defs: &mut Vec<pb::ToolDefinition>) {
++    defs.retain(|tool| !ORG_WEB_TOOLS.contains(&tool.name.as_str()));
++}
++
++/// The refusal of a call to a public-web tool that the org's web switch takes away, or `None` when the call may run.
++/// It is answered before the purpose lock, so the person is told why rather than that the tool is out of scope.
++fn org_web_refusal(req: &pb::RunAgentRequest, tool_name: &str) -> Option<String> {
++    (org_web_off(req) && ORG_WEB_TOOLS.contains(&tool_name)).then(|| {
++        format!("org_web_off: the organisation has turned web access off, so '{tool_name}' is not run")
++    })
++}
++
+ /// Whether this offered set holds both a connected-account tool and a web or browser tool: the
+ /// only case in which the routing question exists.
+ #[must_use]
+@@ -1205,6 +1240,12 @@ async fn offered_tools(
+         governance,
+     )
+     .await;
++    // The org turned web access off (Wave 3 EP-9 W2): the public web tools are not shown to the model. A set with them
++    // withheld is not one a park resume derives again, so it is kept as the snapshot the pause retains.
++    if org_web_off(req) {
++        withhold_org_web_tools(&mut defs);
++        derivable = false;
++    }
+     // `ask_user` (WS14 S4) is named by the deployment and never by a caller: a caller's or an MCP
+     // tool of that name is dropped, and the built-in is offered only where `ask::budget` allows it.
+     // Appended after the base set, so the run is not derivable, as the browser tools are.
+@@ -3907,6 +3948,16 @@ async fn run_rounds(
+                 }));
+                 continue;
+             }
++            // The org turned web access off (Wave 3 EP-9 W2): a web call gets its own typed refusal, ahead of the
++            // purpose lock, so the person is told why and no request leaves the run.
++            if let Some(refusal) = org_web_refusal(req, &call.name) {
++                slots.push(CallSlot::Rejected(ToolStepResult {
++                    name: call.name.clone(),
++                    output: String::new(),
++                    error: Some(refusal),
++                }));
++                continue;
++            }
+             // Purpose-lock: reject any tool not in the offered allowlist.
+             if !ctx.allowlist.contains(&call.name) {
+                 warn!(
+@@ -32402,6 +32453,73 @@ mod tests {
+     }
+ }
+ 
++#[cfg(test)]
++mod org_web_switch_tests {
++    use super::*;
++
++    /// A request under the org web mode `mode`, or with no org web switch at all when `mode` is `None`.
++    fn request_under_web_mode(mode: Option<&str>) -> pb::RunAgentRequest {
++        pb::RunAgentRequest {
++            org_policy: mode.map(|mode| pb::OrgPolicyContext {
++                web: Some(pb::WebPolicyContext {
++                    mode: mode.to_owned(),
++                    paid_providers: true,
++                    revision: 3,
++                }),
++                ..Default::default()
++            }),
++            ..Default::default()
++        }
++    }
++
++    #[test]
++    fn org_web_off_offers_no_web_tools() {
++        // The base set offers the public web tools, so withholding them is a change this test can see.
++        let mut defs = offered_tool_defs();
++        assert!(defs.iter().any(|tool| tool.name == "web_search"));
++        assert!(defs.iter().any(|tool| tool.name == "web.read"));
++        assert!(org_web_off(&request_under_web_mode(Some("off"))));
++        withhold_org_web_tools(&mut defs);
++        for name in ORG_WEB_TOOLS {
++            assert!(defs.iter().all(|tool| tool.name != *name), "{name} is still offered");
++        }
++        // Only the web tools go: every other offered tool stays.
++        assert_eq!(
++            defs.len(),
++            offered_tool_defs()
++                .iter()
++                .filter(|tool| !ORG_WEB_TOOLS.contains(&tool.name.as_str()))
++                .count()
++        );
++        // A live run, and a run the gateway did not stamp, keep the web tools as they were. A mode this build does
++        // not know narrows the run.
++        assert!(!org_web_off(&request_under_web_mode(Some("live"))));
++        assert!(!org_web_off(&request_under_web_mode(None)));
++        assert!(org_web_off(&request_under_web_mode(Some("cached_only"))));
++    }
++
++    #[test]
++    fn org_web_off_refuses_a_forged_call() {
++        let off = request_under_web_mode(Some("off"));
++        for name in [
++            "web_search",
++            "web.search",
++            "web_fetch",
++            "web.read",
++            "knowledge.crawl_site",
++            "knowledge.map",
++            "knowledge.batch",
++        ] {
++            let refusal = org_web_refusal(&off, name).expect("a web call under web off is refused");
++            assert!(refusal.starts_with("org_web_off: "), "{refusal}");
++        }
++        // Calls the switch does not touch reach the purpose lock and the gates as before.
++        assert_eq!(org_web_refusal(&off, "knowledge_search"), None);
++        assert_eq!(org_web_refusal(&request_under_web_mode(Some("live")), "web_search"), None);
++        assert_eq!(org_web_refusal(&request_under_web_mode(None), "web_search"), None);
++    }
++}
++
+ /// EP-6 S10: the `role` parameter on `subagent.task`, from published agent definitions.
+ #[cfg(test)]
+ mod subagent_role_tests {
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs b/apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs
+index 39c010acc..9f6e6b6cc 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs	
+@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
+ use dashmap::DashMap;
+ use mp_contracts::agent_mode::{self, AgentMode, Resolved};
+ use mp_contracts::autonomy;
+-use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext};
++use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext, WebPolicyContext};
+ use mp_contracts::org_agent_policy::{Kind, SettingDef, SETTINGS};
+ use serde::Deserialize;
+ use serde_json::{Map, Value};
+@@ -84,6 +84,25 @@ pub fn policy_mode() -> PolicyMode {
+     })
+ }
+ 
++/// The org's web switches as the gateway enforces them (Wave 3 EP-9 W2). Each is read from its key of the document
++/// with the schema's fail-closed value for any token this build cannot read.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct WebCaps {
++    /// Whether `web.mode` is `live`. `off` withholds public web access from every agent path; so does any token this
++    /// build does not enforce (`cached_only` is reserved and never stored).
++    pub live: bool,
++    /// Whether `web.paid_providers` is `on`: a paid search provider may serve the org's agents.
++    pub paid: bool,
++}
++
++impl WebCaps {
++    /// The switches an enforced org the gateway cannot see is held to: the schema's fail-closed values.
++    pub const FAIL_CLOSED: Self = Self {
++        live: false,
++        paid: false,
++    };
++}
++
+ /// An org's policy as the gateway enforces it, built from the document capability-core answers with.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct OrgPolicy {
+@@ -100,6 +119,8 @@ pub struct OrgPolicy {
+     /// The most items one wide-research run may fan out (`research.max_fan_out_items`, EP-2 S8). A value this build
+     /// cannot read is 0: wide research off for the org.
+     pub max_fan_out_items: u32,
++    /// The org's web switches (`web.mode`, `web.paid_providers`, Wave 3 EP-9 W2).
++    pub web: WebCaps,
+ }
+ 
+ impl OrgPolicy {
+@@ -129,6 +150,10 @@ impl OrgPolicy {
+             max_fan_out_items: token(mp_contracts::org_agent_policy::RESEARCH_MAX_FAN_OUT_ITEMS)
+                 .parse()
+                 .unwrap_or(0),
++            web: WebCaps {
++                live: token("web.mode") == "live",
++                paid: token("web.paid_providers") == "on",
++            },
+         }
+     }
+ }
+@@ -374,12 +399,21 @@ pub async fn admit_turn(
+         PolicyMode::Off => Ok(None),
+         PolicyMode::Shadow => {
+             match ensure(cache, client, base_url, org_id, bearer).await {
+-                Ok(policy) if policy.mode_cap != AgentMode::Auto => tracing::info!(
+-                    %org_id,
+-                    would_mode_cap = policy.mode_cap.as_str(),
+-                    "org agent policy (shadow): the mode cap would bind this turn"
+-                ),
+-                Ok(_) => {}
++                Ok(policy) => {
++                    if policy.mode_cap != AgentMode::Auto {
++                        tracing::info!(
++                            %org_id,
++                            would_mode_cap = policy.mode_cap.as_str(),
++                            "org agent policy (shadow): the mode cap would bind this turn"
++                        );
++                    }
++                    if !policy.web.live {
++                        tracing::info!(
++                            %org_id,
++                            "org agent policy (shadow): web access would be withheld for this turn"
++                        );
++                    }
++                }
+                 Err(error) => {
+                     tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read")
+                 }
+@@ -496,6 +530,49 @@ pub fn stamp_policy_revision(
+     context.policy_digest = digest;
+ }
+ 
++/// The org's web switches for an inline turn, when the switch enforces them and the policy is held. `None` leaves the
++/// turn's web access as the person chose it: a turn is never refused web access because its policy cannot be read,
++/// since an outage must not silently break an answer.
++#[must_use]
++pub fn held_web_caps(mode: PolicyMode, cache: &OrgPolicyCache, org_id: &str) -> Option<WebCaps> {
++    match mode {
++        PolicyMode::Enforce => cache.policy(org_id).map(|policy| policy.web),
++        PolicyMode::Off | PolicyMode::Shadow => None,
++    }
++}
++
++/// Whether the org's switch lets a paid search provider serve this turn. It reads the cache the turn's admission left
++/// warm, as [`held_rung_cap`] does, so the search path needs no extra parameter.
++#[must_use]
++pub fn org_allows_paid_providers(org_id: &str) -> bool {
++    held_web_caps(policy_mode(), shared_cache(), org_id).is_none_or(|caps| caps.paid)
++}
++
++/// Carries the org's web switches on a Do run's policy context, so execution-core withholds the web tools by the policy
++/// the run was admitted under. Enforced and held: the held switches and their revision. Enforced but not held: the
++/// fail-closed switches at revision zero, as the rung is held to the narrowest rung ([`dispatch_rung_cap`]). Off and
++/// shadow stamp nothing, so the request is exactly as it was.
++pub fn stamp_web_policy(
++    mode: PolicyMode,
++    cache: &OrgPolicyCache,
++    org_id: &str,
++    org_policy: &mut Option<OrgPolicyContext>,
++) {
++    let (caps, revision) = match mode {
++        PolicyMode::Enforce => match cache.policy(org_id) {
++            Some(policy) => (policy.web, policy.revision),
++            None => (WebCaps::FAIL_CLOSED, 0),
++        },
++        PolicyMode::Off | PolicyMode::Shadow => return,
++    };
++    let context = org_policy.get_or_insert_with(OrgPolicyContext::default);
++    context.web = Some(WebPolicyContext {
++        mode: if caps.live { "live" } else { "off" }.to_owned(),
++        paid_providers: caps.paid,
++        revision,
++    });
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -680,6 +757,99 @@ mod tests {
+         assert_eq!(held_rung_cap(PolicyMode::Shadow, &cache, "org-held"), None);
+     }
+ 
++    #[test]
++    fn org_agent_policy_web_switches_are_read_from_the_document_and_fail_closed() {
++        let default = OrgPolicy::from_settings(0, "", &settings(json!({})));
++        assert_eq!(default.web, WebCaps { live: true, paid: true });
++        let off = OrgPolicy::from_settings(
++            1,
++            "d",
++            &settings(json!({"web.mode": "off", "web.paid_providers": "off"})),
++        );
++        assert_eq!(off.web, WebCaps { live: false, paid: false });
++        // cached_only is reserved and never stored, and a value this build cannot read takes the fail-closed off.
++        let reserved = OrgPolicy::from_settings(1, "d", &settings(json!({"web.mode": "cached_only"})));
++        assert!(!reserved.web.live);
++        let unreadable = OrgPolicy::from_settings(
++            1,
++            "d",
++            &settings(json!({"web.mode": 3, "web.paid_providers": "maybe"})),
++        );
++        assert_eq!(unreadable.web, WebCaps::FAIL_CLOSED);
++    }
++
++    #[test]
++    fn org_agent_policy_an_off_web_switch_makes_the_policy_restrictive() {
++        let off = OrgPolicy::from_settings(2, "sha256:2", &settings(json!({"web.mode": "off"})));
++        assert!(off.restrictive, "a stale answer that withholds web access keeps the long bound");
++        assert!(!OrgPolicy::from_settings(0, "", &Map::new()).restrictive);
++    }
++
++    #[test]
++    fn org_agent_policy_web_switches_bind_inline_turns_only_under_enforcement_and_when_held() {
++        let cache = OrgPolicyCache::new();
++        cache.store(
++            "org-web-off",
++            OrgPolicy::from_settings(3, "sha256:3", &settings(json!({"web.mode": "off"}))),
++            Instant::now(),
++        );
++        assert_eq!(
++            held_web_caps(PolicyMode::Enforce, &cache, "org-web-off"),
++            Some(WebCaps { live: false, paid: true })
++        );
++        assert_eq!(held_web_caps(PolicyMode::Shadow, &cache, "org-web-off"), None);
++        assert_eq!(held_web_caps(PolicyMode::Off, &cache, "org-web-off"), None);
++        assert_eq!(
++            held_web_caps(PolicyMode::Enforce, &cache, "org-web-unknown"),
++            None,
++            "an unread policy never turns web access off for an inline turn"
++        );
++    }
++
++    #[test]
++    fn org_agent_policy_a_do_run_carries_the_web_switches_it_was_admitted_under() {
++        let cache = OrgPolicyCache::new();
++        cache.store(
++            "org-web-run",
++            OrgPolicy::from_settings(4, "sha256:4", &settings(json!({"web.mode": "off"}))),
++            Instant::now(),
++        );
++        let mut context = None;
++        stamp_web_policy(PolicyMode::Enforce, &cache, "org-web-run", &mut context);
++        let web = context
++            .as_ref()
++            .and_then(|context| context.web.as_ref())
++            .expect("the run carries its web switches");
++        assert_eq!((web.mode.as_str(), web.paid_providers, web.revision), ("off", true, 4));
++
++        cache.store(
++            "org-web-live",
++            OrgPolicy::from_settings(5, "sha256:5", &Map::new()),
++            Instant::now(),
++        );
++        let mut live = None;
++        stamp_web_policy(PolicyMode::Enforce, &cache, "org-web-live", &mut live);
++        let web = live
++            .as_ref()
++            .and_then(|context| context.web.as_ref())
++            .expect("the run carries its web switches");
++        assert_eq!(web.mode, "live");
++
++        // An enforced org the cache does not hold is held to the fail-closed switches at revision zero.
++        let mut unknown = None;
++        stamp_web_policy(PolicyMode::Enforce, &cache, "org-web-unknown", &mut unknown);
++        let web = unknown
++            .as_ref()
++            .and_then(|context| context.web.as_ref())
++            .expect("the run is held to the fail-closed switches");
++        assert_eq!((web.mode.as_str(), web.paid_providers, web.revision), ("off", false, 0));
++
++        // Off and shadow stamp nothing, so the request is exactly as it was.
++        let mut shadow = None;
++        stamp_web_policy(PolicyMode::Shadow, &cache, "org-web-run", &mut shadow);
++        assert!(shadow.is_none());
++    }
++
+     #[test]
+     fn org_agent_policy_attribution_carries_the_revision_without_hook_rules() {
+         let mut context = None;
+@@ -746,6 +916,46 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn org_agent_policy_a_web_off_answer_is_held_for_the_restrictive_bound() {
++        let server = MockServer::start().await;
++        Mock::given(method("GET"))
++            .and(path(ORG_AGENT_POLICY_PATH))
++            .respond_with(ResponseTemplate::new(200).set_body_json(document(
++                "org-web-stale",
++                6,
++                json!({"web.mode": "off"}),
++            )))
++            .mount(&server)
++            .await;
++        let cache = OrgPolicyCache::new();
++        let client = reqwest::Client::new();
++        let t0 = Instant::now();
++        ensure_at(&cache, &client, &server.uri(), "org-web-stale", "token", t0)
++            .await
++            .expect("the registry answers");
++
++        server.reset().await;
++        Mock::given(method("GET"))
++            .and(path(ORG_AGENT_POLICY_PATH))
++            .respond_with(ResponseTemplate::new(503))
++            .mount(&server)
++            .await;
++        // Past the 30 s TTL, a refresh that fails keeps web access off for the restrictive bound: a registry
++        // outage cannot quietly turn an org's web access back on.
++        let held = ensure_at(
++            &cache,
++            &client,
++            &server.uri(),
++            "org-web-stale",
++            "token",
++            t0 + Duration::from_secs(600),
++        )
++        .await
++        .expect("the restrictive answer is inside its 900 s bound");
++        assert!(!held.web.live);
++    }
++
+     #[tokio::test]
+     async fn org_agent_policy_a_permissive_answer_is_served_for_120_seconds_only() {
+         let server = MockServer::start().await;
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse.rs b/apps/Model Plane/rust/services/model-gateway/src/sse.rs
+index a33800ddd..63e1992d3 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse.rs	
+@@ -2259,6 +2259,24 @@ pub async fn invoke_stream_sse(
+             );
+         }
+     };
++    // The org's web switches (Wave 3 EP-9 W2), read from the policy the admission above left warm. `None` when the
++    // policy does not bind this turn, so its web access stays what the person chose.
++    let org_web_off = crate::org_agent_policy::held_web_caps(
++        crate::org_agent_policy::policy_mode(),
++        crate::org_agent_policy::shared_cache(),
++        &org_id,
++    )
++    .is_some_and(|caps| !caps.live);
++    // Deep research is a web turn by definition: it searches outside the tool loop, so an organisation that turned web
++    // access off refuses it here, before any plan or search runs.
++    if req.deep_research && org_web_off {
++        return error_stream(
++            &request_id,
++            "org_web_off",
++            "The organisation has turned web access off, so deep research cannot run.",
++            false,
++        );
++    }
+     let chosen_mode = match crate::profile::chosen_agent_mode(
+         crate::profile::agent_modes_enabled(),
+         req.agent_mode.as_deref(),
+@@ -3954,6 +3972,20 @@ pub async fn invoke_stream_sse(
+             tool_defs.push(web_search);
+         }
+     }
++    // The organisation's web switch (Wave 3 EP-9 W2) withholds the public web tools whatever the turn asked for, so
++    // the model is not shown them and a call to one is refused as not offered. Taken out before the scope filter
++    // below, so each withheld tool is named once, here. The notice further down says what was withheld and why.
++    let excluded_by_org_web: Vec<String> = if org_web_off {
++        let withheld: Vec<String> = tool_defs
++            .iter()
++            .filter(|tool| crate::tool_loop::is_public_web_tool(&tool.name))
++            .map(|tool| tool.name.clone())
++            .collect();
++        tool_defs.retain(|tool| !crate::tool_loop::is_public_web_tool(&tool.name));
++        withheld
++    } else {
++        Vec::new()
++    };
+     if conversation_only {
+         tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
+         prompt.conversation_scope = Some(ChatMessage {
+@@ -4341,16 +4373,26 @@ pub async fn invoke_stream_sse(
+         // receipt has no frame. `conversation_only` forces the filter to
+         // `Auto`, so a Space-scoped conversation-only turn reaches this frame
+         // only through its knowledge receipt (WS18-S3).
+-        if retrieval_scope != crate::normalize::RetrievalScope::Auto || knowledge.is_some() {
++        // An organisation withholding web tools is a reason to say so too, with the same frame (Wave 3 EP-9 W2).
++        if retrieval_scope != crate::normalize::RetrievalScope::Auto
++            || knowledge.is_some()
++            || !excluded_by_org_web.is_empty()
++        {
+             sink.emit(crate::sse_events::ChatEvent::SourceScopeApplied {
+                 scope: match retrieval_scope {
+                     crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only".to_owned(),
+                     crate::normalize::RetrievalScope::WebOnly => "web_only".to_owned(),
+-                    // Reached only with a knowledge receipt, since the guard above admits Auto for nothing else.
++                    // Reached with a knowledge receipt or an organisation withholding, since the guard above admits
++                    // Auto for nothing else.
+                     crate::normalize::RetrievalScope::Auto => "auto".to_owned(),
+                 },
+-                excluded_tools: excluded_by_retrieval_scope.clone(),
++                excluded_tools: excluded_by_org_web
++                    .iter()
++                    .chain(excluded_by_retrieval_scope.iter())
++                    .cloned()
++                    .collect(),
+                 knowledge,
++                reason: (!excluded_by_org_web.is_empty()).then(|| "org_web_off".to_owned()),
+             })
+             .await;
+         }
+@@ -12683,6 +12725,14 @@ fn spawn_run_dispatch(
+             org_id,
+         ),
+     );
++    // The org's web switches travel with the run (Wave 3 EP-9 W2), so execution-core withholds the public web tools by
++    // the policy the run was admitted under. An enforced org the cache does not hold is held to the fail-closed switches.
++    crate::org_agent_policy::stamp_web_policy(
++        crate::org_agent_policy::policy_mode(),
++        crate::org_agent_policy::shared_cache(),
++        org_id,
++        &mut run_agent_req.org_policy,
++    );
+     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
+     run_agent_req.max_questions = max_questions;
+     // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs
+index b26e16566..b8d8bc0a5 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs	
+@@ -342,6 +342,9 @@ pub enum ChatEvent {
+         /// What the Space's knowledge did for this turn (WS18-S3). Absent for a turn no Space
+         /// scopes, so those frames stay byte-identical to before.
+         knowledge: Option<KnowledgeReceipt>,
++        /// Why tools were withheld for a reason the person did not ask for (Wave 3 EP-9 W2): `"org_web_off"` when
++        /// the organisation turned web access off. Absent otherwise, so those frames stay byte-identical to before.
++        reason: Option<String>,
+     },
+     /// Structured internal grounding payload rendered by the chat UI.
+     Grounding {
+@@ -869,11 +872,14 @@ impl ChatEvent {
+                 }
+                 payload
+             }
+-            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge } => {
++            ChatEvent::SourceScopeApplied { scope, excluded_tools, knowledge, reason } => {
+                 let mut payload = json!({ "scope": scope, "excluded_tools": excluded_tools });
+                 if let Some(receipt) = knowledge {
+                     payload["knowledge"] = serde_json::to_value(receipt).unwrap_or_else(|_| json!({}));
+                 }
++                if let Some(reason) = reason {
++                    payload["reason"] = json!(reason);
++                }
+                 payload
+             }
+             ChatEvent::Grounding { grounding } => {
+@@ -3840,21 +3846,24 @@ mod payload_contract {
+             ChatEvent::ToolResult { id: s("1"), status: s("error"), output: s("out"), error: Some(s("boom")) },
+             citation(false),
+             citation(true),
+-            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None },
++            ChatEvent::SourceScopeApplied { scope: s("web_only"), excluded_tools: Vec::new(), knowledge: None, reason: None },
+             ChatEvent::SourceScopeApplied {
+                 scope: s("knowledge_only"),
+                 excluded_tools: vec![s("web_search")],
+                 knowledge: None,
++                reason: None,
+             },
+             ChatEvent::SourceScopeApplied {
+                 scope: s("auto"),
+                 excluded_tools: Vec::new(),
+                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::NotEntitled, sources: None }),
++                reason: None,
+             },
+             ChatEvent::SourceScopeApplied {
+                 scope: s("knowledge_only"),
+                 excluded_tools: vec![s("web_search")],
+                 knowledge: Some(KnowledgeReceipt { mode: KnowledgeMode::Retrieval, sources: Some(3) }),
++                reason: None,
+             },
+             grounding(false),
+             grounding(true),
+@@ -4252,6 +4261,28 @@ mod payload_contract {
+         assert_eq!(key("retrieval_notice", "wording_key").unwrap()["presence"], "always");
+     }
+ 
++    #[test]
++    fn source_scope_applied_names_the_org_web_switch_only_when_it_withheld_a_tool() {
++        let withheld = ChatEvent::SourceScopeApplied {
++            scope: s("auto"),
++            excluded_tools: vec![s("web_search"), s("fetch_url")],
++            knowledge: None,
++            reason: Some(s("org_web_off")),
++        };
++        let payload = withheld.payload("req-1");
++        assert_eq!(payload["reason"], "org_web_off");
++        assert_eq!(payload["excluded_tools"], json!(["web_search", "fetch_url"]));
++
++        // A turn no organisation switch touched keeps its frame as it was: no reason key at all.
++        let plain = ChatEvent::SourceScopeApplied {
++            scope: s("web_only"),
++            excluded_tools: Vec::new(),
++            knowledge: None,
++            reason: None,
++        };
++        assert!(plain.payload("req-1").get("reason").is_none());
++    }
++
+     #[test]
+     fn sse_event_payload_golden() {
+         let generated = render();
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs
+index 87cd5c5fc..e67f8317f 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs	
+@@ -6025,6 +6025,13 @@ const ORG_CLASS_TOOLS: &[&str] = &[
+ /// DEC-26), so a source-filtered turn never sees the read.
+ const CONNECTOR_CLASS_TOOLS: &[&str] = &[mp_contracts::provider_reads::READ_TOOL_NAME];
+ 
++/// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
++/// retrieval scope already calls web, so the two gates never disagree about what counts as the web.
++#[must_use]
++pub fn is_public_web_tool(name: &str) -> bool {
++    WEB_CLASS_TOOLS.contains(&name)
++}
++
+ /// Whether `name` may be offered under a per-turn `RetrievalScope`
+ /// (chat-wave2 scope spec §2.3), the same enforcement chokepoint
+ /// `conversation_tool_allowed` uses: `tool_defs.retain(...)` right after
+@@ -7250,7 +7257,9 @@ pub async fn run_forced_web_search_for_model(
+         // A forced `web_search` and nothing else, so no Data Plane retrieval is
+         // reachable from here — same reasoning as `dispatch_web_tool_audited`.
+         mp_contracts::dataplane_posture::SOVEREIGN_REQUIRED_WITHOUT_SIGNAL,
+-        paid_providers_allowed(requested_model, zdr),
++        // The org's `web.paid_providers` switch (Wave 3 EP-9 W2) can only take the grant away.
++        paid_providers_allowed(requested_model, zdr)
++            && crate::org_agent_policy::org_allows_paid_providers(org_id),
+         &call,
+         None,
+         // web_search only: code_interpreter, the sole reader of the sandbox
+@@ -8566,7 +8575,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
+     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
+     // property of the turn, and a value re-derived per round is a value that can
+     // disagree with itself mid-turn.
+-    let allow_paid_providers = paid_providers_allowed(requested_model, zdr);
++    // The org's `web.paid_providers` switch (Wave 3 EP-9 W2) is read with the entitlement, once per turn.
++    let allow_paid_providers =
++        paid_providers_allowed(requested_model, zdr) && crate::org_agent_policy::org_allows_paid_providers(org_id);
+     // Batched web search is decided once for the turn, so every call of the turn agrees, and its refs live only in
+     // this map, dropped with the turn. `None` (the switch off) leaves every web-search path as it was.
+     let turn_refs = web_search_batch_enabled().then(TurnRefs::default);
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs b/apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs
+index 7a8040060..d960702a8 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs	
+@@ -5,8 +5,8 @@
+ use std::time::Instant;
+ 
+ use model_gateway::org_agent_policy::{
+-    clamp_rung, dispatch_rung_cap, held_revision, held_rung_cap, resolve_turn, OrgPolicy,
+-    OrgPolicyCache, PolicyMode,
++    clamp_rung, dispatch_rung_cap, held_revision, held_rung_cap, held_web_caps, resolve_turn,
++    stamp_web_policy, OrgPolicy, OrgPolicyCache, PolicyMode, WebCaps,
+ };
+ use model_gateway::profile::ApprovalPosture;
+ use mp_contracts::agent_mode::AgentMode;
+@@ -134,6 +134,51 @@ fn a_run_is_attributed_to_the_held_revision_only_under_enforcement() {
+     );
+ }
+ 
++#[test]
++fn an_org_that_turns_web_access_off_is_held_to_it_and_an_unread_one_is_not() {
++    let cache = held(
++        "org-policy-it-web",
++        json!({"web.mode": "off", "web.paid_providers": "off"}),
++    );
++    // The inline loop reads the switches the admission left warm; they bind only under enforcement.
++    assert_eq!(
++        held_web_caps(PolicyMode::Enforce, &cache, "org-policy-it-web"),
++        Some(WebCaps {
++            live: false,
++            paid: false
++        })
++    );
++    assert_eq!(
++        held_web_caps(PolicyMode::Shadow, &cache, "org-policy-it-web"),
++        None
++    );
++    // A Do run is stamped with the switches it was admitted under.
++    let mut stamped = None;
++    stamp_web_policy(PolicyMode::Enforce, &cache, "org-policy-it-web", &mut stamped);
++    let web = stamped
++        .as_ref()
++        .and_then(|context| context.web.as_ref())
++        .expect("the run carries its web switches");
++    assert_eq!(web.mode, "off");
++    assert!(!web.paid_providers);
++    // An enforced org the cache does not hold: the Do run is held to the fail-closed switches, and an inline
++    // turn keeps its web access, because an outage on Ask must not silently break an answer.
++    let empty = OrgPolicyCache::new();
++    let mut unread = None;
++    stamp_web_policy(PolicyMode::Enforce, &empty, "org-policy-it-unread", &mut unread);
++    assert_eq!(
++        unread
++            .as_ref()
++            .and_then(|context| context.web.as_ref())
++            .map(|web| web.mode.as_str()),
++        Some("off")
++    );
++    assert_eq!(
++        held_web_caps(PolicyMode::Enforce, &empty, "org-policy-it-unread"),
++        None
++    );
++}
++
+ /// The decisions above reach the request only through the call sites that make it. These guards read the
+ /// gateway source for each call, in the same style as the other contract tests of this crate.
+ #[test]
+@@ -157,3 +202,25 @@ fn the_admission_the_dispatch_and_the_grant_all_call_the_policy() {
+         "record_grant must hold the grant to the org's rung cap"
+     );
+ }
++
++/// The org's web switches (Wave 3 EP-9 W2) reach both loops: the inline turn withholds the public web tools and the
++/// paid grant, and a Do run is stamped for execution-core. Each is a call site this crate makes, so the guard reads
++/// the source for it.
++#[test]
++fn the_web_switches_reach_both_loops() {
++    let sse = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sse.rs"))
++        .expect("sse.rs is readable");
++    for call in [
++        "org_agent_policy::held_web_caps(",
++        "org_agent_policy::stamp_web_policy(",
++        "tool_loop::is_public_web_tool",
++    ] {
++        assert!(sse.contains(call), "sse.rs must make the call {call}");
++    }
++    let tool_loop = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/tool_loop.rs"))
++        .expect("tool_loop.rs is readable");
++    assert!(
++        tool_loop.contains("org_agent_policy::org_allows_paid_providers("),
++        "the paid search grant must be read with the org's web.paid_providers switch"
++    );
++}

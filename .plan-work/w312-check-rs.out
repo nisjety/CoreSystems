@@ -1,0 +1,18 @@
+services\execution-core\src\capability_policy.rs:367:57: warning: unreachable `else` clause
+services\execution-core\src\approval_delivery_worker.rs:753:4: warning: function `verification_result_for` is never used
+services\execution-core\src\runtime_loop\mod.rs:664:21: warning: function `execute_step_with_subagent` is never used
+services\execution-core\src\runtime_loop\resume.rs:602:15: warning: function `decision_closer` is never used
+warning: `execution-core` (lib) generated 4 warnings
+services\inference-core\src\provider\anthropic.rs:1145:4: warning: function `build_request_body_with_context_management` is never used
+warning: `inference-core` (lib) generated 1 warning
+    Checking session-core v0.1.0 (C:\dev\CoresSystem\.claude\worktrees\epic-shaw-4d613b\apps\Model Plane\rust\services\session-core)
+services\model-gateway\src\browser_run.rs:6060:13: warning: unused `axum::Json` that must be used
+services\model-gateway\src\browser_run.rs:6102:13: warning: unused `axum::Json` that must be used
+services\model-gateway\src\browser_run.rs:6148:13: warning: unused `axum::Json` that must be used
+services\model-gateway\src\http_routes.rs:18739:9: warning: unused `axum::Json` that must be used
+services\model-gateway\src\http_routes.rs:18742:9: warning: unused `axum::Json` that must be used
+warning: `model-gateway` (lib test) generated 5 warnings
+services\session-core\src\auth.rs:73:12: warning: method `provider` is never used
+services\session-core\src\terminalization.rs:730:21: warning: function `start_managed_run_inner` is never used
+warning: `session-core` (bin "session-core") generated 2 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 36s

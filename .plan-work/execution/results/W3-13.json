@@ -1,0 +1,593 @@
+{
+ "batchId": "W3-13",
+ "wave": 3,
+ "results": [
+  {
+   "id": "EP-2-S4",
+   "status": "blocked",
+   "files_changed": [],
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-1",
+   "notes": "Wrong base: the worktree is isolated but was not cut from model-plane. HEAD is 21d636a5a (fix/ui-premium-restore line, dated 2026-09-23). model-plane HEAD is cdfeb5d27, which contains HEAD and is 2606 commits ahead of it. The slice's own files differ heavily between the two: sse_events.rs +3225 lines, session_flow.rs +1948, gen-sse-event-taxonomy.py +413, ChatPanels.tsx +334, deep_research.rs +48. The design doc docs/plans/wave3/EP-2-research-and-citations.md is not in this tree either. A patch built here would not apply to model-plane. I am not allowed to run git checkout or reset, so I made no edits and wrote no patch. Re-launch with a worktree cut from model-plane (cdfeb5d27 or later).",
+   "lead_todo": [
+    "Re-create the EP-2-S4 builder worktree from branch model-plane (not fix/ui-premium-restore) and re-run the slice"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Workflow worktree wf_f130d498-73f-1 was cut from fix/ui-premium-restore (21d636a5a) instead of model-plane, so other W3-13 builders may have the same stale base and produce patches that do not apply."
+    }
+   ],
+   "outcome": "needs-attention",
+   "tests_run": []
+  },
+  {
+   "id": "EP-2-S8",
+   "status": "blocked",
+   "files_changed": [],
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-2",
+   "notes": "Wrong base, not model-plane HEAD. The isolated worktree is at commit 21d636a5a (\"docs: organize Verevon plans and recording evidence\", the fix/ui-premium-restore line). It is 2606 commits behind model-plane (cdfeb5d27) and 0 ahead. In this tree, org_agent_policy.rs, subagent/research_fan_out.rs and docs/plans/wave3/ (the design and the round A/B reports) do not exist. agent.rs and http_routes.rs differ from model-plane by tens of thousands of lines. A patch built here would not apply to model-plane, and the rules forbid git checkout/reset in the worktree, so I made no edits and wrote no patch. Fix: re-launch the slice in a worktree created from model-plane HEAD (git worktree add <path> model-plane, or a detached checkout of cdfeb5d27).",
+   "lead_todo": [
+    "Re-launch EP-2-S8 in an isolated worktree whose HEAD is model-plane (cdfeb5d27 or later). The harness created wf_f130d498-73f-2 from 21d636a5a instead. Other W3-13 builders may have the same wrong base, so check their worktrees' HEAD before applying their patches."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Workflow worktree wf_f130d498-73f-2 was cut from 21d636a5a, not model-plane, so any patch produced in a worktree like it is based on a tree 2606 commits behind and will not apply cleanly."
+    }
+   ],
+   "outcome": "needs-attention",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-3",
+   "files_changed": [
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go",
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/cron/run_now.go",
+    "apps/Model Plane/go/services/capability-core/internal/cron/run_now_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/taskexec/workflow_dispatcher_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/cron_run_now_test.go",
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_actions.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/cron-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/cron-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+   ],
+   "notes": "Patch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-13/EP-6-S2.patch (14 files, 1717 lines). The isolated worktree was NOT a checkout of model-plane's HEAD: it sat at 21d636a5a (fix/ui-premium-restore), which is an ancestor of model-plane cdfeb5d27. I could not run checkout, so I copied each owned file from its model-plane blob (git show, LF bytes), edited those copies, and built the patch as `git diff --cached --binary model-plane -- <the 18 owned paths>`. The patch therefore applies against model-plane, not against the worktree HEAD. The four zdr-posture-matrix files are byte-identical to model-plane and do not appear in the patch.\n\nWhat was built (CRON_RUN_NOW_ENABLED, strict literal \"true\", default off):\n- capability-core: `InsertFire` and an exported `DueSchedule` view were extracted from `fireOne`. Statements, arguments and order are unchanged, and `fireOne` calls `InsertFire` with the slot key.\n- capability-core: new `cron.RunNow`. It runs as one transaction under a `FOR UPDATE` row lock and checks, in order: 400 `invalid_request_id`, 404 `not_found`, 403 `run_now_not_creator`, 409 `approval_expired`, 409 `invalid_schedule`. It then looks up `manual:<request_id>` and returns 200 with `deduplicated:true` if it already exists. Next come 409 `run_now_in_flight` (pending or running and under 15 minutes old) and 429 `run_now_rate_limited` (6 per rolling hour). Then it calls Control `AuthorizeFire`; on refusal it writes a failed fire, commits, returns 403 `fire_not_authorized` and does not disable the schedule. On success it calls `InsertFire`. `next_fire_at` and `last_fire_at` are never touched.\n- `CronHandler.WithRunNow(db, authorizer, enabled)` mounts POST `{id}/run` (202 `{data}`; typed errors `{error:{code,message,details:{}}}`). When off, the path falls through to the old routes and returns 404, as before.\n- The list gains `features.run_now` and per-row `last_fire_status`/`last_outcome` (LATERAL join), plus a `creator=self` filter that compares against the verified actor.\n- `main.go` now builds the fire authorizer before the handler.\n- model-gateway: `/v1/cron/:id/run` proxy forwards only `request_id`, and refuses an id that is not URL-safe with a typed 400. `CronListQuery.creator` forwards only the literal `self`.\n- BFF: `/api/v1/cron/{cron_id}/run` reads the schedule and allows the creator only, with no admin short-circuit. It forwards only `{request_id}`.\n- Frontend: `runScheduleNow` and the new list fields and features in `cron-client.ts`; `schedule.run_now` contract (model plane, risk high).\n\nFollowing the hard rule, I added no zdr-posture-matrix row. The design's `scheduled_run_now` row would be a feature refusal that duplicates an existing input row. ZDR is refused at the model-gateway (`require_non_zdr_durable_mutation` via `proxy_to_capability_core`), at the capability-core router (`authz.go`) and at the dispatcher.\n\nTests are written but not run.",
+   "deviations": [
+    "The worktree base was the old commit 21d636a5a, not model-plane HEAD. Owned files were seeded from model-plane blobs, and the patch is diffed against `model-plane` and limited to the owned paths, not taken from a plain `git diff --cached`.",
+    "`WithRunNow` takes the transaction pool explicitly: `WithRunNow(db cron.RunNowDB, authorizer, enabled)` instead of the design's `WithRunNow(authorizer, enabled)`, because `CronHandler.pool` (`registryDatabase`) has no `Begin`.",
+    "`cron.RunNow` returns `(RunNowResult, *RunNowRefusal, error)`. The extra error separates store failures (500 `run_now_unavailable`) from typed refusals.",
+    "No `scheduled_run_now` zdr-posture-matrix row and no Rust `e_zdr_token_schedule_run_now_refused` case, per the hard rule on resolver-keyed rows. The four matrix files are unchanged.",
+    "The list returns `last_fire_status`/`last_outcome` (omitempty) and `features` even with the switch off, as the design states. These are additive JSON keys, so the list body is not byte-identical with the switch off.",
+    "Added a fourth BFF router test (`run_cron_now_refuses_a_member_who_did_not_create_the_schedule`) and extra Go tests: unknown schedule, bad request id, invalid expression, the route accepting the creator. `run_cron_now_refuses_admin_who_is_not_creator` tests the gate function directly, because an admin session needs a Control membership mock."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the capability-core environment block, directly after the line `      CRON_CONTRACT_GUARDS_ENABLED: ${CRON_CONTRACT_GUARDS_ENABLED:-false}` add two lines: `      # EP-6-S2: Run now, a manual schedule fire through the same Control fire authorization. Only the literal `true` enables it.` and `      CRON_RUN_NOW_ENABLED: ${CRON_RUN_NOW_ENABLED:-false}`",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: directly after `  'schedule.fires.list': exempt('no_owner_executor', 'read'),` add `  'schedule.run_now': exempt('agent_cannot_self_govern', 'external_write'),` (action-registry.test.ts asserts this entry)",
+    "shared-edit apps/Model Plane/api/contracts/space-surface.v1.json AND apps/Model Plane/rust/services/model-gateway/tests/fixtures/space-surface.v1.json: insert after the row with id `mg:POST:/v1/cron` the row {\"id\": \"mg:POST:/v1/cron/:id/run\", \"kind\": \"route\", \"plane\": \"model\", \"service\": \"model-gateway\", \"method\": \"POST\", \"path\": \"/v1/cron/:id/run\", \"handler\": \"http_routes.rs::run_cron_now_proxy\", \"decision_type\": \"token_posture\", \"min_role\": \"authenticated\", \"zdr_class\": \"refuse\", \"basis\": \"guard:proxy_to_capability_core\", \"idempotency\": \"request_id\", \"flag\": \"CRON_RUN_NOW_ENABLED\", \"payload_allow_list\": [], \"reason\": \"Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS); capability-core also refuses a ZDR principal and Control refuses ZDR at both fire decisions.\"}. Match the neighbouring rows' formatting, and if the schema restricts the idempotency/flag values use \"unspecified\" and null. Then re-pin both space-surface.v1.json.sha256 files. Without this row, model-gateway's zdr_posture `every_non_get_route_is_classified` fails.",
+    "Regenerate the agent-action-admission golden (5 copies: apps/Model Plane/api/contracts, verevonv3 src/shared/api/contracts, capability-core internal/api/testdata, execution-core and model-gateway tests/fixtures) for the new action id `schedule.run_now`.",
+    "shared-edit apps/Model Plane/docs/ZDR.md (LF): in the 'Features refused with a typed code' table row (about line 101), after `Scheduled and unattended runs, browser runs and speech and other modalities are refused too.` add ` Run now (a manual schedule fire, EP-6-S2) is refused at three layers: the model-gateway durable-mutation guard, the capability-core router (non-read request from a ZDR principal, authz.go) and Control's fire and scheduled-run decisions (and the dispatcher's re-check).`",
+    "action-registry.test.ts: I set the id count to 271 (270 + schedule.run_now). Other W3-13 builders change the same count, so reconcile the number and the comment line when merging.",
+    "Run the slice's test commands: go test ./internal/cron/... ./internal/api/... ./internal/taskexec/...; cargo test -p model-gateway --lib cron_; gateway cargo test agent_actions; vitest src/shared/api/cron-client.test.ts src/shared/actions; cargo test -p model-gateway --test zdr_posture_matrix (expected unchanged)."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts",
+    "apps/Model Plane/api/contracts/space-surface.v1.json",
+    "apps/Model Plane/rust/services/model-gateway/tests/fixtures/space-surface.v1.json",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/docs/ZDR.md"
+   ],
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Design flows F2-F4 are not run yet: one manual fire with two dispatcher Control decisions and the thread `schedule/<id>/manual:<uuid>`, dedupe, 409/429/403 negatives, ZDR refusal, and the cron slot still firing on time. Also not verified: that nothing downstream parses `manual:<uuid>` as a time."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "RunNow and the new list query are tested only against fakes. The row lock serialisation, the `fire_key LIKE 'manual:%'` counts with `count(*) FILTER`, and the `LEFT JOIN LATERAL` list need DB-backed integration tests in the style of `sweeper_failure_integration_test.go` before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The design's zdr-posture-matrix row `scheduled_run_now` and Rust case `e_zdr_token_schedule_run_now_refused` were not added, because matrix rows are keyed on resolver inputs only. The owner or lead should confirm that the space-surface `refuse` row plus `TestCronRunRefusedForZDRPrincipal` is the accepted ZDR golden."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Run now refuses only a lapsed approval. It still fires a schedule that is disabled (paused by its owner, after failures, or after a sweeper authorization refusal), on the grounds that the creator pressing it is an explicit choice. Control re-decides each fire; this should be confirmed under OD-1/OD-8."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The schedule list now runs one LATERAL `cron_fires` subquery per schedule, with the switch off too. It is served by the `(schedule_id, ...)` index only if one leads with `schedule_id` ordered by `fired_at`; check EXPLAIN on a large org."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "`proxy_to_capability_core` turns capability-core's 202 into 200, so the BFF and SPA cannot tell a new fire from a deduplicated one by status. Clients must read `data.deduplicated`."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The POST run route needs `capability:write` on the user's delegated capability token, like PATCH. Verify live that the BFF-minted token carries it, or the creator gets 403 from the authz router before RunNow."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-6-S9",
+   "status": "partial",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-4",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "notes": "The worktree was NOT cut from model-plane. Its HEAD was 21d636a5a (fix/ui-premium-restore), and model-plane (cdfeb5d27) is not an ancestor of it. My owned file domains/spaces.rs does not exist on model-plane, where the code is in domains/spaces/mod.rs. So I wrote model-plane's blobs of the edited files into the worktree with `git show model-plane:<path>`, edited them, staged them with `git add -A`, and wrote the patch with `git diff --cached --binary model-plane -- <3 paths>`. The patch is 867 lines, 777 insertions and 4 deletions, at .plan-work/execution/patches/W3-13/EP-6-S9.patch. It applies to model-plane blobs. The plain `git diff --cached` would have carried the whole branch difference. Nothing was compiled or run.\n\nWhat I built:\n- BFF (spaces/mod.rs):\n  - The five pin fields (`agent_ref`, `agent_version`, `agent_digest`, `agent_tool_capability_ids`, `agent_autonomy_cap`) are removed from every turn, whatever the flag says.\n  - The binding projection now maps `pinnedVersion` to `pinned_version`.\n  - With `state.space_features.agent_version_pinning` on, the turn takes the binding's pinned version (via `agents:getVersionForGateway`), or else the published one (via `agentPersonaForGateway`). It injects that version's instructions and the five fields. If the version cannot be read, the turn is refused with 503 `agent_version_unavailable`; there is no best-effort fallback. With the flag off, the persona injection runs unchanged.\n- MG (`http_routes.rs` `InvokeRequest`): five `serde(default)` raw-JSON fields, the same idiom as `agent_roles`, so request parsing is byte-identical.\n- MG (`sse.rs`), behind new switch `MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST` (strict, only literal \"true\"):\n  - `agent_pin()` validates the pin strictly; a malformed pin is refused with `agent_pin_invalid`, never dropped.\n  - `narrow_to_agent_allowlist()` only removes. MG has no tool-name-to-capability binding (that is execution-core's `trusted_capability_id`). So an Ask turn with an allowlist loses its client tools, the `tools` feature and `browse_web`. A Do or execute turn with an allowlist is refused with `agent_tool_allowlist_do_unsupported`.\n  - `resolve_turn_with_agent_cap()` adds the cap to the WS25-S6 resolve as `Ceiling{source:\"agent\"}`. It is the same as before when the cap is absent or auto.\n  - The pin's ids and digest go to a log line; the instructions never do.\n- Tests written, not run: 4 BFF tokio tests (pinned v2 after v3 publish, unpinned follows published, unreadable pin refused, forged fields stripped with the flag off, on, and with no mention) and 11 MG unit tests.\n\nNot built (outside my files):\n- `runs.metadata.agent` at StartRun. `StartRunRequest` has no metadata field, so the design's \"no proto\" assumption is wrong. It needs a new sessions.proto field plus a session-core write.\n- Real capability-id intersection for Do runs. It needs `RunAgentRequest` field 26 (reserved for EP-6 S9 in round A) and enforcement in execution-core.\n- zdr-posture-matrix.json is unchanged: there is no new resolver input and no metadata write.",
+   "deviations": [
+    "Assumed OD-5 = (a): the tool allowlist and autonomy cap live in the Convex definition and are applied tighten-only at invoke. capability-core gains no agent table, the cap is one more strictest-wins input, and the allowlist never grants.",
+    "Assumed OD-4 = (b): immutable published versions plus one draft. A binding pins a version (`pinnedVersion`); without one it follows the published version.",
+    "The worktree base was 21d636a5a, not model-plane. I edited model-plane blobs and wrote the patch with `git diff --cached --binary model-plane -- <paths>` instead of a bare `git diff --cached`.",
+    "The owned path `domains/spaces.rs` does not exist on model-plane; I edited `domains/spaces/mod.rs` instead.",
+    "The BFF strips client-supplied pin fields on every turn, even with `AGENT_VERSION_PINNING` off. The outbound body loses keys the gateway ignores, so a forged value can never reach a gateway whose own switch is on.",
+    "MG gates the pin read, the cap and the allowlist under `MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST`; `AGENT_VERSION_PINNING` is the BFF switch.",
+    "The allowlist does not do a true intersection: MG cannot map tool names to capability ids. An Ask turn with an allowlist gets no tools, and a Do or execute turn with an allowlist is refused.",
+    "`runs.metadata.agent` is not written: StartRunRequest has no metadata field. That needs proto and session-core work, so the status is partial.",
+    "No zdr-posture-matrix.json change."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs: in `struct SpaceFeatureFlags`, after the `memory_ui` field, add `/// AGENT_VERSION_PINNING (EP-6 S9): a mention turn runs the binding's pinned (else published) agent version and carries its allowlist and cap to the model gateway. Only the literal true turns it on, never by default in development. Off keeps the legacy persona injection. A rollout control, never an authorization input: the allowlist and cap only narrow.` then `pub(crate) agent_version_pinning: bool,`. In `SpaceFeatureFlags::from_env`, after the `memory_ui:` line, add `agent_version_pinning: env::var(\"AGENT_VERSION_PINNING\").is_ok_and(|value| value == \"true\"),`.",
+    "shared-edit apps/Application Plane/convex-core/convex/spaceAgents.ts: in `spaceAgentBindingsForGateway`'s `projected.push({...})`, after `approvalMode: binding.approvalMode,`, add `// EP-6 S9: the agent version this binding pins; absent follows the published version.` then `pinnedVersion: binding.pinnedVersion,`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts ERROR_COPY (otherwise gateway-error-codes.test.ts fails on the new BFF code): add `agent_version_unavailable: { no: 'Agentens versjon kunne ikke leses akkurat nå. Prøv igjen snart.', en: 'This agent\\'s version could not be read right now. Try again shortly.' },`. Optionally add the MG stream codes too: `agent_pin_invalid` (no: 'Agentversjonen for denne meldingen kunne ikke leses.' / en: 'The agent version for this turn could not be read.') and `agent_tool_allowlist_do_unsupported` (no: 'Denne agentens verktøyliste kan ikke håndheves i en Gjør-kjøring ennå. Spør den i stedet.' / en: 'This agent\\'s tool list cannot be enforced on a Do run yet. Ask it instead.').",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: model-gateway environment, after the `MODEL_GATEWAY_SUBAGENT_ROLE_CATALOGUE` line (~429), add `      MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/docker-compose.yml: gateway service environment, beside `SPACE_ROOM_FILES_UI` (~280), add `      AGENT_VERSION_PINNING: ${AGENT_VERSION_PINNING:-false}`; add `AGENT_VERSION_PINNING: \"false\"` beside line 30 of docker-compose.production.yml.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): \"Agent definitions stay in Convex and are versioned there; the allowlist and autonomy cap apply tighten-only at invoke; capability-core keeps policy only (EP-6 S9, OD-4 (b), OD-5 (a), DEC-14) - proposed until the owner rules\".",
+    "Guard: compile and run `cargo test -q -p model-gateway --lib agent_pin_tests` and `cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets spaces` after applying config.rs (the BFF tests set `state.space_features.agent_version_pinning`)."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs (`agent_version_pinning` field)",
+    "apps/Application Plane/convex-core/convex/spaceAgents.ts (project `pinnedVersion`)",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts (copy for `agent_version_unavailable`)",
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto plus session-core StartRun: an additive field to write `runs.metadata.agent` {ref, version, digest}, refused or skipped under ZDR",
+    "apps/Model Plane/proto/model_plane/v1/execution.proto `RunAgentRequest` field 26 (reserved for EP-6 S9) plus execution-core enforcement of the allowlist through `trusted_capability_id`, so Do runs can carry an agent allowlist instead of being refused"
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-5 was assumed (a): the allowlist and autonomy cap live in the Convex definition and apply tighten-only at invoke; the owner must confirm before `AGENT_VERSION_PINNING` or `MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST` is switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-4 was assumed (b): immutable published versions plus one draft, with bindings pinning via `pinnedVersion`; the owner must confirm before S9 is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "`runs.metadata.agent` {ref, version, digest} is not written because `StartRunRequest` has no metadata field; it needs an additive sessions.proto field plus a session-core write that is skipped under ZDR, and the design's 'no proto' claim is wrong."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "With the switch on, an Ask turn with an allowlist loses every tool and a Do turn with one is refused, because only execution-core maps tool names to capability ids; a real intersection needs `RunAgentRequest` field 26 plus enforcement in execution-core."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "No Convex writer for `spaceAgentBindings.pinnedVersion` was found and `spaceAgentBindingsForGateway` does not project it yet, so until both land every binding follows the published version."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Other BFF routes that forward bodies to MG `/v1/invoke` (for example agent_api) do not strip the five pin fields; a forged pin can only narrow the turn but can mislabel the pin log line, so those routes should strip them too."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The pinned or published version is not checked against the Space's binding beyond the existing roster join, and a cross-org pinned version reads as null and is refused; a live proof (design F5) should show that MG logs `agent_version=1` after v2 is published."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The worktree harness cut this isolated worktree from 21d636a5a instead of model-plane; other W3-13 builders may have produced patches against the wrong base."
+    }
+   ],
+   "outcome": "ready-partial",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S1",
+   "status": "blocked",
+   "files_changed": [],
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-5",
+   "notes": "Wrong base, so I made no edits. The isolated worktree is set up correctly: its top level is C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-5, the tree is clean and the branch is worktree-wf_f130d498-73f-5. But it is checked out at 21d636a5a (the fix/ui-premium-restore line), not at model-plane HEAD cdfeb5d27. 21d636a5a is the merge base, so model-plane is many commits ahead. This checkout does not contain docs/plans/wave3/EP-10-connector-suggestions-and-write-confirmation.md or 00-integration-round-a.md / 00-integration-round-b.md. mp-contracts is also missing all the Wave 1/2 work the slice builds on. A patch built here would not apply cleanly to model-plane. I cannot fix the base myself because checkout and reset are forbidden. Re-launch EP-10-S1 in a worktree cut from model-plane (cdfeb5d27 or later).",
+   "lead_todo": [
+    "Re-run EP-10-S1 in an isolated worktree whose HEAD is model-plane (cdfeb5d27 or later). This worktree was cut from 21d636a5a, the merge base on fix/ui-premium-restore. Check the other W3-13 builder worktrees for the same wrong base: if they were cut the same way, their patches will be against the wrong base too."
+   ],
+   "outcome": "needs-attention",
+   "tests_run": []
+  },
+  {
+   "id": "EP-10-S7",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-6",
+   "files_changed": [
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/tool_policies_integration_test.go",
+    "apps/Model Plane/rust/services/model-gateway/src/connector_reads.rs",
+    "apps/Model Plane/rust/services/execution-core/src/capability_policy.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/ConnectedAppsPolicy.test.tsx"
+   ],
+   "notes": "The patch is at C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-13/EP-10-S7.patch. It is 59 KB, covers 11 files, and is diffed against model-plane HEAD cdfeb5d27.\n\nThe isolated worktree was NOT a checkout of model-plane HEAD. It was at 21d636a5a (fix/ui-premium-restore), where connector_reads.rs and tool_policies.go do not exist. Without any checkout or reset, I wrote the model-plane blobs of the owned files into the worktree with `git show model-plane:<path>`. The two Rust files were converted to CRLF to match the lead tree, which is byte-identical to model-plane for every owned file. I staged that copy as the base and edited on top of it. The patch is therefore `git diff --binary` (working tree against that base, new files added with -N), not `git diff --cached` against the worktree's stale HEAD. After writing the patch I ran `git add -A`.\n\nWhat was built:\n- **capability-core list:** the list now returns `{\"policies\":[...],\"enforced\":bool}` instead of a bare array. A `data` envelope was not usable because the SPA's `unwrap()` would drop the bit. The value comes from a new `ToolPoliciesHandler.WithEnforced`. Left unset it reports false, so nothing is shown as enforced by mistake.\n- **capability-core set:** `set` refuses `ask` on `cap.tool.provider.execute` with 422 `already_always_ask`, for both user and org scope. ask/never on `cap.tool.provider.read` and never on execute were already accepted; allow on either is still refused because both are built-in kind `tool`.\n- **Go tests:** I updated `tool_policies_integration_test.go` (beside the owned file) to the new list shape.\n- **model-gateway:** `connector_reads.rs` gains `ReadPolicy` (`Unrestricted` / `AskFirst` / `Off` / `Unknown`), the pure `policy_of`, `fetch_policy` (GET `/api/v1/tool-policies?capability_id=cap.tool.provider.read` with the person's capability bearer) and `read_policy`. `read_policy` keeps a 60 s cache per (org, user), capped at 4096 entries; an unknown answer is not cached. When enforcement is off the result is always `Unrestricted`. The gateway's existing `connector_turn.filter(connector_offered)` already makes `read_outcome` refuse once the read is not offered.\n- **execution-core:** test-only change. The mock gets an optional `policy_source`, plus tests `user_ask_on_provider_read_pauses`, `user_never_on_provider_read_denies` and `user_never_on_provider_execute_denies`, run under the Shadow and Enforce gates.\n- **SPA contracts:** `integrations.list_connector_policies` and `integrations.set_connector_policy` (owner plane model, risk low, reversible, not executable by the model). `set_connector_policy` takes a discriminated union of read levels {use_without_asking, ask_first, off} and write levels {always_ask, off}.\n- **SPA client:** `orchestration-client.ts` adds `connectorPoliciesOf`, `listConnectorPolicies`, `connectorPolicyRequest` and `setConnectorPolicy`. Returning to the default level revokes the user row; a 404 on that revoke counts as success.\n- **Settings panel:** confirmed the mount point is `IntegrationsSection` in `WorkspaceSettingsPage.tsx`. `ConnectedAppsPolicy` is mounted after the integrations list. It shows \"Not enforced yet\" while enforcement is off, a note when the org's level is stricter, and the Ask-first / Do-mode note.\n\nNo migration (capability-core head stays 0030), no proto change, no new switch. Nothing was run.",
+   "lead_todo": [
+    "shared-edit apps/Model Plane/go/services/capability-core/cmd/main.go: replace the two lines `toolPolicies := api.NewToolPoliciesHandler(pool)` / `toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)` with `toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)` then `toolPolicies := api.NewToolPoliciesHandler(pool).WithEnforced(toolPolicyEnforced)` (without it the list always reports enforced=false)",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (fn with `let connector_offered = connector_reads::offered(`, ~line 8527): change the statement to `let connector_offered = connector_reads::offered(connector_reads::enabled(), zdr, !space_id.is_empty(), connector_turn) && connector_reads::read_policy(state, org_id, user_id, capability_bearer).await.admits_ask_loop();` (short-circuit: the policy read runs only on a turn that already offers the read; state/org_id/user_id/capability_bearer are in scope). Without it read_policy is unused (dead-code warning).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: after the `'integrations.fetch_connection_content'` row add `  'integrations.list_connector_policies': exempt('agent_cannot_self_govern', 'read'),` and `  'integrations.set_connector_policy': exempt('agent_cannot_self_govern', 'external_write'),` (MODEL_ACCESS is exhaustive by type; typecheck fails without them)",
+    "Regenerate the agent-action-admission golden for the two new action ids (guard).",
+    "Run cargo fmt on model-gateway/src/connector_reads.rs and execution-core/src/capability_policy.rs before fmt --check: assert_eq/format! wrapping was hand-formatted.",
+    "Apply the patch with CRLF kept on the two Rust files (lead tree CRLF; patch generated with core.autocrlf=true against model-plane blobs)."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx: 'Change for connected apps' link on a provider approval card to /settings/integrations#connected-apps-policy (CONNECTED_APPS_POLICY_ID exported from ConnectedAppsPolicy.tsx) - not built",
+    "composer connector chip copy 'Ask first: available in Do mode' when the read is withheld by policy - not built (chip owner's file)"
+   ],
+   "deviations": [
+    "The list body changed from a bare JSON array to {policies, enforced} (not a {data, meta} envelope, which the SPA unwrap would strip); the only in-repo consumer, the capability-core integration test, was updated.",
+    "Isolated worktree was at 21d636a5a, not model-plane HEAD; base files were materialised from model-plane blobs and the patch is the unstaged diff against that staged base, not git diff --cached against HEAD.",
+    "Edited tool_policies_integration_test.go (not in the owned list; it sits beside tool_policies.go) to follow the new list shape."
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "In execution-core the person's own row on cap.tool.provider.read/execute only applies when TOOL_CLASS_GATE is shadow or enforce: with the gate off EvaluatePolicy carries no user_id, so TOOL_POLICY_ENFORCED alone honours org rows only and the panel would overstate per-person enforcement in the Do loop."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With CONNECTOR_ASK_READS_ENABLED on, a capability-core outage or a missing capability bearer now makes read_policy Unknown, which removes the Ask-loop read even while TOOL_POLICY_ENFORCED is off (deliberately fail-closed); confirm the chat route always carries a capability bearer before switch-on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The 422 already_always_ask uses capability-core's existing {\"error\": msg} body, not the typed {error:{code,message,details}} envelope; the gateway/BFF mapping of that code to the SPA was not checked."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "S10 must prove with TOOL_POLICY_ENFORCED=true and TOOL_CLASS_GATE=enforce: read Off removes the read in Ask and denies it in Do, Ask first pauses in Do (cause capability_policy_ask) and drops it in Ask, write Off denies execute_provider_action, and the panel loses Not enforced yet."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ConnectedAppsPolicy container (load, set, refetch, 404-on-revoke) has no rendered test; only the view and the pure request/parse helpers are covered."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Ledger entry for D5 (connector policy levels = tighten-only user rows) and a docs line for the list's new enforced field were not written (files outside this slice)."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-1-S1",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-7",
+   "files_changed": [
+    "apps/Model Plane/api/contracts/approval-causes.json",
+    "apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs",
+    "apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/browser_session.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/approvals/approval-copy.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-run-watch.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatLiveRunPanel.takeover.test.tsx",
+    "apps/Frontend Plane/verevonv3/tests/e2e/chat-browser-takeover.spec.ts"
+   ],
+   "notes": "The isolated worktree was NOT cut from model-plane. It was cut from 21d636a5a (fix/ui-premium-restore, an ancestor of model-plane), so none of the slice's Model Plane files were in it. I did not run checkout or reset. Instead I wrote each owned file's model-plane blob (cdfeb5d27) into the worktree, built the slice on top, ran `git add -A`, and took the patch with `git diff --cached --binary model-plane -- <owned paths>`. So the patch at .plan-work/execution/patches/W3-13/EP-1-S1.patch (1813 lines, 14 files) is against model-plane HEAD cdfeb5d27, not against this worktree's HEAD. All blobs were LF.\n\nWhat was built (nothing compiled or run):\n- Contract: cause `browser_human_assist`, with `CauseCode::BrowserHumanAssist` (ALL now has 11). New `for_browser_assist` keeps only closed kind/origin words and a bounded host; other causes are stripped of host and assist fields. These fields round-trip through to_metadata and from_metadata.\n- Proto: `ApprovalCause.assist_kind=13`, `assist_origin=14`, `host=15`. Field 11 was already taken by `host_class` in the mp-w2w3 merge, and 12 stays held for WS21-S6. `BrowserRunPaused.control_epoch=4` and `BrowserRunResumed.control_epoch=4`. `reason=3` was already there, and I reused its WS8.G tokens `user_took_over` and `control_returned`.\n- quarry_agent: Typed errors and `is_user_took_over` already existed. I added `RunControl` and `run_control()`, which reads GET /v1/agent/runs/{id}/browser-session with the service token, plus tests `user_took_over_is_typed` and `run_control_reads_the_owner_projection`.\n- browser_session: refusal `TAKEN_OVER` (`browser_user_has_control`). `quarry_refusal` maps USER_TOOK_OVER to it with the switch on or off, as designed. New switch `EXECUTION_BROWSER_TAKEOVER_PAUSE` (OnceLock, strict parser). New `takeover_step`, which refuses ZDR or waived runs with feature `browser_human_assist`. With the switch on, `open` is refused while the person holds the session. Also new: `session_control` and `takeover_event`. A small hold set stops the cancel guard (RunRelease::drop) from closing the page while a takeover pause waits. The design's six test names are written.\n- agent.rs: a takeover refusal becomes a pause with cause BrowserHumanAssist, using assist_kind `user_takeover`, origin `person`, and the session host. After the pause the session is held and BrowserRunPaused is published with the epoch. Before a released Do browser call is dispatched, Quarry control is read again. If the person still holds the browser, the call is not dispatched and the model gets TAKEN_OVER. Otherwise BrowserRunResumed is published and the call runs.\n- FE: cause copy in nb and en. `applyBrowserControl` and `browserSessionFromChatRun(state, {takeover})`; with takeover off the output is identical to before. The panel gets props `browserBinding` and `onBrowserGiveBack`, and `VITE_CHAT_BROWSER_TAKEOVER` (off) passes `onBrowserControlMode` to BrowserChrome through the existing `changeBrowserControl` / BFF control route.\n\nDeviations from the design are listed below.",
+   "deviations": [
+    "ApprovalCause.host is field 15, not 11: host_class already holds 11 on model-plane (merged from mp-w2w3 on 2026-11-03). The reservation tables in 00-integration-round-a/b are stale on this.",
+    "BrowserRunPaused/Resumed reuse the WS8.G reason tokens `user_took_over` and `control_returned` rather than the design's `user_takeover`, so the shared field keeps one vocabulary.",
+    "A released call that still meets the takeover is not paused again (the design said re-pause under the same key). The idempotency key `{run_id}:{step_id}` would fall back onto the already-consumed approval (ON CONFLICT DO NOTHING) and strand the run. Instead the call is not dispatched, the model reads TAKEN_OVER, and its next browser call pauses with a fresh approval.",
+    "I did not add new action ids `browser_run.take_over` and `browser_run.give_back`. Each new registry id needs a gateway handlers.rs dispatcher (action-surface-contract.test.mjs), a model-access.ts row and an admission-golden row, and the panel reuses the existing `browser_action.set_control_mode` contract. I updated that contract's description to cover the chat-panel take over and give back.",
+    "The panel does not decide the approval itself. On give-back it calls the new `onBrowserGiveBack(runId)` prop; the chat controller wiring that decides the browser_human_assist approval and continues the run is not in this slice's files.",
+    "The turn's binding arrives as a `browserBinding` prop, because the WS21-S6 `browser_session_opened` event does not exist yet. The FE half is complete behind the flag but inert until WS21-S6 feeds that prop.",
+    "errors.ts was not changed: `browser_control_epoch_stale` and USER_TOOK_OVER copy already exist (WS9.I)."
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/tests/approval_gate_contract.rs: in fn variant_and_token, before `CauseCode::UnclassifiedGate => (\"UnclassifiedGate\", \"unclassified_gate\"),` add `CauseCode::BrowserHumanAssist => (\"BrowserHumanAssist\", \"browser_human_assist\"),` (exhaustive match; does not compile otherwise)",
+    "shared-edit apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs: in the Feature table after `Feature { key: \"browser_tool\", label: \"browser tools\" },` add `Feature { key: \"browser_human_assist\", label: \"browser help requests\" },` (feature_not_supported debug_asserts the key, so browser_session test takeover_pauses_with_human_assist_cause_when_switch_on panics without it); add the same row `{\"key\": \"browser_human_assist\", \"label_en\": \"browser help requests\"}` after browser_tool in apps/Model Plane/api/contracts/zdr-refusals.json, regenerate its .sha256, sync the vendored copies apps/Model Plane/go/pkg/zdrrefusal/zdr-refusals.json(+.sha256) and apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json, add `| 'browser_human_assist'` to the key union and `browser_human_assist: { no: 'hjelpeforespørsler i nettleseren', en: 'browser help requests' }` in apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts, update the row counts in the zdr_refusal_inventory.rs tests, and add one line to apps/Model Plane/docs/ZDR.md (browser human assist is refused for ZDR/waived runs with zdr_feature_not_supported / browser_human_assist; no approval row is written). No zdr-posture-matrix row.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/browser_events.rs: add `control_epoch: 0,` after the `reason: ...` line in the four BrowserRunPaused/BrowserRunResumed literals (fns run_paused, run_resumed, paused_by_user, resumed_after_takeover); the attached-tab path does not read the epoch yet",
+    "shared-edit apps/Model Plane/rust/crates/mp-orchestration/src/proto_shim.rs: in the PbBrowserRunPaused and PbBrowserRunResumed literals (internal->proto, around the `reason,` lines) add `control_epoch: 0,`; the internal run_event enum does not carry the epoch, and the Do loop records the proto directly through RecordOrchestrationEvent",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs: in test orchestration_browser_pause_resume_frames_carry_reason_only_when_set add `control_epoch: 0,` to the BrowserRunPaused and BrowserRunResumed literals",
+    "shared-edit apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs: add `control_epoch: 0,` to the three test literals of orchestration_event::BrowserRunPaused/BrowserRunResumed (near the event_run_id assertions and refuse_park_events_while_parking_is_off)",
+    "shared-edit apps/Model Plane/api/openapi.yaml: add `- browser_human_assist` before `- unclassified_gate` in the ApprovalCause code enum (around line 1876), then regenerate the Python and TS SDK ApprovalCause enums (api/sdk/python/model_plane_sdk/models/approval_cause.py, api/sdk/typescript/src/models/ApprovalCause.ts)",
+    "regenerate proto bindings (Rust prost builds itself; Go apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go) and run buf lint and buf breaking against proto/baseline.binpb",
+    "regenerate the agent-action-admission golden if its catalog_entry hash covers descriptions (the browser_action.set_control_mode description changed)",
+    "no migration (the cause lives in approvals.metadata JSONB); no new proto numbers beyond ApprovalCause 13/14/15 and BrowserRun{Paused,Resumed}.control_epoch=4; 15 was taken because 11 is host_class"
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts or ChatPage.tsx: pass `browserBinding` from the WS21-S6 browser_session_opened binding and implement `onBrowserGiveBack(runId)` = decide the open browser_human_assist approval (granted) then /continue",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs: forward control_epoch on the browser_run_paused/resumed SSE frames (only reason is forwarded today)",
+    "apps/Frontend Plane/verevonv3 approval HTTP cause parser: carry `host`/`assistKind`/`assistOrigin` into ApprovalCause for the S2 card"
+   ],
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Pre-existing: the Do loop's `_browser_release` guard (RunRelease::drop) closes the run's Quarry page whenever a request returns paused, so any approval pause (e.g. browser.act BrowserActionRisk) loses the page before its release; S1 only exempts takeover pauses through the in-process hold set."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The browser session and the takeover hold live in one execution-core process's memory, so a give-back that resumes on another replica (or after a restart) finds no session and the released call answers browser_not_open; a hold whose approval expires is never cleared, and the Quarry run lives on until its grant TTL (30 min) or Quarry's idle sweep (S5 territory)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A takeover pause needs the loop-owned resume (WS03 continue/loop-resume switches on): with continuation mode cold the delivery worker would try to run browser.observe/open, which it cannot serve."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Verify live that execution-core's browser:execute service token may read GET /v1/agent/runs/{id}/browser-session on its own runs, and that the read's `live.touch()` does not keep a held run from Quarry's idle sweep in a way Q-5 does not expect."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "If Quarry's control cannot be read, `open_with` and `released_browser_call_still_held` let the call through (fail-open). The guarantee that the agent never acts during a takeover then rests on QUARRY_EDGE__TAKEOVER_ENFORCEMENT=1 (Q-4)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The paused event's control_epoch is read from Quarry's projection after the pause, not from the USER_TOOK_OVER details.control_epoch. The refusal reaches the loop as text only, so the event can carry a later epoch if the person flips quickly."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Loop-level behaviour has no unit test that drives run_rounds: a refused call becoming a pause, the hold being set, and Paused/Resumed being published. The browser_session tests cover the parts; the rest needs an agent.rs run_rounds test with a Quarry stub."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The design's live proof (take over, refused agent call, card, BrowserRunPaused, give back with epoch 2, approval consumed once, run completes; second user 404; stale epoch 409) waits on Q-1, Q-4, WS21-S5a open working live, and the WS21-S6 binding."
+    }
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  },
+  {
+   "id": "EP-3-S2",
+   "status": "done",
+   "worktree": "C:/dev/CoresSystem/.claude/worktrees/wf_f130d498-73f-8",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/session-core/src/artifact_revisions.rs"
+   ],
+   "notes": "The slice is finished, but nothing has been compiled or run, as ordered. W3-12 had already committed the session-core half to model-plane in 172462912: the proto, migration 0090 with its revert, session-core artifact_revisions.rs with its tests, the grpc.rs registration and thread-delete statement, main.rs and build.rs. This run built what was still missing.\n- **Gateway:** a new artifact_revisions.rs reads MODEL_GATEWAY_ARTIFACT_REVISIONS. Only the exact values `off`, `shadow` or `on` are accepted; unset or empty means off, and any other value fails AppState::from_env at startup. It also holds `record_turn_revisions` and `write_turn`.\n- **state.rs:** adds `artifact_revision_client` and `artifact_revisions_mode` in new() and in both from_env branches.\n- **lib.rs:** one module line.\n- **sse.rs:** one guarded call at the single commit site, after the durable save. It reads each artifact's committed head (expected_version) before the turn's versions are seeded, then writes on its own spawned task. ZDR and waived turns write nothing. A refusal or conflict only increments the counter `mp_gateway_artifact_revision_writes_total{outcome}` (conflicts are `outcome=conflict`); it never fails the turn. The idempotency key is a sha256 of run, artifact and version, never content. The source message is left to session-core to resolve from run_id.\n- **session-core gdpr.rs:** org erase now runs an explicit `DELETE FROM artifact_revisions WHERE org_id = $1` before messages. PurgeSummary gains an `artifact_revisions` field counted in total(); the total test expects 34 and the ordering test is extended. The org-erase test in session-core artifact_revisions.rs now asserts the count.\n\n**Base workaround:** this isolated worktree was checked out at fix/ui-premium-restore 21d636a5a, not model-plane HEAD. Before editing, I wrote the model-plane versions of the six owned files I needed (plus the earlier slice files) into the worktree and staged them. The patch is `git diff --binary` of my edits against that staged base. Its pre-image blob hashes match `git ls-tree model-plane` exactly, so it applies to model-plane, not to this worktree's HEAD. After writing the patch I ran `git add -A`; the worktree's staged state therefore also contains the model-plane base files.\n\nPatch: C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/.plan-work/execution/patches/W3-13/EP-3-S2.patch (33,952 bytes).",
+   "deviations": [
+    "Assumed OD-1 = (c) two stores (thread artifacts in session-core, Space canvas in Data), linked only by a one-way promote",
+    "Assumed OD-2 = (b) session-core table artifact_revisions, dual-written, metadata.artifacts unchanged",
+    "Assumed OD-8 = thread-wide artifact head; revisions record their run and session-core resolves source_message_id from the run",
+    "Assumed OD-9 = Space-origin threads refuse non-model editors (session-core side already built)",
+    "Assumed OD-10 = 200 revisions per artifact and 20 MB revision text per thread, then artifact_revision_limit (session-core side already built)",
+    "Assumed OD-11 = waived (DEC-32) turns write no artifact_revisions row (gateway skips them; session-core also refuses)",
+    "The patch is cut against model-plane HEAD by staging the model-plane blobs of the owned files first (the isolated worktree was at fix/ui-premium-restore), not with `git add -A` plus `git diff --cached` as instructed.",
+    "`on` behaves like `shadow` for the S2 writer; S3 gives `on` its read routes.",
+    "The conflict counter is the outcome=conflict series of mp_gateway_artifact_revision_writes_total, not a separate artifact_revision_shadow_conflicts_total."
+   ],
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-1 and OD-2 (two stores, promote-only link; session-core table, dual-write) are built on the recommendation and still need the owner's ledger entry and the Space session's acknowledgement on overlap-space row 13."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "OD-8 to OD-11 (thread-wide head, Space threads take model revisions only, 200 revisions / 20 MiB caps, waived turns write nothing) are built on the recommendation and need owner sign-off before MODEL_GATEWAY_ARTIFACT_REVISIONS leaves off."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Shadow mode needs both MODEL_GATEWAY_ARTIFACT_REVISIONS=shadow and SESSION_CORE_ARTIFACT_REVISIONS_ENABLED=true; if only the gateway switch is on, every write is counted as failed (unavailable); the design's three-turn psql proof (versions 1..n, editor_kind=model, source_message_id = assistant ids, zero rows after ZDR, waived and thread delete) is not run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "source_message_id is resolved in session-core through managed_run_terminalization_outbox.completion_message_sequence; on the legacy two-call save path that row may be absent, leaving source_message_id NULL, which the live proof should check."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gateway tests (mock ArtifactRevisionService on a local port) and the session-core gdpr/DB tests are written but not compiled or run."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "When an artifact first reaches a replica whose committed store does not know it, expected_version is 0. A thread with existing rows then counts a shadow conflict, which is what the counter should measure, but it inflates the count after every gateway restart until the thread is rehydrated."
+    }
+   ],
+   "lead_todo": [
+    "Apply the patch to model-plane (it is cut against model-plane HEAD blobs 192aaa499 lib.rs, ef4800c2a sse.rs, 29ff62d6b state.rs, 80db5411b session-core artifact_revisions.rs, d032a7fd7 gdpr.rs). Do not apply it against this worktree's HEAD.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the model-gateway environment block, after the MODEL_GATEWAY_REQUEST_INSPECTOR line, add `      # EP-3 S2: shadow dual-write of artifact revisions into session-core (off|shadow|on; any other value fails startup).` and `      MODEL_GATEWAY_ARTIFACT_REVISIONS: ${MODEL_GATEWAY_ARTIFACT_REVISIONS:-off}`. In the session-core block, after SESSION_CORE_REQUEST_INSPECTOR_READ, add `      # EP-3 S2: the ArtifactRevisionService store. Only the literal true.` and `      SESSION_CORE_ARTIFACT_REVISIONS_ENABLED: ${SESSION_CORE_ARTIFACT_REVISIONS_ENABLED:-false}`.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (CRLF, newest first): add the entry 'Artifact revisions are thread-owned in session-core; the Space canvas is Data-owned; they link only by promote (EP-3 OD-1, OD-2; OD-8..OD-11 taken by recommendation, owner sign-off pending)'.",
+    "shared-edit apps/Model Plane/docs/capability-ownership-matrix.md: add a row 'Artifact revision store (artifact_revisions, ArtifactRevisionService) | session-core | writer: model-gateway shadow dual-write (EP-3 S2)'.",
+    "shared-edit apps/Model Plane/docs/ZDR.md boundary table: add a row for **Artifact revisions (`artifact_revisions`, session-core, EP-3 S2)**: built dark behind MODEL_GATEWAY_ARTIFACT_REVISIONS (off) and SESSION_CORE_ARTIFACT_REVISIONS_ENABLED (off); no row from a ZDR turn (no artifacts; the RPC refuses ZDR and waived credentials with zdr_durable_mutation_forbidden); a waived turn is skipped by the gateway and a thread holding a waived run is refused (artifact_revisions_waived_thread); erased with the thread (cascade plus delete_thread_rows) and the org (gdpr purge). No posture-matrix row.",
+    "Owner: add MODEL_GATEWAY_ARTIFACT_REVISIONS=off and SESSION_CORE_ARTIFACT_REVISIONS_ENABLED=false to .env.example.",
+    "Guard: cargo check plus `cargo test -q -p model-gateway --lib artifact_revisions`, `cargo test -q -p session-core artifact_revisions gdpr`, and `cargo fmt --all -- --check` (the new gateway module was hand-formatted). Proto bindings are already regenerated (W3-12); no proto change in this patch."
+   ],
+   "outcome": "ready",
+   "tests_run": []
+  }
+ ],
+ "designs": [],
+ "guard": {
+  "checks": [
+   {
+    "command": "git apply --3way --whitespace=nowarn for EP-6-S2, EP-6-S9, EP-10-S7, EP-1-S1, EP-3-S2 (EP-2-S4, EP-2-S8, EP-10-S1 have no patch)",
+    "outcome": "All 5 patches applied cleanly with no conflict markers. git reset -q unstaged them, and git diff --stat shows every slice's files.",
+    "clean": true
+   },
+   {
+    "command": "buf generate (buf.gen.local2.yaml -> .plan-work/gen-out) + copy differing model_plane Go files",
+    "outcome": "orchestration.pb.go copied. orchestration_grpc.pb.go also copied: it was already drifting at HEAD in comment-bullet style only.",
+    "clean": true
+   },
+   {
+    "command": "bash apps/Model Plane/scripts/tests/go-gen-drift.sh",
+    "outcome": "48 generated Go files match go/gen/model_plane",
+    "clean": true
+   },
+   {
+    "command": "buf generate (buf.gen.py-remote.yaml -> .plan-work/gen-py)",
+    "outcome": "Only orchestration_pb2.py differs. It was copied into python/mp-events-py/src/mp_events/_gen/model_plane/v1/ and keeps the same version header.",
+    "clean": true
+   },
+   {
+    "command": "buf lint --error-format json (apps/Model Plane/proto)",
+    "outcome": "1923 findings, the same set as buf-lint-w312.json. No new finding. Output is in .plan-work/buf-lint-w313.json.",
+    "clean": true
+   },
+   {
+    "command": "buf breaking --against baseline.binpb",
+    "outcome": "exit 0",
+    "clean": true
+   },
+   {
+    "command": "VEREVON_UPDATE_GOLDEN=1 vitest run --pool=forks src/shared/actions/admission-contract.test.ts",
+    "outcome": "5 passed. The golden gains rows for schedule.run_now, integrations.list_connector_policies and integrations.set_connector_policy. It was copied to the 4 vendored locations and re-pinned to 2609c9a7... in the .sha256 and in zdr-contract-sync.test.sh.",
+    "clean": true
+   },
+   {
+    "command": "MP_UPDATE_PROMPT_MANIFEST=1 cargo test -q -p mp-contracts --test prompt_tool_manifest",
+    "outcome": "9 passed, manifest unchanged",
+    "clean": true
+   },
+   {
+    "command": "cargo check --workspace --all-targets (apps/Model Plane/rust)",
+    "outcome": "The first runs failed with 3 errors (sse.rs closure lifetime, zdr_features.rs destructure, normalize.rs InvokeRequest literal). After the fixes it is clean. Only the old warnings remain.",
+    "clean": true
+   },
+   {
+    "command": "cargo check --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets",
+    "outcome": "First run: E0425 AGENT_PIN_FIELDS in spaces/mod.rs test. After the fix it is clean. Only the old warnings remain.",
+    "clean": true
+   },
+   {
+    "command": "go build ./... && go vet ./... (capability-core, pkg/zdrrefusal, gen)",
+    "outcome": "clean",
+    "clean": true
+   },
+   {
+    "command": "node node_modules/typescript/bin/tsc6 -p tsconfig.app.json --noEmit",
+    "outcome": "Exactly 1 error, the known baseline error in src/shared/api/schedule-contract.test.ts(28,16)",
+    "clean": true
+   },
+   {
+    "command": "zdr-contract-schema.mjs",
+    "outcome": "Not run: zdr-posture-matrix.json was not changed",
+    "clean": true
+   }
+  ],
+  "fixes": [
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "slice": "EP-6-S9",
+    "what": "agent_pin: the `present` closure could not tie its returned borrow to its argument (lifetime error at line 326). Replaced it with an inner `fn present(value: Option<&Value>) -> Option<&Value>`."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs",
+    "slice": "EP-6-S9",
+    "what": "Named the 5 new InvokeRequest fields (agent_ref, agent_version, agent_digest, agent_tool_capability_ids, agent_autonomy_cap) in invoke_field_names (destructuring and list). Added FIELD_TREATMENTS rows as Treatment::Honored: the pin is read and narrows before the ZDR branch, and only ids and the digest are logged. CRLF kept."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/normalize.rs",
+    "slice": "EP-6-S9",
+    "what": "Test InvokeRequest literal: added the 5 agent_* fields as None (E0063)."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces/mod.rs",
+    "slice": "EP-6-S9",
+    "what": "The test referenced AGENT_PIN_FIELDS, which the tests module does not import. Changed it to super::AGENT_PIN_FIELDS."
+   },
+   {
+    "file": "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+    "slice": "EP-6-S2 + EP-10-S7",
+    "what": "Merged the id count: 273 (270 + schedule.run_now + the 2 connector policy ids), with a comment line for EP-10-S7."
+   },
+   {
+    "file": "apps/Model Plane/rust/services/model-gateway/src/artifact_revisions.rs",
+    "slice": "EP-3-S2",
+    "what": "rustfmt on the new module, which the builder had formatted by hand. CRLF restored afterwards."
+   }
+  ],
+  "still_broken": [
+   "EP-2-S4: no patch (builder blocked: wrong worktree base). Needs a re-run from model-plane.",
+   "EP-2-S8: no patch (builder blocked: worktree cut from 21d636a5a). Needs a re-run from model-plane.",
+   "EP-10-S1: no patch (builder blocked: worktree cut from 21d636a5a). Needs a re-run from model-plane."
+  ],
+  "regenerated": [
+   "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go",
+   "apps/Model Plane/go/gen/model_plane/v1/orchestration_grpc.pb.go (drift at HEAD in comment-bullet style only; now matches buf generate)",
+   "apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/orchestration_pb2.py",
+   "agent-action-admission.json (verevonv3 src/shared/api/contracts, MP api/contracts, capability-core internal/api/testdata, execution-core tests/fixtures, model-gateway tests/fixtures) + api/contracts/agent-action-admission.json.sha256 + zdr-contract-sync.test.sh pin",
+   "space-surface.v1.json (3 copies: MP api/contracts, model-gateway tests/fixtures, verevonv3 gateway tests/fixtures) + 3 .sha256 + zdr-contract-sync.test.sh pin (d8e871c9...)",
+   "zdr-refusals.json (4 copies: MP api/contracts, go/pkg/zdrrefusal, verevonv3 src/shared/api/contracts, Quarry-v2 quarry-runtime tests/fixtures) + 4 .sha256 + zdr-contract-sync.test.sh pin (7b28a828...)"
+  ],
+  "shared_edits_applied": [
+   "apps/Model Plane/deploy/docker-compose.yml: CRON_RUN_NOW_ENABLED (capability-core, EP-6-S2); MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST (model-gateway, EP-6-S9); MODEL_GATEWAY_ARTIFACT_REVISIONS=off (model-gateway) and SESSION_CORE_ARTIFACT_REVISIONS_ENABLED (session-core) (EP-3-S2). All have comments and default off.",
+   "apps/Frontend Plane/verevonv3/docker-compose.yml + docker-compose.production.yml: AGENT_VERSION_PINNING false (EP-6-S9)",
+   "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs: SpaceFeatureFlags.agent_version_pinning field + strict from_env read (CRLF) (EP-6-S9)",
+   "apps/Application Plane/convex-core/convex/spaceAgents.ts: pinnedVersion projected in spaceAgentBindingsForGateway (EP-6-S9)",
+   "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts: agent_version_unavailable, agent_pin_invalid, agent_tool_allowlist_do_unsupported copy (EP-6-S9)",
+   "apps/Frontend Plane/verevonv3/src/shared/actions/model-access.ts: schedule.run_now (EP-6-S2), integrations.list_connector_policies and integrations.set_connector_policy (EP-10-S7)",
+   "space-surface.v1.json: row mg:POST:/v1/cron/:id/run (EP-6-S2). idempotency is 'unspecified' because 'request_id' is not in the file's value space. flag is CRON_RUN_NOW_ENABLED.",
+   "apps/Model Plane/docs/ZDR.md (CRLF): Run now (EP-6-S2) and browser help requests (EP-1-S1) sentences added to the typed-refusal row; boundary row for Artifact revisions (EP-3-S2)",
+   "apps/Model Plane/docs/capability-ownership-matrix.md: Artifact revision store row, session-core owner (EP-3-S2)",
+   "apps/Model Plane/go/services/capability-core/cmd/main.go: toolPolicyEnforced computed first; NewToolPoliciesHandler(pool).WithEnforced(toolPolicyEnforced) (EP-10-S7)",
+   "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (LF): connector_offered && read_policy(...).await.admits_ask_loop(), short-circuit, with a comment (EP-10-S7)",
+   "apps/Model Plane/rust/services/execution-core/tests/approval_gate_contract.rs: CauseCode::BrowserHumanAssist arm (EP-1-S1)",
+   "mp-contracts zdr_refusal.rs Feature browser_human_assist + zdr-refusals.json row in all vendored copies + zdr-refusals.ts key union and NO/EN label (EP-1-S1)",
+   "control_epoch: 0 added in browser_events.rs (4 literals), mp-orchestration proto_shim.rs (2), model-gateway sse.rs test (2), session-core orchestration_grpc.rs tests (3) (EP-1-S1)",
+   "apps/Model Plane/api/openapi.yaml ApprovalCause enum + browser_human_assist; SDK enums in api/sdk/python/.../approval_cause.py and api/sdk/typescript/src/models/ApprovalCause.ts (EP-1-S1)"
+  ],
+  "shared_edits_skipped": [
+   "apps/Model Plane/docs/decisions/ledger.md entries for EP-6-S9 and EP-3-S2 (the lead books these)",
+   "Owner .env.example additions (MODEL_GATEWAY_ARTIFACT_REVISIONS, SESSION_CORE_ARTIFACT_REVISIONS_ENABLED, etc.)",
+   "EP-1-S1 'update the row counts in the zdr_refusal_inventory.rs tests': those tests hold no feature count. The only feature-count assert is Quarry-v2 quarry-edge/tests/zdr_feature_matrix.rs:450 (expects 32). The catalogue already had 40 features before this batch, so that assert was failing already. Left as is.",
+   "Builder-requested cargo fmt on connector_reads.rs and capability_policy.rs: the workspace is far from fmt-clean at HEAD (hundreds of diffs per file, connector_reads.rs already had 15 at HEAD), so fmt --check is not a usable gate. Not reformatted, per the rule against whole-file reformatting.",
+   "Builder test commands (go test, cargo test, vitest beyond the golden generation): not run, per the guard rules"
+  ],
+  "notes": "Worktree C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b is on branch model-plane at cdfeb5d27. All 5 available patches applied cleanly; EP-2-S4, EP-2-S8 and EP-10-S1 had no patch because their builders were blocked by the wrong worktree base. After the merge I ran git reset -q, so nothing is staged; 80 tracked files are changed plus the new untracked slice files (ConnectedAppsPolicy*.tsx, ChatLiveRunPanel.takeover.test.tsx, chat-browser-takeover.spec.ts, cron run_now*.go, cron_run_now_test.go, model-gateway artifact_revisions.rs). Line endings in this worktree are mixed: most patched files are CRLF, but tool_loop.rs, approval_gate_contract.rs, openapi.yaml, the JSON contracts and the compose files are LF. Every edit kept the file's own style. A judgement call for the lead to review: in zdr_features.rs I classified the 5 EP-6-S9 pin fields as Honored, because sse.rs reads the pin and narrows tools before the ZDR branch. The space-surface row uses idempotency 'unspecified' instead of the builder's 'request_id', which is not in the file's value space. EP-6-S9 needs_other_files (sessions.proto agent metadata, execution.proto RunAgentRequest field 26), EP-10-S7 (ChatMessages link, composer chip copy) and EP-1-S1 (use-chat-controller wiring, sse.rs control_epoch forwarding, approval cause parser) were not built; they are design work for later slices. Pre-existing untracked items not touched: apps/Control Plane/audit-core/audit-verify.exe, apps/Frontend Plane/Ingestion Plane/."
+ }
+}

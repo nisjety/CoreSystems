@@ -322,6 +322,9 @@ pub fn is_risky_tool(tool_name: &str) -> bool {
         // still submit a form, disclose an approved artifact, or accept a
         // dialog. Keep the effectful half behind the normal `ask` posture.
         "browser.act",
+        // computer.act (W4-C C1) drives the person's desktop: a click or a keystroke reaches any application,
+        // so it is gated like browser.act. No keyword above matches it.
+        "computer.act",
         // publish_social_post creates a REAL workspace post and requests its
         // publish to connected platforms. The "post" keyword above already
         // matches it, but list it explicitly so the gate is intent-visible
@@ -1358,6 +1361,8 @@ browser.observe            risky=no/no restricted=no rung=read_only/read_only ow
 browser.open               risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 code_interpreter           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 company_lookup             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+computer.act               risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
+computer.observe           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 execute_provider_action    risky=no/yes restricted=no rung=read_only/danger_full_access owner=no consent=no ask=Allow/AwaitApproval auto=Allow/Allow
 get_shipping_quotes        risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 knowledge_search           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
@@ -1428,6 +1433,8 @@ yr_weather                 risky=no/no restricted=no rung=read_only/read_only ow
             [
                 "tickets.create",
                 "browser.act",
+                "computer.act",
+                "computer.observe",
                 "mcp__s__t",
                 "MCP__s__t",
                 " mcp__s__t ",

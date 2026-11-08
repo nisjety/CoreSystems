@@ -1,0 +1,536 @@
+{
+ "batchId": "W1-17",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS10-S6",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/lib/settings-sections.ts",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/WorkspaceSettingsPage.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgModelAccessSection.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/settings/components/OrgModelAccessSection.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.ts",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx",
+    "apps/Frontend Plane/verevonv3/tests/e2e/model-entitlement.spec.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.model-entitlement.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/i18n/errors.model-entitlement.test.ts",
+    "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.model-entitlement.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.model-entitlement.test.tsx",
+    "apps/Frontend Plane/verevonv3/src/features/core/lib/sidebar-navigation.model-access.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "pnpm exec vitest run (new files: OrgModelAccessSection, DashboardComposer.model-entitlement, chat-client.model-entitlement, errors.model-entitlement, AiModelPicker.model-entitlement, sidebar-navigation.model-access)",
+     "outcome": "all pass (10 + 11 + 11 + 3 + 3 + 3 tests)"
+    },
+    {
+     "command": "pnpm exec vitest run src/features/settings src/features/core src/features/dashboard src/shared src/features/spaces src/features/support src/features/inbox",
+     "outcome": "1989 tests passed; 2 suites fail to load, both in files I did not touch (SupportPage.test.tsx, quarry-client.test.ts: missing @quarry/client)"
+    },
+    {
+     "command": "pnpm exec vitest run (everything else)",
+     "outcome": "2111 tests passed; scripts/check-bundle-budget.test.mjs fails to load (not mine)"
+    },
+    {
+     "command": "pnpm exec eslint on all touched and new files",
+     "outcome": "0 errors, 4 warnings (1 pre-existing in WorkspaceSettingsPage.tsx, 3 solid/reactivity warnings for async catalogue props in my picker test)"
+    },
+    {
+     "command": "pnpm typecheck (grepped for my files)",
+     "outcome": "no errors in any touched file; the global run still fails on pre-existing quarry-client.ts, RemoteSupportPage.tsx and schedule-contract.test.ts errors"
+    },
+    {
+     "command": "pnpm build",
+     "outcome": "FAILS on the same pre-existing typecheck errors (quarry-client.ts, schedule-contract.test.ts), not on my files"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/lib/shell-data.ts: add '/settings/model-access' to the VerevonRoute union (beside '/settings/mcp', line ~53) and `if (path.startsWith('/settings/model-access')) return '/settings/model-access'` in routeFromPath (beside line ~254); then remove the `MODEL_ACCESS_HREF` cast constant in sidebar-navigation.ts and use the literal href.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx line ~107: `applyDemoModeNavGate(sidebarSections, { modelAccessEnabled: <BFF enabled flag from getModelEntitlement(orgId)> })`, with the flag read only for admins (`shouldShowWorkspaceAdminNavigation(session)`).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx: add `{ id: 'model-access', label: 'Modelltilgang', icon: BrainCircuit, href: '/settings/model-access' }` beside the mcp entry (line ~54), shown only under the same BFF flag.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css: optionally add a `.verevon-ai-model-picker__notice` rule (font-size 11.5px, opacity 0.8, margin 4px 0 0) and drop POLICY_NOTICE_STYLE from AiModelPicker.tsx.",
+    "Run the Playwright spec: start a second Vite dev server on port 5174 for this worktree, then `cd \"apps/Frontend Plane/verevonv3\" && E2E_BASE_URL=http://localhost:5174 pnpm test:e2e -- model-entitlement`; keep the trace and screenshots as WS10-S6 evidence.",
+    "Evidence for the DoD (admin edits a role policy, member picker loses a model on next catalogue load, denied pinned send shows the Norwegian refusal) needs the rebuilt frontend and gateway images plus WS10-S7's org-core, inference-core and model-gateway with the switches on; that is the WS10-S7 live flow."
+   ],
+   "deviations": [
+    "The row names `listModelCatalogue()` and keeps `listModels()`; the composer reads the entitlement through `getModelEntitlementMeta()` (set by the shared load path) instead of switching its catalogue call, to keep the many existing composer test mocks valid and avoid a second /api/v1/models request.",
+    "Stale-selection reset and notice were also added to AiModelPicker.tsx (listed as owned) so the shared picker does not diverge from the composer.",
+    "A composer reconcile test was added as DashboardComposer.model-entitlement.test.tsx beside the other composer tests, as the row asks, plus small tests for the picker, errors seam, chat-client meta and nav gate.",
+    "Status is partial only because the full `pnpm build` cannot pass (pre-existing typecheck failures in untouched files) and the Playwright spec is unrun; all unit tests pass."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/src/features/core/lib/shell-data.ts (add '/settings/model-access' to VerevonRoute and to routeFromPath, then drop the MODEL_ACCESS_HREF cast in sidebar-navigation.ts)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx (line ~107: pass { modelAccessEnabled } from the BFF GET to applyDemoModeNavGate)",
+    "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx (add a Modelltilgang entry beside mcp, shown under the same BFF flag)",
+    "apps/Frontend Plane/verevonv3/src/styles/global.css (no rule exists for .verevon-ai-model-picker__notice; an inline style stands in)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Playwright tests/e2e/model-entitlement.spec.ts is written but not run: it needs a second Vite dev server on 5174 (restart Vite, host edits are not seen by the container) and auth. Run `E2E_BASE_URL=http://localhost:5174 pnpm test:e2e -- model-entitlement` and keep the trace and screenshots as evidence.",
+     "pnpm build cannot go green until the pre-existing typecheck failures (quarry-client.ts, RemoteSupportPage.tsx, schedule-contract.test.ts) are fixed. None of them are in slice files.",
+     "The live DoD flow (admin edits a role policy, member picker loses a model on the next catalogue load, a denied pinned send shows the Norwegian refusal) needs the rebuilt frontend and gateway images plus org-core, inference-core and model-gateway with the switches on. That is the WS10-S7 flow.",
+     "The lead must make the shared edits the implementer listed: shell-data.ts (route union and routeFromPath, then drop the MODEL_ACCESS_HREF cast), CoreSidebar.tsx (pass `{ modelAccessEnabled }` from the BFF flag to applyDemoModeNavGate), CoreSidebarSettingsPanels.tsx (add the Modelltilgang entry), and optionally a global.css rule for the picker notice."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Playwright tests/e2e/model-entitlement.spec.ts is written but unrun; run it with E2E_BASE_URL on a second dev server at port 5174 (restart Vite, host edits are not seen by the container) and confirm the selectors (model button aria-label, .dashboard-composer-stale-model-notice) and that a 403 stream body with code model_not_entitled reaches the Norwegian refusal text."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Wire the sidebar: CoreSidebar.tsx must read the BFF `enabled` flag and pass { modelAccessEnabled } to applyDemoModeNavGate, otherwise the Model access tab stays hidden although the /settings/model-access route works by URL."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Verify /api/v1/models through the Frontend gateway (domains/chat/json_handlers.rs list_models) passes the model-gateway `entitlement` sibling field through unchanged; the SPA reads it from there and without it no reconcile happens (fail-open in the UI, server still enforces)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The section edits only allow_mode, allow, deny and max_effort; min_privacy_tier and per-surface defaults are preserved but not editable, and there is no model-id picker or validation against the live catalogue, only free text."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "max_effort is offered from the SPA's six-name EFFORT_LEVELS; WS11 may change the ladder, and org-core validates against the WS11 golden, so the select should read the golden once WS11 lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The stale-selection notice names the model by its remembered label or id, and the reset persists immediately via rememberAiModelSelection; a person who switches org mid-session is not re-reconciled until the next catalogue load."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Role overrides are free-text role names (datalist suggests member and admin); a roles list from org-core or auth-core would prevent typos for custom roles."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Pre-existing failures seen and not touched: quarry-client.ts missing @quarry/client, RemoteSupportPage.tsx implicit any, schedule-contract.test.ts TS2352, SupportPage.test.tsx and quarry-client.test.ts load failures, check-bundle-budget.test.mjs load failure; these block a green pnpm typecheck and pnpm build."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "CoreSidebar.tsx does not yet pass the BFF `enabled` flag to applyDemoModeNavGate, so the Modelltilgang nav item stays hidden even with the admin switch on. The section is reachable only by URL until the lead wires it (shared-edit)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The SPA reads `entitlement` as a sibling of `models` on /api/v1/models. Confirm the Frontend gateway list_models handler passes the model-gateway `entitlement` field through unchanged. If it drops the field, no reconcile happens: the UI fails open and the server still enforces."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The Playwright spec model-entitlement.spec.ts is unrun, so its selectors and the 403 stream body with code model_not_entitled reaching the Norwegian refusal text are unproven against a real build."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The org-default policy is edited as free-text model ids with no validation against the live catalogue. min_privacy_tier and per-surface defaults are preserved but not editable. Role names are free text, so a typo on a custom role creates a dead override."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "max_effort options come from the SPA's own EFFORT_LEVELS and the composer maps Quick/Deep/Max to low/high/xhigh. Both must be re-read from the WS11 ladder golden when WS11 lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The stale-selection reset persists immediately via selectModel, and the meta is a module-level singleton set by the last catalogue load. A person who switches org mid-session keeps the old org's meta until the next listModels call."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "MODEL_ACCESS_HREF cast in sidebar-navigation.ts and the inline POLICY_NOTICE_STYLE / COMPOSER_NOTICE_STYLE objects are stand-ins for shared edits (shell-data.ts route union, global.css) and should be removed once those land."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The role-layer fallback button in OrgModelAccessSection reads \"Opprett organisasjonsstandard\" but can only be reached for the org default, so it is harmless. Pre-existing typecheck and load failures (quarry-client.ts, RemoteSupportPage.tsx, schedule-contract.test.ts, SupportPage.test.tsx, check-bundle-budget.test.mjs) block a green pnpm typecheck and pnpm build."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "Built the SPA half of WS10-S6 (code and unit tests), with no VITE_ flag. Section visibility follows the BFF reply to GET /api/v1/orgs/:id/model-entitlement ({enabled:false} gives a not-enabled note and no editor).\n\nWhat exists:\n- chat-client.ts: `listModelCatalogue()` returns {models, entitlement}, and `listModels()` is kept with the same signature as a wrapper over it. The entitlement meta is parsed whole or not at all. It is also exposed through `getModelEntitlementMeta()`, the same pattern as `getAttachmentPolicy`, so the composer, which already loads the catalogue through `listModels`, needs no second request and the roughly 20 existing composer test mocks of `listModels` are untouched. New pure helpers: `enforcedMaxEffort`, `effortLevelWithin`, `selectionIsStale`.\n- DashboardComposer.tsx:\n  - A pinned model the enforced policy no longer lists is replaced, by the policy default if the catalogue lists it and otherwise by Verevon Balance, with a visible notice, and the new choice is persisted.\n  - The effort select drops options above `max_effort`: Quick maps to low, Deep to high, Max to xhigh, and Auto sends no effort so is never capped.\n  - A pick made earlier falls to the strongest allowed level on send, with a notice.\n  - Both rules apply only when `enforced` is true, so shadow mode changes nothing.\n  - An empty catalogue (an outage) never resets a selection.\n- AiModelPicker.tsx: the same stale-selection reset plus notice, so the Space, Support and Inbox pickers follow the policy.\n- OrgModelAccessSection.tsx: editor for the org default and role overrides (allow mode, allow list, deny list, max effort). It saves with `expected_revision`, refuses an empty listed policy and `*` patterns client-side, and shows the typed refusals (revision_conflict, model_policy_leaves_no_zdr_model and others) through `translateApiError`. It preserves `min_privacy_tier` and `defaults` of an existing policy.\n- errors.ts: the member refusals model_not_entitled and model_entitlement_unavailable render from `model-entitlement-refusals.ts` (Norwegian first), and the admin refusal codes were added.\n- settings-sections.ts, WorkspaceSettingsPage.tsx, sidebar-navigation.ts: new 'model-access' section, route match and nav item. `applyDemoModeNavGate(sections, {modelAccessEnabled})` hides the nav item unless the BFF flag is passed, so with the existing call site the tab stays hidden.\n- tests/e2e/model-entitlement.spec.ts: three route-stubbed cases (stale reset with notice, effort ceiling, Norwegian refusal on a denied pinned send). Written but NOT run: it needs the second dev server on 5174 and auth.\n\nDecision for the lead: the nav item needs a cast (`MODEL_ACCESS_HREF`) because `VerevonRoute` lives in shell-data.ts, which is not owned. The shared edits below remove it. I did not run `pnpm test:e2e`."
+  },
+  {
+   "id": "WS07-S1",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/memory.proto",
+    "apps/Model Plane/rust/services/session-core/migrations/0051_user_memory_state.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0051_user_memory_state.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/memory_control.rs",
+    "apps/Model Plane/rust/services/session-core/src/memory_grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/dreaming.rs",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/learning_events.rs",
+    "apps/Model Plane/rust/services/session-core/src/gdpr.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p session-core --bin session-core memory_control",
+     "outcome": "passed: 10 passed, 7 ignored (6 new DB tests plus the pre-existing retired-mirror DB test; DB tests compile but were not run)"
+    },
+    {
+     "command": "cargo test -q -p session-core --bin session-core (whole binary)",
+     "outcome": "passed: 576 passed, 0 failed, 199 ignored. Includes every_agent_memory_writer_calls_the_gate, the gdpr total (26) and the learning_events source scans"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib memory_prefetch",
+     "outcome": "passed: 6 passed (the 4 existing source scans stay green with the new skip exit, plus the new skip-label test)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib recall_memory_reports_paused_not_empty",
+     "outcome": "passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib inline_tool_allowed_still_refuses_save_memory",
+     "outcome": "passed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib (whole lib)",
+     "outcome": "passed: 2270 passed, 0 failed, 4 ignored"
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib save_memory_maps_paused",
+     "outcome": "NOT RUN: execution-core does not compile. runtime_loop/agent.rs:2720 builds pb::InferRequest without image_parts (field 20 added to inference.proto by WS08-S3.code, a file outside this slice). cargo check reports that as the only error, so the new production code in mod.rs type-checks, but the test has not executed."
+    }
+   ],
+   "db_tests_written": [
+    "pause_blocks_inline_and_dreaming_extraction",
+    "resume_does_not_mine_messages_written_while_paused",
+    "paused_user_still_gets_org_rows_and_no_user_rows",
+    "off_hides_list_but_delete_still_works",
+    "inflight_extraction_cannot_persist_after_pause",
+    "zdr_caller_cannot_set_state"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: in the session-core service env (next to DREAMING_LLM_EXTRACTION, about line 878) add: '      # WS07-S1 kill switch. Default true: the memory gate enforces each user paused/off state. false restores pre-S1 behaviour (every user treated as on) and logs ERROR once per Dreaming cycle; SetMemoryControls is then refused.' then '      MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true}'",
+    "Run the six ignored DB tests through the harness against a disposable DATABASE_URL (migration 0051 applies first): cargo test -q -p session-core --bin session-core -- --ignored --test-threads=1 pause_blocks_inline_and_dreaming_extraction resume_does_not_mine_messages_written_while_paused paused_user_still_gets_org_rows_and_no_user_rows off_hides_list_but_delete_still_works inflight_extraction_cannot_persist_after_pause zdr_caller_cannot_set_state (they compile; none has been executed). Also confirm the pre-existing ignored memory DB tests (forgotten_memory_cannot_return_from_pending_or_inflight_extraction, delete_memory_reports_what_happened_to_the_durable_row, zdr_receipt_memory_delete_is_open_to_the_zdr_owner_and_stays_scoped) still pass with the new SQL.",
+    "Regenerate protos: buf generate (Go gen memory.pb.go and memory_grpc.pb.go, python memory_pb2, the TS gen) so Go consumers see GetMemoryControls, SetMemoryControls, skip_reason, hidden_reason. letta-bridge and orchestrator-core embed UnimplementedMemoryServiceServer, so they keep compiling. Run buf lint and buf breaking (additive only).",
+    "Once the WS08-S3.code InferRequest.image_parts literal is fixed at apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:2720, run cargo test -q -p execution-core --lib save_memory_maps_paused and recall_memory_reports_unavailable_not_no_memories_when_paused.",
+    "Live evidence per the plan row after a rebuild of session-core, model-gateway, execution-core: say 'husk at jeg heter Ima' (row appears), SetMemoryControls(paused) via grpcurl, repeat a new fact, run Dreaming with DREAMING_INTERVAL_SECS=5: zero new agent_memory rows, SearchMemory skip_reason=user_paused, mp_gateway_chat_memory_prefetch_total{outcome=\"skipped_paused\"}, then resume and show the paused-period message is never extracted. Sessions only use migration 0051 after a session-core restart.",
+    "Commit with CRLF preserved on every file except the two LF files (sse.rs and the new migrations 0051 up and revert)."
+   ],
+   "deviations": [
+    "MEMORY_CONTROLS_ENABLED is read as an opt-out kill switch that defaults ON (the plan row says 'opt-out vocabulary A, default ON'), not as an opt-in that defaults OFF as the lead's general rule says. Reason: state 'on' is behaviour-neutral, and an opt-in default would silently not enforce a user's pause. Falsey values (false, 0, off, no) restore pre-S1 behaviour and log ERROR once per Dreaming cycle. If the lead wants it default OFF, the change is the one-line enabled_from_env in memory_control.rs, but a user's pause would then not be enforced until the env is set.",
+    "api/contracts/zdr-posture-matrix.json and .sha256 were not edited. The matrix loaders reject unknown fields and the matrix has no store or feature section, so a memory_controls row needs an mp-contracts loader change first (outside this slice). See depth_findings.",
+    "list_user_memory does not take MemoryAccess as the plan sketches: paused keeps the list and off hides it, so ListMemory decides visibility from the decision (list_visible) and a new count_user_memory supplies hidden_rows.",
+    "index_agent_memory keeps its String return type (retention_receipt.rs tests call it and are not owned): a gate refusal returns the empty id and the handler asks the gate again to name the reason.",
+    "model-gateway tests/e2e_invoke_chain_test.rs (a test mock of MemoryService) and the MockMemoryService in model-gateway grpc.rs got stub get_memory_controls and set_memory_controls, because the new RPCs are required trait methods. Also model-gateway tool_loop.rs:7084 got image_parts: Vec::new() on a test InferRequest literal, because WS08-S3.code's field 20 broke that file's compile; it is the same one-line fix that site needs regardless."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (line 2720: add image_parts to the pb::InferRequest literal; caused by WS08-S3.code field 20, blocks execution-core compile)",
+    "apps/Model Plane/rust/crates/mp-contracts (zdr_retention_matrix loader) plus api/contracts/zdr-posture-matrix.json: a durable-mutation row for GetMemoryControls/SetMemoryControls (Appendix B N7) cannot be added until the loader accepts one",
+    "apps/Model Plane/deploy/docker-compose.yml (the MEMORY_CONTROLS_ENABLED line, see lead_todo)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "DB tests: run the six ignored tests (pause_blocks_inline_and_dreaming_extraction, resume_does_not_mine_messages_written_while_paused, paused_user_still_gets_org_rows_and_no_user_rows, off_hides_list_but_delete_still_works, inflight_extraction_cannot_persist_after_pause, zdr_caller_cannot_set_state) against a disposable DATABASE_URL, plus the pre-existing forgotten_memory_cannot_return_from_pending_or_inflight_extraction, delete_memory_reports_what_happened_to_the_durable_row and the retention_receipt and learning_events DB tests. No new SQL has executed against Postgres yet.",
+     "execution-core: add image_parts to the pb::InferRequest literal at runtime_loop/agent.rs:2720 (WS08-S3.code breakage, not this slice), then run save_memory_maps_paused and recall_memory_reports_unavailable_not_no_memories_when_paused.",
+     "shared-edit apps/Model Plane/deploy/docker-compose.yml: add MEMORY_CONTROLS_ENABLED: ${MEMORY_CONTROLS_ENABLED:-true} (with the implementer's comment) to the session-core env. It is not declared yet.",
+     "buf generate, buf lint and buf breaking (additive only). Go bindings, python and TS gen are not regenerated.",
+     "Live evidence per the plan row: rebuild session-core, model-gateway and execution-core; inline row; SetMemoryControls(paused) via grpcurl; Dreaming with DREAMING_INTERVAL_SECS=5 gives zero new rows; skip_reason=user_paused; mp_gateway_chat_memory_prefetch_total{outcome=\"skipped_paused\"}; resume, and the paused-period message is never mined. Session-core must restart to pick up migration 0051.",
+     "Commit with CRLF kept on every file except the LF files (sse.rs and the two new migrations)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "None of the six DB tests, and none of the new SQL (memory_state predicate with a bound boolean, set_state CASE on $3, OrgOnly OR-branches in search and context queries), has run against Postgres; the unit tests and source scan cannot catch an SQL typing mistake."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Org policy is not wired: resolve passes OrgMemoryPolicy::Allow, so org_disabled and policy_unavailable are decided and tested in the table but never produced; WS07-S4 must supply the mirror value and make resolve fail closed when the mirror is stale."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "capability-core /api/v1/memory writes agent_memory by direct SQL in the shared DB and bypasses this gate until WS07-S5; the writer source-scan only covers session-core dreaming.rs, so that writer and the operator memory_dedup CLI (which retires rows but never creates content) are outside the guarantee."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A paused user's already-loaded Dreaming batch can still send message text to the paid extractor model in the window between load_pending_messages and the persist gate; persist is refused, but the LLM call is not. Re-check the state before extractor.extract if this window matters."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When the gate refuses an in-flight Dreaming write, persist returns (0, []) and dream_once still records a dream_runs row, so a message written before the pause is never mined after a resume (safe direction, but it loses a pre-pause fact)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "SkippedOrigin means runs on any thread whose origin is not 'chat' (space, agent_run, support, system, mail_task) or a run with no thread are no longer announced to the learning loop while MEMORY_CONTROLS_ENABLED is on; that is the plan's text, but it changes behaviour for mail_task and agent_run threads and the owner should confirm."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No behavioural test yet for learning_events with a paused user or a non-chat origin (only a source-order scan); the plan puts memory_paused_and_non_chat_origin_are_never_announced in S7 and it needs a DB."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "WS02-S6 (run_context.rs, memory composer) also calls search_memory and should map skip_reason to SKIPPED_BY_POLICY(memory_*) instead of EMPTY; the compaction memory directive already inherits the gate because it goes through SearchMemory."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "gdpr.rs only has the org-level purge, which now deletes memory_control_events; there is no per-user erasure path for the state row or its events (a user erasure request would need one)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With MEMORY_CONTROLS_ENABLED=false GetMemoryControls still reports the stored state while use_allowed is true; deliberate (state is the preference, the flags are the enforcement) but the UI in S3 should show a notice when state is not on and use_allowed is true."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "extract_after is set from the database clock while messages.created_at comes from the application clock (pre-existing pattern in record_forgetting); with clock skew a message written just before a resume could be mined."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "MEMORY_CONTROLS_ENABLED defaults ON (opt-out kill switch), as the plan row states, not default-off like the lead's general switch rule; owner or lead should confirm, since a default-off would leave every user's pause unenforced. Falsey parsing reuses learning_events::is_falsey (false/0/off/no, trimmed, case-insensitive) and logs ERROR once per Dreaming cycle."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No new SQL has run against Postgres: the bound-boolean predicates in load_pending_messages, load_preceding_context, search_agent_memory and load_agent_memory_context_rows, and the set_state CASE WHEN $3 = 'on' (parameter reused as text), are read-correct but unexecuted; the DB harness must run before the behaviour is relied on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Org policy is not wired: resolve and resolve_in_tx hard-code OrgMemoryPolicy::Allow, so org_disabled and policy_unavailable exist only in the decision table; WS07-S4 must supply the mirror and fail closed on staleness."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "capability-core /api/v1/memory writes agent_memory by direct SQL and bypasses the gate until WS07-S5; every_agent_memory_writer_calls_the_gate scans only session-core dreaming.rs and grpc.rs, so that writer and the memory-dedup CLI are outside the guarantee."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "api/contracts/zdr-posture-matrix.json and .sha256 have no row for GetMemoryControls or SetMemoryControls (Appendix B N7): its decision and enforcement rows are routing-shaped and the loader needs a durable-mutation section first; SetMemoryControls ZDR and waived refusal is covered only by the ignored DB test zdr_caller_cannot_set_state."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A paused user's already-loaded Dreaming batch can still reach the paid extractor model between load_pending_messages and the persist gate; the write is refused but the LLM call is not."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When the gate refuses an in-flight Dreaming persist, dream_once still records a dream_runs row, so a pre-pause message is never mined after a resume (safe direction, loses one fact)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "SkippedOrigin (only threads.origin='chat') and SkippedMemoryState are active whenever the switch is on, so even default-on users stop having space, agent_run, support, system, mail_task and thread-less runs announced to the learning loop; this follows the plan text but is not behaviour-neutral and needs owner confirmation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "learning_events has only a source-order scan (memory_state_and_origin_gates_precede_the_outbox_insert), no behavioural test for a paused user or non-chat origin (the plan puts it in S7); the existing ignored retention_receipt/learning_events DB tests need a re-run to confirm their threads are origin 'chat'."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No unit test covers model-gateway fetch_memory_context (grpc.rs) recording the skipped_* outcome, or the sse.rs fetch_chat_memory_context skip branch beyond the label mapping."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "gdpr.rs purges memory_control_events only with the whole organization; there is no per-user erasure for the state row and its events."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "WS02-S6 (run_context.rs memory composer) should map SearchMemoryResponse.skip_reason to SKIPPED_BY_POLICY(memory_*) instead of EMPTY."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "With MEMORY_CONTROLS_ENABLED=false, GetMemoryControls still reports the stored state while use_allowed is true, and SetMemoryControls is refused; the S3 UI should show a notice for that combination."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "extract_after uses the database clock while messages.created_at uses the application clock (pre-existing pattern in record_forgetting); with skew a message written just before a resume could be mined."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Edits outside the owned list are limited to the new MemoryService mock stubs in model-gateway tests/e2e_invoke_chain_test.rs (a test file beside the change) and image_parts: Vec::new() in tool_loop.rs (an owned file, needed after WS08-S3.code); the lead should expect the same image_parts one-liner from the WS08 batch to avoid a duplicate."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "authority",
+    "audit",
+    "policy"
+   ],
+   "notes": "What exists. The single gate is in memory_control.rs: MemoryState, MemoryAccess {Full, OrgOnly, None}, MemoryReason (on, user_paused, user_off, org_disabled, zdr, policy_unavailable), a pure decide(zdr, org, user) table, resolve (reader, unlocked read), resolve_in_tx (writer, FOR UPDATE row lock), stored_state, and set_state (bumps extract_after on a transition into on, writes a content-free memory_control_events row). permits_extraction now asks the gate under the same lock, so persist_candidates and apply_grounded_candidates are covered for both Dreaming and inline.\n\nWriters gated: inline append (append_message_in_tx asks resolve_in_tx before persist or Letta), persist_candidates, apply_grounded_candidates, index_agent_memory (asks under the lock and returns the empty id on denial; the IndexMemory handler maps that to failed_precondition memory_not_enabled:<reason>). Dreaming load_pending_messages and load_preceding_context exclude non-on users.\n\nReaders gated: SearchMemory (skip_reason, org-only rows while paused or off, Letta skipped), the context assembly in grpc.rs (access passed to load_agent_memory_context_rows; memory_index rows and the Letta mirror skipped unless Full), ListMemory (hidden_reason user_off or org_disabled; paused keeps the list). DeleteMemory is untouched.\n\nNew RPCs: GetMemoryControls (a ZDR caller is answered reason=zdr and nothing is read or written) and SetMemoryControls (user caller for themselves only; refused for a service, ZDR or waived credential; refused with failed_precondition when MEMORY_CONTROLS_ENABLED is off).\n\nlearning_events: SkippedMemoryState and SkippedOrigin (only threads.origin='chat'), counter mp_session_learning_run_events_skipped_total{reason}, both under the kill switch. gdpr purges memory_control_events.\n\nmodel-gateway: three new prefetch outcome labels, the skip token mapping (skipped_prefetch_outcome), the gRPC twin records it, recall_memory returns {\"memory\":\"unavailable\",\"reason\":...}. execution-core: save_memory maps memory_not_enabled:* to an honest tool error and recall_memory reports unavailable instead of no_memories.\n\nProto: only the plan's tags (SearchMemoryResponse.skip_reason=4, ListMemoryResponse.hidden_reason=4, MemoryControls 1-9, SetMemoryControlsRequest 1-3), all additive. The Get request and the two response wrappers are my own shapes; the plan did not specify them.\n\nStatus is partial only because the execution-core test could not be run (see tests_run), and because the DB tests, buf regeneration and compose line are lead steps. The slice's code and the unit tests that could run are done."
+  },
+  {
+   "id": "WS08-S3.code",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc/zdr_waiver_route_tests.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Model Plane/rust\" && CARGO_INCREMENTAL=0 cargo check -q -p model-gateway -p execution-core --lib",
+     "outcome": "FAILS with exactly two E0063 errors: execution-core runtime_loop/agent.rs:2720 and model-gateway tool_loop.rs:7038 missing field image_parts. Both files are outside the owned set; edits handed back in lead_todo as shared-edits."
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib (previous round, nothing in owned files changed this round)",
+     "outcome": "517 passed, 0 failed"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: add `image_parts: Vec::new(),` to the pb::InferRequest literal at ~2720 (it ends with `prompt_tiers: prompt_tier_plan(req.run_context.as_ref(), &messages),` at ~2774; add the new line after it).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: add `image_parts: Vec::new(),` after `prompt_tiers: None,` in the InferRequest literal at ~7067 (literal begins at ~7038).",
+    "Then run: cargo check -q -p model-gateway -p execution-core --lib and cargo test -p model-gateway -p execution-core --no-run.",
+    "Go bindings: run buf generate for apps/Model Plane/proto (InferRequest.image_parts = 20, InferImagePart) and rebuild any Go service that vendors the generated inference package.",
+    "Status contract: add E::VisionUnsupported(\"...\") to status_contract_cases in inference-core grpc.rs tests, run MP_UPDATE_GOLDEN=1 cargo test -p inference-core --lib status_contract, re-pin the digest in scripts/tests/zdr-contract-sync.test.sh, run bash scripts/tests/zdr-contract-sync.test.sh.",
+    "Evidence step: rebuild inference-core and send two images to a live vision deployment; capture the provider-bound body shape from a debug test, never bytes in logs.",
+    "buf breaking is vacuous until WS12-S2 (baseline.binpb is 0 bytes): the tag diff (additions only: InferRequest.image_parts = 20, InferImagePart 1..3, tag 19 left free) is the additivity proof.",
+    "Gateway side (WS08-S4): map trailer kind vision_unsupported in model-gateway refusal handling and sse-event-taxonomy before any caller sets image_parts."
+   ],
+   "deviations": [
+    "The third fallback.rs gate site (embedding path) was not gated, since embeddings carry no images.",
+    "VisionUnsupported is not yet in the status contract golden (needs a regenerated golden outside the owned files)."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "inference-core status contract golden (STATUS_CONTRACT_PATH in grpc.rs tests) and the pinned digest in scripts/tests/zdr-contract-sync.test.sh"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "LEAD MUST APPLY before the workspace compiles: shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: add `image_parts: Vec::new(),` to the pb::InferRequest literal at ~2720, after `prompt_tiers: prompt_tier_plan(...)`. Then shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: add `image_parts: Vec::new(),` after `prompt_tiers: None,` in the InferRequest literal at ~7055. Then re-run cargo check -q -p model-gateway -p execution-core --lib and cargo test -p model-gateway -p execution-core --no-run.",
+     "Go bindings: run buf generate for apps/Model Plane/proto and rebuild any Go service that vendors the generated inference package.",
+     "Status contract: add E::VisionUnsupported(...) to status_contract_cases in the grpc.rs tests, regenerate the golden with MP_UPDATE_GOLDEN=1, re-pin the digest in scripts/tests/zdr-contract-sync.test.sh and run it. Today the exhaustive-name match was extended but the golden cases were not, so the committed golden does not list vision_unsupported.",
+     "Live evidence: rebuild inference-core (docker, lead) and send two images to a live vision deployment, capturing the provider-bound body shape from a debug test, never bytes in logs.",
+     "buf breaking is vacuous until WS12-S2; the tag diff above is the additivity proof."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "prost-generated pb::InferRequest derives Debug and would print image bytes if any caller logs a request with {:?}; the internal ImagePart redacts, the wire type does not. No grep for such a log was done."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "vision_unsupported is not yet in the committed status contract golden, the gateway refusal catalogue or its trailer reader; a gateway reading the trailer treats it as an unknown FAILED_PRECONDITION until WS08-S4 and the golden regeneration land."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The vision denylist is name-based, so an operator-chosen Azure alias for a denylisted model over-advertises vision; the server gate only fails closed for names it recognises."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the intent-ladder substituting a non-vision rung for an image request, or the OpenAI unified-Azure flavor (supports_vision false) end to end."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each image is base64-encoded on every attempt and retry; 4 images of up to 20 MB each make per-attempt memory large, and the 20 MB per-image cap is far above the gateway's planned 1 MB cap."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Anthropic apply_prompt_caching skips a last message that is an image block array, so image turns lose last-message caching; not measured, and the ZDR image path under Anthropic with tiered system is untested."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "No magic-byte sniffing of image data against the declared mime type; a mismatch is passed to the provider, which rejects it."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Gateway side is not wired: the model-gateway refusal catalogue, trailer reader and sse-event-taxonomy do not know kind vision_unsupported, so it reads as an unknown FAILED_PRECONDITION; WS08-S4 must map it before any caller sets image_parts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The prost-generated pb::InferRequest derives Debug and prints image bytes if any caller logs a request with {:?}; only the internal ImagePart redacts, so a grep of all pb::InferRequest log sites is needed before callers set image_parts."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The vision denylist is name-based, so an operator-chosen Azure deployment alias for a denylisted model over-advertises vision and passes the server gate; INFERENCE_VISION_MODEL_DENYLIST_EXTRA is the only mitigation."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the intent-ladder substituting a non-vision rung for an image request, the OpenAI unified-Azure flavor, or a streaming path with an image on the OpenAI/Anthropic adapters; the vision gate is also not applied at the embedding site (correct, since embeddings carry no images)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Each image is base64-encoded on every attempt and retry, and the 20 MB per-image cap with the 16 MiB decode limit is inconsistent: a single 20 MB image can never arrive through tonic (decode limit 16 MiB), so MAX_IMAGE_BYTES is unreachable for image parts and the effective cap is about 16 MiB total request."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Anthropic apply_prompt_caching skips a last message that is an image block array, so image turns lose last-message caching, and the tiered-system plus image combination is untested."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The no-image body byte-identity test covers only the OpenAI body; the Anthropic text-only body is covered only by pre-existing tests."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "No magic-byte sniffing of image data against the declared mime type; a mismatch is passed through and rejected by the provider."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "policy"
+   ],
+   "notes": "Nothing in the slice's owned files changed this round. The two review findings are exhaustive prost struct literals in files the slice does not own, so per the ownership rule they are not edited here; they are handed back as shared-edits. After both lines are added, re-run cargo check -q -p model-gateway -p execution-core --lib and cargo test -p model-gateway -p execution-core --no-run. The other InferRequest literals in non-owned files and in inference-core/tests use ..Default::default() or ..InferRequest::default() and are unaffected (checked by grep, not compiled). The earlier 'no errors' claim for the check was wrong. All other behaviour from the previous report is unchanged."
+  }
+ ]
+}

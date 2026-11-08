@@ -171,6 +171,12 @@ describe('toolFamily', () => {
     expect(toolFamily('web_search', 'diff')).toBe('change')
   })
 
+  it('takes the computer panel intents as command for a process, and generic for a browser step or a file', () => {
+    expect(toolFamily('some_process_tool', 'process')).toBe('command')
+    expect(toolFamily('browser.act', 'browser')).toBe('generic')
+    expect(toolFamily('workspace_edit', 'file')).toBe('generic')
+  })
+
   it('does not take an object prototype key for a listed name', () => {
     expect(toolFamily('constructor', 'search')).toBe('search')
     expect(toolFamily('constructor', 'generic')).toBe('generic')

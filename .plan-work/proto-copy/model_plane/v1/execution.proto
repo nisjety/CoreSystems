@@ -1,0 +1,377 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "model_plane/v1/runs.proto";
+import "model_plane/v1/inference.proto";
+
+// ExecutionCore — runtime loop ownership for agent execution.
+// Owns: tool planning/selection, permission checkpoints, tool execution,
+//       artifacts, subagents, step transitions, compaction triggers.
+service ExecutionCore {
+  // Execute a single step within a run.
+  rpc ExecuteStep(ExecuteStepRequest) returns (ExecuteStepResponse);
+
+  // Resume a paused or checkpointed run.
+  rpc ResumeRun(ResumeRunRequest) returns (ResumeRunResponse);
+
+  // Cancel an active run.
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+
+  // Pause an active run (Phase 2 B5 — user-initiated browser-run control).
+  // Mirrors ResumeRun/CancelRun. A paused run's in-flight loop (e.g. the
+  // browser-agent loop) polls this state and blocks between steps until
+  // resumed or cancelled; it never aborts a step already in flight.
+  rpc PauseRun(PauseRunRequest) returns (PauseRunResponse);
+
+  // Drive a whole agent run to completion: plan → infer → persist → finalize.
+  // MVP no-tool slice — a single InferenceCore.Infer round persisted to the
+  // run's thread, with the run flipped to a terminal status. Dispatched by the
+  // gateway after StartRun so a chat turn produces a durable answer instead of
+  // stalling in `'queued'`.
+  rpc RunAgent(RunAgentRequest) returns (RunAgentResponse);
+
+  // Execute one service-owned scheduled turn. This is intentionally separate
+  // from ExecuteStep: the latter is user-delegated and must never be widened
+  // to make Temporal work. The lane remains disabled until Session Core's
+  // current-run claim/receipt and Control's per-step decision are deployed.
+  rpc ExecuteScheduledStep(ExecuteScheduledStepRequest) returns (ExecuteScheduledStepResponse);
+}
+
+// ExecuteScheduledStepRequest contains only non-secret, immutable bindings.
+// The Control decision is carried as direct-hop metadata by the eventual
+// implementation, never in Temporal input, events, checkpoints, or tool
+// payloads. Keeping the request content-free prevents a caller from selecting
+// a goal, tool, credential, or user identity at the execution boundary.
+message ExecuteScheduledStepRequest {
+
+  string thread_id = 2;
+  string org_id = 3;
+  string space_id = 4;
+  string subject_id = 5;
+  string schedule_id = 6;
+  string fire_key = 7;
+  string template_digest = 8;
+  string step_id = 9;
+  uint32 step_index = 10;
+  string policy_digest = 11;
+  string idempotency_key = 12;
+  // Ephemeral direct-hop Control decision. It must never be persisted in
+  // Temporal history, Session metadata, events, checkpoints, or tool output.
+  string control_decision_token = 13;
+}
+
+message ExecuteScheduledStepResponse {
+  string step_id = 1;
+  string status = 2;
+  string receipt_id = 3;
+  string output = 4;
+  string error = 5;
+  bool unknown_outcome = 6;
+}
+
+// RunAgentRequest — drive one agent run from goal to terminal answer.
+message RunAgentRequest {
+  // Run to drive (created by session-core StartRun).
+  string run_id = 1;
+
+  // Thread the run belongs to (assistant answer is appended here).
+  string thread_id = 2;
+
+  // User goal / prompt for this turn.
+  string goal = 3;
+
+  // Tenant identifier.
+  string org_id = 4;
+
+  // Acting user identifier.
+  string user_id = 5;
+
+  // Requested model (empty / "verevon-*" lets inference-core's intent layer
+  // resolve a concrete model).
+  string model = 6;
+
+  // Run mode hint: "execute", etc.
+  string mode = 7;
+
+  // Maximum agent rounds (reserved for the multi-tool loop; the MVP no-tool
+  // slice executes a single round).
+  uint32 max_rounds = 8;
+
+  // Zero-Data-Retention flag for this run. When true, the driver threads it
+  // into every inference round and onto each tool step's GDPR audit detail so
+  // no run content is retained durably. Sourced from the chat request's `zdr`
+  // flag (model-gateway), OR'd with any org-level ZDR default.
+  bool zdr = 9;
+
+  // Client-supplied tool definitions for this turn (chat-parity: the same
+  // ToolSpec[] the inline chat loop accepts). Merged with execution-core's
+  // built-in read/action tools and the org's registered MCP tools, then
+  // offered to the model AND admitted into the purpose-lock allowlist. Every
+  // client tool still executes through the SAME governed execute_step path
+  // (permission gate + HITL), so forwarding them cannot bypass approval; a
+  // client tool that resolves to no executor returns a graceful error the
+  // ReAct loop feeds back. Empty → only the server-side set is offered.
+  repeated ToolDefinition tools = 10;
+
+  // Minimum privacy tier every serving provider of EVERY inference round of
+  // this run must satisfy. The gateway threads the chat request's floor here;
+  // execution-core copies it onto each round's InferRequest so the governed
+  // agent loop enforces the same constraint as the inline path — a tier can
+  // never be lost by routing a constrained chat turn through the agent loop.
+  // UNSPECIFIED imposes no constraint.
+  PrivacyTier min_privacy_tier = 11;
+  // When true, this run must never take a real side-effecting action,
+  // regardless of `mode` -- the human asked to see what the agent WOULD do
+  // before letting it act. Read-only tools (knowledge_search, yr_weather,
+  // ...) still run; anything `permission::is_risky_call` classifies as
+  // risky is refused outright, the same way a delegated subagent already
+  // refuses one (see runtime_loop::agent's leaf/orchestrator role split).
+  // Sourced from the chat request's `plan_mode` flag (model-gateway).
+  // Before this field existed, the request carried NO way to express this at
+  // all -- `plan_mode` was tracked only as a durable status flag
+  // (session-core `run.mode` / `PlanModeStore.is_plan_mode`) for the UI to
+  // query, with no code path that ever consulted it before dispatching a
+  // tool. A run a human believed was "planning" could still execute a real
+  // action if its `mode` happened to be `auto`.
+  // Field number 13, not 11: `min_privacy_tier` took 11 on the integration
+  // line before this field merged. Renumbered here rather than there because
+  // this one had not shipped yet — moving a field number that is already on a
+  // deployed wire is how two builds disagree about what a byte means.
+  bool plan_mode = 13;
+
+  // The rung this run is permitted to operate at, checked PER CALL by the
+  // runtime loop. Unset reads as the narrowest rung, never as a grant — an
+  // older caller that does not set it must not accidentally authorize
+  // everything.
+  //
+  // Distinct from `plan_mode` and from `mode`: plan_mode is the binary "show me
+  // what you would do" gate, while this is the graded authority a human granted
+  // when they approved the plan. A run can be out of plan mode and still be
+  // held at `WORKSPACE_WRITE`.
+  AutonomyRung autonomy_rung = 12;
+
+  // Canonical Control-registered Space this run belongs to, empty for the
+  // pre-existing non-Space path — the same field, same meaning, and same
+  // "presence alone grants nothing" posture as `ExecuteStepRequest.space_id`
+  // (field 11 on that message). Needed because `RunAgent`'s own governed
+  // multi-tool loop (`runtime_loop::agent::run_agent_with_tools`) dispatches
+  // through the SAME `execute_step_inner` core `ExecuteStep` does — despite
+  // this message's field 8 doc comment still describing an "MVP no-tool
+  // slice" that the code has moved past. Without this field, a Space-scoped
+  // agent run's own `code_interpreter` calls had no way to reach a sandbox
+  // lease at all. See
+  // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+  // §3.5 phase B.2.
+  string space_id = 14;
+
+  // Per-run ceiling on delegated subagents this run may start across all of
+  // its rounds (chat-wave2-specs wide-research fan-out §2.1). Same "0 =
+  // unspecified, use default" convention as `max_rounds` (field 8) — an older
+  // caller that never sets this keeps today's behavior
+  // (`subagent::DEFAULT_MAX_CHILDREN`), never a surprise widening. Resolved
+  // server-side by `subagent::resolve_child_ceiling`, which also clamps
+  // against an org-level ceiling (when configured) and the hard
+  // `subagent::MAX_CHILDREN_CEILING` — a request can only tighten the
+  // ceiling, never loosen it past what the org allows.
+  uint32 max_subagents = 15;
+
+  // Inference route this run is PINNED to. Empty (together with
+  // `subscription_connection_id`) is every run that predates the field: the
+  // loop resolves its model as before (`EXECUTION_AGENT_MODEL`, e.g.
+  // "model-router") and names no provider. The only value execution-core
+  // accepts is "openai-codex-subscription" (the canonical registry id, not an
+  // alias), and only together with `subscription_connection_id` (17), an
+  // explicit non-"verevon-*" `model` (6), `zdr = false`, `plan_mode = true`
+  // (unless AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS is also on: a subscription run is
+  // read-only until plan approval is connected) and
+  // AGENTIC_SUBSCRIPTION_ENABLED. When set, execution-core copies this onto
+  // EVERY inference round of the run, parent and delegated subagents alike,
+  // ignores `EXECUTION_AGENT_MODEL`, and stops the run (no further rounds) if
+  // a round is served by any other provider or model. A half-set pair or any
+  // other value is refused, never ignored: ignoring it would silently run the
+  // loop on the paid default route.
+  //
+  // Rollout order matters. An execution-core built before this field existed
+  // skips unknown fields and would run the loop on its default route, so the
+  // gateway only sends it once AGENTIC_SUBSCRIPTION_ENABLED is on, and that
+  // switch is turned on only after the new execution-core is running.
+  string provider_hint = 16;
+
+  // Opaque Integration Core reference to the user's ChatGPT subscription
+  // connection, meaningful only with `provider_hint` (16). Identical
+  // semantics to `InferRequest.subscription_connection_id`: inference-core
+  // hands it to Integration Core, which validates it against the caller's
+  // verified org and user scope. It carries no credential.
+  string subscription_connection_id = 17;
+}
+
+// RunAgentResponse — terminal outcome of a driven agent run.
+message RunAgentResponse {
+  // Terminal status: "completed" or "failed".
+  string status = 1;
+
+  // The persisted assistant answer (or graceful error sentence on failure).
+  string final_output = 2;
+
+  // Number of agent rounds actually executed.
+  uint32 rounds_executed = 3;
+
+  // HONESTY_CONTRACT: true when at least one knowledge_search call in this
+  // run actually returned org knowledge (status "ok"), so the gateway can
+  // score confidence honestly instead of assuming ungrounded. False for
+  // "awaiting_approval" (run not finished) and when no knowledge_search
+  // call succeeded with real results.
+  bool grounded = 4;
+
+  // True when the loop cleared tool-result payloads to stay inside the context
+  // window during this run.
+  //
+  // Reported because compaction is LOSSY and otherwise invisible: an answer
+  // built on a prompt whose earlier tool results were cleared can be worse for a
+  // reason nothing in the response explains. `StepOutcome` carries the same flag
+  // for the single-step surface, where it is correctly always false — one step
+  // accumulates no history to compact.
+  bool compaction_triggered = 5;
+
+  // Why a run pinned to the ChatGPT subscription (`RunAgentRequest.provider_hint`
+  // = "openai-codex-subscription") ended in `status` "failed", as a stable
+  // code. Empty for every other outcome and for every run that is not pinned.
+  // One of: "subscription_usage_limit", "subscription_reauth_required",
+  // "subscription_upstream_unavailable", "subscription_bad_request",
+  // "rate_limited", "prompt_too_long", or "subscription_route_unavailable"
+  // (any other subscription failure, and a round that was served by another
+  // provider or model than the run is pinned to). The spellings are
+  // model-gateway's `subscription_failure` vocabulary and are pinned to it by a
+  // contract test; the gateway words the reason for the user from this code and
+  // never from `final_output`.
+  //
+  // When set, execution-core has NOT appended an assistant message to the
+  // thread: the gateway persists the explanation it words from this code, so
+  // the thread carries exactly one. A caller that does not read this field
+  // sees `status` "failed" and `final_output`, as for any failed run.
+  string failure_code = 6;
+
+  // How long to wait before a retry could succeed, in whole milliseconds, when
+  // the provider said. Unset when it did not (an unset value is not zero).
+  // Meaningful only with `failure_code`.
+  optional uint64 retry_after_ms = 7;
+
+  // When a "subscription_usage_limit" resets: RFC 3339 UTC to whole seconds.
+  // Empty when unknown. Meaningful only with `failure_code`.
+  string resets_at = 8;
+}
+
+// ExecuteStepRequest — request to execute one step in the agent loop.
+message ExecuteStepRequest {
+  // Run this step belongs to.
+  string run_id = 1;
+
+  // Step identifier (ULID).
+  string step_id = 2;
+
+  // Tool to invoke (empty for reasoning-only steps).
+  string tool_name = 3;
+
+  // Tool input as JSON string.
+  string tool_input = 4;
+
+  // Permission mode: "auto", "ask", "deny".
+  string permission_mode = 5;
+
+  // Hook context as JSON string (hooks evaluated before execution).
+  string hook_context = 6;
+
+  // Tenant identifier.
+  string org_id = 7;
+
+  // Acting user identifier (viewer). Threaded into the step so knowledge-search
+  // (and any other viewer-scoped tool) filters to the caller's visible set, not
+  // the whole org. Empty = org-scoped only (legacy/unauthenticated primitive).
+  string user_id = 8;
+
+  // Zero-Data-Retention posture. The executor must not create durable run,
+  // step, audit-content, cache, or tool-output state when true.
+  bool zdr = 9;
+
+  // Minimum privacy tier this step must respect, mirroring
+  // `RunAgentRequest.min_privacy_tier` (field 11) for the direct single-step
+  // surface. Read today by `knowledge_search`'s Data Plane retrieval to derive
+  // a sovereignty posture when no signed claim exists — the SOVEREIGN tier is
+  // the only value that means anything to that axis; every other tier defers.
+  // UNSPECIFIED imposes no constraint. Field 10 was free on this message; it
+  // is unrelated to `RunAgentRequest`'s 11, which is a different message.
+  PrivacyTier min_privacy_tier = 10;
+
+  // Canonical Control-registered Space this step's run belongs to, empty for
+  // the pre-existing non-Space path (mirrors `ExecuteScheduledStepRequest`'s
+  // own `space_id`, field 4 on that message). Threaded by the caller from
+  // whatever Space context it already resolved (e.g. model-gateway's
+  // `ThreadSpaceContext`) rather than looked up here — the same pattern
+  // `org_id`/`user_id` above already use. Presence alone does not grant
+  // sandbox capability; see
+  // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+  // §3.5 phase B for the signed decision that actually does.
+  string space_id = 11;
+}
+
+// ExecuteStepResponse — result of a single step execution.
+message ExecuteStepResponse {
+  // Step identifier echoed back.
+  string step_id = 1;
+
+  // Step status: "completed", "failed", "permission_denied", "awaiting_approval".
+  string status = 2;
+
+  // Tool output (populated on success).
+  string output = 3;
+
+  // Error message (populated on failure).
+  string error = 4;
+
+  // Whether this step triggered a compaction.
+  bool compaction_triggered = 5;
+}
+
+// ResumeRunRequest — resume a paused or checkpointed run.
+message ResumeRunRequest {
+  // Run to resume.
+  string run_id = 1;
+
+  // Optional checkpoint to resume from (empty = latest).
+  string checkpoint_id = 2;
+
+  // Tenant identifier.
+  string org_id = 3;
+
+  // Durable granted approval authorizing an AwaitingApproval -> Running
+  // transition. Empty is valid only for a user-paused run; it can never
+  // resume an approval gate.
+  string approval_id = 4;
+}
+
+// ResumeRunResponse — acknowledgement that the run has been resumed.
+message ResumeRunResponse {
+  // True if the run was successfully resumed.
+  bool resumed = 1;
+
+  // Current step index after resume.
+  uint32 step_index = 2;
+}
+
+// PauseRunRequest — pause an active run (Phase 2 B5).
+message PauseRunRequest {
+  // Run to pause.
+  string run_id = 1;
+
+  // Tenant identifier.
+  string org_id = 2;
+}
+
+// PauseRunResponse — acknowledgement that the run has been paused.
+message PauseRunResponse {
+  // True if the run was successfully paused.
+  bool paused = 1;
+}

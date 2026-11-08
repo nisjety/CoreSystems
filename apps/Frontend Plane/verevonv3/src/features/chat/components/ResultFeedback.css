@@ -1,0 +1,14 @@
+/* The rating row under an agent run's answer or a scheduled run's fire. The thumbs are
+   the chat's action buttons and the reasons are the chat's chips (global.css). */
+.verevon-result-feedback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-top: 10px;
+}
+
+.verevon-result-feedback > .verevon-chat-feedback-reasons,
+.verevon-result-feedback > .verevon-chat-feedback-reasons__note {
+  flex-basis: 100%;
+}

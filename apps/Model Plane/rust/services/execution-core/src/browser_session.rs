@@ -199,10 +199,11 @@ pub(crate) const HELP_TIMED_OUT: Refusal = Refusal {
 const ASSIST_TTL_ENV: &str = "EXECUTION_BROWSER_ASSIST_TTL_SECONDS";
 /// Quarry's own takeover idle limit (its plan D8-3), and so the default wait.
 const ASSIST_TTL_DEFAULT_SECONDS: u32 = 30 * 60;
-/// The configured wait is clamped to these: shorter cuts off a sign-in, longer is the hour every
-/// other approval waits.
+/// The configured wait is clamped to these: shorter cuts off a sign-in. Longer than the run grant
+/// lives would end the session at the give-back anyway, so the wait stops at the grant's life (EP-1
+/// D3-671; the test `assist_ttl_max_is_the_grant_life` keeps the two in step).
 const ASSIST_TTL_MIN_SECONDS: u32 = 5 * 60;
-const ASSIST_TTL_MAX_SECONDS: u32 = 60 * 60;
+const ASSIST_TTL_MAX_SECONDS: u32 = 30 * 60;
 /// How long past the approval's expiry the held page is kept, so a give-back the approval store took
 /// just in time still finds the page when its continue arrives.
 const ASSIST_EXPIRY_GRACE: Duration = Duration::from_secs(60);
@@ -328,7 +329,8 @@ fn person_note_line(note: &str) -> Option<String> {
     Some(format!("<person_note>{escaped}</person_note>"))
 }
 
-/// `text` followed by the framed note line, or `text` alone for a blank note.
+/// `text` followed by the framed note line, or `text` alone for a blank note. The loop frames a
+/// give-back's note onto the paused call's result with this, once the result is recorded (EP-1 S3).
 #[must_use]
 pub(crate) fn with_person_note(text: String, note: &str) -> String {
     match person_note_line(note) {
@@ -337,18 +339,35 @@ pub(crate) fn with_person_note(text: String, note: &str) -> String {
     }
 }
 
-/// Whether the one fresh look a hand-back takes is the paused call itself: a paused observe is
-/// answered by that look, so the page is not read twice (EP-1 S3).
+/// Whether the one fresh look a hand-back takes is the paused call itself, so the page is not read
+/// twice (EP-1 S3). A paused observe is answered by the look. So is a paused open of the page the
+/// person holds (`held_host`): opening it again would end that page and the sign-in the person made
+/// on it, and a new Quarry run starts with an empty profile (EP-1 S4, D8). An open of another host
+/// is not answered: it runs and replaces the page, as an open does.
 #[must_use]
-pub(crate) fn hand_back_answers(tool_name: &str) -> bool {
-    tool_name == OBSERVE_TOOL
+pub(crate) fn hand_back_answers(
+    tool_name: &str,
+    tool_input: &str,
+    held_host: Option<&str>,
+) -> bool {
+    match tool_name {
+        OBSERVE_TOOL => true,
+        OPEN_TOOL => held_host.is_some_and(|host| {
+            serde_json::from_str::<OpenInput>(tool_input)
+                .ok()
+                .and_then(|input| parse_target(&input.url).ok())
+                .is_some_and(|target| target.host == host)
+        }),
+        _ => false,
+    }
 }
 
 /// The one fresh look at the page after the person gave the browser back (EP-1 S3): the page as it
-/// is now, through the same observe and fence every agent read passes, followed by the person's
-/// note. Nothing else of the takeover is read: not what the person typed, not the pages they
-/// visited, not Quarry's receipts, timeline or devtools. The note is model input only, so the log
-/// carries its length and never its text.
+/// is now, through the same observe and fence every agent read passes. Nothing else of the takeover
+/// is read: not what the person typed, not the pages they visited, not Quarry's receipts, timeline
+/// or devtools. The person's note is not part of the look. The loop frames it onto the paused
+/// call's own result, so the step record of the look never holds it (EP-1 S3). The log carries the
+/// note's length and never its text.
 pub(crate) async fn hand_back(
     dispatch: &BrowserDispatch<'_>,
     quarry: Option<&QuarryAgentClient>,
@@ -359,9 +378,7 @@ pub(crate) async fn hand_back(
         "browser session: the person gave the browser back"
     );
     let quarry = quarry.ok_or(UNAVAILABLE)?;
-    observe(dispatch, quarry)
-        .await
-        .map(|view| with_person_note(view, note))
+    observe(dispatch, quarry).await
 }
 
 /// The runs paused on a takeover whose page the person holds (EP-1 S1). A paused request returns
@@ -1663,8 +1680,14 @@ mod handback_tests {
         assert_eq!(assist_ttl_from(Some("60")), 300);
         assert_eq!(assist_ttl_from(Some("900")), 900);
         assert_eq!(assist_ttl_from(Some(" 1200 ")), 1200);
-        assert_eq!(assist_ttl_from(Some("7200")), 3600);
-        assert_eq!(assist_ttl_from(Some("99999999999999")), 3600);
+        assert_eq!(assist_ttl_from(Some("1800")), 1800);
+        assert_eq!(assist_ttl_from(Some("3600")), 1800, "capped at the grant's life");
+        assert_eq!(assist_ttl_from(Some("99999999999999")), 1800);
+    }
+
+    #[test]
+    fn assist_ttl_max_is_the_grant_life() {
+        assert_eq!(ASSIST_TTL_MAX_SECONDS, u32::try_from(GRANT_TTL_SECONDS).unwrap());
     }
 
     #[tokio::test]
@@ -2954,12 +2977,16 @@ mod tests {
             look.contains("\"page_url\":\"https://example.com/after\""),
             "the look reads the page as it is now: {look}"
         );
-        assert!(look.ends_with("\n<person_note>Done.</person_note>"), "{look}");
+        assert!(!look.contains("person_note"), "the loop frames the note, not the look: {look}");
 
-        // The paused call runs after the look; a paused observe is answered by the look itself.
-        assert!(hand_back_answers(OBSERVE_TOOL));
-        for tool in [OPEN_TOOL, CLOSE_TOOL, ACT_TOOL] {
-            assert!(!hand_back_answers(tool), "{tool} runs again after the look");
+        // The paused call runs after the look, except a paused observe and an open of the held
+        // page, which the look answers (see the test below).
+        assert!(hand_back_answers(OBSERVE_TOOL, "{}", None));
+        for tool in [CLOSE_TOOL, ACT_TOOL] {
+            assert!(
+                !hand_back_answers(tool, "{}", Some("example.com")),
+                "{tool} runs again after the look"
+            );
         }
         close(&dispatch(&state, &broker), Some(&quarry(&server))).await;
         assert_eq!(step_count(&server).await, 2, "the redispatched close reads no page");
@@ -2969,6 +2996,33 @@ mod tests {
             Err(UNAVAILABLE),
             "no Quarry, no look"
         );
+    }
+
+    #[test]
+    fn the_look_answers_a_paused_open_only_of_the_held_page() {
+        let held = Some("example.com");
+        assert!(
+            hand_back_answers(OPEN_TOOL, r#"{"url":"https://example.com/next"}"#, held),
+            "an open of the held site is answered by the look, keeping the sign-in"
+        );
+        assert!(
+            !hand_back_answers(OPEN_TOOL, r#"{"url":"https://example.org/"}"#, held),
+            "an open of another site runs and replaces the page"
+        );
+        assert!(
+            !hand_back_answers(OPEN_TOOL, r#"{"url":"https://example.com/"}"#, None),
+            "with no page held there is nothing for the look to answer"
+        );
+        for input in [
+            "not json",
+            r#"{"url":"example.com"}"#,
+            r#"{"url":"https://example.com/","ref":"@e1"}"#,
+        ] {
+            assert!(
+                !hand_back_answers(OPEN_TOOL, input, held),
+                "{input} is refused by open itself, so the look does not answer it"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2998,7 +3052,7 @@ mod tests {
             .expect("the page given back is read")
         };
 
-        assert!(look.contains(marker), "the note is model input: {look}");
+        assert!(!look.contains(marker), "the look carries no note: {look}");
         let logged = events.0.lock().unwrap().join("\n");
         assert!(logged.contains("note_chars=27"), "the length is logged: {logged}");
         assert!(!logged.contains(marker), "the note reached a log line: {logged}");

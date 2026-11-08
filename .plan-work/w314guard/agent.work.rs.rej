@@ -1,0 +1,44 @@
+--- agent.rs	
++++ agent.rs	
+@@ -4540,21 +4540,28 @@ async fn run_rounds(
+                         });
+                     // EP-1 S1: the browser call a takeover paused runs only once the person has given
+                     // the browser back. While Quarry still says the person holds it, the call is not
+-                    // dispatched and the model reads that the person is using the browser.
+-                    let still_taken_over = match browser.as_ref() {
+-                        Some(browser)
+-                            if is_release
+-                                && crate::browser_session::is_do_tool(&call.name)
+-                                && crate::browser_session::takeover_pause_enabled() =>
+-                        {
+-                            released_browser_call_still_held(ctx, browser).await
++                    // dispatched and the model reads that the person is using the browser. EP-1 S5:
++                    // after the give-back it also needs a grant that outlived the takeover, read back
++                    // under the person's click-time bearer; a run whose wait ran out is told so.
++                    let handback_refusal = if is_release
++                        && crate::browser_session::is_do_tool(&call.name)
++                        && crate::browser_session::takeover_pause_enabled()
++                    {
++                        match browser.as_ref() {
++                            Some(browser) => released_browser_call_refusal(ctx, browser).await,
++                            None if !zdr && ctx.depth == 0 && req.space_id.is_empty() => {
++                                crate::browser_session::handback_without_bearer(
++                                    ctx.state,
++                                    &req.run_id,
++                                )
++                            }
++                            None => None,
+                         }
+-                        _ => false,
++                    } else {
++                        None
+                     };
+-                    let outcome = if still_taken_over {
+-                        Some(StepOutcome::failed(
+-                            &crate::browser_session::TAKEN_OVER.text(),
+-                        ))
++                    let outcome = if let Some(refusal) = handback_refusal {
++                        Some(StepOutcome::failed(&refusal.text()))
+                     } else {
+                         Some(
+                         runtime_loop::retry::run_attempts(

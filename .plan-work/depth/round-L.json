@@ -1,0 +1,28 @@
+{
+ "packets": [
+  {
+   "key": "ic-anthropic-tool-name-wire-and-4xx",
+   "rows": [
+    "D1-797",
+    "D1-798"
+   ],
+   "title": "inference-core: the Anthropic adapter sends tool names in the API's alphabet and maps them back, and a malformed-request 400 is not retried",
+   "brief": "PREVIOUS ATTEMPT: an earlier coder run on this packet died before reporting and left about 775 lines of partial edits in these four files (anthropic.rs has is_wire_tool_name, named_tool_choice and a per-request name map built by for_request; grpc.rs and mod.rs have a provider-rejection status; fallback.rs has +270 lines). Start by reading `git diff` of the four files: keep what is correct and matches this brief, fix or finish the rest, do not start over (you may not run git checkout or stash). Keep your final report short and call the structured output before you stop; if you run low on budget, report what is done and what is left rather than continuing.\n\nMeasured live by the lead 2026-10-27 on claude-sonnet-5-5 (owner's Anthropic key): an agentic run from execution-core (model-gateway plan_mode turn, features agentic) fails because the governed tool set carries dotted names: plan.propose, subagent.task, subagent.research_fan_out, web.read, web.search (execution-core run start log lists 26 tools). api.anthropic.com answers 400 invalid_request_error \"tools.15.custom.name: String should match pattern '^[a-zA-Z0-9_-]{1,128}$'\". The chain then retried the same 400 three times on the same provider (fallback.rs ~:1696 generic `Err(e)` arm; the same match exists in the stream walks near the other two `exhausted_error(total_attempts)` call sites, ~:1892 and ~:2202).\n\nDo, in apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs (CRLF: measure and keep) and provider/fallback.rs (measure and keep):\n(1) Tool names on the wire. In the Anthropic adapter only (the names are a provider wire constraint; execution-core, capability-core and model-gateway keep their names): build, per request, a reversible map from each tool name the request carries (tools[].name, tool_choice's named tool, and every tool_use name in the message history, which the API also validates) to a wire name matching ^[a-zA-Z0-9_-]{1,128}$. A name that already matches maps to itself, so every request that works today is byte-identical (prove it with the existing golden/body tests). Otherwise replace each disallowed char deterministically (for example '.' -> '__dot__'-style or '_x2e_' escaping; pick a scheme that cannot collide with a valid name already in the same request, and if it would, add a short deterministic suffix); cap at 128. Decode every tool_use name in the response back to the original, unary AND streaming (content_block_start tool_use name, and anywhere else the adapter surfaces a tool name, including tool-call deltas), using the request's map, never a generic inverse. An unknown wire name in a response (not in the map) passes through unchanged and is logged at debug by name only. ZDR: log names and counts only, never arguments or content.\n(2) A malformed-request 4xx is deterministic. Map Anthropic's 400 invalid_request_error (that is not already mapped to TooLong for a context overflow; check what the adapter does today for overflow and keep it) and other non-retryable 4xx except 429 (408/409 stay retryable if you find the adapter treats them so) to a typed error that fallback.rs treats like TooLong: break out of the remaining retries for this provider (`break; // Deterministic for this provider`), still walking on to the next provider or model. Prefer an existing variant (ProviderError::InvalidResponse maps to gRPC invalid_argument in grpc.rs:1813, which may be the right status for the caller too: decide and say why) over a new one; if you add a variant, handle it in every exhaustive match (grpc.rs provider_error_to_status included) and in all three walk loops. 401/403 keep today's behaviour (say what it is).\n\nTests (required, unit only, no live API): (a) a request with tools plan.propose, web.search, web_search and subagent.research_fan_out plus a history tool_use named web.read produces wire names that all match the pattern, are unique, leave web_search untouched, and decode back exactly; (b) a unary response tool_use with the wire name decodes to plan.propose; (c) a streamed content_block_start tool_use decodes the same way; (d) a request whose names are all valid is byte-identical to today's body (reuse an existing golden); (e) fallback: a provider returning the deterministic 400 is attempted once, not three times, and the chain moves on (use the existing scripted/recording test providers in fallback.rs tests); (f) a 5xx is still retried as today. Each new test must fail on today's code. Run the commands in tests.",
+   "files": [
+    "apps/Model Plane/rust/services/inference-core/src/provider/anthropic.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/mod.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib anthropic",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib fallback",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p inference-core --lib",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p inference-core --all-targets"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  }
+ ]
+}

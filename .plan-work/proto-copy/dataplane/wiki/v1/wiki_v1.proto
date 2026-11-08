@@ -1,0 +1,201 @@
+syntax = "proto3";
+
+package dataplane.wiki.v1;
+
+option go_package = "github.com/triodelab/dataplane/gen/go/wiki/v1";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message WikiPage {
+  string page_id = 1;
+  string org_id = 2;
+  string workspace_id = 3;
+  string title = 4;
+  string path = 5;
+  string current_version_id = 6;
+  string status = 7;
+  repeated string backlinks = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Struct metadata = 11;
+}
+
+message WikiPageVersion {
+  string version_id = 1;
+  string page_id = 2;
+  string content = 3;
+  repeated string source_refs = 4;
+  optional string proposed_by_agent = 5;
+  optional string proposed_by_user = 6;
+  optional string approved_by = 7;
+  string edit_reason = 8;
+  string status = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp published_at = 11;
+  google.protobuf.Struct metadata = 12;
+}
+
+message WikiSourceLog {
+  string log_id = 1;
+  string page_id = 2;
+  repeated string original_chunks = 3;
+  string processing_model = 4;
+  string synthesis_prompt_hash = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Struct metadata = 7;
+}
+
+message WikiMaintenanceLog {
+  string log_id = 1;
+  string page_id = 2;
+  string issue_type = 3;
+  google.protobuf.Struct details = 4;
+  optional string proposed_fix = 5;
+  string status = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp resolved_at = 8;
+  google.protobuf.Struct metadata = 9;
+}
+
+message WikiProposal {
+  string proposal_id = 1;
+  string page_id = 2;
+  string org_id = 3;
+  string proposed_content = 4;
+  string edit_reason = 5;
+  string proposed_by_agent = 6;
+  repeated string source_refs = 7;
+  string status = 8;  // "pending" | "accepted" | "rejected"
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Struct metadata = 10;
+}
+
+message GetPageRequest {
+  string page_id = 1;
+  string org_id = 2;
+  optional string version_id = 3;
+}
+
+message GetPageResponse {
+  WikiPage page = 1;
+  WikiPageVersion version = 2;
+}
+
+message GetPageByPathRequest {
+  string org_id = 1;
+  string path = 2;
+  optional string version_id = 3;
+}
+
+message GetPageByPathResponse {
+  WikiPage page = 1;
+  WikiPageVersion version = 2;
+}
+
+message ListPageVersionsRequest {
+  string page_id = 1;
+  string org_id = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message ListPageVersionsResponse {
+  repeated WikiPageVersion versions = 1;
+  int32 total = 2;
+}
+
+message GetPageSourcesRequest {
+  string page_id = 1;
+  string org_id = 2;
+  optional string version_id = 3;
+}
+
+message GetPageSourcesResponse {
+  WikiSourceLog source_log = 1;
+}
+
+message ListMaintenanceIssuesRequest {
+  string org_id = 1;
+  optional string page_id = 2;
+  string status = 3;
+  int32 limit = 4;
+  int32 offset = 5;
+}
+
+message ListMaintenanceIssuesResponse {
+  repeated WikiMaintenanceLog issues = 1;
+  int32 total = 2;
+}
+
+message GetBacklinksRequest {
+  string page_id = 1;
+  string org_id = 2;
+}
+
+message GetBacklinksResponse {
+  repeated WikiPage pages = 1;
+}
+
+message CreatePageRequest {
+  string org_id = 1;
+  string workspace_id = 2;
+  string title = 3;
+  string path = 4;
+  string initial_content = 5;
+}
+
+message CreatePageResponse {
+  WikiPage page = 1;
+  WikiPageVersion version = 2;
+}
+
+message UpdatePageVersionRequest {
+  string page_id = 1;
+  string org_id = 2;
+  string new_content = 3;
+  string edit_reason = 4;
+  optional string proposed_by_user = 5;
+}
+
+message UpdatePageVersionResponse {
+  WikiPageVersion new_version = 1;
+}
+
+message SubmitProposalRequest {
+  string page_id = 1;
+  string org_id = 2;
+  string proposed_content = 3;
+  string edit_reason = 4;
+  string proposed_by_agent = 5;
+  repeated string source_refs = 6;
+}
+
+message SubmitProposalResponse {
+  WikiProposal proposal = 1;
+}
+
+message ReviewProposalRequest {
+  string proposal_id = 1;
+  string org_id = 2;
+  string decision = 3;  // "accept" | "reject"
+  optional string reviewed_by = 4;
+}
+
+message ReviewProposalResponse {
+  WikiProposal proposal = 1;
+  optional WikiPageVersion new_version = 2;
+}
+
+service WikiService {
+  rpc GetPage(GetPageRequest) returns (GetPageResponse);
+  rpc GetPageByPath(GetPageByPathRequest) returns (GetPageByPathResponse);
+  rpc ListPageVersions(ListPageVersionsRequest) returns (ListPageVersionsResponse);
+  rpc GetPageSources(GetPageSourcesRequest) returns (GetPageSourcesResponse);
+  rpc ListMaintenanceIssues(ListMaintenanceIssuesRequest) returns (ListMaintenanceIssuesResponse);
+  rpc GetBacklinks(GetBacklinksRequest) returns (GetBacklinksResponse);
+  rpc CreatePage(CreatePageRequest) returns (CreatePageResponse);
+  rpc UpdatePageVersion(UpdatePageVersionRequest) returns (UpdatePageVersionResponse);
+  rpc SubmitProposal(SubmitProposalRequest) returns (SubmitProposalResponse);
+  rpc ReviewProposal(ReviewProposalRequest) returns (ReviewProposalResponse);
+}

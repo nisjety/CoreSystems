@@ -1,0 +1,453 @@
+{
+ "batchId": "W2-44",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS13-S7",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0070_approval_grant_rule_link.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0070_approval_grant_rule_link.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0030_tool_policy_expiry.up.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/migrations/0030_tool_policy_expiry.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/tool_policies.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/api/tool_policy_rules_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/capability-core/internal/policy/engine_rule_expiry_test.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client.decide-approval.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposals.test.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib --bins",
+     "outcome": "exit 0 (the E0063 is gone). Warnings only, none in the edited line: capability_policy.rs:367 irrefutable let-else, approval_delivery_worker.rs:746 unused fn, runtime_loop/mod.rs:661 unused fn, runtime_loop/resume.rs:581 unused fn. None of these files or lines were touched by this slice."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path <rust>/Cargo.toml -p execution-core --lib",
+     "outcome": "started in the background; the result was NOT observed before this report, so no pass is claimed. Log: scratchpad ec-test-lib.log (its EXIT= line gives the code). The lead must read it."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q --workspace --lib --bins",
+     "outcome": "started in the background after the test run; the result was NOT observed before this report. Log: scratchpad ws-check.log. The lead must read it."
+    },
+    {
+     "command": "git diff HEAD on runtime_loop/mod.rs (read-only)",
+     "outcome": "exactly one insertion, '+        rule_proposed: false,' after the scope field of auto_posture_decision_request (line 3053). Line endings: 5490 CRLF = 5490 LF, 0 bare LF, so CRLF is preserved."
+    }
+   ],
+   "db_tests_written": [
+    "an_always_decision_proposes_one_rule_linked_to_its_grant",
+    "a_rule_is_not_proposed_for_a_built_in_tool"
+   ],
+   "lead_todo": [
+    "Read scratchpad ec-test-lib.log and ws-check.log (their EXIT= lines) to confirm the execution-core lib test result and the workspace lib+bins check, which were pending when this report was written.",
+    "Regenerate apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go from orchestration.proto with buf (ApprovalCause.ToolDigest field 10; DecideApprovalRequest.RuleProposed field 8). Then run go vet ./... and go test ./... in any Go service that imports that package. Attach the tag evidence: no tag removed or renumbered.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: in approval_cause_for_pause (~line 7669) replace approval_cause::for_call(cause, run_id, tool_name, tool_input) with for_call_with_tool(cause, run_id, tool_name, tool_input, <signed effect class>, <signed tool digest>), carrying both from the evaluation through PendingPause.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/grpc.rs: the ExecuteStep pause (~line 1570) replaces approval_cause::for_call with the same for_call_with_tool call.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs: add route_note: None to the InferResponse literal (~line 3376) and the InferChunk literals (~3399, ~3416), all inside mod tests (~line 3117). Then run cargo test -q -p model-gateway --lib approval with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx: offer Always for MCP approvals whose cause lists thread; send decideApproval(approvalId, 'approve', '', undefined, 'thread', true).",
+    "DB harness (lead only): with a scratch database whose name contains 'test', run DATABASE_URL=... cargo test -p session-core --bin session-core an_always_decision_proposes_one_rule_linked_to_its_grant -- --ignored --test-threads=1, and the same for a_rule_is_not_proposed_for_a_built_in_tool. Apply session-core migration 0070 and capability-core migration 0030 on the stack, then run the capability-core tool_policies integration tests.",
+    "Keep APPROVAL_RULE_PROPOSALS_ENABLED off. Keep APPROVAL_SCOPE_GRANTS_ENABLED off until the grant-digest finding is fixed."
+   ],
+   "deviations": [
+    "Edit tool used for the one-line insertion; file is pure CRLF and the edit kept CRLF (verified by byte count). No rustfmt run.",
+    "The execution-core lib tests and the workspace check were started in the background and not confirmed before reporting; the outcome is recorded as pending rather than as a pass.",
+    "Carried forward from the first report: the 90-day default lapse and 365-day cap apply to every allow written through PUT, and capability-core audits allow writes under new action names regardless of TOOL_POLICY_ENFORCED; this is a decision for the owner."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: approval_cause_for_pause (~line 7669) must call approval_cause::for_call_with_tool with the signed effect class and tool digest, carried from the evaluation through PendingPause (shared-edit).",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs: the ExecuteStep pause (~line 1570) calls approval_cause::for_call with no class and no digest; it needs the same for_call_with_tool change (shared-edit).",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs: add route_note: None to the InferResponse literal (~line 3376) and the InferChunk literals (~3399, ~3416), inside mod tests (~line 3117). Owned by WS27-S7; the gateway test profile does not compile without it.",
+    "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx: offer Always for MCP approvals whose cause lists thread, calling decideApproval(id, 'approve', '', undefined, 'thread', true) (shared-edit).",
+    "Settings page or McpServersSection mount for ApprovalRuleProposals, and the proposal list, confirm and dismiss chain: session-core RPCs on ApprovalScopeGrantService, model-gateway and BFF routes, and a capability id for the confirm PUT."
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/go/gen/model_plane/v1/orchestration.pb.go (owned): it was not regenerated after orchestration.proto gained ApprovalCause.tool_digest = 10 and DecideApprovalRequest.rule_proposed = 8. grep finds neither ToolDigest nor RuleProposed in it. Run buf generate (buf and protoc-gen-go are installed under ~/go/bin), then go vet/go test in orchestrator-core and capability-core. Why: the contract is half-landed, and Go callers cannot set or read the new fields.",
+     "K3-10 audit rows are incomplete (Appendix B is binding). capability-core writes 'tool_policy_rule_created' on the first allow PUT, which is actually the Confirm, and 'tool_policy_rule_confirmed' only on a re-write. Making the proposal (session-core create_scope_grant, rule_proposed path) writes no content-free audit row. No 'tool_policy_rule_used' row exists (the lead's re-scope assigned it to execution-core runtime_loop/mod.rs). No 'tool_policy_rule_expired' row exists either, so an expired allow is demoted silently in engine.go lapsed(). Fix: create = proposal, confirm = the allow write, plus use and expire rows, all content-free.",
+     "The Confirm/Dismiss chain the row's DoD requires is missing. No session-core RPC or model-gateway/BFF route lists or resolves approval_rule_proposals, so state never leaves 'proposed' and Dismiss has nothing to call. The proposal row stores no capability_id, yet the confirm PUT /api/v1/tool-policies/{capability_id} needs one, so ApprovalRuleProposals.tsx has no data source. Add a list and resolve path in the owned files (orchestration.proto, orchestration_grpc.rs/orchestration_store.rs, http_routes.rs, BFF orchestration.rs, orchestration-client.ts), behind APPROVAL_RULE_PROPOSALS_ENABLED."
+    ],
+    "dod_gaps": [
+     "Live proof (row DoD): an MCP fixture tool goes Always -> proposal -> confirm -> a later run proceeds with policy_source=tool_policy_allow and rule_id in audit; revoking it makes the run ask again. This needs a rebuilt stack, so only the lead can do it.",
+     "DB harness (lead only): the session-core ignored tests an_always_decision_proposes_one_rule_linked_to_its_grant and a_rule_is_not_proposed_for_a_built_in_tool, plus applying session-core migration 0070 and capability-core migration 0030 on Postgres, and the setToolPolicySQL CASE/expires_at path against a real database.",
+     "Shared edits outside the ownership set, so Always can actually be offered: execution-core agent.rs approval_cause_for_pause and grpc.rs ExecuteStep pause must call approval_cause::for_call_with_tool with the signed effect class and tool digest; ChatMessages.tsx must offer Always (decideApproval(..., 'thread', true)); and the ApprovalRuleProposals card must be mounted on a settings page (path to be chosen with WS25/WS23).",
+     "model-gateway lib/test profile in the live worktree does not compile because of other slices' uncommitted edits: sse.rs ChatEvent::UsageProgress.routing, tool_loop.rs:5793 record_call arity, and grpc.rs test literals missing route_note against the modified inference.proto. These are WS27-S7 work, and the lead must land or fix them before any model-gateway test runs in the tree."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Always is unreachable end to end: approval_cause_for_pause (agent.rs ~7669) and the ExecuteStep pause (grpc.rs ~1570) build causes with an empty effect class and no tool digest, so eligible_scopes stays ONCE for every MCP call."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Standing-grant matching ignores the tool digest: USE_APPROVAL_SCOPE_GRANT_SQL matches tool name, action key and class only. Bind grants to the digest, or revoke on drift, before enabling standing grants for MCP tools."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The rule-use audit row tool_policy_rule_used is not built. It needs a durable sink reachable from execution-core, and capability-core EvaluatePolicy carries no ZDR posture."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "tool_policy_rule_expired is not built: an expired allow is demoted to ask silently. A sweeper or read-path writer is needed, and it must be content-free."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ZDR: decide whether a ZDR or waived run may use a user rule at all, and make any rule-use row ZDR-aware before the switch is flipped."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The proposal list, confirm and dismiss chain is missing: no list RPC, the card has no data source, and the confirm PUT needs a capability id the cause does not carry."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "DB tests are unrun: session-core an_always_decision_proposes_one_rule_linked_to_its_grant and a_rule_is_not_proposed_for_a_built_in_tool (ignored); capability-core setToolPolicySQL CASE and expires_at; migrations 0070 and capability-core 0030 are untested on Postgres."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway approval tests have not run because the test profile is blocked by the route_note literals in grpc.rs (WS27-S7)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The 90-day default and 365-day cap apply to every allow written through PUT, not only Always rules, and this is not behind a switch. Legacy allow rows have no expiry and never lapse; the owner should decide on a backfill."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Always cannot be reached end to end: no approval producer sets ApprovalCause.tool_digest (agent.rs and grpc.rs still call approval_cause::for_call), so is_pinned_mcp is false for every live cause and rule_offered never holds."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "eligible_scopes now offers thread/run for a pinned MCP external_write, but the standing-grant match (USE_APPROVAL_SCOPE_GRANT_SQL) keys on tool, action_key and class only, not tool_digest. A thread grant would therefore survive a definition drift for its TTL. Bind grants to the digest before APPROVAL_SCOPE_GRANTS_ENABLED and the digest producers are switched on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "Some capability-core changes are not behind any switch. Every allow written through PUT /v1/tool-policies now gets a 90-day default lapse (365-day cap), and its audit action is renamed from tool_policy_set to tool_policy_rule_created/confirmed. With TOOL_POLICY_ENFORCED on and APPROVAL_RULE_PROPOSALS_ENABLED off, behaviour therefore differs from HEAD for manually set allows. The owner must accept this, or the lapse must be scoped to Always rules."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "ZDR/DEC-32: a confirmed user allow in capability-core applies to any later run, including ZDR or waived runs, and EvaluatePolicy carries no ZDR posture. Decide whether those runs may use a rule, and make any rule-use audit row ZDR-aware before the switch is flipped."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The flag row says APPROVAL_RULE_PROPOSALS_ENABLED requires WS05 TOOL_POLICY_ENFORCED, but model-gateway checked_rule_proposal does not check that. With the proposals switch on and enforcement off, a person can confirm a rule that never applies."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "ApprovalRuleProposals.tsx, confirmApprovalRule and ruleConfirmationRequest are not mounted or called anywhere outside their tests, so they are dead code until the settings mount and the proposal list land. The confirm write also has no action contract in src/shared/actions (project rule)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Legacy allow rows keep expires_at NULL and never lapse. Only new writes get the 90-day lapse, so the owner should decide on a backfill."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's named tests confirming_writes_a_digest_pinned_allow and a_digest_drift_demotes_the_rule_to_ask exist only as equivalents: the FE test 'confirming writes a digest-pinned allow that lapses in ninety days' and Go TestADigestDriftDemotesTheRuleToAsk. No server-side test checks that a confirm is refused when the proposal digest differs from the registry pin."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "setToolPolicySQL labels any allow written over an existing active row (for example an ask) as tool_policy_rule_confirmed, although no rule existed before. The audit label then misstates the history."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Verifier note: while compiling a scratch copy I briefly shared C:/dev/mp-target-w2, then ran cargo clean -p on every Rust workspace member there to rule out stale-artifact poisoning. The next build in that target dir is therefore a full workspace rebuild (registry deps are kept)."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "go test ./internal/api/ ./internal/policy/ (capability-core)",
+      "outcome": "both packages ok (api 22.8s, policy 1.8s); includes tool_policy_rules_test.go and engine_rule_expiry_test.go (K3-10 expiry and audit rows)",
+      "passed": true
+     },
+     {
+      "command": "vitest run ApprovalRuleProposals.test.tsx orchestration-client.decide-approval.test.ts --pool=threads",
+      "outcome": "2 files passed, 10 tests passed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -p model-gateway --lib an_always_choice (plan test an_always_choice_before_confirmation_is_a_thread_grant)",
+      "outcome": "cannot run: model-gateway lib test target fails to compile with 9 errors, all in files not owned by this slice: sse.rs (ChatEvent::UsageProgress has no field `routing`, lines ~13837, 23634, 23641), tool_loop.rs:5793 (E0061, 3 args supplied, method takes 2), grpc.rs:3376/3399/3416 (missing `route_note` on InferResponse/InferChunk). These are WS27-S7 / other-slice leftovers",
+      "passed": false
+     },
+     {
+      "command": "plan tests confirming_writes_a_digest_pinned_allow and a_digest_drift_demotes_the_rule_to_ask",
+      "outcome": "do not exist anywhere under apps/Model Plane (grep found only an_always_choice_before_confirmation_is_a_thread_grant, in model-gateway http_routes.rs:7814). Not built.",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p model-gateway --lib --bins",
+      "outcome": "fails: 4 errors in the lib (3x E0559 `routing` in sse.rs, 1x E0061 in tool_loop.rs:5793), none in slice-owned files",
+      "passed": false
+     },
+     {
+      "command": "cargo check -q -p session-core -p execution-core -p mp-contracts --lib --bins",
+      "outcome": "exit 0, no errors",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p mp-contracts --lib approval_cause",
+      "outcome": "23 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bins approval",
+      "outcome": "54 passed, 0 failed, 57 ignored (the ignored ones are DB-harness tests, not run)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "policy",
+    "authority",
+    "audit"
+   ],
+   "notes": "Required fix 1 is applied: execution-core runtime_loop/mod.rs (auto_posture_decision_request, around line 3044) now sets rule_proposed: false, the only change in this round. Its literal was the only struct literal without ..Default::default() in execution-core; browser_events.rs (2 DecideApprovalRequest literals, 1 ApprovalCause literal) uses ..Default::default(), so it is unaffected. A grep over apps/ found no other DecideApprovalRequest literal missing the field. cargo check -p execution-core --lib --bins passed (exit 0). The execution-core lib test run and the workspace lib+bins check were started but had not finished when this report was written, so the status stays partial: it still carries the open items from the first report (Always not reachable end to end, rule-use and expiry audit rows not built, list/confirm/dismiss chain missing, model-gateway approval tests not run because of WS27-S7's route_note literals, and the DB tests unrun). Switches unchanged: APPROVAL_RULE_PROPOSALS_ENABLED off, APPROVAL_SCOPE_GRANTS_ENABLED off. No commit, no docker, no DB harness, no git reset/checkout/stash. Line endings preserved (Edit tool, CRLF verified).\""
+  },
+  {
+   "id": "WS27-S7",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/inference.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/inference-core/src/streaming.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.tsx",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/RunCostMeter.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p inference-core --lib -- intent fallback (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "111 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "cargo test -q -p inference-core --lib -- constrained_posture_stamps_tier_shifted exhausted_stamps_cheap_fallback pinned_model_stamps_nothing route_note_switch_is_on_only_for_the_literal_true the_route_note_rides_the_final_chunk_only --test-threads=1",
+     "outcome": "5 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "cargo test -q -p inference-core --test fallback_test",
+     "outcome": "14 passed, 0 failed, exit 0"
+    },
+    {
+     "command": "cargo check -q -p model-gateway --lib (check only, not a test run)",
+     "outcome": "FAILS with 4 errors, all at shared-edit sites: E0559 variant has no field routing at sse.rs:5549, 8535, 13837; E0061 record_call takes 2 arguments at tool_loop.rs:5793. No error in owned code."
+    },
+    {
+     "command": "cargo check -q -p model-gateway --lib --tests (check only)",
+     "outcome": "FAILS with 9 errors: the 4 above, plus E0559 at sse.rs:23634 and 23641 (my new test literals, same missing variant field), and E0063 missing route_note at grpc.rs:3376, 3399, 3416 (shared edit 2). The e2e integration target is not in this check."
+    },
+    {
+     "command": "node_modules/.bin/vitest run src/features/chat/components/RunCostMeter.test.tsx src/features/agents/components/AgentRunConsole.test.tsx src/features/chat/components/ChatMessages.metrics.test.tsx (verevonv3)",
+     "outcome": "3 files, 70 tests passed"
+    },
+    {
+     "command": "node_modules/.bin/eslint src/features/chat/components/RunCostMeter.tsx src/features/chat/components/RunCostMeter.test.tsx",
+     "outcome": "exit 0, clean"
+    },
+    {
+     "command": "node_modules/.bin/tsc6 -p tsconfig.app.json --noEmit (verevonv3)",
+     "outcome": "36 errors: 14 are routing missing from ChatUsageProgressEvent and RunMeter in RunCostMeter.tsx (9) and RunCostMeter.test.tsx (5), cleared by shared edits 4 and 5; 22 pre-existing (quarry-client.ts 21, schedule-contract.test.ts 1)"
+    },
+    {
+     "command": "python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+     "outcome": "sse taxonomy up to date (31 events), exit 0"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 on model-gateway src/tool_loop.rs and src/sse.rs",
+     "outcome": "no hunk touches the lines this round added; remaining hunks predate the slice"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (apply all of (a)-(e) before compiling model-gateway): (a) in ChatEvent::UsageProgress after line 453 `ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,` add a doc comment and `routing: Option<&'static str>,` (8 spaces). (b) payload() UsageProgress arm: add `routing,` (16 spaces) after line 917 `ceiling,`; after line 952 (the 16-space `}` closing `if let Some(ceiling) = ceiling {`) and before line 953 `payload`, insert `if let Some(routing) = routing {` / `payload[\"routing\"] = json!(routing);` / `}` at 16 spaces (body 20). (c) RichEventSink::record_call (line 1568): add `routing: Option<&'static str>,` (8 spaces) after line 1571 `priced: &crate::pricing::Priced,`; in its emit (lines 1588-1592) add `routing,` (16 spaces) after `ceiling,`. (d) test module: replace every `sink.record_call(&call, &priced).await;` (lines 2375, 2376, 2426, 2431) with `sink.record_call(&call, &priced, None).await;`. (e) add `routing: None,` (12 spaces) after `ceiling: None,` at lines 2188, 2265, 2338, 2544; after line 2449 `}),` in the `carried` literal (line 2441, before its closing brace on line 2450); after `ceiling,` at line 3452 in usage_progress_with_ceiling.",
+    "Golden contract (after shared edit 1 compiles): give usage_progress_with_ceiling a sixth parameter `routing: Option<&'static str>` (pass None at line 3423 and at the ceiling sample near line 3600), add one routed sample `usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some(\"tier_shifted\"))` to the sample list, then in apps/Model Plane/rust run `MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib payload_contract`. Confirm the golden diff adds only routing (optional string) to usage_progress. Then refresh apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 and the pinned digest in the repo-level scripts/tests/zdr-contract-sync.test.sh, copy the golden to apps/Frontend Plane/verevonv3/src/shared/api/contracts/sse-event-payloads.json, and run `node scripts/gen-chat-event-types.mjs` in apps/Frontend Plane/verevonv3.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs (test module): after line 3390 `provider_timing: None,` (16 spaces) add `route_note: None,` (16 spaces); after lines 3414 and 3431 `provider_timing: None,` (20 spaces) add `route_note: None,` (20 spaces each).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs: after lines 400 and 974 `provider_timing: None,` (12 spaces) add `route_note: None,` (12 spaces); after lines 445 and 462 `provider_timing: None,` (16 spaces) add `route_note: None,` (16 spaces).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: (a) in ChatUsageProgressEvent after line 32 `warning?: 'run_ceiling_80' | 'run_ceiling_reached'` add a doc comment and `routing?: 'tier_shifted' | 'cheap_fallback'`. (b) after the runCeilingWarningValue function (lines 59-61) add `function routingValue(value: unknown): 'tier_shifted' | 'cheap_fallback' | undefined {` / `  return value === 'tier_shifted' || value === 'cheap_fallback' ? value : undefined` / `}`. (c) in usageProgressFrame after line 78 `warning: runCeilingWarningValue(payload.warning),` add `routing: routingValue(payload.routing),`. Optional: a routing case in the describe('usage_progress (WS27 S3)') block of chat-client.test.ts (line 2329).",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts: in RunMeter after the line `warning?: NonNullable<ChatUsageProgressEvent['warning']>` add a one-line doc comment and `routing?: NonNullable<ChatUsageProgressEvent['routing']>`.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: under the inference-core environment block, directly after the line INFERENCE_CORE_EFFORT_MODEL_ALIASES (about line 1107), add `      INFERENCE_ROUTE_NOTE: ${INFERENCE_ROUTE_NOTE:-false}` (6 spaces). Carried over from the previous round, still required.",
+    "Record in apps/Model Plane/docs/decisions/ledger.md: RouteNote is shared with WS11 at InferResponse.route_note 15 and InferChunk.route_note 16; the side-channel API (infer_noted, infer_stream_noted) replaces struct fields; the routing token rule is cheap_fallback over tier_shifted, else none; there is no gateway switch because the note exists only when INFERENCE_ROUTE_NOTE is on in inference-core.",
+    "Verify after the shared edits land (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0): cargo test -q -p model-gateway --lib, which covers route_shift_names_only_a_budget_move, a_routed_progress_frame_states_its_routing_and_an_unrouted_one_does_not, the_answer_progress_frame_precedes_the_usage_frame_with_the_turn_total and payload_contract; cargo check should then be clean. In verevonv3: node_modules/.bin/vitest run src/shared/api/chat-client.test.ts src/features/chat/components/RunCostMeter.test.tsx; tsc6 -p tsconfig.app.json --noEmit should show only the 22 pre-existing errors. Also python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check.",
+    "Live proof (lead only, not run here): deploy inference-core with INFERENCE_ROUTE_NOTE unset, then with it set to true, via bash apps/Model Plane/scripts/compose.sh up -d --no-deps --build inference-core (worktree env carry-over applies). With MODEL_GATEWAY_USAGE_PROGRESS on and an org above 80% of budget_cap_usd (the WS11-S5 cost-core fixture), confirm the answer's final InferChunk carries route_note and the usage_progress frame carries routing. Rollback: unset INFERENCE_ROUTE_NOTE and restart inference-core.",
+    "Sibling, not this slice: execution-core lib tests fail to compile at services/execution-core/src/runtime_loop/mod.rs:3044 (DecideApprovalRequest missing rule_proposed, from WS13-S7). Python and verevon TypeScript bindings for inference.proto remain unregenerated; they are wire-compatible."
+   ],
+   "deviations": [
+    "The reviewer named the direct ZDR path at sse.rs 8516-8531. That span is run_infer_fallback, the non-streaming fallback used when InferStream is unavailable. ZDR turns return earlier (sse.rs:1952, zdr_direct_stream) and never reach it; they emit no usage_progress, so nothing is routed on ZDR.",
+    "Routing lives on the meter (RunMeter.routing, set by applyUsageProgress, kept by applyUsageTotal) and RunCostMeter reads props.meter.routing. The separate routing prop was removed because no caller passed it, which keeps ChatPanels.tsx, ChatLiveRunPanel.tsx and AgentRunConsole.tsx unchanged.",
+    "record_call takes a routing argument (shared edit in sse_events.rs) instead of a new sink method. Overhead call sites pass None, per the reviewer's spec, so routing rides only the frame of the call the budget moved.",
+    "Earlier deviation kept: the RouteNote travels beside InferResponse and InferChunk through infer_noted and infer_stream_noted, not as fields on the internal provider structs."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (shared edit 1: variant field, payload key, record_call routing argument, test literals, golden sample)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/grpc.rs (shared edit 2: test mocks need route_note)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (shared edit 3: route_note on four literals)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (shared edit 4: parse routing on usage_progress)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts (shared edit 5: RunMeter.routing)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts (optional routing parse test)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/sse-event-payloads.json and .sha256 (golden refresh after shared edit 1, by the lead)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml (shared edit 6: INFERENCE_ROUTE_NOTE passthrough)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md (decision record, by the lead)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (shared edit, lead): add `routing: Option<&'static str>` to ChatEvent::UsageProgress (after line 453), emit `payload[\"routing\"]` only when Some in the payload() arm (around 914-953), add the `routing` parameter to RichEventSink::record_call (line 1568) and pass it into its emit (1588), and update the test call sites (record_call at 2375/2376/2426/2431 gets `, None`; `routing: None` at the literals 2185/2262/2335/2441/2541 and in usage_progress_with_ceiling at 3434). Why: model-gateway lib does not compile now. I re-ran `cargo check -p model-gateway --lib --tests` and got E0559 at sse.rs:5549, 8535, 13837, 23634, 23641 and E0061 at tool_loop.rs:5793. The implementer's anchors match the current file.",
+     "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (shared edit, lead): add `route_note: None` to the test-mock InferResponse at 3376 and the InferChunk literals at 3399 and 3416. Why: E0063, missing field `route_note`, breaks the lib test target.",
+     "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (shared edit, lead): add `route_note: None` beside each `provider_timing: None` at the four literals the implementer lists. Why: without it the integration target fails to compile after the proto change.",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts and src/features/chat/components/chat-types.ts (shared edits, lead): add `routing?: 'tier_shifted' | 'cheap_fallback'` to ChatUsageProgressEvent, parse it in usageProgressFrame with a closed-value guard, and add `routing?` to RunMeter. Why: tsc6 -p tsconfig.app.json reports 14 new errors in RunCostMeter.tsx and its test (36 in total against 22 before). Without the parse, the calm line can never render, because the frame's routing key never reaches the meter.",
+     "After the edits above: run `cargo test -q -p model-gateway --lib` (it covers route_shift_names_only_a_budget_move, a_routed_progress_frame_states_its_routing_and_an_unrouted_one_does_not and payload_contract), regenerate the golden for the new optional `routing` key and refresh its sha256 pin. The slice row's 'gateway usage_progress carries routing' test has never run."
+    ],
+    "dod_gaps": [
+     "Live proof: deploy inference-core with INFERENCE_ROUTE_NOTE unset, then set to true, with MODEL_GATEWAY_USAGE_PROGRESS on and an org above 80% of budget_cap_usd. Confirm the final InferChunk carries route_note and the usage_progress frame carries routing. Rollback is to unset the switch.",
+     "docker-compose.yml passthrough `INFERENCE_ROUTE_NOTE: ${INFERENCE_ROUTE_NOTE:-false}` for inference-core (a lead shared edit, the file named in the notes).",
+     "Golden refresh: sse-event-payloads.json, its sha256, the zdr-contract-sync pinned digest and the vendored SPA copy, then regenerate the chat event types.",
+     "Decision ledger entry: RouteNote at tags 15/16 shared with WS11, the infer_noted/infer_stream_noted side channel instead of struct fields on provider/mod.rs, and the rule that the token is cheap_fallback over tier_shifted.",
+     "The plan's test command `cargo test -q -p inference-core --lib intent fallback` is malformed (cargo rejects two filters). The plan row should be corrected to two runs or a single regex filter."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "The slice cannot pass until shared edits 1-5 land: model-gateway does not compile before shared edit 1, and the calm line cannot render until shared edits 4 and 5 land and INFERENCE_ROUTE_NOTE plus MODEL_GATEWAY_USAGE_PROGRESS are on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No end-to-end test drives a Constrained or Exhausted posture through the answer or tool-round stream. Coverage is the route_shift mapping, the payload key and the inference-core stamping tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Overhead calls (judge, resample, review and repair) pass None by spec, so a constrained overhead call shows no calm line even though its tokens are billed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Answer routing is read from the final chunk only. An answer stream that ends without a done chunk shows no routing, the same limit the note already has."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Whether the golden contract should list routing. Recommended yes: add a routed sample (shared edit 1, golden step) and refresh the golden, its sha256 pin and the SPA vendored copy."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "verevon-ui-events.ts maps usage_progress to usage.progress without routing. It is not on the chat meter path, so it is left alone."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "WS13-S7 edits in this worktree still break execution-core lib tests (runtime_loop/mod.rs:3044). Not caused by this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "model-gateway result_validation.rs rebuilds the final InferChunk/InferResponse field by field with ..Default::default() (lines 122-137 and 609-626), so a word-range-validated answer silently drops route_note and its usage_progress frame shows no routing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Agent-run usage progress (sse.rs AgentRunUsage, around line 13837) and the overhead calls (judge, resample, repair) always pass routing None, so a budget-constrained agent round or an overhead call never shows the calm line."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "budget_route_note is computed from the intent decision before the ladder runs, so when the resolved model fails and a ladder rung answers, the note still claims tier_shifted for a model that did not serve."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives a Constrained or Exhausted posture end to end through infer_noted/infer_stream_noted with INFERENCE_ROUTE_NOTE on. Coverage is the pure budget_route_note mapping, the bridge final-chunk test and the gateway route_shift mapping only."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "No chat-client.test.ts case parses routing on usage_progress or rejects an unknown routing value."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The route note travels as a side value from infer_noted/infer_stream_noted instead of the plan's `route_note: Option<RouteNote>` on provider/mod.rs structs. It is functionally equivalent, but it deviates from the row and should be recorded."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The behaviour is only observable with INFERENCE_ROUTE_NOTE and MODEL_GATEWAY_USAGE_PROGRESS both on, and with the shared edits applied. No live proof has been run."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -q -p inference-core --lib intent fallback (as written in the plan)",
+      "outcome": "Cannot run as written: cargo rejects the second filter ('unexpected argument fallback found'). This is a malformed plan command, not a slice defect.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib intent (split from the plan command)",
+      "outcome": "33 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --lib fallback (split from the plan command)",
+      "outcome": "82 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p inference-core --test fallback_test",
+      "outcome": "14 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p inference-core --all-targets",
+      "outcome": "No errors (only a dead_code warning)",
+      "passed": true
+     },
+     {
+      "command": "cargo check -q -p model-gateway --lib",
+      "outcome": "Fails with 4 errors. E0559 'variant ChatEvent::UsageProgress has no field named routing' occurs 3 times, in sse.rs. E0061 'method takes 2 arguments but 3 were supplied' is the record_call call in tool_loop.rs. They are caused by the missing shared edit in sse_events.rs, which the slice does not own. The model-gateway tests could not be run.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [],
+   "notes": "Required fix 2 (gateway half) is implemented in the owned files. sse.rs and tool_loop.rs read route_note and attach a routing token: cheap_fallback when cheap_fallback_forced is set, else tier_shifted when tier_shifted is set, else none (tool_loop.rs route_shift). Emission sites: the tool round (tool_loop.rs stream_call_usage with resp.route_note), the answer (sse.rs invoke_stream_sse, read from the final chunk), and the InferStream-unavailable fallback (sse.rs run_infer_fallback, unary resp.route_note). Overhead calls (judge, resample, review/repair) pass None. The variant field, the payload key and the record_call routing argument live in sse_events.rs, which is not owned, so model-gateway does not compile until shared edit 1 lands. Fix 1 (grpc.rs and e2e test mocks) and fix 3 (chat-client.ts, chat-types.ts) are hand-backs in lead_todo, not applied. SPA: RunCostMeter now reads routing from the meter; applyUsageProgress and applyUsageTotal carry it; the routing prop was removed. The three mount sites already pass meter, so ChatPanels.tsx, ChatLiveRunPanel.tsx and AgentRunConsole.tsx need no change. NOT RUN: model-gateway tests (lib, the new tests route_shift_names_only_a_budget_move and a_routed_progress_frame_states_its_routing_and_an_unrouted_one_does_not, the source-scan test the_answer_progress_frame_precedes_the_usage_frame_with_the_turn_total, payload_contract, e2e, zdr tests), because the crate cannot compile until the shared edits land. Run and passing: inference-core (111 + 5 + 14), SPA vitest (70), eslint, taxonomy check. Status partial: the slice cannot pass until the lead applies shared edits 1 to 5, runs the model-gateway tests and runs the live proof. No commit, stage, push or docker was run."
+  }
+ ]
+}

@@ -1,0 +1,649 @@
+{
+ "batchId": "W2-36",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS14-S2",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.plan-gate.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -p model-gateway --lib --tests --message-format=short (run twice)",
+     "outcome": "Not a test run; EXIT 101. First run (before my sse.rs edit): lib 4 errors, lib-test 8 errors. Second run (after my sse.rs edit): lib 3 errors (zdr_features.rs:212 E0027; artifacts.rs:490 E0063; tool_loop.rs:719 E0061 arity), lib-test 7 errors (adds normalize.rs:568 E0063, artifacts.rs:811 E0027, sse_events.rs:3185-3186 AttachmentPreview not in scope). No gateway test compiled or ran."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core grant",
+     "outcome": "11 passed, 0 failed, 17 ignored (DB-gated, not run); EXIT 0"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test autonomy_ladder_contract",
+     "outcome": "11 passed, 0 failed; EXIT 0"
+    },
+    {
+     "command": "./node_modules/.bin/vitest run src/features/chat/components/use-chat-controller.plan-gate.test.ts src/shared/api/chat-client.test.ts",
+     "outcome": "2 files, 177 passed, 0 failed"
+    },
+    {
+     "command": "./node_modules/.bin/tsc6 -p tsconfig.app.json --noEmit",
+     "outcome": "EXIT 2, 22 errors, none in the slice's files: 21 in src/shared/api/quarry-client.ts (cannot find module '@quarry/client'), 1 in src/shared/api/schedule-contract.test.ts (file not modified). The previous report's exit 0 is not reproduced; not investigated further, no install run."
+    },
+    {
+     "command": "Static read, not executed: invoke_stream_sse body (sse.rs lines 1429 to 5652)",
+     "outcome": "holds exactly three req.execute_granted references (lines 1579, 2028, 2373), matching the count pin in the_flag_is_passed_by_the_invoke_and_never_by_a_continuation (expects 3)"
+    },
+    {
+     "command": "NOT RUN: cargo test -p model-gateway --lib approve_then_execute; --lib execute_turn_tests; orchestration_http_test plan-gate tests",
+     "outcome": "blocked: the gateway lib does not compile in this worktree (errors listed above, all but one outside my owned files)"
+    }
+   ],
+   "db_tests_written": [
+    "bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (CRLF; reviewer item 1; line numbers are current, but they shift as you insert, so apply bottom-up or by anchor text): (a) after line 137 `    (\"execute_granted\", refused_feature(\"agentic\")),` add `    (\"approved_plan_id\", refused_feature(\"agentic\")),`; (b) after the block at lines 324-326 (`    if request.execute_granted {` / `        return feature(\"agentic\");` / `    }`) add `    if request.approved_plan_id.as_deref().is_some_and(|id| !id.trim().is_empty()) {` / `        return feature(\"agentic\");` / `    }`; (c) in invoke_field_names(): after line 244 `        execute_granted: _,` add `        approved_plan_id: _,`, and after line 286 `        \"execute_granted\",` add `        \"approved_plan_id\",`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/normalize.rs (CRLF; reviewer item 2; test-only, inside mod tests at line 518): after line 600 `            execute_granted: false,` (inside the InvokeRequest literal that starts at line 568) add `            approved_plan_id: None,`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifacts.rs (CRLF; reviewer item 3; no owner in the W2-36 lists, so assign it): line 27 `use crate::sse_events::ChatEvent;` becomes `use crate::sse_events::{AttachmentPreview, ChatEvent};`; in attachment_event (line 482) after line 488 `    check: Option<mp_contracts::office_verification::OfficeVerification>,` add `    preview: Option<AttachmentPreview>,`; in its literal after line 496 `        check,` add `        preview,`; in the test after line 809 `            None,` add a second `            None,` (seventh argument), and after line 817 `                check,` add `                preview: _,`.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (CRLF; WS19-S5-owned; test-only): line 3088 `    use super::{ChatEvent, RetentionClass, ServedBy};` becomes `    use super::{AttachmentPreview, ChatEvent, RetentionClass, ServedBy};`. tool_loop.rs:719 needs no edit once the artifacts.rs item lands.",
+    "After the items above: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib approve_then_execute, then --lib execute_turn_tests, then the orchestration_http_test plan-gate tests (cargo test -q -p model-gateway --test orchestration_http_test an_approval_answers_next_message_while_the_execute_switch_is_off). The integration target may hit the known pre-existing Windows non-lib failure; if it does, run it on the Linux side.",
+    "DB harness, lead only: scripts/tests/session-core-db-tests.sh with filter bind_grant_to_run (test bind_grant_to_run_takes_only_the_plan_the_thread_names_against_real_pg, grpc.rs around line 13948).",
+    "Carried unchanged from the previous report: deploy/docker-compose.yml (MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE default false; confirm the MODEL_GATEWAY_DURABLE_PLAN_GRANT default, which is :-true near line 390 while the WS04-S4 ledger entry says off); capability-ownership-matrix.md row 26; decisions/ledger.md WS14-S2 entry; zdr-posture-matrix.json and .sha256 with zdr-contract-sync goldens; buf generate plus Go and Python gen files for sessions.proto; BFF history.rs and spaces.rs strip of approved_plan_id; chat.reject_plan contract not added; e2e spec not written."
+   ],
+   "deviations": [
+    "sse.rs: `preview: None,` added at line 7347, in an owned file, for the reviewer's item 3 line only (image attachments carry no Office render). It is the only owned-file change this round.",
+    "Reviewer item 2 line is now at normalize.rs:600 (the literal starts at 568), and item 2 breaks only the lib-test build; item 1 breaks the plain lib.",
+    "Carried from the previous report: plan_approval always returns a continuation key (see depth_findings); the typed SSE error plan_grant_unavailable is used instead of an HTTP 409 JSON envelope; BindGrantToRun is one conditional UPDATE; an execute turn claims only the plan its grant names; approved_plan_id without execute_granted is invalid_request while the switch is on."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (reviewer item 1; lead applies)",
+    "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (reviewer item 2; lead applies; test-only)",
+    "apps/Model Plane/rust/services/model-gateway/src/artifacts.rs (reviewer item 3; in no listed owned set, the lead must assign it)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (WS19-S5-owned; one test-module import)",
+    "apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs (approved_plan_id table case, after zdr_features.rs lands)",
+    "apps/Model Plane/deploy/docker-compose.yml, apps/Model Plane/docs/capability-ownership-matrix.md, apps/Model Plane/docs/decisions/ledger.md (carried from the previous report)",
+    "apps/Model Plane/api/contracts/zdr-posture-matrix.json and .sha256; scripts/tests/zdr-contract-sync.test.sh goldens (carried)",
+    "Go gen files and Python sessions_pb2.py for sessions.proto (carried; buf regeneration)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs and spaces.rs (carried; approved_plan_id strip)",
+    "apps/Frontend Plane/verevonv3/tests/e2e/plan-approve-execute.spec.ts (not written)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs (shared, the lead applies it, CRLF): the slice added `InvokeRequest.approved_plan_id`, so the exhaustive destructure at zdr_features.rs:212 no longer compiles (E0027). Add `approved_plan_id: _` and the `\"approved_plan_id\"` name to invoke_field_names(). Add the row `(\"approved_plan_id\", refused_feature(\"agentic\"))` and the `approved_plan_id` non-blank -> feature(\"agentic\") branch next to `execute_granted`, as written in the implementer's lead_todo. Without this the model-gateway lib does not build, and the ZDR refusal path for the new field does not exist.",
+     "apps/Model Plane/rust/services/model-gateway/src/normalize.rs (shared, test-only, CRLF): the InvokeRequest literal at normalize.rs:568 needs `approved_plan_id: None,` (E0063). Until it lands the lib-test target does not compile.",
+     "The model-gateway lib and lib-test must compile before this slice can pass. They also fail on WS19-S5 errors outside this slice: artifacts.rs:490 and :811 (missing `preview`), tool_loop.rs:719 (arity), sse_events.rs:3185 (AttachmentPreview import). The lead must land those fixes, or assign artifacts.rs to an owner. Then run `cargo test -p model-gateway --lib approve_then_execute` and `--lib execute_turn_tests`. None of the slice's gateway code (sse.rs, http_routes.rs) has been type-checked past these errors or run by any test.",
+     "apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs (owned): this is an authority-risk slice, and its core behaviour tests from the plan row are missing. Add: approve, then one execute turn naming the plan gets the bound rung and the plan block once; a second execute of the same plan is refused `plan_grant_unavailable`; a wrong plan id is refused. Only the switch-off `next_message` case was written.",
+     "apps/Model Plane/api/contracts/zdr-posture-matrix.json and .sha256 (owned): the ZDR clause and the row require golden cases `e_zdr_token_execute_approved_plan_refused` and `e_zdr_token_bind_grant_refused`, checked by scripts/tests/zdr-contract-sync.test.sh. Neither exists (grep finds none), so the ZDR gate does not cover the new field or the new RPC."
+    ],
+    "dod_gaps": [
+     "Live proof (lead, docker): rebuild model-gateway, session-core, execution-core and BFF. Then on a developer stack with MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE and MODEL_GATEWAY_DURABLE_PLAN_GRANT on: approve once, and expect one Do run, runs.metadata.approved_plan_id set, the plan EXECUTING, and a double click executing once. Also show the ZDR-org typed refusal.",
+     "DB harness (lead): scripts/tests/session-core-db-tests.sh with the bind_grant_to_run filter. The #[ignore] test has not run. It also covers only the wrong plan and the wrong org, not the expired grant or the wrong owner the row names.",
+     "Shared edits (lead): deploy/docker-compose.yml `MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE=${...:-false}`; capability-ownership-matrix.md row 26; decisions/ledger.md entry 'Plan approval starts a new Do run; a grant never widens a run in flight'.",
+     "buf regeneration of the Go and Python gen files for the new ThreadAutonomy.BindGrantToRun RPC and its messages. Only the Rust side (tonic build) picks it up today.",
+     "BFF history.rs and spaces.rs do not strip approved_plan_id (frontend gateway, not in the owned set)."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "plan_approval always returns a continuation key (http_routes.rs about line 9017). With MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE off, the approval response gains a key, which conflicts with the byte-identical-when-off rule. The owner decides: omit the key when off, or accept it as additive (the S2a grant_expires_at_unix precedent)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No gateway test has run on this worktree since the S2 edits, because the crate does not compile. Claim-lost, bind-failure, plan-mismatch and double-execute refusals have helper tests and source-order pins only, no behaviour tests."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "artifacts.rs is needed by WS19-S5's attachment change but sits in no listed owned set. W2-36 should assign it, or WS19-S5 cannot finish."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A plan grant still covers every later run on its thread for 24 h, and S2 binds only the execute run. The owner should confirm this before the switch goes on (carried)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A gateway restart or bind failure after the plan claim leaves the plan EXECUTING, so the person must plan again. Needs a live proof with the switch on (carried)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "orchestration_http_test is an integration target. The batch rules say model-gateway non-lib targets fail on Windows, so that run may be impossible on this host."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The frontend typecheck now exits 2 (22 errors: quarry-client.ts cannot find '@quarry/client', and schedule-contract.test.ts). None are in the slice's files. The earlier exit 0 is not reproduced; the node_modules link is the likely cause, not investigated, no install run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The S2a pill path can still replay a grant within its TTL. S2 closes replay only for execute_now turns (carried)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Each execute turn makes two Session Core grant reads, one pre-run in invoke and one in agentic_run_stream (carried)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The BFF does not strip approved_plan_id (history.rs, spaces.rs). The gateway refuses the combination while the switch is on (carried)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The e2e spec was not written. The retry text sits in the plan card's error slot, so it renders styled as an error (carried)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "plan_approval (http_routes.rs ~9016) always adds `continuation` to the approval JSON, even with MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE off. That breaks the byte-identical-when-off rule unless the owner accepts it as additive (the grant_expires_at_unix precedent)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Owned deliverables are missing: action-registry.ts has no `chat.reject_plan` and was not touched (`chat.execute_approved_plan` already exists from S2a), and tests/e2e/plan-approve-execute.spec.ts was not written."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The plan row's plan-gate test names are not written: 'send failure leaves a retry, grant intact' and the concurrent-execute CAS test. Claim-lost, bind-failure and expired-grant outcomes in approve_then_execute_grant have pure-helper tests only."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "BindGrantToRun (session-core grpc.rs) writes the rung, justification and plan id onto runs.metadata but emits no audit event, though the slice's risk class includes audit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A bind failure or gateway restart after the APPROVED->EXECUTING claim leaves the plan EXECUTING and the run refused, so the person must plan again. This needs a live proof before the switch goes on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "BindGrantToRun is not itself single-use. It relies on the gateway's plan claim, and the thread grant still covers later runs on the thread for its TTL, so S2 narrows replay only for execute_now turns."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "An execute turn reads the Session Core grant twice, once pre-run in invoke_stream_sse and once in agentic_run_stream, before binding."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The SPA's retry text for a failed execute_now send sits in the plan card's error slot (setPlanApprovalError), so a success-path prompt renders styled as an error."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "cargo test -p execution-core --test autonomy_ladder_contract",
+      "outcome": "11 passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p model-gateway --lib --tests",
+      "outcome": "FAIL. lib: 3 errors (zdr_features.rs:212 E0027 missing approved_plan_id; artifacts.rs:490 E0063 missing preview; tool_loop.rs:719 E0061 6 args expected, 7 given). lib test: 7 errors (adds normalize.rs:568 E0063 missing approved_plan_id, artifacts.rs:811 E0027, sse_events.rs:3185-3186 AttachmentPreview not in scope). No gateway test could compile or run (approve_then_execute, execute_turn_tests, orchestration_http_test plan-gate not run).",
+      "passed": false
+     },
+     {
+      "command": "cargo check -p session-core --bin session-core --tests",
+      "outcome": "Finished OK, 2 pre-existing-looking dead-code warnings only",
+      "passed": true
+     },
+     {
+      "command": "vitest run --pool=threads use-chat-controller.plan-gate.test.ts chat-client.test.ts",
+      "outcome": "2 files passed, 177 tests passed, 0 failed",
+      "passed": true
+     },
+     {
+      "command": "tsc6 -p tsconfig.app.json --noEmit",
+      "outcome": "22 errors total, none in chat-client.ts or use-chat-controller.ts (grep empty); per implementer they are in quarry-client.ts (@quarry/client missing) and schedule-contract.test.ts, outside the slice",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "zdr",
+    "audit"
+   ],
+   "notes": "Reviewer item 1 and item 2 are shared files (zdr_features.rs, normalize.rs). I did not edit them; exact lines are in lead_todo and were checked against the current files. Item 3: only sse.rs:7347 is in this slice's owned list, and I added `preview: None,` to the image Attachment literal (image attachments carry no Office render, so the value is None). The rest of item 3 sits in WS19-S5's files (sse_events.rs test import, tool_loop.rs already passes seven arguments) and in artifacts.rs, which is in no listed owned set, so I did not edit it. Result: the gateway lib still does not compile here, so no gateway test has run, and the previous report did not run one either. Expect more type errors once artifacts.rs lands, since rustc has not type-checked past these. Independent suites re-run green: session-core grant, execution-core ladder, frontend plan-gate and chat-client files. Nothing committed, pushed, staged or stashed; no docker; no git state changed; no copies of the workspace were made. Line endings: sse.rs is LF (my edit kept LF). zdr_features.rs, normalize.rs, artifacts.rs and sse_events.rs are CRLF, so the lead's edits must keep CRLF. WS19-S5's files are still moving (tool_loop.rs is updated, artifacts.rs is not)."
+  },
+  {
+   "id": "WS19-S5",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse_events.rs (modified)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\tool_loop.rs (modified)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-types.ts (modified; stage only the GeneratedFilePreview and preview hunks)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\artifact-renderers.ts (modified)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ArtifactOfficePreview.tsx (new)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ArtifactOfficePreview.test.tsx (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "node node_modules/vitest/vitest.mjs run src/features/chat/components/ArtifactOfficePreview.test.tsx src/features/chat/components/artifact-renderers.test.ts src/features/chat/components/ChatArtifactPanel.test.tsx src/features/chat/components/chat-artifacts.test.ts (apps/Frontend Plane/verevonv3)",
+     "outcome": "4 files, 82 tests passed"
+    },
+    {
+     "command": "node node_modules/.pnpm/@typescript+typescript6@6.0.2/node_modules/@typescript/typescript6/lib/tsc.js -p tsconfig.app.json --noEmit",
+     "outcome": "exit 2, 22 errors, all pre-existing (21 quarry-client.ts, 1 schedule-contract.test.ts); none in owned files"
+    },
+    {
+     "command": "node node_modules/eslint/bin/eslint.js on ArtifactOfficePreview.tsx, ArtifactOfficePreview.test.tsx, artifact-renderers.ts, chat-types.ts",
+     "outcome": "exit 0"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --lib (apps/Model Plane/rust)",
+     "outcome": "exit 101, 4 errors, the same four the reviewer named: artifacts.rs:490 E0063 and sse.rs:7340 E0063 (shared, lead); tool_loop.rs:719 E0061 (seventh argument, resolved by the shared artifacts.rs signature edit); zdr_features.rs:212 E0027 (WS14-S2). No error in sse_events.rs."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib office_verify (apps/Model Plane/rust)",
+     "outcome": "exit 0, 16 passed, 0 failed. Producer side: FilePreview serialises name, pdf_b64 (nullable) and thumbs_b64, which matches the gateway parse."
+    },
+    {
+     "command": "NOT RUN: cargo test -q -p model-gateway --lib (carries_binary_is_true_for_a_preview_attachment, attachment_event_carries_preview_only_when_present, a_delivered_office_file_carries_its_render_preview_and_its_own_download, a_preview_without_a_report_or_over_the_cap_is_no_preview, sse_event_payload_golden)",
+     "outcome": "not run: the crate does not compile until the lead's shared edits and WS14-S2's zdr_features.rs land; sse_event_payload_golden also needs MP_UPDATE_GOLDEN regeneration"
+    },
+    {
+     "command": "NOT RUN: pnpm test:e2e -- office-deliverables.spec.ts",
+     "outcome": "not run: the spec does not exist and is not in new_files, so the lead creates it. Only product-office-outputs.spec.ts exists."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs (measure CRLF first): in struct CodeResult, after line 200 (`verification_unchecked: usize,`), add a doc comment, `#[serde(skip_serializing_if = \"Vec::is_empty\")]` and `previews: Vec<office_verify::FilePreview>,`. After line 730 (`verification_unchecked: office.unchecked,`) add `previews: office.previews,`. After line 1019 (`verification_unchecked: 0,`) add `previews: Vec::new(),`. This is the key the gateway reads as payload[\"previews\"]. CodeResult and FilePreview both derive Serialize only, so this compiles.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/artifacts.rs (measure CRLF first): (a) after line 488 (`check: Option<mp_contracts::office_verification::OfficeVerification>,` in `pub fn attachment_event(`, line 482) add `    preview: Option<crate::sse_events::AttachmentPreview>,`; (b) after line 496 (`        check,` in the literal) add `        preview,`; (c) after line 809 (the test call's `            None,`) add a second `            None,`; (d) after line 817 (`                check,` in the test pattern) add `                preview: _,`. tool_loop.rs already calls it with seven arguments.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse.rs (LF; re-find by text if WS14-S2 edits move it): in the image literal `let attachment = crate::sse_events::ChatEvent::Attachment {` (line 7340), after `check: None,` (line 7346) add `preview: None,`.",
+    "sequence first (not this slice): apps/Model Plane/rust/services/model-gateway/src/zdr_features.rs:212 (WS14-S2 approved_plan_id pattern) blocks cargo check and test of model-gateway --lib until WS14-S2 fixes it.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx (LF): add `import { officePdfRenderer } from './ArtifactOfficePreview'` beside line 39 (`import { extraArtifactRenderers } from './artifact-renderers'`). After the last import add `extraArtifactRenderers.register(officePdfRenderer)`. Replace line 424 (`{(component) => <Dynamic component={component()} artifact={displayed()} />}`, under `<Match when={extraRenderer()?.component}>` at line 423) with `{(component) => <Dynamic component={component()} artifact={displayed()} file={props.item.file} fallback={() => (<Show when={fileMeta()}>{(meta) => <ArtifactFileCard meta={meta()} title={title()} />}</Show>)} />}`.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/features/chat/components/chat-normalizers.ts (LF): (a) line 68: add `type GeneratedFilePreview,` beside `type GeneratedFile,`; (b) beside normalizeGeneratedFileCheck (line 1642) add `export function normalizeGeneratedFilePreview(value: unknown): GeneratedFilePreview | undefined`, returning undefined unless mime is application/pdf and url starts with `data:application/pdf;base64,`, pages is a number, fonts_substituted is a boolean and thumbs is an array; it maps fonts_substituted to fontsSubstituted and keeps only `data:image/png;base64,` thumbs; (c) in normalizeGeneratedFile's event type, after line 1664 (`check?: unknown`) add `preview?: unknown`; (d) after line 1667 add `const preview = normalizeGeneratedFilePreview(event.preview)`; (e) after line 1674 (`...(check ? { check } : {}),`) add `...(preview ? { preview } : {}),`; (f) add a guard test beside chat-normalizers.generated-file-check.test.ts.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (LF): after line 421 (`check?: unknown` in ChatAttachmentEvent) add `preview?: unknown`; after line 1689 (`check: value.check,`) add `preview: value.preview,`; after line 1931 (`check: payload.check,`) add `preview: payload.preview,`. use-chat-controller.ts needs no change: lines 3632-3633 pass the whole event to normalizeGeneratedFile.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/styles/global.css: add `.verevon-chat-artifact-office` (column flex), `.verevon-chat-artifact-office__notice` (small muted text) and `.verevon-chat-artifact-office__pages` (horizontal scroll row; buttons outlined when aria-current=\"page\"; thumbnail images about 96px high), next to `.verevon-chat-artifact-frame` (line 28193). The frame reuses that class.",
+    "golden regeneration, after the Rust and TSX edits compile: run MP_UPDATE_GOLDEN=1 for sse_event_payload_golden (sse_events.rs payload_contract) to refresh apps/Model Plane/api/contracts/sse-event-payloads.json and its .sha256; copy both to apps/Frontend Plane/verevonv3/src/shared/api/contracts/; from apps/Frontend Plane/verevonv3 run `node scripts/gen-chat-event-types.mjs` and then with --check; update the pinned digest on line 198 of scripts/tests/zdr-contract-sync.test.sh (repo root) to the new sha256 of the Model Plane golden.",
+    "e2e (not in new_files): create apps/Frontend Plane/verevonv3/tests/e2e/office-deliverables.spec.ts (nearest existing spec: product-office-outputs.spec.ts) and extend the H5 oracle the plan row names. Then run `pnpm test:e2e -- office-deliverables.spec.ts` (the script is `playwright test`).",
+    "lead-only live DoD (not run here): Ask turns for an xlsx with a chart, a docx and a pptx with CODE_INTERPRETER_OFFICE_VERIFY=render; screenshots of the page strip and the substitution notice; the download SHA-256 equals the sandbox output; confirm a real browser honours #page=N on a data: PDF and that changing src does not reload the whole PDF on each thumbnail click.",
+    "commit hygiene: chat-types.ts also carries WS14-S2's uncommitted SendOptions.approvedPlanId hunk, so stage only the GeneratedFilePreview and GeneratedFile.preview hunks. sse_events.rs and tool_loop.rs carry pre-existing rustfmt hunks outside this slice, so do not format whole files."
+   ],
+   "deviations": [
+    "The plan row lists only sse_events.rs and tool_loop.rs. The preview field on ChatEvent::Attachment needs literal edits in artifacts.rs and sse.rs, and the render data needs CodeResult.previews in code_interpreter.rs. Those are shared files, so they are handed back in lead_todo.",
+    "attachment_event takes the preview as a seventh argument. This is kept over building ChatEvent::Attachment inline in tool_loop.rs (see notes).",
+    "The frame has no sandbox attribute. It mirrors ChatArtifactPanel.tsx's existing PDF frame, while the plan text says sandboxed. This is an open owner decision.",
+    "The viewer gets its props through the renderer contract: ArtifactRendererProps in artifact-renderers.ts gains file and fallback. The registry signature does not change.",
+    "pages and fonts_substituted are read from the verifier stats render_pages and fonts_substituted. check.py emits at most 12 stat keys, under MAX_STATS = 16, so none is truncated.",
+    "No switch is added, as the row says.",
+    "Correction to the previous report: JSX is imported from '@solidjs/web', the repo convention with 89 imports, not '@softidjs/web'."
+   ],
+   "needs_other_files": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\code_interpreter.rs (CodeResult.previews and its three sites)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\artifacts.rs (attachment_event signature, literal, test call, test pattern)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\sse.rs (image-generation attachment literal; WS14-S2 has uncommitted edits in this file)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\zdr_features.rs (WS14-S2 approved_plan_id pattern; not this slice, but it blocks the crate)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatArtifactPanel.tsx (import, module-level register, Dynamic slot props)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\chat-normalizers.ts (preview normalizer, and its guard test beside chat-normalizers.generated-file-check.test.ts)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\chat-client.ts (preview on the attachment type and both dispatch paths)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\styles\\global.css (three office-preview rules)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\tests\\e2e\\office-deliverables.spec.ts (new; named by the plan row, not in new_files)",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\api\\contracts\\sse-event-payloads.json and .sha256, the SPA copies under apps\\Frontend Plane\\verevonv3\\src\\shared\\api\\contracts\\, and the pinned digest on line 198 of scripts\\tests\\zdr-contract-sync.test.sh (golden regeneration)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (owned): the test module `mod payload_contract` (line ~3088, `use super::{ChatEvent, RetentionClass, ServedBy};`) does not import `AttachmentPreview`, so `cargo check -p model-gateway --lib --tests` fails with E0425/E0422 at sse_events.rs:3185-3186 (fn office_preview). Add `AttachmentPreview` to that `use super::{...}`. The implementer missed this because they only ran `--lib`, and it blocks sse_event_payload_golden.",
+     "The model-gateway crate does not compile because of shared edits this slice needs, which the lead must apply (exact lines are in the implementer's lead_todo): artifacts.rs attachment_event gets a 7th `preview` parameter, the literal at :490 gets `preview,`, the test call at ~:809 gets an extra `None,`, and the test pattern at :811 gets `preview: _`. sse.rs:7340 image literal gets `preview: None,`. Without these, tool_loop.rs:719 (E0061) and all five slice Rust tests cannot build.",
+     "Without these, the row's deliverable is not wired end to end. execution-core code_interpreter.rs must serialise `CodeResult.previews` (the gateway reads payload[\"previews\"], which nothing produces today). ChatArtifactPanel.tsx must register officePdfRenderer and pass file/fallback through its Dynamic slot (today the component is imported nowhere outside its own test). chat-normalizers.ts must add normalizeGeneratedFilePreview, and chat-client.ts must forward `preview`. All are shared files, so the lead applies the lead_todo lines.",
+     "Golden regeneration after the edits compile: run MP_UPDATE_GOLDEN=1 sse_event_payload_golden, because the full attachment sample now sets `preview`. Then refresh the .sha256, the SPA contract copies, the gen-chat-event-types check and the pinned digest in scripts/tests/zdr-contract-sync.test.sh."
+    ],
+    "dod_gaps": [
+     "The plan's test command `pnpm test:e2e -- office-deliverables.spec.ts` cannot run: tests/e2e/office-deliverables.spec.ts does not exist (only product-office-outputs.spec.ts does) and it is not in new_files. The lead must create it.",
+     "Live DoD: with CODE_INTERPRETER_OFFICE_VERIFY=render, generate an xlsx with a chart, a docx and a pptx; take screenshots of the page strip and the substitution notice; check that the download SHA-256 equals the sandbox output; check that #page=N works on a data: PDF in Chrome and Firefox.",
+     "zdr_features.rs:212 and normalize.rs:568 (WS14-S2 approved_plan_id) also block model-gateway compilation and must land first."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway's ExecutionCoreClient sets no decode limit: the only max_decoding_message_size in the Rust tree is the execution-core server at grpc.rs:2109. The tonic default of 4 MiB applies to ExecuteStepResponse. A 2 MiB preview (about 2.8 MB base64) rides the same response as the delivered files' content_b64, so a render can fail the whole call. Raise the client limit or send previews separately before CODE_INTERPRETER_OFFICE_VERIFY=render is enabled. The fix is in model-gateway state.rs, which is not owned here."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The caps disagree. execution-core accepts OFFICE_PREVIEW_MAX_BYTES up to 8 MiB (parse_preview_max clamps to MAX_PREVIEW_BYTES), but the gateway drops any PDF above 2,796,204 base64 characters (2 MiB). An operator who raises the producer cap gets silent drops. Align the caps, or document the gateway cap as the contract."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The PDF frame has no sandbox attribute. It mirrors ChatArtifactPanel.tsx's existing PDF frame, while the plan says sandboxed. Decide before the live proof, and test Chrome and Firefox PDF rendering if the attribute is added."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "office-pdf is priority 0 and claims every OOXML artifact. Ties keep the earlier registration, so a later Space renderer at priority 0 would lose. Settle priorities before Space registers renderers."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Previews are transient by design, and carries_binary keeps them out of the resume buffer. Not re-verified this round: that no SPA or session-core path persists GeneratedFile.preview. Confirm before relying on never-persisted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The gateway checks the PDF's length and the thumbnail count, but not each thumbnail's size. execution-core caps each thumbnail at 150 KB, and the gateway does not re-check it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "No owned Rust test has run, because the crate does not compile until the shared edits and WS14-S2's zdr_features.rs land. The e2e spec is absent. The live DoD (xlsx with chart, docx, pptx, screenshots, download hash equal to the sandbox hash, #page=N in a real browser) has not run. All of this is lead-only."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The strip shows at most three thumbnails, and the viewer shows no 'of N' page count, although the pages field counts the whole document."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The new CSS classes are unstyled until the global.css edit lands. The notice and aria strings are inline i18n.tr pairs, so the WS12 i18n gate needs a look."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Corrections to the previous report: JSX is imported from '@solidjs/web' (the repo convention, 89 imports), not '@softidjs/web'. The controller reference is use-chat-controller.ts:3632-3633, not 3586."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat-types.ts carries WS14-S2's uncommitted SendOptions.approvedPlanId hunk, and sse_events.rs and tool_loop.rs carry pre-existing rustfmt hunks. Commit with hunk staging, and do not format whole files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "model-gateway's ExecutionCoreClient keeps the tonic default 4 MiB decode limit. A preview of up to about 2.8 MB of base64, plus the delivered files' content_b64 in the same ExecuteStepResponse, can fail the whole call once render is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The caps disagree: execution-core allows OFFICE_PREVIEW_MAX_BYTES up to 8 MiB, while the gateway (tool_loop.rs PREVIEW_PDF_MAX_BASE64 = 2 MiB) silently drops anything larger, so a raised producer cap yields no preview with no signal."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "office_preview_for does not check the size of each thumbnail or its PNG-ness (it only takes 3 and prefixes data:image/png). It relies entirely on execution-core's 150 KB per-thumb cap."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The row says the PDF frame is sandboxed, but ArtifactOfficePreview's iframe has no sandbox attribute. It mirrors the panel's existing PDF frame. Owner decision before the live proof."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Never-persisted is asserted only on the gateway side (carries_binary keeps previews out of the resume buffer). No test proves that the SPA or session-core never stores GeneratedFile.preview with the thread, and ZDR depends on the preview staying transient."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "officePdfRenderer is priority 0 and matches every OOXML data: artifact, whether or not it has a preview, and ties keep the earlier registration. Settle priorities before other renderers (Space) register."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "carries_binary_is_true_for_a_preview_attachment does not cover a data: URL without a preview, or a non-data URL with a preview other than blob:. Minor."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "`pages` falls back to 0 when render_pages is missing from the stats, and the viewer never shows the page count. Either show 'of N' or drop the field."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "chat-types.ts carries WS14-S2's approvedPlanId hunk, and sse_events.rs and tool_loop.rs carry unrelated hunks. Stage the slice's hunks only. Line endings are preserved (CRLF Rust, LF TS); the diffstat shows no whole-file rewrite."
+    }
+   ],
+   "tester": {
+    "all_passed": false,
+    "results": [
+     {
+      "command": "pnpm test:e2e -- office-deliverables.spec.ts (the plan's test command)",
+      "outcome": "Not run: tests/e2e/office-deliverables.spec.ts does not exist (only product-office-outputs.spec.ts is there) and it is not in the slice's new_files.",
+      "passed": false
+     },
+     {
+      "command": "vitest run --pool=threads ArtifactOfficePreview.test.tsx artifact-renderers.test.ts ChatArtifactPanel.test.tsx chat-artifacts.test.ts (apps/Frontend Plane/verevonv3)",
+      "outcome": "4 files passed, 82 tests passed, 0 failed.",
+      "passed": true
+     },
+     {
+      "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --lib",
+      "outcome": "Failed with 4 errors: E0063 missing field `preview` in ChatEvent::Attachment at artifacts.rs:490 and sse.rs:7340 (shared files); E0061 at tool_loop.rs:719 (attachment_event called with 7 args, the function takes 6); E0027 at zdr_features.rs:212 (pattern misses approved_plan_id, from WS14-S2). No error in sse_events.rs.",
+      "passed": false
+     },
+     {
+      "command": "cargo test -p model-gateway --lib (the five slice Rust tests)",
+      "outcome": "Not run: the crate does not compile, so the tests cannot be built.",
+      "passed": false
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "zdr",
+    "data-loss"
+   ],
+   "notes": "No owned file changed in this round. The three required fixes are shared-file edits (code_interpreter.rs, artifacts.rs, sse.rs, ChatArtifactPanel.tsx, chat-normalizers.ts, chat-client.ts, global.css), the e2e spec, and golden regeneration. They are handed back as exact lines in lead_todo, checked against the current tree. The 7-argument attachment_event call stays the chosen design: the alternative builds ChatEvent::Attachment inline in tool_loop.rs, which duplicates the helper and leaves attachment_event used only by tests. Re-verified: the owned frontend tests (82 pass), typecheck (no owned-file errors), eslint (clean), cargo check (only the four named sites fail), and the execution-core producer tests (16 pass). The slice is not finished end to end until the lead applies the shared edits and runs the Rust tests and the e2e spec. Nothing was committed, staged or pushed, and no docker, DB harness or live proof was run."
+  },
+  {
+   "id": "WS21-S5b",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/browser_agent/browser_risk.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/quarry_agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/tool_bridge/mod.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib (run after the wire-filter fix, before the whitespace-only layout edits)",
+     "outcome": "ok. 1622 passed; 0 failed; 0 ignored; finished in 306.06s; exit 0"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib browser_risk (final source)",
+     "outcome": "ok. 33 passed; 0 failed; exit 0. Includes browser_agent::browser_risk::tests::precedence_between_categories"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib (final tree, after the layout edits)",
+     "outcome": "ok. 1622 passed; 0 failed; 0 ignored; finished in 304.17s; exit 0"
+    },
+    {
+     "command": "Named tests inside the full runs: tool_bridge act_on_read_only_grant_refused, an_act_without_a_page_is_refused_before_the_broker, an_act_on_an_act_grant_sends_one_action_then_reads_the_page, a_blocked_act_is_not_reported_as_done, act_is_never_retried; runtime_loop::agent a_browser_act_pause_is_stored_under_its_typed_cause and only_the_literal_true_switches_the_browser_act_on; quarry_agent browser_action_from_wire_reads_back_what_action_to_wire_sends and a_wire_action_with_no_loop_equivalent_reads_back_as_none",
+     "outcome": "all passed (they are inside the two full-lib runs with 0 failures)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 browser_risk.rs",
+     "outcome": "before the layout edits: exit 1 with 3 hunks, all in this slice's own test code (assert_table wire message; the_direct_fixtures_agree_on_the_wire type annotation and two action calls). After the layout edits: exit 0"
+    },
+    {
+     "command": "python3 line-ending count on browser_risk.rs (final)",
+     "outcome": "CRLF 1488, LF 1488, bare CR 0 (CRLF kept)"
+    },
+    {
+     "command": "git status on the five slice files and executor.rs",
+     "outcome": "the five slice files are modified; executor.rs is unmodified against HEAD"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: record WS21-S5b: every browser act pauses regardless of permission mode (typed browser_action_risk); read-level precheck before any approval, using broker validate only; risk category empty until the session keeps the page's targets; EXECUTION_DO_BROWSER_ACT_ENABLED is strict 'true', default off, gated on K3-6; the wire carries a url only for a navigation, so the parity check skips rows naming one; filling the page address into the wire form was rejected because it would judge ref-bound clicks by the page address, which the loop never does.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml (optional, documentation only): execution-core environment line EXECUTION_DO_BROWSER_ACT_ENABLED=${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}. Do NOT set it to true anywhere until K3-6 passes.",
+    "Quarry side (quarryv2, not in this branch): the K3-6 read_only contract test must prove mutating actions are refused on read-level grants before EXECUTION_DO_BROWSER_ACT_ENABLED is set anywhere.",
+    "No live proof was run. The act path needs act-level grants (browser_session.rs open change) and a live stack after quarryv2 merges. The lead runs any DB harness or docker step.",
+    "Owner or lead to decide whether to add an act-specific offer test in runtime_loop/agent.rs (see the depth finding on the browser-act offer). Not added in this round."
+   ],
+   "deviations": [
+    "Fix option (b) instead of option (a): the wire check in assert_table skips rows that name a url on a non-navigation action. Option (a) could not make checkout_page_login_button pass as written (it has no observation) and would change real verdicts for ref-bound clicks (see notes).",
+    "Applied rustfmt's layout to three hunks in this slice's own test code (the assert_table wire message, the the_direct_fixtures_agree_on_the_wire type annotation, and two action calls). Whitespace only, outside the named fix; declared so the lead can drop it if unwanted.",
+    "Correction to the previous report: the browser-act offer test it named does not exist. browser_act_tool_def is covered only through the browser-tools offer gate, and no test sets browser_act to true. Not added here; listed as a test gap."
+   ],
+   "needs_other_files": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/browser_session.rs (acquire_run_grant read_only=true; BrokerError SiteConsent and map_status; keep page targets for classification; is_effectful_do_tool add ACT_TOOL; stale ACT_TOOL comment; dedupe act helpers and constants)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/services/browser-broker/internal/server/server.go (distinct consent reason for an ask-effective host instead of BROWSER_SITE_DENIED; max_level metadata)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/crates/mp-contracts/src/approval_cause.rs and C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/api/contracts/approval-causes.json (+ TS mirror approval-copy.ts) for the browser_site_consent code (consent path only)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/decisions/ledger.md (shared; lead applies the entry)",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml (shared; optional documentation line, must not enable act)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Site consent deliverable missing (plan row WS21-S5b: `browser.open` on an ask host -> cause `browser_site_consent{host,max_level,options}` clamped to the grant cap, options {allow this run, remember read/act, deny}, denial memory per run; named tests `consent_cause_options_clamped_to_cap` and `denied_site_not_reasked`). None of it exists in the diff. Building it needs files outside this slice's ownership set (browser_session.rs map_status/BrokerError::SiteConsent, browser-broker server.go distinct consent reason instead of BROWSER_SITE_DENIED, mp-contracts approval_cause.rs + api/contracts/approval-causes.json + approval-copy.ts for the new code), so the lead must either widen the ownership set for a follow-up round or split the consent path into its own slice and record that in the ledger.",
+     "State diff deliverable missing (plan row: act result carries `{url_changed,title_changed,refs_added[],refs_removed[]}`, ref ids + name hashes only). `browser_do_act_run` in tool_bridge/mod.rs returns only the post-act observation. Either keep the previous observation in the session (browser_session.rs, not owned) or take a pre-act observe inside tool_bridge and diff it; or the lead formally defers it."
+    ],
+    "dod_gaps": [
+     "Live proof (form fill on act-level site works, checkout button pauses, read-level site refuses act; events + approval rows on the S5a stack) can only run after quarryv2 merges and after open requests act-level grants.",
+     "K3-6: Quarry read_only contract test on quarryv2 must pass before EXECUTION_DO_BROWSER_ACT_ENABLED is set anywhere.",
+     "Ledger entry (apps/Model Plane/docs/decisions/ledger.md) for the act-pauses-always decision, strict 'true' switch, and the wire-parity url skip: shared file, lead applies.",
+     "Optional compose doc line EXECUTION_DO_BROWSER_ACT_ENABLED=${...:-false}: shared file, lead applies."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "browser_session.rs acquire_run_grant still sends read_only=true, so every browser.act is refused at the read-level precheck. The act path cannot run live until open requests act-level grants."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Site consent is not built. Broker server.go siteDeniedError returns BROWSER_SITE_DENIED for both ask and deny, so browser_site_consent needs a distinct broker reason, a SiteConsent variant in browser_session.rs map_status, and the cause in approval-causes.json and mp-contracts. The tests consent_cause_options_clamped_to_cap and denied_site_not_reasked are not written."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Risk category is None for every act: browser_session.rs does not keep the last observation's snapshot targets, so a ref-bound act has no label evidence and the typed risk_category on the approval card stays empty."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Quarry is the hard guard against mutating actions on read-level grants. The K3-6 contract test lives on quarryv2, and the model-plane precheck only re-reads the broker. EXECUTION_DO_BROWSER_ACT_ENABLED must stay off until K3-6 passes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers the browser-act offer. browser_act_tool_def is pushed only when browser_tools_offered holds and browser_act is set (runtime_loop/agent.rs around line 1188). The earlier report named an offer test, but the only offer test, browser_tools_need_a_bearer_outside_zdr_and_the_switch, covers the browser tools, and no agent.rs test sets browser_act to true. Not added in this round."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Wire parity for url-bearing clicks: the loop's Evidence reads action.url for every action type, but the wire form carries no url for a click. The parity check therefore covers only schema-following planner output. If a Do-run act ever gets page-address evidence, the loop and the wire must change together; that is an owner design decision."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Every browser act pauses regardless of permission mode (conservative). Whether low-risk acts may skip the pause once page evidence exists is not decided."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The state diff {url_changed, title_changed, refs_added, refs_removed} is not built; it needs the previous observation kept by the session."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "No ZDR typed refusal for browser.act when the act switch is on: a ZDR run that proposes browser.act takes the generic permission pause. Add an early tool_bridge::browser_do_unavailable(true) refusal in execute_step_inner when the switch is on."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The gate-level pause in execute_step_inner has no unit test. The pause is covered only by a_browser_act_pause_is_stored_under_its_typed_cause."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Duplicated mappers and constants: act_refusal, broker_refusal, ACT_MAX_STEPS and ACT_MAX_RUNTIME_SECONDS repeat browser_session.rs quarry_refusal, BrokerError::refusal and its step constants. Move act into browser_session.rs and dedupe."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Stale wording: the browser_session.rs ACT_TOOL doc says the Do loop does not serve it yet, is_effectful_do_tool omits ACT_TOOL, and the runtime_loop/agent.rs test near line 21014 asserts is_do_tool(browser.act) is false with the message 'browser.act is not served yet'."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "browser_session.rs acquire_run_grant still mints read_only=true grants, so with the act switch on every browser.act is refused by browser_act_precheck with browser_act_not_permitted; the act path cannot work until open requests act-level grants on an act-level site."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "risk_category on the browser_action_risk approval is always empty in practice: browser_act_tool_def only offers *_ref actions and browser_act_risk_category judges with observation None, so the classifier never sees a label; the card cannot say why an act is risky until the session keeps the last snapshot targets."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Plan-named `risky_act_pauses_with_typed_cause` gate test is absent: nothing drives execute_step_inner to prove a browser.act returns awaiting_approval(BrowserActionRisk) under every permission mode and that a released call skips the pause but reruns the precheck; only the stored-cause test a_browser_act_pause_is_stored_under_its_typed_cause exists."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "When a capability pause is also held (deferred_pause), `deferred_pause.or(permission_pause)` stores the capability cause, not browser_action_risk, so the approval card for that act shows the capability cause; the once-only property still holds because both causes are checked for grantability."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Cross-domain navigation is judged against the current page, not the fence as the row says; it is moot today because act grammar has no navigate, but should be recorded."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "With the act switch on, a ZDR run that proposes browser.act takes the generic path rather than a typed browser_do_unavailable(true) refusal."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "act_refusal/broker_refusal/ACT_MAX_STEPS/ACT_MAX_RUNTIME_SECONDS in tool_bridge/mod.rs duplicate browser_session.rs mappings and constants; browser_session.rs ACT_TOOL doc and is_effectful_do_tool omission, and the agent.rs test message 'browser.act is not served yet', are stale."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Implementer's report says no browser-act offer test exists, but the diff does add the_browser_act_is_offered_only_on_its_own_switch in runtime_loop/agent.rs (switch on/off, no bearer, ZDR), and it passes; the report's test-gap finding is wrong."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib",
+      "outcome": "exit 0; test result ok. 1622 passed; 0 failed; 0 ignored; finished in 302.54s. The build compiled, so the compile check of the touched crate (execution-core) is covered. Two tests ran over 60s and passed: executor::tests::a_hung_child_is_killed_at_the_timeout and runtime_loop::agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused.",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "policy",
+    "cross-branch: the Quarry-side grant issuance endpoint and Quarry-to-broker identity are built on local branch quarryv2, not on model-plane; build against the contract with a stub and leave the live proof to the lead after quarryv2 merges"
+   ],
+   "notes": "Fix round for the parity failure in browser_risk::tests::precedence_between_categories. Only browser_risk.rs changed in this round. I chose option (b): assert_table's wire check now skips rows that name a url on a non-navigation action, because action_to_wire carries a url only for Navigate and the planner schema tells the planner to leave url empty otherwise. Only checkout_page_login_button is skipped; its loop-side expectation (Checkout) is still asserted. Option (a) was rejected: that row has no observation (page None), so the page url cannot be filled as written, and filling it in generally would judge ref-bound clicks by the page address, which the loop never does. Example: a 'Slett konto' click on a /kasse page would read Checkout on the wire but Destructive in the loop, which breaks the parity the check exists for. Verification: the full execution-core lib passed 1622/1622 with exit 0 both before and after the whitespace-only edits; the browser_risk module passed 33/33 on the final source. Two tests ran over 60 seconds on this host and passed: executor::tests::a_hung_child_is_killed_at_the_timeout (executor.rs is unmodified) and runtime_loop::agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused. A full lib run takes about 5 minutes here. Final-tree log: C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/ws21s5b-final-lib.log. The slice stays partial: the consent path, the state diff, act-level grants and a page-kept risk category are not built (see depth_findings)."
+  }
+ ]
+}

@@ -41,9 +41,11 @@ fn text_field(payload: &Value, key: &str) -> Option<String> {
 }
 
 /// The `metadata.origin` of a chat attachment, and the only one while the promote switch is off.
-const CHAT_ATTACHMENT_ORIGIN: &str = "chat-attachment";
+pub(super) const CHAT_ATTACHMENT_ORIGIN: &str = "chat-attachment";
 /// The `metadata.origin` of an artifact revision saved to knowledge (EP-3 S8).
-const CHAT_ARTIFACT_ORIGIN: &str = "chat-artifact";
+pub(super) const CHAT_ARTIFACT_ORIGIN: &str = "chat-artifact";
+/// The Data Plane `type` of a saved artifact revision (F-t3-080). The gateway sets it; a body cannot.
+pub(super) const CHAT_ARTIFACT_TYPE: &str = "chat_artifact";
 /// Longest thread or artifact id a `source_ref` may carry. Ids are opaque labels, never content.
 const MAX_SOURCE_REF_ID_CHARS: usize = 256;
 /// The composer capabilities are a handful of booleans; anything larger is not that answer.
@@ -164,7 +166,7 @@ pub(super) async fn with_promote_capability(response: Response, enabled: bool) -
 /// Data Plane v2 document so retrieval can ground later turns on it.
 ///
 /// With the artifact-promote switch on (EP-3 S8, `space_features.chat_artifact_promote`) it also saves one artifact
-/// revision to knowledge (`origin: chat-artifact` plus `source_ref`). That copy
+/// revision to knowledge (`origin: chat-artifact` plus `source_ref`, stored with type `chat_artifact`). That copy
 /// is independent of the thread: it follows Data Plane retention and erase, so
 /// deleting the chat leaves it. With the switch on the BFF refuses a Zero Data
 /// Retention caller (request or org posture) with the typed 412 itself, before
@@ -246,10 +248,19 @@ pub(crate) async fn upload_chat_document(
         (!resolved.is_empty()).then_some(resolved)
     };
 
+    // A saved artifact is its own kind of document, so the library can filter on it; an attachment
+    // keeps the type it was sent with, exactly as before (F-t3-080).
+    let document_type =
+        if metadata.get("origin").and_then(Value::as_str) == Some(CHAT_ARTIFACT_ORIGIN) {
+            CHAT_ARTIFACT_TYPE.to_owned()
+        } else {
+            text_field(&payload, "type").unwrap_or_else(|| "text".to_owned())
+        };
+
     let document = json!({
         "org_id": org_id.clone().unwrap_or_default(),
         "source": text_field(&payload, "source").unwrap_or_else(|| "chat-upload".to_owned()),
-        "type": text_field(&payload, "type").unwrap_or_else(|| "text".to_owned()),
+        "type": document_type,
         "title": title,
         "content": content,
         "zdr_classification": "internal",

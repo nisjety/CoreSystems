@@ -5,6 +5,7 @@ import {
   canMoveBranches,
   rewindPlan,
   serverVersionBadge,
+  turnExcerpt,
   type VersionedTurn,
 } from './chat-versions-server'
 
@@ -19,13 +20,35 @@ const version = (overrides: Partial<ChatMessageVersion>): ChatMessageVersion => 
 
 /** A thread: a question, its answer (the active one of three versions), and a follow-up. */
 const versionedThread = (): VersionedTurn[] => [
-  { id: 'user-1', version: version({ parentMessageId: '', siblings: ['user-1'] }) },
+  {
+    id: 'user-1',
+    role: 'user',
+    content: 'Hva koster frakten?',
+    version: version({ parentMessageId: '', siblings: ['user-1'] }),
+  },
   {
     id: 'answer-2',
+    role: 'assistant',
+    content: 'Frakten koster 99 kr.',
     version: version({ siblingOrdinal: 2, siblingCount: 3, siblings: ['answer-1', 'answer-2', 'answer-3'] }),
   },
-  { id: 'user-2', version: version({ parentMessageId: 'answer-2', siblings: ['user-2'] }) },
-  { id: 'answer-4', version: version({ parentMessageId: 'user-2', siblings: ['answer-4'] }) },
+  {
+    id: 'user-2',
+    role: 'user',
+    content: 'Og retur?',
+    version: version({ parentMessageId: 'answer-2', siblings: ['user-2'] }),
+  },
+  {
+    id: 'answer-4',
+    role: 'assistant',
+    content: 'Retur er gratis.',
+    version: version({ parentMessageId: 'user-2', siblings: ['answer-4'] }),
+  },
+]
+
+const plain: VersionedTurn[] = [
+  { id: 'user-1', role: 'user', content: 'Hei' },
+  { id: 'answer-1', role: 'assistant', content: 'Hei der' },
 ]
 
 describe('serverVersionBadge', () => {
@@ -57,7 +80,6 @@ describe('activeLeafId and canMoveBranches', () => {
   })
 
   it('reports no leaf and no branch moves for a transcript without a version tree', () => {
-    const plain = [{ id: 'user-1' }, { id: 'answer-1' }]
     expect(canMoveBranches(plain)).toBe(false)
     expect(activeLeafId(plain)).toBe('')
     expect(canMoveBranches(versionedThread())).toBe(true)
@@ -65,19 +87,52 @@ describe('activeLeafId and canMoveBranches', () => {
 })
 
 describe('rewindPlan', () => {
-  it('counts the active-path turns a rewind hides and names the leaf the move must find', () => {
+  it('lists the active-path turns a rewind hides, oldest first, and names the leaf the move must find', () => {
     expect(rewindPlan(versionedThread(), 'answer-2')).toEqual({
       hiddenTurns: 2,
+      hidden: [
+        { id: 'user-2', role: 'user', excerpt: 'Og retur?' },
+        { id: 'answer-4', role: 'assistant', excerpt: 'Retur er gratis.' },
+      ],
       expectedLeafMessageId: 'answer-4',
     })
+  })
+
+  it('leaves out a turn the version tree marks as off the active path', () => {
+    const thread = versionedThread()
+    thread[2] = { ...thread[2]!, version: version({ parentMessageId: 'answer-2', onActivePath: false }) }
+    expect(rewindPlan(thread, 'answer-2')?.hidden.map((turn) => turn.id)).toEqual(['answer-4'])
   })
 
   it('offers nothing at the leaf, for a turn off the active path, or without a version tree', () => {
     expect(rewindPlan(versionedThread(), 'answer-4')).toBeNull()
     const off = versionedThread()
-    off[1] = { id: 'answer-1', version: version({ siblingOrdinal: 1, siblingCount: 3, onActivePath: false }) }
+    off[1] = {
+      id: 'answer-1',
+      role: 'assistant',
+      content: 'Frakten koster 99 kr.',
+      version: version({ siblingOrdinal: 1, siblingCount: 3, onActivePath: false }),
+    }
     expect(rewindPlan(off, 'answer-1')).toBeNull()
-    expect(rewindPlan([{ id: 'user-1' }, { id: 'answer-1' }], 'user-1')).toBeNull()
+    expect(rewindPlan(plain, 'user-1')).toBeNull()
     expect(rewindPlan(versionedThread(), 'no-such-turn')).toBeNull()
+  })
+
+  it('keeps a turn with no text in the preview, with an empty excerpt', () => {
+    const thread = versionedThread()
+    thread[2] = { ...thread[2]!, content: '   ' }
+    expect(rewindPlan(thread, 'answer-2')?.hidden[0]).toEqual({ id: 'user-2', role: 'user', excerpt: '' })
+  })
+})
+
+describe('turnExcerpt', () => {
+  it('keeps a short text whole and collapses its whitespace onto one line', () => {
+    expect(turnExcerpt('  Hei\n\n  på   deg  ')).toBe('Hei på deg')
+  })
+
+  it('cuts a long text short with an ellipsis', () => {
+    const excerpt = turnExcerpt('ord '.repeat(60))
+    expect(excerpt.endsWith('…')).toBe(true)
+    expect(excerpt.length).toBeLessThanOrEqual(121)
   })
 })

@@ -85,6 +85,9 @@ var orgAgentPolicySettings = []orgAgentSetting{
 	{key: "web.mode", kind: "enum", order: []string{"off", "cached_only", "live"}, def: "live", failClose: "off", reservedValues: []string{"cached_only"}},
 	// Wave 3 EP-9 W2: whether a paid search provider may serve the org's agents.
 	{key: "web.paid_providers", kind: "enum", order: []string{"off", "on"}, def: "on", failClose: "off"},
+	// Wave 4 W4-D M1a: the origins an MCP App may reach. `approved_only` names origins; it is reserved
+	// until MCP_APPS_NETWORK_ENABLED serves them, so a write of it is refused not_enforced.
+	{key: "mcp_apps.network_origins", kind: "origin_allow_list", order: []string{"none", "approved_only"}, def: "none", failClose: "none", reserved: true},
 }
 
 // orgAgentCountOrder is the strictness order of an integer key: "0" to max, smallest first,
@@ -136,7 +139,7 @@ func orgAgentDefaultValue(def orgAgentSetting, token string) any {
 	switch def.kind {
 	case "bool":
 		return token == "true"
-	case "allow_list":
+	case "allow_list", "origin_allow_list":
 		return map[string]any{"mode": token, "ids": []string{}}
 	case "integer":
 		// A token in the order is always a decimal count, so the parse cannot fail.
@@ -212,7 +215,7 @@ func parseOrgAgentValue(def orgAgentSetting, raw any) (string, any, *orgAgentRef
 			return "true", true, nil
 		}
 		return "false", false, nil
-	case "allow_list":
+	case "allow_list", "origin_allow_list":
 		return parseOrgAgentAllowList(def, raw)
 	case "integer":
 		// encoding/json decodes every number as float64: a fraction, a negative or a quoted
@@ -247,7 +250,7 @@ func parseOrgAgentAllowList(def orgAgentSetting, raw any) (string, any, *orgAgen
 	ids := []string{}
 	for _, item := range rawIDs {
 		id, ok := item.(string)
-		if !ok || !mcpIdentifier.MatchString(id) {
+		if !ok || !orgAgentIDWellFormed(def.kind, id) {
 			return "", nil, &orgAgentRefuseInvalidValue
 		}
 		if !seen[id] {
@@ -260,6 +263,63 @@ func parseOrgAgentAllowList(def orgAgentSetting, raw any) (string, any, *orgAgen
 	}
 	sort.Strings(ids)
 	return mode, map[string]any{"mode": mode, "ids": ids}, nil
+}
+
+// orgAgentIDWellFormed is the shape an allow-list id must have for its kind: an MCP server id, or a
+// canonical https origin.
+func orgAgentIDWellFormed(kind, id string) bool {
+	if kind == "origin_allow_list" {
+		return isHTTPSOrigin(id)
+	}
+	return mcpIdentifier.MatchString(id)
+}
+
+// isHTTPSOrigin mirrors mp-contracts' is_https_origin: one canonical https origin, lowercase host
+// labels and an optional canonical port. The two must accept and refuse the same strings.
+func isHTTPSOrigin(value string) bool {
+	rest, ok := strings.CutPrefix(value, "https://")
+	if !ok || len(value) > 200 {
+		return false
+	}
+	host, port, hasPort := rest, "", false
+	if i := strings.LastIndex(rest, ":"); i >= 0 {
+		host, port, hasPort = rest[:i], rest[i+1:], true
+	}
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if !isDNSLabel(label) {
+			return false
+		}
+	}
+	return !hasPort || isCanonicalPort(port)
+}
+
+func isDNSLabel(label string) bool {
+	if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func isCanonicalPort(port string) bool {
+	if port == "" || len(port) > 5 || port[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(port); i++ {
+		if port[i] < '0' || port[i] > '9' {
+			return false
+		}
+	}
+	number, err := strconv.Atoi(port)
+	return err == nil && number <= 65535
 }
 
 // orgAgentPolicyDigest is the sha256 of the canonical document: encoding/json sorts map

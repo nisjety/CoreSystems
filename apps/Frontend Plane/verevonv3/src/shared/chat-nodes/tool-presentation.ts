@@ -35,7 +35,11 @@
 import type { ChatToolCall } from '@/features/chat/components/chat-types'
 import { looksLikeUnifiedDiff, parseUnifiedDiff } from './diff'
 
-export type ToolIntent = 'terminal' | 'search' | 'read' | 'diff' | 'generic'
+/**
+ * How a tool call is drawn. `terminal` is a one-shot command. `browser`, `process` and `file` are the computer
+ * panel's kinds (P1): a browser step, a process the agent started, and a workspace file.
+ */
+export type ToolIntent = 'terminal' | 'search' | 'read' | 'diff' | 'generic' | 'browser' | 'process' | 'file'
 
 /**
  * How a `code_interpreter` run was confined, from its enforcement report (EP-9
@@ -113,9 +117,37 @@ const READ_TOOLS = new Set([
   'recall_conversations',
 ])
 
+/**
+ * The browser tools (`browser.*`). Their output is a page observation: the live browser view draws it, and a tool
+ * card keeps the raw text.
+ */
+const BROWSER_TOOLS = new Set(['browser.open', 'browser.observe', 'browser.act', 'browser.close', 'browser.console'])
+
+/**
+ * The process host's tools: a long-running process the agent starts, reads from, writes to and signals. Their output
+ * is a transcript, which the computer panel's terminal viewer draws.
+ */
+const PROCESS_TOOLS = new Set(['process_start', 'process_read', 'process_stdin', 'process_signal', 'process_list'])
+
+/**
+ * The workspace file tools (WS24): reading, searching, listing, editing and writing files in the thread's workspace.
+ * Their output is file text or a listing, which the computer panel's file viewer draws.
+ */
+const FILE_TOOLS = new Set([
+  'workspace_read',
+  'workspace_grep',
+  'workspace_glob',
+  'workspace_list',
+  'workspace_edit',
+  'workspace_put',
+])
+
 function intentFor(name: string): ToolIntent {
   const normalized = name.trim().toLowerCase()
   if (TERMINAL_TOOLS.has(normalized)) return 'terminal'
+  if (PROCESS_TOOLS.has(normalized)) return 'process'
+  if (BROWSER_TOOLS.has(normalized)) return 'browser'
+  if (FILE_TOOLS.has(normalized)) return 'file'
   if (SEARCH_TOOLS.has(normalized)) return 'search'
   if (READ_TOOLS.has(normalized)) return 'read'
   // Anything else — action tools, MCP tools, subagents — renders generically.
@@ -125,7 +157,7 @@ function intentFor(name: string): ToolIntent {
 }
 
 /** Parse the tool's own JSON envelope, if it emitted one. */
-function envelope(output: string | undefined): Record<string, unknown> | null {
+export function envelope(output: string | undefined): Record<string, unknown> | null {
   if (!output) return null
   const trimmed = output.trim()
   if (!trimmed.startsWith('{')) return null

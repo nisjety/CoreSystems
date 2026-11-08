@@ -21,6 +21,7 @@ mod continuation_crypto;
 mod decision_keys;
 mod dream_extractor;
 mod dreaming;
+mod event_triggers;
 mod eventlog_grpc;
 mod external_content;
 mod finetune_grpc;
@@ -63,6 +64,8 @@ mod space_membership_nats;
 mod space_stream_grpc;
 mod store;
 mod terminalization;
+#[cfg(test)]
+mod test_log_capture;
 mod thread_export;
 mod thread_fork;
 mod thread_import;

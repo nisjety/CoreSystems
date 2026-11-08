@@ -1,0 +1,42 @@
+{
+ "packets": [
+  {
+   "key": "mg-active-stream-gauge-guard",
+   "rows": [
+    "D1-795"
+   ],
+   "title": "model-gateway: gateway_active_streams is held by a drop guard, so a stopped or cancelled stream no longer leaks a count",
+   "brief": "Measured live by the lead 2026-10-27 (WS04-S9 two-replica proof, case 1): a stream on replica A was stopped from replica B (202 via peer, A's stream ended with one `stopped` frame, turn timing outcome=cancelled two seconds later), but A's `gateway_active_streams` stayed at 1 for minutes after the client disconnected. Cause (source): the gauge is counted by hand. apps/Model Plane/rust/services/model-gateway/src/sse.rs calls `gateway_metrics::stream_opened()` once (~:1465) and `gateway_metrics::stream_closed()` only on the completed path (~:4684, ~:7645) and one error path (~:7786); every `ChatEvent::Stopped` path (~:2889, :3085, :3702, :4283, :4329, :4458, :7296, :7455), the early `return` before :7786 (\"Unable to record the failed chat run\") and a panic never decrement. Line numbers may drift: find the calls by name.\n\nDo: (1) gateway_metrics.rs: add `pub struct ActiveStreamGuard` with `#[must_use] pub fn open() -> Self` that increments the gauge, and `impl Drop` that decrements it exactly once. Make the bare stream_opened/stream_closed functions private to the module (or remove them) so the hand-counting cannot come back. Doc comment: why (the stop and error paths leaked). (2) sse.rs: replace the one `stream_opened()` with `let active_stream = gateway_metrics::ActiveStreamGuard::open();` and MOVE it into the task (or the response stream) whose lifetime is the stream's lifetime, so it drops when that task ends on any path: completed, failed, stopped, cancelled, client disconnect, panic. Read how the handler spawns the producer task after the open and pick the owner of `tx`; if the open happens before an early return that sends no stream, the guard must drop there too (that is what RAII gives you, as long as it is not leaked with mem::forget). Remove the three manual `stream_closed()` calls. If 7645 or 7786 sit in a function that is not reached from the task the guard moves into, trace it and report; do not add a second open. (3) Do not change any frame, envelope (STREAM_OPENED/STREAM_CLOSED publishing stays exactly as it is), turn timing, or the run-control code. sse.rs is LF (measure with `file` first); gateway_metrics.rs measure too; preserve each.\n\nTests (required): (a) gateway_metrics.rs unit test: open two guards, drop one, the gauge reads 1; drop the other, 0. If reading the gauge needs a recorder, check model-gateway's Cargo.toml for metrics-util (DebuggingRecorder) first; if it is not there, do NOT add a dependency: add a `#[cfg(test)]` AtomicI64 mirror updated by open/drop and assert on that (tests that touch it run serially inside one #[test] fn). (b) a source-scan test (in sse.rs's test module or tests/): sse.rs contains no `stream_closed(` and no `stream_opened(`, and exactly one `ActiveStreamGuard::open()`. (c) If an existing lib test already runs a full stream to a `stopped` frame with fakes (search for tests asserting a stopped frame), add one that asserts the mirror counter is back to its starting value after that stream ends; if none exists, say so in the report instead of building a harness. Run the commands in `tests`; diff the failing set of the full model-gateway lib run against HEAD (the lib has known parallel-flaky tests: report, do not fix them).",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/gateway_metrics.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib gateway_metrics",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib active_stream",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib (diff the failing set against HEAD)",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p model-gateway --all-targets"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ec-durable-loop-contract-pause-needle",
+   "rows": [
+    "D1-796"
+   ],
+   "title": "durable_loop_contract: the pause-site guard follows run_pause_mode_with, so the contract test is green again without weakening it",
+   "brief": "Found by the I-2a tester 2026-10-27 and confirmed by the lead: `cargo test -p execution-core --test durable_loop_contract` fails 2 of 31 at HEAD: the_pause_site_mints_loop_for_not_zdr_and_not_waived_and_the_old_name_is_gone (\"agent.rs calls run_pause_mode 0 times, expected the one pause site\") and every_guard_goes_red_when_the_code_it_guards_regresses. Cause: commit 484e27425 (D1-274/275, owner-approval marker call sites via RunGate) changed the one pause site in apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs from `run_pause_mode(` to `super::resume::run_pause_mode_with(` (agent.rs ~:4319), and the source-text guard at tests/durable_loop_contract.rs:617-640 (pause_site_violations; needle `\brun_pause_mode\\s*\\(` at :621) and its mutation test were not updated. Read resume.rs to see what run_pause_mode_with takes compared with run_pause_mode (git show 484e27425 -- '*resume.rs').\n\nDo, in tests/durable_loop_contract.rs only: update pause_site_violations so it finds the ONE pause call whatever its current name (accept `run_pause_mode(` or `run_pause_mode_with(`, optionally path-qualified), still requires exactly one such call in agent.rs (tests stripped), and still checks what the guard was written for: the loop flag fed to that call is derived from `!req.zdr && !ctx.route.is_waived()` (or whatever expression the current call site uses that means not-ZDR and not-waived; read the call site and keep the guard's meaning, never loosen it to match anything). Update the mutation in every_guard_goes_red_when_the_code_it_guards_regresses (~:4422 and wherever it rewrites the pause site) so the mutated source still makes this guard go red. Keep the guard's message text pointing at the real function name. Do not edit agent.rs, resume.rs or any production code. Measure line endings first and keep them.\n\nTests: the full durable_loop_contract binary passes 31/31; then prove the guard still bites: temporarily (in your head or a scratch copy, never in the repo) the test must fail if the call site fed `!req.zdr` alone, which the mutation test should already cover; report how.",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/tests/durable_loop_contract.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test durable_loop_contract"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "medium"
+  }
+ ]
+}

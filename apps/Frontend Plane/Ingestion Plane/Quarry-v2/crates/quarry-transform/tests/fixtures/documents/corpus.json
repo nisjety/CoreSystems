@@ -1,0 +1,368 @@
+{
+  "schema": "quarry-document-corpus/1",
+  "note": "Synthetic Norwegian public-sector fixture set for document parsing and PII (E3.6-10). Invented people, cases and addresses; identity numbers pass the mod-11 control but belong to no one; IBAN and card numbers are published examples. Regenerate with generate.py; do not hand-edit corpus.json.",
+  "documents": [
+    {
+      "id": "no-01-vedtak-bostotte",
+      "file": "no/no-01-vedtak-bostotte.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Text PDF, one page. Decision letter: national identity number, email, international phone, Norwegian IBAN. Near misses: case number, postal code.",
+      "bytes": 1599,
+      "sha256": "c177676a20ad2b91c51918b6284b40048583ad4e6a3e852da35cff1fb25c0e91",
+      "pii": [
+        {
+          "kind": "fodselsnummer",
+          "value": "12058512336"
+        },
+        {
+          "kind": "email",
+          "value": "kari.testperson@example.no"
+        },
+        {
+          "kind": "phone",
+          "value": "+47 22 33 44 55"
+        },
+        {
+          "kind": "iban",
+          "value": "NO93 8601 1117 947"
+        }
+      ],
+      "near_miss": [
+        "2024/104532",
+        "0150 Oslo"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "text"
+        }
+      ],
+      "ocr_truth": []
+    },
+    {
+      "id": "no-02-soknad-barnehageplass",
+      "file": "no/no-02-soknad-barnehageplass.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Text PDF, two pages. Application form: two identity numbers, a national mobile number, an email and a payment card. Near miss: application number.",
+      "bytes": 1908,
+      "sha256": "63ed3f8a220d8aa8374d8b3d454bf3ec86c3827c7dcd2ae7322f90db3d3bf1bc",
+      "pii": [
+        {
+          "kind": "fodselsnummer",
+          "value": "13058512375"
+        },
+        {
+          "kind": "phone",
+          "value": "41 23 45 67"
+        },
+        {
+          "kind": "email",
+          "value": "ola.testmann@example.no"
+        },
+        {
+          "kind": "fodselsnummer",
+          "value": "01010078950"
+        },
+        {
+          "kind": "card",
+          "value": "4111 1111 1111 1111"
+        }
+      ],
+      "near_miss": [
+        "2024-55871"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "text"
+        },
+        {
+          "page": 2,
+          "kind": "text"
+        }
+      ],
+      "ocr_truth": []
+    },
+    {
+      "id": "no-03-faktura-kort",
+      "file": "no/no-03-faktura-kort.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Text PDF, one page. Invoice: IBAN, an email, a published test card number. Near misses: organisation number, KID, a card-shaped order number that fails Luhn.",
+      "bytes": 1485,
+      "sha256": "e4c6f64ca88c3b9988e32bc99396273e70f4eb8a7cdd8c09bd9353552cf9cd88",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "kari.testperson@example.no"
+        },
+        {
+          "kind": "iban",
+          "value": "NO93 8601 1117 947"
+        },
+        {
+          "kind": "card",
+          "value": "5555 5555 5555 4444"
+        }
+      ],
+      "near_miss": [
+        "974 760 673",
+        "1234567890",
+        "4111 1111 1111 1112",
+        "2024-0917"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "text"
+        }
+      ],
+      "ocr_truth": []
+    },
+    {
+      "id": "no-04-skannet-innkalling",
+      "file": "no/no-04-skannet-innkalling.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Scanned PDF, one page: an image with no text layer. The OCR truth is listed. Holds a national H-number and an international phone.",
+      "bytes": 22383,
+      "sha256": "5972b87daaf140244294f6c2c9002e531a17535d5d0f9f2d763a9664b88669e0",
+      "pii": [
+        {
+          "kind": "fodselsnummer",
+          "value": "12458512319"
+        },
+        {
+          "kind": "phone",
+          "value": "+47 22 33 44 55"
+        }
+      ],
+      "near_miss": [
+        "2024/104532"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "scanned"
+        }
+      ],
+      "ocr_truth": [
+        "INNKALLING TIL MØTE I RÅDET",
+        "Testkommune Nord, sekretariatet",
+        "Dato: 12. april 2024, kl. 09.00",
+        "Sted: Rådhussalen, 3. etasje",
+        "Mottaker: Per Testsen",
+        "Fødselsnummer: 12458512319",
+        "Telefon: +47 22 33 44 55",
+        "Saksnummer: 2024/104532",
+        "Vennligst gi beskjed om forfall til postmottak",
+        "senest 5. april."
+      ]
+    },
+    {
+      "id": "no-05-blandet-notat-og-vedlegg",
+      "file": "no/no-05-blandet-notat-og-vedlegg.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Mixed PDF, two pages: page 1 has a text layer, page 2 is a scan. Tests the per-page classifier on one document.",
+      "bytes": 12950,
+      "sha256": "ce3c11620a53ed47b2474ff7b6ce8122810aed924b874e9c5f35b286a920d3a0",
+      "pii": [
+        {
+          "kind": "phone",
+          "value": "+47 22 33 44 55"
+        },
+        {
+          "kind": "email",
+          "value": "eva.testdal@example.no"
+        },
+        {
+          "kind": "fodselsnummer",
+          "value": "01010078950"
+        },
+        {
+          "kind": "phone",
+          "value": "41 23 45 67"
+        }
+      ],
+      "near_miss": [],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "text"
+        },
+        {
+          "page": 2,
+          "kind": "scanned"
+        }
+      ],
+      "ocr_truth": [
+        "VEDLEGG: ANSATTLISTE (SKANNET)",
+        "1. Per Testsen, fødselsnummer 01010078950",
+        "2. Kari Testperson, telefon 41 23 45 67"
+      ]
+    },
+    {
+      "id": "no-06-skann-kvittering-sidefot",
+      "file": "no/no-06-skann-kvittering-sidefot.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Scanned PDF, one page with a short vector footer over the scan. The footer is under the text threshold, so the page is a scan. Holds a published test card number.",
+      "bytes": 17810,
+      "sha256": "9d880e14b70b70a17309d6e7788c23f947222292eeece474dc036ff5f73bd8ce",
+      "pii": [
+        {
+          "kind": "card",
+          "value": "4111 1111 1111 1111"
+        }
+      ],
+      "near_miss": [
+        "0155 Oslo"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "scanned"
+        }
+      ],
+      "ocr_truth": [
+        "KVITTERING (SYNTETISK TESTDOKUMENT)",
+        "Testkiosken, Storgata 1, 0155 Oslo",
+        "Vare 1: Kaffe 49,00",
+        "Vare 2: Kanelbolle 32,00",
+        "Totalt NOK 81,00",
+        "Betalt med kort 4111 1111 1111 1111",
+        "Kortholder: Kari Testperson"
+      ]
+    },
+    {
+      "id": "no-07-nare-treff",
+      "file": "no/no-07-nare-treff.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Text PDF, one page with no personal data. Every line is a near miss: case, order and organisation numbers, a UUID, a git SHA, postal codes and a version. Must produce no findings.",
+      "bytes": 1355,
+      "sha256": "b352ed52cccd1f1975b3d7cfa076b224455f6c1d0c39938f69fed35dcb8168a8",
+      "pii": [],
+      "near_miss": [
+        "2024/104532",
+        "4111 1111 1111 1112",
+        "974 760 673",
+        "0150 Oslo",
+        "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+        "12.04.2024"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "text"
+        }
+      ],
+      "ocr_truth": []
+    },
+    {
+      "id": "no-08-vedtak-tilskudd",
+      "file": "no/no-08-vedtak-tilskudd.docx",
+      "format": "docx",
+      "language": "nb",
+      "summary": "DOCX, paragraphs only. Grant decision with an email, a national identity number, a national mobile number in +47 form and an IBAN. Near miss: case number.",
+      "bytes": 1179,
+      "sha256": "cc8d8963c7a42c227aa60290cde0c18e7395d97f9aff61536f66eaf23630672d",
+      "pii": [
+        {
+          "kind": "email",
+          "value": "per.testsen@example.no"
+        },
+        {
+          "kind": "fodselsnummer",
+          "value": "31129900183"
+        },
+        {
+          "kind": "phone",
+          "value": "+47 91 23 45 67"
+        },
+        {
+          "kind": "iban",
+          "value": "NO93 8601 1117 947"
+        }
+      ],
+      "near_miss": [
+        "2024/77412"
+      ]
+    },
+    {
+      "id": "no-09-oppdragsavtale-tabell",
+      "file": "no/no-09-oppdragsavtale-tabell.docx",
+      "format": "docx",
+      "language": "nb",
+      "summary": "DOCX with a table. Engagement agreement: a D-number, a national identity number, two IBANs (one Norwegian, one German published example) and a phone. Near miss: contract number.",
+      "bytes": 1263,
+      "sha256": "e1d0c1d77d958aafee6993dc93296c6af6a3e34d8285d19eeb7e81a40517619d",
+      "pii": [
+        {
+          "kind": "fodselsnummer",
+          "value": "52058512400"
+        },
+        {
+          "kind": "iban",
+          "value": "NO93 8601 1117 947"
+        },
+        {
+          "kind": "fodselsnummer",
+          "value": "12058512336"
+        },
+        {
+          "kind": "iban",
+          "value": "DE89 3704 0044 0532 0130 00"
+        },
+        {
+          "kind": "phone",
+          "value": "+47 91 23 45 67"
+        }
+      ],
+      "near_miss": [
+        "2023-0042"
+      ]
+    },
+    {
+      "id": "no-10-journalnotat",
+      "file": "no/no-10-journalnotat.pdf",
+      "format": "pdf",
+      "language": "nb",
+      "summary": "Text PDF, two pages. Journal note: an identity number written with a space, a national phone, an email on page 2. Near misses: case and journal numbers.",
+      "bytes": 2010,
+      "sha256": "29b29d138e62b8f50e8e27ca9115c43afe4b25752778ca66564039b1c09ad70a",
+      "pii": [
+        {
+          "kind": "fodselsnummer",
+          "value": "120585 12336"
+        },
+        {
+          "kind": "phone",
+          "value": "22 33 44 55"
+        },
+        {
+          "kind": "email",
+          "value": "kari.testperson@example.no"
+        }
+      ],
+      "near_miss": [
+        "2024/1183",
+        "24/00912"
+      ],
+      "pages": [
+        {
+          "page": 1,
+          "kind": "text"
+        },
+        {
+          "page": 2,
+          "kind": "text"
+        }
+      ],
+      "ocr_truth": []
+    }
+  ]
+}

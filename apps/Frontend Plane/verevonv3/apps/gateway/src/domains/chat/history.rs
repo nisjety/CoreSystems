@@ -2511,6 +2511,129 @@ mod thread_goal_handler_tests {
 }
 
 #[cfg(test)]
+mod thread_goal_route_tests {
+    use axum::{body::Body, http::Request, http::StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn answer(server: &MockServer, verb: &str, route: &str, body: Value) {
+        Mock::given(wm_method(verb))
+            .and(wm_path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn goal_routes_relay_each_verb_and_forward_no_forged_scope() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let auth = MockServer::start().await;
+        answer(
+            &auth,
+            "GET",
+            "/api/auth/get-session",
+            json!({
+                "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            }),
+        )
+        .await;
+        for path in ["/api/model-plane/token", "/api/session-core/token"] {
+            answer(&auth, "GET", path, json!({"token": "delegated-token"})).await;
+        }
+        let user_core = MockServer::start().await;
+        answer(
+            &user_core,
+            "GET",
+            "/api/v1/me/session-context",
+            json!({"userId": "user-1", "orgId": "org-1", "role": "member", "onboardingStatus": "COMPLETED"}),
+        )
+        .await;
+        let model = MockServer::start().await;
+        answer(
+            &model,
+            "GET",
+            "/v1/threads",
+            json!({"threads": [{"thread_id": "thread-1", "origin": "chat"}], "next_cursor": ""}),
+        )
+        .await;
+        let reply = json!({"found": true, "goal": {"id": "goal_1", "threadId": "thread-1", "status": "active"}});
+        for verb in ["GET", "PUT", "PATCH"] {
+            answer(&model, verb, "/v1/threads/thread-1/goal", reply.clone()).await;
+        }
+
+        let mut state = crate::tests::test_state(false);
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model.uri();
+        let calls = [
+            ("GET", None),
+            (
+                "PUT",
+                Some(json!({"objective": "Ship it", "successCriteria": ["Numbers reconciled"]})),
+            ),
+            (
+                "PATCH",
+                Some(json!({"goalId": "goal_1", "expectedRevision": 1, "status": "paused"})),
+            ),
+        ];
+        for (verb, body) in calls {
+            let mut builder = Request::builder()
+                .method(verb)
+                .uri("/api/v1/chat/threads/thread-1/goal?org_id=org-forged")
+                .header("cookie", "better-auth.session_token=session-1")
+                .header("x-verevon-org-id", "org-forged")
+                .header("x-verevon-user-id", "user-forged");
+            let request_body = match body {
+                Some(value) => {
+                    builder = builder.header("content-type", "application/json");
+                    Body::from(value.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = crate::build_router(state.clone())
+                .oneshot(builder.body(request_body).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let answered: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            assert_eq!(status, StatusCode::OK, "{verb}: {answered}");
+            assert_eq!(answered, reply, "{verb} relays the upstream answer unchanged");
+        }
+
+        let received = model.received_requests().await.unwrap();
+        let forwarded = |verb: &str| {
+            received
+                .iter()
+                .find(|request| {
+                    request.method.as_str() == verb && request.url.path() == "/v1/threads/thread-1/goal"
+                })
+                .unwrap_or_else(|| panic!("{verb} reaches model-gateway"))
+        };
+        for verb in ["GET", "PUT", "PATCH"] {
+            let request = forwarded(verb);
+            assert_eq!(request.url.query(), None, "{verb}: the browser's query stays behind");
+            assert!(request.headers.get("x-verevon-org-id").is_none(), "{verb}");
+            assert!(request.headers.get("x-verevon-user-id").is_none(), "{verb}");
+        }
+        let put: Value = serde_json::from_slice(&forwarded("PUT").body).unwrap();
+        assert_eq!(
+            put,
+            json!({"objective": "Ship it", "successCriteria": ["Numbers reconciled"], "replace": false})
+        );
+        let patch: Value = serde_json::from_slice(&forwarded("PATCH").body).unwrap();
+        assert_eq!(
+            patch,
+            json!({"goalId": "goal_1", "expectedRevision": 1, "status": "paused"})
+        );
+    }
+}
+
+#[cfg(test)]
 mod thread_export_handler_tests {
     use super::*;
 

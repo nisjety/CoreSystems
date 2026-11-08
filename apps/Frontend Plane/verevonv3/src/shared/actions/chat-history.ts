@@ -31,6 +31,9 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
   // A rewind moves the active leaf and deletes nothing, but it still changes
   // which answer the next turn sees, so the caller must confirm it explicitly.
   z.object({ type: z.literal('thread.rewind'), threadId, messageId, confirm: z.literal(true) }),
+  // An undo returns the leaf to the turn a rewind left. It moves nothing the rewind did not already move, so it
+  // needs no confirmation of its own.
+  z.object({ type: z.literal('thread.undo_rewind'), threadId, messageId }),
 ])
 
 // The registry's input for the same export: the three fields and nothing else. The owner is the

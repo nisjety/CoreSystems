@@ -23,12 +23,15 @@ import {
   parallelThreadLoadEnabled,
   parseTurnTiming,
   queueInvocationInput,
+  rewindChatThread,
   resumeStream,
   saveChatThreadSnapshot,
   searchChatThreads,
   streamChat,
   subscriptionModelDisplayName,
   submitFeedback,
+  submitRunFeedback,
+  undoChatRewind,
 } from './chat-client'
 import type { ChatStreamHandlers } from './chat-client'
 import {
@@ -1938,6 +1941,71 @@ describe('chat-client server thread history', () => {
   })
 })
 
+describe('chat thread branch moves (WS17 S9)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function jsonResponse(body: unknown, status: number): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  it('posts an undo to its own route, naming the turn to return to and the leaf the rewind landed on', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(
+      { thread_id: 'thread-1', active_leaf_message_id: 'message-4', active_path: ['message-1', 'message-4'] },
+      200,
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const move = await undoChatRewind('thread-1', 'message-4', 'message-2')
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/chat/threads/thread-1/undo-rewind')
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      targetMessageId: 'message-4',
+      expectedLeafMessageId: 'message-2',
+    })
+    expect(move).toEqual({ activeLeafMessageId: 'message-4', activePath: ['message-1', 'message-4'] })
+  })
+
+  it('posts a rewind with its confirmation, and reads the leaf the thread landed on', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(
+      { thread_id: 'thread-1', active_leaf_message_id: 'message-2', active_path: ['message-1', 'message-2'] },
+      200,
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const move = await rewindChatThread('thread-1', 'message-2', 'message-4')
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/chat/threads/thread-1/rewind')
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      targetMessageId: 'message-2',
+      expectedLeafMessageId: 'message-4',
+      confirm: true,
+    })
+    expect(move.activeLeafMessageId).toBe('message-2')
+  })
+
+  it('sends nothing for an undo with no turn to return to', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(undoChatRewind('thread-1', ' ', 'message-2')).rejects.toThrow()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('rejects an undo the thread refuses because it moved on, so the client can reload', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(
+      { error: { code: 'active_leaf_stale', message: 'the thread moved on' } },
+      409,
+    )))
+
+    await expect(undoChatRewind('thread-1', 'message-4', 'message-2')).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
 describe('chat feedback', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -1989,6 +2057,55 @@ describe('chat feedback', () => {
     expect(describeFeedbackFailure(new Error('boom'))).toContain(
       'Kunne ikke lagre',
     )
+  })
+
+  it('describes a run that cannot be found, and every failure in English when asked', () => {
+    const english = (_noText: string, enText: string) => enText
+    expect(describeFeedbackFailure(new ApiError('gone', 404, null))).toContain('Vi fant ikke kjøringen')
+    expect(describeFeedbackFailure(new ApiError('gone', 404, null), english)).toBe(
+      'The run to rate could not be found. The rating was not saved.',
+    )
+    expect(describeFeedbackFailure(new ApiError('zdr', 412, null), english)).toBe(
+      'Ratings are not saved while zero data retention is on.',
+    )
+    expect(describeFeedbackFailure(new Error('boom'), english)).toBe(
+      'The rating could not be saved. Try again.',
+    )
+  })
+
+  it('rates a durable run by run id, with no chat turn and no skill id', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ accepted: true }, 200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await submitRunFeedback('run_fire_1', 'negative', 'Inaccurate')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/chat/feedback',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body).toEqual({ run_id: 'run_fire_1', rating: 'negative', note: 'Inaccurate' })
+    expect(body.requestId).toBeUndefined()
+    expect(body.skill_id).toBeUndefined()
+  })
+
+  it('sends no note when the rating has none', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ accepted: true }, 200))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await submitRunFeedback('run_fire_1', 'positive')
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))
+    expect(body).toEqual({ run_id: 'run_fire_1', rating: 'positive' })
+    expect('note' in body).toBe(false)
+  })
+
+  it('rejects a run rating that zero data retention refused, so nothing reads as saved', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ error: { code: 'zdr_durable_mutation_forbidden', message: 'refused' } }, 412),
+    ))
+
+    await expect(submitRunFeedback('run_fire_1', 'positive')).rejects.toBeInstanceOf(ApiError)
   })
 })
 

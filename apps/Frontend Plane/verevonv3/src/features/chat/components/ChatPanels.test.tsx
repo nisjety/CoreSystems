@@ -403,6 +403,63 @@ describe('ToolCallCard diff intent', () => {
   })
 })
 
+describe('ToolCallCard computer panel', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('keeps the raw output while the computer panel is off, which is the default', () => {
+    const { container, unmount } = render(() => (
+      <ToolCallCard call={{ id: 't1', name: 'shell', status: 'completed', output: 'total 4' }} />
+    ))
+    fireEvent.click(container.querySelector('button')!)
+    flush()
+    expect(container.querySelector('[data-computer-viewer]')).toBeNull()
+    expect(container.querySelector('pre')?.textContent).toContain('total 4')
+    unmount()
+  })
+
+  it('draws a command in the terminal viewer when the panel is on', () => {
+    vi.stubEnv('VITE_CHAT_COMPUTER_PANEL', 'true')
+    const { container, unmount } = render(() => (
+      <ToolCallCard
+        call={{ id: 't1', name: 'shell', status: 'completed', args: { command: 'ls' }, output: 'total 4' }}
+      />
+    ))
+    fireEvent.click(container.querySelector('button')!)
+    flush()
+    expect(container.querySelector('[data-computer-viewer="terminal"]')).not.toBeNull()
+    expect(container.querySelector('[data-computer-viewer="terminal"] pre')?.textContent).toBe('total 4')
+    unmount()
+  })
+
+  it('draws a workspace file in the file viewer when the panel is on', () => {
+    vi.stubEnv('VITE_CHAT_COMPUTER_PANEL', 'true')
+    const { container, unmount } = render(() => (
+      <ToolCallCard
+        call={{ id: 't1', name: 'workspace_read', status: 'completed', args: { path: 'a.txt' }, output: 'hello' }}
+      />
+    ))
+    fireEvent.click(container.querySelector('button')!)
+    flush()
+    expect(container.querySelector('[data-computer-viewer="file"]')).not.toBeNull()
+    expect(container.querySelector('[data-computer-viewer="file"] pre')?.textContent).toBe('hello')
+    unmount()
+  })
+
+  it('keeps a browser step as its raw output when the panel is on', () => {
+    vi.stubEnv('VITE_CHAT_COMPUTER_PANEL', 'true')
+    const { container, unmount } = render(() => (
+      <ToolCallCard call={{ id: 't1', name: 'browser.open', status: 'completed', output: 'page text' }} />
+    ))
+    fireEvent.click(container.querySelector('button')!)
+    flush()
+    expect(container.querySelector('[data-computer-viewer]')).toBeNull()
+    expect(container.querySelector('pre')?.textContent).toContain('page text')
+    unmount()
+  })
+})
+
 describe('MemoryRecallNotice disclosure', () => {
   const memory = (overrides: Partial<RecalledMemory> = {}): RecalledMemory => ({
     memoryId: 'mem-1',

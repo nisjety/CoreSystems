@@ -237,8 +237,8 @@ pub(crate) async fn list_artifact_revisions(
     })))
 }
 
-/// What the composer and the Output panel may offer, from this gateway's own switches. Only
-/// `artifact_history` has a server half today; each later EP-3 slice wires its own field here.
+/// What the composer and the Output panel may offer, from this gateway's own switches. Each field
+/// follows the switch behind it; the two reference fields are set by `with_reference_switches`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComposerCapabilities {
     artifact_history: bool,
@@ -248,15 +248,30 @@ pub(crate) struct ComposerCapabilities {
     selection_edit: bool,
 }
 
-fn capabilities_for(mode: ArtifactRevisionsMode, zdr: bool) -> ComposerCapabilities {
+fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> ComposerCapabilities {
     ComposerCapabilities {
         // A ZDR caller would only be refused the read, so the panel is told not to ask.
         artifact_history: mode == ArtifactRevisionsMode::On && !zdr,
-        artifact_editing: false,
+        // The edit routes need the revision table on (startup refuses editing otherwise) and refuse
+        // ZDR at the write, so the panel offers nothing a write would refuse.
+        artifact_editing: editing && mode == ArtifactRevisionsMode::On && !zdr,
         context_refs: false,
         thread_references: false,
         selection_edit: crate::selection_guard::enabled_for(mode) && !zdr,
     }
+}
+
+/// The reference features follow their own switches (EP-3 S5 and S7). A ZDR caller is offered neither:
+/// a turn that carries a reference is refused for ZDR, and a ZDR credential is refused every thread read.
+fn with_reference_switches(
+    mut capabilities: ComposerCapabilities,
+    context_refs: bool,
+    thread_references: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.context_refs = context_refs && !zdr;
+    capabilities.thread_references = thread_references && !zdr;
+    capabilities
 }
 
 pub(crate) async fn composer_capabilities(
@@ -269,7 +284,16 @@ pub(crate) async fn composer_capabilities(
         &crate::zdr_posture::Route::plain(false),
     )
     .unwrap_or(true);
-    Json(json!({ "data": capabilities_for(state.artifact_revisions_mode, zdr) }))
+    let context_refs = crate::context_refs::enabled();
+    Json(json!({
+        "data": with_reference_switches(
+            capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
+            context_refs,
+            // A thread is referenced only through a reference, so its tools need the reference switch too.
+            context_refs && crate::thread_reference_tools::enabled(),
+            zdr,
+        )
+    }))
 }
 
 #[cfg(test)]
@@ -588,12 +612,65 @@ mod tests {
 
     #[test]
     fn capabilities_reflect_switches() {
-        assert!(!capabilities_for(ArtifactRevisionsMode::Off, false).artifact_history);
-        assert!(!capabilities_for(ArtifactRevisionsMode::Shadow, false).artifact_history);
-        assert!(capabilities_for(ArtifactRevisionsMode::On, false).artifact_history);
-        assert!(!capabilities_for(ArtifactRevisionsMode::On, true).artifact_history);
-        let on = capabilities_for(ArtifactRevisionsMode::On, false);
+        assert!(!capabilities_for(ArtifactRevisionsMode::Off, false, false).artifact_history);
+        assert!(!capabilities_for(ArtifactRevisionsMode::Shadow, false, false).artifact_history);
+        assert!(capabilities_for(ArtifactRevisionsMode::On, false, false).artifact_history);
+        assert!(!capabilities_for(ArtifactRevisionsMode::On, false, true).artifact_history);
+        let on = capabilities_for(ArtifactRevisionsMode::On, false, false);
         assert!(!on.artifact_editing && !on.context_refs && !on.thread_references && !on.selection_edit);
+    }
+
+    #[test]
+    fn reference_switches_are_offered_only_when_on_and_not_zdr() {
+        let base = || capabilities_for(ArtifactRevisionsMode::Off, false, false);
+        let on = with_reference_switches(base(), true, true, false);
+        assert!(on.context_refs && on.thread_references);
+        let zdr = with_reference_switches(base(), true, true, true);
+        assert!(
+            !zdr.context_refs && !zdr.thread_references,
+            "a ZDR caller is offered no reference"
+        );
+        let off = with_reference_switches(base(), false, false, false);
+        assert!(!off.context_refs && !off.thread_references);
+    }
+
+    #[test]
+    fn artifact_editing_is_offered_only_with_its_switch_revisions_on_and_no_zdr() {
+        assert!(
+            !capabilities_for(ArtifactRevisionsMode::On, false, false).artifact_editing,
+            "off by default"
+        );
+        assert!(capabilities_for(ArtifactRevisionsMode::On, true, false).artifact_editing);
+        assert!(
+            !capabilities_for(ArtifactRevisionsMode::On, true, true).artifact_editing,
+            "a ZDR write is refused, so nothing is offered"
+        );
+        assert!(
+            !capabilities_for(ArtifactRevisionsMode::Shadow, true, false).artifact_editing,
+            "no table to edit over"
+        );
+        assert!(!capabilities_for(ArtifactRevisionsMode::Off, true, false).artifact_editing);
+    }
+
+    #[tokio::test]
+    async fn the_capabilities_route_reports_the_editing_switch() {
+        let mut state = state_with(FakeStore::default(), ArtifactRevisionsMode::On).await;
+        let Json(off) = composer_capabilities(
+            State(state.clone()),
+            Extension(claims("org-1", OWNER, false)),
+        )
+        .await;
+        assert_eq!(off["data"]["artifact_editing"], false);
+        state.artifact_editing_enabled = true;
+        let Json(on) = composer_capabilities(
+            State(state.clone()),
+            Extension(claims("org-1", OWNER, false)),
+        )
+        .await;
+        assert_eq!(on["data"]["artifact_editing"], true);
+        let Json(zdr) =
+            composer_capabilities(State(state), Extension(claims("org-1", OWNER, true))).await;
+        assert_eq!(zdr["data"]["artifact_editing"], false);
     }
 
     #[tokio::test]

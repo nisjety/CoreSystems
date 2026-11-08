@@ -10,6 +10,7 @@ import { readChatThreadTranscript, selectChatThread } from '../lib/chat-thread-h
 import { PROSE_ARTIFACT_KINDS } from './chat-types'
 import { buildPromptSuggestions } from '../lib/prompt-suggestions'
 import { ScheduleDialog } from './ScheduleDialog'
+import { ChatLibraryPanel } from './ChatLibraryPanel'
 import { ScheduledRunsPanel } from './ScheduledRunsPanel'
 
 type Section = 'findings' | 'reports' | 'routines'
@@ -95,6 +96,7 @@ export default function ChatUtilityPage(props: { section: Section }) {
 
         <Show when={props.section === 'reports'}>
           <header class="chat-utility-page__header"><div><h1>{i18n.tr('Rapporter', 'Reports')}</h1><p>{i18n.tr('Rapportartefakter på denne enheten og rapportrelaterte samtaler.', 'Report artifacts on this device and report-related chats.')}</p></div></header>
+          <ChatLibraryPanel />
           <Show when={!threads.loading} fallback={<p role="status">{i18n.tr('Laster rapporter…', 'Loading reports…')}</p>}>
             <Show when={!threads.error} fallback={<p role="alert">{i18n.tr('Kunne ikke hente samtaler akkurat nå.', 'Chats could not be loaded right now.')}</p>}>
               <Show when={reports().length} fallback={<p class="chat-utility-page__empty">{i18n.tr('Ingen rapporter eller rapportrelaterte samtaler ennå.', 'No reports or report-related chats yet.')}</p>}>

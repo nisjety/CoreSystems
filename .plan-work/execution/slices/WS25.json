@@ -1,0 +1,479 @@
+{
+  "ws": "WS25",
+  "header_decisions": [
+    "DEC-14 (WS25-D1, capability-core as system of record) gates S7-S12 and must be recorded in the ledger by S0; decider OWN (MPO), CP acknowledges. Not in docs/decisions/ledger.md at HEAD.",
+    "DEC-15 (WS25-D3 strictest-wins, D4 fail-closed, D7 post-tool withhold) gates S3 and S6 and is recorded in S0; decider MPO, PROD for the mode labels.",
+    "DEC-13 (WS25-D8 fail-closed fetch shape) gates S9; deciders CP (ownership) and OWN (ADR-0005). Not in the ledger at HEAD.",
+    "Local WS25 decisions carried into slice decisions (not DEC-numbered): D2 no webhook hooks (S8), D5 four mode ids with non-blocking labels (S6), D6 locks are ceilings (S7), D9 loop_detected terminal code stays execution_failed (S2), D10 JSON agent_mode carrier (S6), D11 plugins key reserved (S7).",
+    "Binding amendments applied: K3-26 flag vocabulary (S1, S3, S9); K3-27 WS25 effort 70-98 days; N1 (S0 needs no stack, S1-S12 do); N2 (WS12-S2 in depends_on of S2, S3, S8); N4 final proto tags (org_policy 24, Hook 8-10, failure code 10 with a naming conflict); N6 (revert file for the S12 session-core drop); N7 scope noted, not applied; N8 path checks.",
+    "Open for the integrator: S2 failure code name and tag (tag 10 is binding but failure_code is already taken at tag 6); Hook tag 8 owner (S3 adds it, the 4.3 table lists S8); the K, C, H and A vocabulary labels are undefined in the plan; migration numbers (capability-core 0018-0020 suggested after WS05 claims 0016 and 0017; session-core number for S12 left as <next>, with 0049 unclaimed)."
+  ],
+  "notes": "SCOPE AND SOURCES. WS25 section (plan lines 1353-1398), Appendix B (lines 2253-2322), vocabulary section 2.0 (lines 109-115), decision rows DEC-13, DEC-14 and DEC-15 (lines 135-137) and the 4.3 proto finals (execution.proto table near lines 1815-1834; Hook row near line 1894) were read in full. Sibling slice files in .plan-work/execution/slices were read only to check claimed migration numbers and proto tags; none was edited. Only this file was written.\n\nBINDING AMENDMENTS. K3-26: LOOP_GUARD_MODE is observational (unknown = shadow; S1, S2). HOOKS_DO_RUNS (S3) and ORG_AGENT_POLICY_MODE (S9) are authority flags (unknown = enforce). The section text labels all three vocab K, and K3-26 requires different labels for the two rules. The plan never defines the K, C, H or A letters (searched the whole plan; they occur only as labels), so the new label is for the integrator; the per-flag unknown-value rules are recorded as written. K3-27: the header effort 70-95 is superseded; the per-slice ranges sum to 70 low and 98 high. N1: S0 changes no runtime and needs no stack; S1-S12 need a rebuilt stack and end-to-end evidence. N2: WS12-S2 is in depends_on of every proto-editing slice (S2, S3, S8); it is already in history (commit e45caa71), so it is satisfied, but the tag-diff evidence is still required. N4: finals used: RunAgentRequest.org_policy = 24 (S3); gateway Hook priority = 8 (S3), revision = 9 and created_by = 10 (S8); RunAgentResponse failure code = 10 (S2), see conflict 1. N6: the S12 session-core drop migration ships revert/<next>_drop_hook_configs.down.sql. N7: its text scopes the ZDR inventory row to session-core RPCs; WS25 durable writes are capability-core HTTP (S7, S8) and a gateway proxy (S8). No slice names a row for api/contracts/zdr-posture-matrix.json, so this is left open for the integrator and not applied. N8: every NEW path was checked with Glob and none exists. The ZDR files the plan marks live-only (mp-contracts zdr_refusal.rs and retention.rs, model-gateway tests zdr_posture_matrix.rs, execution-core tests zdr_refusal_inventory.rs, api/contracts zdr-refusals.json, session-core migrations 0044 and 0045) are present in this worktree and in history, so that prerequisite is met on this branch.\n\nCONFLICTS LEFT FOR THE INTEGRATOR. (1) S2 failure code. The S2 row says RunAgentResponse.failure_code = 'loop_detected' on field 6, and N4 binds tag 10. Field 6 already exists (execution.proto line 319: failure_code, the ChatGPT-subscription failure vocabulary pinned by a contract test, whose comment says execution-core appends no assistant message, which S2's fixed reply contradicts). Tag 10 is free in RunAgentResponse (it uses 1-8 and 11; sibling WS02 proposes 9 for usage). This file uses the binding tag 10. A second field cannot also be called failure_code, so the integrator must choose a name (for example loop_failure_code) or rule that S2 reuses field 6 and extends its pinned vocabulary. (2) Hook tag 8. The 4.3 table assigns Hook priority, revision and created_by to WS25 S8 (tags 8, 9, 10). S3 needs priority for deterministic order and its row adds priority = 8, so this file adds 8 in S3 and 9 and 10 in S8. The numbers are final either way; S8 must not add tag 8 again. (3) org_policy = 24: the 4.3 table names WS25 S9 as the proposer while the S3 row adds the field; placed in S3, number unchanged. (4) The header lists S0-S5 and S12 as FINISH, but the table tags S5 [BUILD]; the table tag is used, and S5 is new code (result_handles.rs and park_oversized are absent). (5) Migration numbers: capability-core migrations 0001-0015 exist (0013 is duplicated). Sibling WS05 claims 0016 (S1) and 0017 (S5), so this slice set's capability-core migrations (S5, S7, S8) would take 0018, 0019 and 0020 if built in that order; the <next> placeholders are kept and must be replaced by the integrator. Session-core: sibling files claim 0050-0054, 0057 and 0058; 0049 and 0055-0056 are unclaimed; HEAD ends at 0048; S12 is <next>. (6) DEC-13, DEC-14 and DEC-15 are not in the ledger (a grep of docs/decisions/ledger.md finds no WS25, DEC-13, DEC-14 or DEC-15 text). S7-S12 stay blocked until S0 records DEC-14, and S9 stays blocked until DEC-13 is decided.\n\nBUILT STATUS. git log afb83928..HEAD lists 101 commits, none about WS25 (the newest are session-core tool-completion and park-event commits). Glob and Grep under apps/: no WS25 slice deliverable exists. Absent NEW paths include mp-contracts loop_guard.rs, agent_mode.rs, org_agent_policy.rs and result_query.rs; execution-core runtime_loop/result_handles.rs and tests org_policy_characterisation.rs and do_run_hooks_test.rs; model-gateway org_agent_policy.rs and the tests loop_guard_inline_test.rs, agent_mode_resolution_test.rs, org_policy_enforcement_test.rs and hook_proxy_zdr_test.rs; capability-core internal/api org_agent_policy.go, org_hooks.go and their tests, and internal/policy engine_org_policy_test.go; api/contracts agent-modes.json and org-agent-policy-schema.json; the FE src/features/customize folder, apps/gateway domains/agent_policy.rs and tests/e2e/customize-hub.spec.ts; the session-core drop migration. No WS25 flag name appears under apps/Model Plane (LOOP_GUARD_MODE, HOOKS_DO_RUNS, HOOKS_FAIL_CLOSED, HOOKS_DURABLE, RESULT_HANDLES_EXTENDED, EXECUTION_RESULT_HANDLES, AGENT_MODES, ORG_AGENT_POLICY_API, ORG_AGENT_POLICY_MODE, ORG_EXTENSION_ALLOWLIST). The FINISH slices S1-S4 start from the private helpers the plan names, confirmed at: duplicate_call_signature (model-gateway src/tool_loop.rs:2328), MAX_FETCH_CHARS (tool_loop.rs:126), handle_or_inline_output (tool_loop.rs:3805), MAX_LIVE_HANDLES (src/tool_result_handles.rs:57), struct ToolResultHandle (tool_result_handles.rs:76), MAX_TOOL_CONTEXT_CHARS (execution-core src/runtime_loop/agent.rs:280), RoundsOutcome (agent.rs:483) with OutOfTime (agent.rs:510), hook::evaluate (execution-core src/hook/mod.rs:113; the first-match tests are wildcard_and_first_match_wins at :207 and malformed_context_fails_open at :239), HookRegistry (model-gateway src/runtime_registries.rs:2003) and hook_context_json (runtime_registries.rs:2032). The hook engine is called from runtime_loop/mod.rs:575 (pre) and :815 (post). The Hook message is at gateway.proto:1268 with fields 1-7, so tags 8-10 are free. RunAgentRequest has run_context 18 and resume 19, and no field numbered 20-29 exists in execution.proto at HEAD, so org_policy 24 is free. The mp-contracts loop-fold golden (tests/loop_fold_golden.rs) and its fixture (tests/fixtures/loop-fold-v1.json) already carry a fold extension key loop_guard with repeats 0, a WS03 placeholder; S1 must decide whether it is used (the plan says loop-guard state is never persisted). S12 is not started: hook_configs is still in session-core migrations/0004 (lines 162-184) and in src/gdpr.rs (lines 156, 197, 384, 629). Dependencies: the WS01-S0 ZDR wave and the WS03 slices S1-S9 are in history behind default-off switches. WS02, WS04, WS05, WS10, WS11 and WS26 were not checked beyond what the sibling files say. Plan line numbers drift from HEAD (for example hook evaluate 109-135 is now 113; duplicate_call_signature 2304-2322 is now 2328), so the slices use names, not line numbers.\n\nPATHS. Abbreviations are expanded as the task states, with two exceptions: EC/tests/... maps to execution-core/tests/ (crate root, not src) and MG/tests/... to model-gateway/tests/. CC is apps/Model Plane/go/services/capability-core; FE is apps/Frontend Plane/verevonv3. Paths with <next> are migration numbers to be assigned. Files named only as references, and not changed by the slice, are left out: retry.rs and tool_retry.rs (S1 authority references), grpc_auth.rs (S8), WorkspaceSettingsPage.tsx (S11 mount reference), the capability-core policy engine.go in S7 (the row says no change), terminalization.rs (S2 says untouched), scripts/compose.sh (S1 evidence command) and scripts/tests/zdr-contract-sync.test.sh (S7 pattern). Implied additions, included because the code cannot compile or be reached without them: mp-contracts/src/lib.rs in S5, S6 and S7 (S1 and S9 name it); capability-core cmd/main.go in S8 (route registration; S7 names it); the FE apps/gateway/src/domains/mod.rs in S10 (module declaration); execution.proto in S2 (the new field is named in the row). Implied but left out: compose defaults for the S1-S9 flags (only S2's passthrough and S12 name compose); .env.example for S1-S9; generated bindings (Go pb, TypeScript, Python) for S2, S3 and S8; zdr-contract-sync rows for the new goldens (S6, S7); the api/contracts README pin procedure. Locations the plan does not name and this file assumes: AgentModesSection.tsx, HooksSection.tsx, their tests and CustomizeHub.test.tsx are in src/features/customize/; the customize route and nav entry file are unnamed; engine_org_policy_test.go is in capability-core internal/policy/; the reader of ORG_EXTENSION_ALLOWLIST and where the agent_modes capability is advertised are unnamed. S2 names LOOP_GUARD_MODE for execution-core and S1 names it for model-gateway; each service reads its own environment variable.\n\nTEST COMMANDS. Taken from each Tests column. A cd prefix is added where the plan names a cargo package but no directory (apps/Model Plane/rust), and for pnpm (apps/Frontend Plane/verevonv3). Omitted because the plan gives no command: the Go tests in S8, S9 and S11 (go test in capability-core is implied), the Playwright run of customize-hub.spec.ts, and the live proofs. S12's Go and FE gates are named in prose only.\n\nSHARED RISKS NOT IN ANY SINGLE SLICE. S3 may use the interim is_risky_call class until WS05-S1 lands (its text allows this). session-core has an org_policy.rs claimed by sibling WS07 (learning policy mirror); the WS25 names (org_agent_policy, OrgPolicyContext) are distinct and should stay distinct. S2, S3 and S5 all edit runtime_loop/agent.rs and mod.rs (the header's edit-first order applies). WS10-S6 also edits the settings page (additive); this is a coordination risk, not a dependency, so it is not in S11's depends_on. N5: WS25 names no Cargo.toml change; if org_agent_policy.rs digests with sha2 or blake3, the integrator's single dependency PR (N5) must include it.\n\nFLAG ORDER (S12, not a slice change). LOOP_GUARD_MODE=enforce; HOOKS_FAIL_CLOSED on; HOOKS_DURABLE=on; HOOKS_DO_RUNS=enforce; RESULT_HANDLES_EXTENDED and EXECUTION_RESULT_HANDLES on; AGENT_MODES on; ORG_AGENT_POLICY_MODE=enforce. The compose default for LOOP_GUARD_MODE is shadow for one release (S1).\n\nEFFORT. Each slice takes its Effort column range. Total 70-98 days (K3-27). Gating: DEC-14 for S7-S12, DEC-15 for S3 and S6, DEC-13 for S9.",
+  "slices": [
+    {
+      "id": "WS25-S0",
+      "title": "Land, characterise, record decisions",
+      "tag": "FINISH",
+      "summary": "Adds the org-policy characterisation goldens (Do sends an empty hook context, the from_wire table, the resolve_mode table, first-match hook evaluate, the gateway hook_context_json shape) and records the DEC-14 and DEC-15 ownership, strictest-wins and fail-closed decisions in an append-only ledger entry and matrix rows. No runtime change and no deploy.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/tests/org_policy_characterisation.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/Model Plane/docs/capability-ownership-matrix.md",
+        "apps/master-ownership-matrix.md"
+      ],
+      "depends_on": ["WS01-S0", "WS03"],
+      "needs_live_stack": false,
+      "needs_external": "OWN/MPO ruling to record DEC-14 and DEC-15 as decided in the ledger, and CP acknowledgement of DEC-14",
+      "risk": ["audit"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "new_files": ["apps/Model Plane/rust/services/execution-core/tests/org_policy_characterisation.rs"],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --test org_policy_characterisation"
+      ]
+    },
+    {
+      "id": "WS25-S1",
+      "title": "LoopGuard helper and gateway inline loop",
+      "tag": "FINISH",
+      "summary": "Adds a pure LoopGuard in mp-contracts that observes each tool round and returns Continue, Remind (at 3 and 5 repeats) or Stop (at 8 repeats, or on a cycle or no-progress pattern), and wires it into the gateway inline tool loop behind LOOP_GUARD_MODE with shadow as the default. The guard never executes or retries a tool; the content-free stop is persisted in run audit detail only.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/loop_guard.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/state.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/loop_guard_inline_test.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs"
+      ],
+      "depends_on": ["WS25-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["audit", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": [],
+      "flag": "LOOP_GUARD_MODE (model-gateway; off/shadow/enforce; unknown = shadow, observational label per K3-26)",
+      "migration": false,
+      "proto_change": false,
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/loop_guard.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/loop_guard_inline_test.rs"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-contracts loop_guard",
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway duplicate_signature"
+      ]
+    },
+    {
+      "id": "WS25-S2",
+      "title": "LoopGuard in the Do loop, typed stop",
+      "tag": "FINISH",
+      "summary": "Runs a canonical-signature LoopGuard in the execution-core Do loop and ends a looping run with a typed loop_detected stop: a failed run with a fixed reply and no further dispatch of a write. A child loop stop is a typed child result and does not stop the parent. The stop code is a new RunAgentResponse field at binding tag 10; the name failure_code is already used at tag 6 (see notes, conflict 1).",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/proto/model_plane/v1/execution.proto"
+      ],
+      "depends_on": ["WS25-S1", "WS03", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "audit"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "decisions": ["WS25-D9"],
+      "flag": "LOOP_GUARD_MODE (execution-core, own environment variable; off/shadow/enforce; unknown = shadow)",
+      "migration": false,
+      "proto_change": true,
+      "new_files": [],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core retrieval_signature",
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --test autonomy_ladder_contract"
+      ]
+    },
+    {
+      "id": "WS25-S3",
+      "title": "hook_context into Do runs, strictest-wins evaluator, fail-closed",
+      "tag": "FINISH",
+      "summary": "Passes the org hook context into Do runs in place of the empty string, replaces first-match with a strictest-wins evaluator (deny over ask over allow) that fails closed on malformed context, and withholds the result of a denied post-tool call while keeping the step successful. Adds an OrgPolicyContext message as RunAgentRequest.org_policy at binding tag 24, and a priority field at tag 8 on the gateway Hook message.",
+      "files": [
+        "apps/Model Plane/proto/model_plane/v1/execution.proto",
+        "apps/Model Plane/proto/model_plane/v1/gateway.proto",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/execution-core/src/hook/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/do_run_hooks_test.rs"
+      ],
+      "depends_on": ["WS25-S0", "WS03", "WS05-S1", "WS02", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": ["DEC-15"],
+      "flag": "HOOKS_DO_RUNS (model-gateway; off/shadow/enforce; unknown = enforce, authority label per K3-26); HOOKS_FAIL_CLOSED (execution-core)",
+      "migration": false,
+      "proto_change": true,
+      "new_files": ["apps/Model Plane/rust/services/execution-core/tests/do_run_hooks_test.rs"],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core hook::",
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway hook_rules"
+      ]
+    },
+    {
+      "id": "WS25-S4",
+      "title": "Gateway handles for remaining read tools",
+      "tag": "FINISH",
+      "summary": "Parks oversized output of fetch_url, knowledge_search and web_search behind gateway handles that are readable by range (4,000 characters per read), and replays the stored screening verdict and trust label on every read. Parking is refused for external content whose screening was skipped, and never happens under ZDR.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+      ],
+      "depends_on": ["WS25-S0", "WS26-S2"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "authority"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": [],
+      "flag": "RESULT_HANDLES_EXTENDED (model-gateway; vocab C opt-in; default off)",
+      "migration": false,
+      "proto_change": false,
+      "new_files": [],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway tool_result_handles"
+      ]
+    },
+    {
+      "id": "WS25-S5",
+      "title": "Execution-core run-scoped handles and result_query",
+      "tag": "BUILD",
+      "summary": "Adds a per-run in-memory handle store in execution-core that parks oversized read-class tool output and serves it back in slices through result_query; the store is capped at 1 MiB per handle and 4 MiB per run, released at finalize, and under ZDR output falls back to inline. The query logic moves into mp-contracts so the gateway and execution-core share it, and a read-class capability row lets dispatch pass the signed gate.",
+      "files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/result_handles.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/result_query.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_result_query_capability.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_result_query_capability.down.sql"
+      ],
+      "depends_on": ["WS25-S4", "WS05-S1", "WS03"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "authority"],
+      "effort_days_low": 8,
+      "effort_days_high": 10,
+      "decisions": [],
+      "flag": "EXECUTION_RESULT_HANDLES (execution-core; vocab C; on/off; default off)",
+      "migration": true,
+      "proto_change": false,
+      "new_files": [
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/result_handles.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/result_query.rs",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_result_query_capability.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_result_query_capability.down.sql"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core result_handles",
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core tool_context",
+        "cd \"apps/Model Plane/rust\" && cargo test -p mp-contracts result_query"
+      ]
+    },
+    {
+      "id": "WS25-S6",
+      "title": "AgentMode vocabulary and resolution seam",
+      "tag": "BUILD",
+      "summary": "Adds the four agent modes (lockdown, read_only, ask_first, auto) with a strictest-wins resolve over the platform floor, the org cap and the user's choice, a pinned golden, and an optional agent_mode field on invoke behind AGENT_MODES. With no choice the request is byte-identical; an unknown mode is refused with agent_mode_unknown; the chat client sends the mode, and the action contract is registered first.",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/agent_mode.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/rust/services/execution-core/src/permission/mod.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/profile.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/api/contracts/agent-modes.json",
+        "apps/Model Plane/api/contracts/agent-modes.json.sha256",
+        "apps/Model Plane/rust/services/model-gateway/tests/agent_mode_resolution_test.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts"
+      ],
+      "depends_on": ["WS25-S0", "WS11"],
+      "needs_live_stack": true,
+      "needs_external": "PROD confirmation of the four mode labels (labels are non-blocking per D5)",
+      "risk": ["authority", "policy"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": ["DEC-15", "WS25-D5", "WS25-D10"],
+      "flag": "AGENT_MODES (model-gateway; vocab C; off/on; default off)",
+      "migration": false,
+      "proto_change": false,
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/agent_mode.rs",
+        "apps/Model Plane/api/contracts/agent-modes.json",
+        "apps/Model Plane/api/contracts/agent-modes.json.sha256",
+        "apps/Model Plane/rust/services/model-gateway/tests/agent_mode_resolution_test.rs"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -q -p mp-contracts agent_mode",
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway profile",
+        "cd \"apps/Model Plane/rust\" && cargo test -p execution-core --test autonomy_ladder_contract"
+      ]
+    },
+    {
+      "id": "WS25-S7",
+      "title": "Org agent policy registry in capability-core",
+      "tag": "BUILD",
+      "summary": "Adds the org agent policy registry in capability-core as system of record (DEC-14): a versioned document per org with typed keys (mode_cap, rung_cap, lockdown, extension allow-lists, approval floors and reserved keys), an admin-only PUT with If-Match revision checks, member reads, an effective-policy read and an append-only history with content-free audit rows; writes are refused for ZDR principals. Enforcement comes in S9. Behind ORG_AGENT_POLICY_API (off returns 404).",
+      "files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs",
+        "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go",
+        "apps/Model Plane/go/services/capability-core/cmd/main.go",
+        "apps/Model Plane/go/services/capability-core/internal/authz/authz_test.go",
+        "apps/Model Plane/api/contracts/org-agent-policy-schema.json",
+        "apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_agent_policy.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_agent_policy.down.sql"
+      ],
+      "depends_on": ["WS25-S0", "WS05-S1", "WS05-S5", "WS01"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["policy", "authority", "audit", "zdr"],
+      "effort_days_low": 8,
+      "effort_days_high": 10,
+      "decisions": ["DEC-14", "WS25-D6", "WS25-D11"],
+      "flag": "ORG_AGENT_POLICY_API (capability-core; vocab H opt-in; default off, off = 404)",
+      "migration": true,
+      "proto_change": false,
+      "new_files": [
+        "apps/Model Plane/rust/crates/mp-contracts/src/org_agent_policy.rs",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_agent_policy_test.go",
+        "apps/Model Plane/api/contracts/org-agent-policy-schema.json",
+        "apps/Model Plane/api/contracts/org-agent-policy-schema.json.sha256",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_agent_policy.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_agent_policy.down.sql"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/go/services/capability-core\" && go test ./... && go vet ./...",
+        "cd \"apps/Model Plane/rust\" && cargo test -p mp-contracts org_agent_policy"
+      ]
+    },
+    {
+      "id": "WS25-S8",
+      "title": "Durable hook rules; gateway registry becomes a cache",
+      "tag": "BUILD",
+      "summary": "Stores org hook rules durably in capability-core (org_hook_rules) with admin-only writes that bump the org policy revision and a cap of 200 rules per org, and turns the gateway in-memory hook registry into a read-through cache with a revision bound, proxying register and list to capability-core. Behind HOOKS_DURABLE (off keeps the in-memory registry); rules survive restarts and enforce on the next Do run.",
+      "files": [
+        "apps/Model Plane/go/services/capability-core/internal/api/org_hooks.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_hooks_test.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_hooks_integration_test.go",
+        "apps/Model Plane/go/services/capability-core/cmd/main.go",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_hook_rules.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_hook_rules.down.sql",
+        "apps/Model Plane/rust/services/model-gateway/src/runtime_registries.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/hook_proxy_zdr_test.rs",
+        "apps/Model Plane/proto/model_plane/v1/gateway.proto"
+      ],
+      "depends_on": ["WS25-S3", "WS25-S7", "WS04", "WS12-S2"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["policy", "authority", "audit", "zdr"],
+      "effort_days_low": 5,
+      "effort_days_high": 7,
+      "decisions": ["DEC-14", "WS25-D2"],
+      "flag": "HOOKS_DURABLE (model-gateway; vocab C; off/on; default off)",
+      "migration": true,
+      "proto_change": true,
+      "new_files": [
+        "apps/Model Plane/go/services/capability-core/internal/api/org_hooks.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_hooks_test.go",
+        "apps/Model Plane/go/services/capability-core/internal/api/org_hooks_integration_test.go",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_hook_rules.up.sql",
+        "apps/Model Plane/go/services/capability-core/migrations/<next>_org_hook_rules.down.sql",
+        "apps/Model Plane/rust/services/model-gateway/tests/hook_proxy_zdr_test.rs"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway hook",
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway --test hook_proxy_zdr_test"
+      ]
+    },
+    {
+      "id": "WS25-S9",
+      "title": "Enforcement: policy client, mode and rung caps, lockdown, extension allow-lists",
+      "tag": "BUILD",
+      "summary": "Makes the org policy bind: the gateway reads it through a cached client (30 s TTL; stale-if-error bounds of 900 s after a restrictive answer and 120 s after a permissive one, then typed 503 org_policy_unavailable for Do runs); the mode resolves against the cap with lockdown refused as mode_lockdown; rung grants clamp to the rung cap; and capability-core hides and denies MCP servers and tools outside the org allow-list (org_extension_not_allowed). Behind ORG_AGENT_POLICY_MODE (off/shadow/enforce) and ORG_EXTENSION_ALLOWLIST.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/autonomy_ladder_contract.rs",
+        "apps/Model Plane/go/services/capability-core/internal/api/registry_apis.go",
+        "apps/Model Plane/go/services/capability-core/internal/policy/engine.go",
+        "apps/Model Plane/go/services/capability-core/internal/policy/engine_org_policy_test.go"
+      ],
+      "depends_on": ["WS25-S6", "WS25-S7", "WS25-S8", "WS05-S2", "WS05-S3", "WS05-S4", "WS05-S5", "WS10"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-13 ruling (CP for ownership, OWN for ADR-0005) before S9 merges",
+      "risk": ["authority", "policy"],
+      "effort_days_low": 8,
+      "effort_days_high": 12,
+      "decisions": ["DEC-13", "DEC-14"],
+      "flag": "ORG_AGENT_POLICY_MODE (off/shadow/enforce; unknown = enforce, authority label per K3-26); ORG_EXTENSION_ALLOWLIST (capability-core; vocab H opt-in; default off)",
+      "migration": false,
+      "proto_change": false,
+      "new_files": [
+        "apps/Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/org_policy_enforcement_test.rs",
+        "apps/Model Plane/go/services/capability-core/internal/policy/engine_org_policy_test.go"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test -p model-gateway org_agent_policy"
+      ]
+    },
+    {
+      "id": "WS25-S10",
+      "title": "BFF routes and action contracts",
+      "tag": "BUILD",
+      "summary": "Adds the org policy and hook routes to the model-gateway and to the Verevon gateway agent_policy domain: GET and PUT of the policy, the effective-policy read and hook CRUD, admin-gated with no org id in bodies, envelope errors, and ZDR writes refused before they run. Registers the five org action contracts (ownerPlane model, risk high for writes, reversible) with a registry test.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_policy.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/mod.rs",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts"
+      ],
+      "depends_on": ["WS25-S7", "WS25-S8", "WS12"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "auth", "zdr"],
+      "effort_days_low": 4,
+      "effort_days_high": 6,
+      "decisions": ["DEC-14"],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "new_files": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_policy.rs"],
+      "new_files_already_present": [],
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": [
+        "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets",
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm test"
+      ]
+    },
+    {
+      "id": "WS25-S11",
+      "title": "Customize hub, Modes and Hooks sections, mode picker",
+      "tag": "BUILD",
+      "summary": "Builds the Customize hub in the Frontend Plane, composing the existing MCP servers, skills, org instructions and plugins sections with new Agent Modes (mode cap, rung cap, lockdown, allow-lists, locked badge) and Hooks (rule table, add and edit, test-match) sections; replaces the Chatbot Studio placeholder; and limits the composer mode picker to modes at or below the effective cap. The hub sits behind ORG_AGENT_POLICY_API.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/HooksSection.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/HooksSection.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/agents/components/ChatbotStudioCards.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.test.tsx",
+        "apps/Frontend Plane/verevonv3/tests/e2e/customize-hub.spec.ts"
+      ],
+      "depends_on": ["WS25-S10", "WS25-S6", "WS12"],
+      "needs_live_stack": true,
+      "needs_external": "WS12 copy gate sign-off on the new i18n strings",
+      "risk": ["policy"],
+      "effort_days_low": 8,
+      "effort_days_high": 12,
+      "decisions": ["DEC-14"],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/HooksSection.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/AgentModesSection.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/HooksSection.test.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/customize/CustomizeHub.test.tsx",
+        "apps/Frontend Plane/verevonv3/tests/e2e/customize-hub.spec.ts"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Frontend Plane"],
+      "test_commands": [
+        "cd \"apps/Frontend Plane/verevonv3\" && pnpm lint && pnpm typecheck && pnpm test"
+      ]
+    },
+    {
+      "id": "WS25-S12",
+      "title": "Proof stack, flag flips, retire dead table",
+      "tag": "FINISH",
+      "summary": "Flips the compose defaults of the WS25 switches in the planned order after the proof run, and drops the unused hook_configs table once one release has run with HOOKS_DURABLE on and the table is verified empty (an additive-safe migration with a revert file, and the gdpr erasure references removed). The evidence is a rebuilt-stack run of a denied tool, a looping tool and a large read, repeated after restarting capability-core and the gateway.",
+      "files": [
+        "apps/Model Plane/deploy/docker-compose.yml",
+        "apps/Model Plane/deploy/.env.example",
+        "apps/Model Plane/rust/services/session-core/migrations/<next>_drop_hook_configs.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/<next>_drop_hook_configs.down.sql",
+        "apps/Model Plane/rust/services/session-core/src/gdpr.rs"
+      ],
+      "depends_on": ["WS25-S0", "WS25-S1", "WS25-S2", "WS25-S3", "WS25-S4", "WS25-S5", "WS25-S6", "WS25-S7", "WS25-S8", "WS25-S9", "WS25-S10", "WS25-S11"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["data-loss", "policy"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "decisions": ["DEC-14"],
+      "flag": "",
+      "migration": true,
+      "proto_change": false,
+      "new_files": [
+        "apps/Model Plane/rust/services/session-core/migrations/<next>_drop_hook_configs.sql",
+        "apps/Model Plane/rust/services/session-core/migrations/revert/<next>_drop_hook_configs.down.sql"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cd \"apps/Model Plane/rust\" && cargo test --workspace --no-fail-fast",
+        "cd \"apps/Model Plane/rust\" && cargo fmt --all -- --check",
+        "cd \"apps/Model Plane/rust\" && cargo check --workspace --all-targets",
+        "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check",
+        "bash scripts/tests/zdr-contract-sync.test.sh",
+        "bash scripts/tests/zdr-contract-sync.test.sh --self-test"
+      ]
+    }
+  ]
+}

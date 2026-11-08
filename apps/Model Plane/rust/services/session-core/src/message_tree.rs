@@ -106,6 +106,12 @@ impl Tree {
             self.descend_newest_child(target)
         })
     }
+
+    /// The leaf an exact move lands on: the target itself, whatever continues it. An undo of a
+    /// rewind needs this, since the turn it left may already have a newer continuation.
+    fn exact_leaf(&self, target: &str) -> Option<String> {
+        self.turn(target).map(|turn| turn.id.clone())
+    }
 }
 
 /// The message tree is written for this write when the switch is on, the thread is not a
@@ -386,7 +392,12 @@ async fn set_active_leaf_in_tx(
         return Err(Status::aborted("active_leaf_stale"));
     }
     let tree = Tree::new(load_turns(tx, &req.thread_id).await?);
-    let new_leaf = tree.resolve_leaf(&req.target_message_id).ok_or_else(|| {
+    let landed = if req.exact {
+        tree.exact_leaf(&req.target_message_id)
+    } else {
+        tree.resolve_leaf(&req.target_message_id)
+    };
+    let new_leaf = landed.ok_or_else(|| {
         Status::invalid_argument("target_message_id does not name a message in this thread")
     })?;
     let path = tree
@@ -488,6 +499,14 @@ mod tests {
     #[test]
     fn a_turn_without_a_continuation_is_its_own_leaf() {
         assert_eq!(branching().resolve_leaf("D").as_deref(), Some("D"));
+    }
+
+    #[test]
+    fn an_exact_move_lands_on_the_turn_it_names_not_on_its_continuation() {
+        // A version switch to B lands on F; an exact move, which undoes a rewind, lands on B.
+        assert_eq!(branching().resolve_leaf("B").as_deref(), Some("F"));
+        assert_eq!(branching().exact_leaf("B").as_deref(), Some("B"));
+        assert_eq!(branching().exact_leaf("Z"), None);
     }
 
     #[test]
@@ -702,11 +721,31 @@ mod tests {
         target: &str,
         expected: &str,
     ) -> Result<pb::SetActiveLeafResponse, Status> {
+        move_leaf_as(pool, thread, target, expected, false).await
+    }
+
+    async fn undo_leaf(
+        pool: &PgPool,
+        thread: &str,
+        target: &str,
+        expected: &str,
+    ) -> Result<pb::SetActiveLeafResponse, Status> {
+        move_leaf_as(pool, thread, target, expected, true).await
+    }
+
+    async fn move_leaf_as(
+        pool: &PgPool,
+        thread: &str,
+        target: &str,
+        expected: &str,
+        exact: bool,
+    ) -> Result<pb::SetActiveLeafResponse, Status> {
         let mut request = Request::new(pb::SetActiveLeafRequest {
             org_id: ORG.to_owned(),
             thread_id: thread.to_owned(),
             target_message_id: target.to_owned(),
             expected_leaf_message_id: expected.to_owned(),
+            exact,
         });
         request
             .extensions_mut()
@@ -839,6 +878,32 @@ mod tests {
             3,
             "a rewind deletes nothing"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn undo_of_a_rewind_returns_the_leaf_it_left_past_its_own_continuation() {
+        let pool = connect().await;
+        std::env::set_var(ENABLED_ENV, "true");
+        let thread = mp_ids::new_ulid();
+        seed_thread(&pool, &thread).await;
+        let a = append(&pool, &thread, "user", "a").await;
+        let b = append(&pool, &thread, "assistant", "b").await;
+        let c = append(&pool, &thread, "user", "c").await;
+        let d = append(&pool, &thread, "assistant", "d").await;
+        move_leaf(&pool, &thread, &c, &d).await.unwrap();
+        move_leaf(&pool, &thread, &a, &c).await.unwrap();
+        // c still has d beneath it. A version switch to c would land on d, so the undo is exact.
+        let undone = undo_leaf(&pool, &thread, &c, &a).await.unwrap();
+        assert_eq!(undone.active_leaf_message_id, c);
+        assert_eq!(undone.active_path, vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(leaf(&pool, &thread).await.as_deref(), Some(c.as_str()));
+        let flags: Vec<bool> = shape(&pool, &thread)
+            .await
+            .iter()
+            .map(|row| row.2)
+            .collect();
+        assert_eq!(flags, vec![true, true, true, false], "a rewind and its undo delete nothing");
     }
 
     #[tokio::test]

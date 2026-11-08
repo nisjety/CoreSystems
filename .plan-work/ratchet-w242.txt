@@ -1,0 +1,52 @@
+::error::buf lint: 85 finding(s) not in the baseline
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_FIELD: Field "absolute_expires_at" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_FIELD: Field "denied_domains" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_FIELD: Field "endpoint" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_FIELD: Field "expires_at" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_FIELD: Field "grant_id" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_MESSAGE: Message "DeriveRunGrantRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_MESSAGE: Message "DeriveRunGrantResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_MESSAGE: Message "RenewGrantRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/browser.proto: COMMENT_MESSAGE: Message "RenewGrantResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "bundles" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "content" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "created_by" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "executable" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "file_count" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "files" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "manifest_sha256" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "sha256" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "size_bytes" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_FIELD: Field "total_bytes" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "GetSkillBlobRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "GetSkillBlobResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "GetSkillBundleManifestRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "ListSkillBundlesRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "ListSkillBundlesResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "SkillBundleFile" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "SkillBundleManifest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: COMMENT_MESSAGE: Message "SkillBundleSummary" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/capabilities.proto: RPC_RESPONSE_STANDARD_NAME: RPC response type "SkillBundleManifest" should be named "GetSkillBundleManifestResponse" or "CapabilityCoreGetSkillBundleManifestResponse".
+  apps/Model Plane/proto/model_plane/v1/execution.proto: COMMENT_ENUM_VALUE: Enum value "RUN_ATTACHMENT_KIND_UNSPECIFIED" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/execution.proto: COMMENT_FIELD: Field "input_tokens" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/execution.proto: COMMENT_FIELD: Field "kind" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/execution.proto: COMMENT_FIELD: Field "output_tokens" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/execution.proto: COMMENT_FIELD: Field "tool_calls" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/execution.proto: COMMENT_FIELD: Field "withheld_effects" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/gateway.proto: COMMENT_FIELD: Field "user_id" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_ENUM_VALUE: Enum value "MEMORY_STATE_UNSPECIFIED" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_FIELD: Field "controls" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_MESSAGE: Message "GetMemoryControlsRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_MESSAGE: Message "GetMemoryControlsResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_MESSAGE: Message "ResetMemoryRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_MESSAGE: Message "ResetMemoryResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_MESSAGE: Message "SetMemoryControlsRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/memory.proto: COMMENT_MESSAGE: Message "SetMemoryControlsResponse" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_ENUM_VALUE: Enum value "APPROVAL_DECISION_SOURCE_UNSPECIFIED" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_ENUM_VALUE: Enum value "APPROVAL_SCOPE_UNSPECIFIED" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_FIELD: Field "decision_source" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_FIELD: Field "grants" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_FIELD: Field "scope" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_MESSAGE: Message "ListApprovalScopeGrantsRequest" should have a non-empty comment for documentation.
+  apps/Model Plane/proto/model_plane/v1/orchestration.proto: COMMENT_MESSAGE: Message "ListApprovalScopeGrantsResponse" should have a non-empty comment for documentation.
+  ... and 35 more

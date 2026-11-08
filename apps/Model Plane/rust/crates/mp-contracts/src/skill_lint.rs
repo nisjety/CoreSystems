@@ -360,6 +360,8 @@ mod tests {
     const PIN: &str = include_str!("../../../../api/contracts/authored-behaviour-lint.json.sha256");
     const GOLDEN: &str =
         include_str!("../../../../api/contracts/authored-behaviour-lint-golden.json");
+    const GOLDEN_PIN: &str =
+        include_str!("../../../../api/contracts/authored-behaviour-lint-golden.json.sha256");
 
     fn json(text: &str) -> Value {
         serde_json::from_str(text).expect("the contract file is JSON")
@@ -377,19 +379,41 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// The lowercase hex sha256 of a contract file read with CRLF as LF, the form its `.sha256` names.
+    fn pin_digest(text: &str) -> String {
+        Sha256::digest(text.replace("\r\n", "\n").as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     /// The Go test computes the same digest over the same file, so a rule
     /// changed in the file without both readers being retested fails here and there.
     #[test]
     fn skill_lint_contract_digest_is_the_pinned_one() {
-        let normalised = CONTRACT.replace("\r\n", "\n");
-        let digest: String = Sha256::digest(normalised.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let pinned = PIN.split_whitespace().next().expect("the pin names a digest");
+        let pinned = PIN
+            .split_whitespace()
+            .next()
+            .expect("the pin names a digest");
         assert_eq!(
-            digest, pinned,
+            pin_digest(CONTRACT),
+            pinned,
             "authored-behaviour-lint.json changed without its .sha256 pin being refreshed"
+        );
+    }
+
+    /// Both readers check their results against the same golden cases, so a case edited to suit
+    /// one of them fails here and in the Go test.
+    #[test]
+    fn skill_lint_golden_digest_is_the_pinned_one() {
+        let pinned = GOLDEN_PIN
+            .split_whitespace()
+            .next()
+            .expect("the pin names a digest");
+        assert_eq!(
+            pin_digest(GOLDEN),
+            pinned,
+            "authored-behaviour-lint-golden.json changed without its .sha256 pin being refreshed"
         );
     }
 

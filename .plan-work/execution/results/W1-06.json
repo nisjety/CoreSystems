@@ -1,0 +1,442 @@
+{
+ "batchId": "W1-06",
+ "wave": 1,
+ "results": [
+  {
+   "id": "WS04-S5",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/chat_turn_registry.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/stream_buffer.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "cd 'apps/Model Plane/rust' && CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib chat_turn_registry",
+     "outcome": "16 passed, 0 failed"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib -- feedback shared_record stream_buffer chat_turn",
+     "outcome": "44 passed, 3 ignored, 0 failed"
+    },
+    {
+     "command": "CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib",
+     "outcome": "2146 passed, 1 failed (sse_events::payload_contract::sse_event_payload_golden, in sse_events.rs which I did not touch and which carries other sessions' uncommitted edits), 4 ignored"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 chat_turn_registry.rs",
+     "outcome": "clean"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Flip MODEL_GATEWAY_SHARED_TURN_RECORD to on in docker-compose.yml only in S9, together with the two-replica live proof listed in depth_findings. Add the env key there (default off) when S1/S9 own that file; I did not touch deploy files.",
+    "Run `cargo test -q -p model-gateway --all-targets` per the plan row where the platform allows. On Windows only --lib was run; the pre-existing non-lib target failures were not checked."
+   ],
+   "deviations": [
+    "Instead of making the stream_buffer.rs breaker helpers pub(crate), I added two narrow StreamBufferStore methods (kv_set, kv_get) that use the private Breaker. Same breaker, smaller surface.",
+    "The shared lookup is done as a hydrate step (adopt_shared) before the unchanged sync resolve_feedback_target, instead of making resolve_feedback_target async. Existing tests of that function are untouched. The cost is that an adopted record lives in the local map for its own 24 h from adoption.",
+    "The sse.rs call-in is at the record_chat_turn site (about line 1922 now), not the plan's :1768, which has drifted."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/deploy/docker-compose.yml (declare MODEL_GATEWAY_SHARED_TURN_RECORD: ${MODEL_GATEWAY_SHARED_TURN_RECORD:-false}; owned by S1/S9)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Two-replica live proof: stream a turn on replica A and rate it on B with the shared Redis/Dragonfly; confirm the feedback envelope carries the skill ids. Also confirm Redis-down degrades to turn_not_rateable/run-only without delaying the rating.",
+     "docker-compose.yml needs MODEL_GATEWAY_SHARED_TURN_RECORD default false (owned by S1/S9), flipped on in S9.",
+     "Plan row command `cargo test -q -p model-gateway --all-targets` not run on Windows (only --lib); non-lib targets are known to fail on Windows."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "Needed before the switch is flipped in S9: with two replicas on the shared Redis/Dragonfly, stream a turn on A and rate it on B, and confirm the feedback envelope carries the skill ids. Also confirm the breaker-open path (Redis down) degrades to turn_not_rateable / run-only without delaying the rating."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives ingest_feedback end to end with the flag on, because test_state uses the in-memory StreamBufferStore and the env switch is process-global. The adopt-then-resolve composition is tested, but the handler wiring and the sse.rs call-in are not."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "There is no real-Redis test for kv_set/kv_get (key and TTL round trip), and none that the in-memory-backend no-op holds when REDIS_URL is unset."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "mirror_chat_turn spawns an unbounded tokio task per turn with the flag on. The breaker caps each at 250 ms, but a burst during a Redis stall queues many tasks until the breaker opens. Acceptable now; revisit if the stream buffer ever gets a bounded writer."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The adopted record gets a fresh local 24 h TTL, so a turn rated late on replica B can stay rateable locally longer than the shared 24 h window. Harmless, but a remaining-TTL adopt would be exact."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "sse_events::payload_contract::sse_event_payload_golden currently fails in the working tree. It lives in sse_events.rs, which belongs to another in-flight change (lifecycle notice), not this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test drives ingest_feedback end to end with the flag on, and no test covers the sse.rs call-in; the adopt-then-resolve composition and the fake-store mirror are tested but the handler wiring is not."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No real-Redis test for StreamBufferStore::kv_set/kv_get (key, TTL round trip, breaker-open returns None)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "mirror_chat_turn spawns one unbounded tokio task per turn when the flag is on; the 250 ms breaker caps each, but a Redis stall queues many tasks until the breaker opens."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "adopt_shared gives the adopted record a fresh local 24 h TTL (via record), so a late-rated turn stays locally rateable longer than the shared window; harmless but not exact."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "sse_events::payload_contract::sse_event_payload_golden failure is in sse_events.rs, which carries another session's uncommitted edits and is outside this slice; audit.rs and sse_events.rs show as modified in the tree but are not this slice's."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "auth"
+   ],
+   "notes": "Shared turn record built behind MODEL_GATEWAY_SHARED_TURN_RECORD (default off; parsed with mp_contracts::loop_fold::switch_from, the same strict parser run_control uses). With it off nothing is written or read, so behaviour is unchanged.\n\nWhat it does when on:\n- sse.rs: one call-in after record_chat_turn, skipped for waived turns. ZDR turns return earlier and never reach it. mirror_chat_turn spawns a best-effort write of {run_id, skill_ids} to Redis at mp:gw:turn:{org}\\x1f{user}\\x1f{request_id}, TTL 24 h (TURN_TTL).\n- http_routes.rs: ingest_feedback calls ChatTurnRegistry::adopt_shared after the existing ZDR guard (require_non_zdr_durable_mutation). On a local miss it reads the caller's own shared record into the local map, then the unchanged sync resolve_feedback_target runs. A miss leaves today's turn_not_rateable / run-only behaviour. Ownership is still verified by Session Core.\n- stream_buffer.rs: StreamBufferStore gains kv_set and kv_get, run under the existing stream-buffer Breaker (250 ms op timeout, 5 s cooldown). The in-memory backend does nothing there. Log lines carry the op name, not the key.\n- chat_turn_registry.rs: shared_turn_key (refuses blank, oversized or separator-bearing parts), SharedTurnStore trait (native async fn, pub(crate)) so the mirror is tested against a fake, mirror_turn, lookup_shared_turn, adopt_shared. PreviousTurnRegistry stays local.\n\nNew tests: shared_turn_key_is_identity_scoped, switch strictness, cross-replica round trip, other user or tenant misses, ids-only record plus 24 h TTL, local record not overwritten, corrupt or run-less record is a miss, unusable turn not mirrored, in-memory store mirrors nothing, and two feedback-route tests (resolves on replica B through the shared record; another caller cannot resolve it).\n\nCRLF and LF preserved: stream_buffer.rs stays CRLF; the other three stay LF. rustfmt was run only on chat_turn_registry.rs (LF)."
+  },
+  {
+   "id": "WS06-S2",
+   "outcome": "ready",
+   "status": "done",
+   "files_changed": [
+    "apps/Control Plane/audit-core/internal/store/migrations/007_audit_chain.sql",
+    "apps/Control Plane/audit-core/internal/store/migrations/revert/007_audit_chain.down.sql",
+    "apps/Control Plane/audit-core/internal/store/migrate.go",
+    "apps/Control Plane/audit-core/internal/store/chain.go",
+    "apps/Control Plane/audit-core/internal/store/store.go",
+    "apps/Control Plane/audit-core/internal/metrics/server.go",
+    "apps/Control Plane/audit-core/cmd/server/main.go",
+    "apps/Control Plane/audit-core/cmd/server/main_test.go",
+    "apps/Control Plane/audit-core/.env.example",
+    "apps/Control Plane/audit-core/internal/store/chain_insert_test.go",
+    "apps/Control Plane/audit-core/internal/store/chain_guard_test.go",
+    "apps/Control Plane/audit-core/internal/store/store_test.go",
+    "apps/Control Plane/audit-core/internal/store/session_core_replay_test.go",
+    "apps/Control Plane/audit-core/internal/testdata/export-content-free.golden.json"
+   ],
+   "tests_run": [
+    {
+     "command": "cd \"apps/Control Plane/audit-core\" && go vet ./...",
+     "outcome": "clean"
+    },
+    {
+     "command": "cd \"apps/Control Plane/audit-core\" && go test ./... (TEST_DATABASE_URL unset)",
+     "outcome": "all packages ok; Postgres-gated tests SKIP, including every new chain test. The earlier full run was before the Purge test was added and the guard file was written; afterwards I re-ran only store, cmd/server and chain (ok)."
+    },
+    {
+     "command": "go test ./internal/store -run DetailsGuard",
+     "outcome": "pass (pure unit test of the observe-only details guard)"
+    },
+    {
+     "command": "go test ./cmd/server -run \"AuditChain|ChainSwitch\" -v",
+     "outcome": "TestLoadConfigAuditChainSwitchIsStrictAndOffByDefault and TestAuditChainSwitchShipsOff pass"
+    },
+    {
+     "command": "go test ./internal/store -run TestSessionCoreFixturesHashContentFreeGolden",
+     "outcome": "pass; the golden was filled from the first run's printed values and is not independently derived. Pure test, no database."
+    }
+   ],
+   "db_tests_written": [
+    "TestChainedInsertIsContiguousAndLinked",
+    "TestChainedInsertFiftyWritersThreeOrgsStayGapFree",
+    "TestChainedReplayDoesNotAdvanceHead",
+    "TestChainedChangedPayloadStillConflictsOnEveryInsertPath",
+    "TestChainCatchUpChainsRowsInsertedWhileTheSwitchWasOff",
+    "TestChainCatchUpLeavesLegacyRowsUnchained",
+    "TestChainSwitchOffInsertsLeaveNoChainTrace",
+    "TestAuditEventsGuardBlocksUpdateAndDeleteOutsideMaintenance",
+    "TestPurgeSkipsChainedRowsAndStillRemovesExpiredUnchainedRows",
+    "TestChainedInsertMarksABrokenTipAndStillAppends",
+    "TestChainedInsertCountsDetailsGuardAndAppends",
+    "TestChainedSessionCoreFixturesStoreOnlyContentFreeDetails",
+    "TestPurge_DeletesOnlyExpiredRows",
+    "TestJetStreamInboxDeduplicatesRedelivery",
+    "TestLogicalAuditIdentityIsBoundToProducerAndRejectsConflictingReuse",
+    "TestReplayedSessionCoreAuditEventIsStoredExactlyOnce"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Control Plane/docker-compose.yml: in the audit-core service `environment:` block (near the HTTP_PORT line, about 825), add `AUDIT_CHAIN_ENABLED: \"${AUDIT_CHAIN_ENABLED:-0}\"` with a comment line above it, e.g. `# Per-org audit hash chain; only the literal 1 enables it (WS06-S2).` TestAuditChainSwitchShipsOff requires the `${AUDIT_CHAIN_ENABLED:-0}` default.",
+    "Run the audit-core DB tests through the harness (no -race, needs cgo): `docker run --rm -d --name ac-pg -p 55432:5432 -e POSTGRES_PASSWORD=t postgres:16`, then `cd \"apps/Control Plane/audit-core\" && TEST_DATABASE_URL=\"postgres://postgres:t@localhost:55432/postgres?sslmode=disable\" go vet ./... && go test ./...`. Fix anything the unrun SQL and trigger code gets wrong; the likeliest places are the guard trigger's to_jsonb comparison, the pgx batch parameter typing, and the FOR UPDATE head upsert race.",
+    "Rebuild and flag-on proof per the plan: `bash scripts/run-control-plane.sh up -d --build audit-core`, set AUDIT_CHAIN_ENABLED=1, run one governed tool action in the SPA, and check in psql that chain_seq is contiguous, prev_hash equals the previous row_hash, and audit_chain_heads equals the last row. Then restart mid-stream and confirm no gap, and capture the audit_core_chain_head_lock_wait_seconds histogram.",
+    "Deploy order: the migration adds the trigger as soon as the new image boots. Old-image replicas still running Purge will log delete failures until they are replaced; roll audit-core as one image swap."
+   ],
+   "deviations": [
+    "The AUDIT_CHAIN_ENABLED parser accepts only the literal \"1\". The plan row says default 0 and flip to 1, and audit-core's own switches use \"1\"; the generic rule in the task says literal \"true\". The plan row wins.",
+    "I added a revert file at internal/store/migrations/revert/007_audit_chain.down.sql. It is not in the slice's file list, but the slice rules require a revert file and it sits beside the owned migration.",
+    "Purge was changed in S2, not S3. The guard trigger lands here and would otherwise break retention. Until S3, chained rows are never purged and only unchained rows age out.",
+    "The details guard counters are recorded only when the chain is on, so a switch-off run adds no behaviour or series.",
+    "internal/store/chain_guard_test.go is an extra pure in-package test, beside the owned files.",
+    "cmd/server/extra_nats.go needed no edit: it receives a ready *store.Store.",
+    "I added a compose-contract test that requires AUDIT_CHAIN_ENABLED to default to 0 in the audit-core block only if the variable appears there. It passes today, with no compose edit."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Run the audit-core DB tests against Postgres 16 via the harness (docker run ac-pg, then go vet and go test with TEST_DATABASE_URL); all 15 new/updated DB tests are unrun.",
+     "Apply the shared edit to apps/Control Plane/docker-compose.yml: AUDIT_CHAIN_ENABLED: \"${AUDIT_CHAIN_ENABLED:-0}\" in the audit-core environment block.",
+     "Live proof per the plan: rebuild audit-core via scripts/run-control-plane.sh, flag on, one governed tool action, psql shows contiguous chain_seq, prev_hash == previous row_hash, head == last row; restart mid-stream with no gap; capture the audit_core_chain_head_lock_wait_seconds histogram."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until S3, chained rows are never purged (Purge skips chain_seq IS NOT NULL), so the audit table grows unbounded once the flag is on; S3's chain-safe purge must ship before long-running use."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "A rolling deploy lets an old-image replica insert an unchained row with ingested_at just before an org's activated_at, so it is silently classed legacy_unchained and never chained; a stop-the-world image swap or an activation grace window is needed before the flag is switched on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "CatchUp runs only at boot; rows written while the switch is off on a replica that stays up are chained only at the next restart, so a periodic catch-up sweep may be wanted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The guard trigger is not proven by any test against TRUNCATE or against a table-owner role that disables it, because it is a guard rail only; the honest-limits text in S9 must say so."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Nothing yet tests that a catch-up failure at boot leaves the org's head unchanged and does not stall ingestion."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The details guard deny-list (content, prompt, completion, message, body, text, password, secret, token, authorization, api_key) and the 8 KiB size cap are my defaults for D7 observe mode; the owner may want to tune them after real traffic shows the denied_key rate."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "checkChainTip does an extra indexed read on every append; if lock hold time matters on a hot org, move the spot-check to a sampled or per-boot check."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "None of the 15 Postgres-backed tests ran (no local Postgres, docker not allowed); the migration SQL, the guard trigger's to_jsonb comparison, the pgx batch and the head-lock race are unproven until the lead runs the harness."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Chained rows are never purged until S3 (Purge skips chain_seq IS NOT NULL), so the audit table grows unbounded once AUDIT_CHAIN_ENABLED=1; S3 must land before long-running use."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 007 installs the DELETE/UPDATE guard trigger on first boot even with the switch off, so an old-image replica running Purge will fail its delete until replaced; roll audit-core as one image swap."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "During a rolling deploy an old-image replica can insert an unchained row with ingested_at just before an org's activated_at, which is then permanently legacy_unchained; use a stop-the-world swap or an activation grace window before enabling."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "The compose default AUDIT_CHAIN_ENABLED: \"${AUDIT_CHAIN_ENABLED:-0}\" is still a lead shared-edit in apps/Control Plane/docker-compose.yml; TestAuditChainSwitchShipsOff passes without it only because it is conditional."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "export-content-free.golden.json hash values were captured from the implementation's own first run, not derived independently (e.g. from internal/chain vectors), so the golden proves stability, not correctness."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "CatchUp runs only at boot, so rows written while the switch is off on a long-lived replica are chained only at the next restart; a periodic sweep may be wanted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers a catch-up failure at boot leaving the head unchanged and ingestion unblocked, nor TRUNCATE or owner-role bypass of the guard trigger (honest-limits text in S9 must say so)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "A replayed event still creates the org's head row and takes the head lock before the conflict is detected, and checkChainTip adds an indexed read on every append; both only matter under hot-org load."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "AUDIT_CHAIN_ENABLED accepts only the literal \"1\" (matches the plan row, differs from the generic \"true\" rule); details-guard deny-list and 8 KiB cap are implementer defaults for D7 observe mode, to be tuned from the denied_key rate."
+    }
+   ],
+   "unreviewed_risk": [
+    "audit",
+    "zdr"
+   ],
+   "notes": "The code, the unit tests and every new switch default (off) are in place. The Postgres-backed chain tests were never run, because there is no local Postgres and I may not run docker. The lead must run them through the harness before this is treated as verified.\n\nBuilt:\n- Migration 007_audit_chain.sql, embedded in migrate.go:\n  - Adds the five nullable chain columns, the unique index uq_audit_events_org_chain, the table audit_chain_heads, and the guard trigger audit_events_guard.\n  - The guard blocks UPDATE and DELETE except the one transition that chains an unchained row, or a transaction that set audit.maintenance='on'.\n  - Revert file: internal/store/migrations/revert/007_audit_chain.down.sql.\n- store.New(pool, ...Option) with WithChain(). The unchained insert path is the same statement as before, now a shared insertAuditSQL constant.\n- internal/store/chain.go:\n  - Chained path: one transaction takes the head lock, spot-checks the tip hash, inserts, hashes from the read-back row, then updates row and head in a pgx batch.\n  - A replay or conflict commits and falls to resolveAuditConflict unchanged.\n  - A tip mismatch marks the head broken, counts it once, logs it, and still appends.\n  - CatchUp chains only unchained rows with ingested_at at or after the org's activated_at, as chain_mode 'catchup', in 500-row transactions.\n  - The details guard (D7 observe mode) counts ok, oversize (over 8 KiB) or denied_key; it never rejects.\n- Four metrics: audit_core_chain_appends_total{result}, ..._head_lock_wait_seconds, ..._chain_broken_total, audit_core_details_guard_total{result}.\n- main.go: AUDIT_CHAIN_ENABLED, then boot catch-up before the subscriber starts. A catch-up failure is logged and boot continues.\n- Purge now runs in a transaction with audit.maintenance on and skips chained rows (chain_seq IS NULL only). Without this the new trigger would break retention, and deleting a chained row would break its chain.\n- Tests: chain_insert_test.go (new) plus the guard, loadConfig and compose-default tests listed above. Existing DB tests in store_test.go and session_core_replay_test.go now use execMaintenance for their UPDATE and DELETE."
+  },
+  {
+   "id": "WS01-S12.code",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/docs/runbooks/release-rollback-rehearsal.md",
+    "apps/Model Plane/docs/MODEL_PLANE_RELEASE_EVIDENCE.md"
+   ],
+   "tests_run": [
+    {
+     "command": "bash apps/Model Plane/scripts/tests/rollback-rehearsal-test.sh",
+     "outcome": "pass"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/acceptance-thresholds-test.sh",
+     "outcome": "pass (17 rows valid, state proposed)"
+    },
+    {
+     "command": "bash scripts/tests/coresystem-conformance-artifact-test.sh",
+     "outcome": "pass"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/rebuild-service-test.sh; migration-expand-contract-test.sh",
+     "outcome": "pass"
+    },
+    {
+     "command": "bash scripts/tests/coresystem-cross-plane-preflight-test.sh",
+     "outcome": "fails without rg on PATH (not installed in this Git bash); passes with a scratch rg shim; re-run after the doc edit, still passes"
+    },
+    {
+     "command": "bash scripts/tests/coresystem-conformance-test.sh (with rg shim)",
+     "outcome": "FAIL: expects capability_promotion_ledger=source_only but it is invalid"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/capability-promotion-ledger-test.sh (with rg shim)",
+     "outcome": "FAIL: ledger lacks cap.agent.lineage.read, cap.memory.index, cap.memory.search, cap.process.background, cap.skill.summarize that capability-core migrations seed"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/tests/release-contract-test.sh, release-runtime-partition-test.sh, release-input-security-test.sh",
+     "outcome": "FAIL, environment: 'this platform does not support O_NOFOLLOW' (Windows Python); need Linux"
+    },
+    {
+     "command": "bash scripts/coresystem-conformance.sh --profile runtime",
+     "outcome": "blocked as expected: dirty tree, no candidate, no rollback, no rehearsal, invalid ledger, proposed thresholds"
+    },
+    {
+     "command": "bash apps/Model Plane/scripts/release-artifact.sh dry-run /tmp/ra-dry",
+     "outcome": "12 docker build lines, nats-provisioner listed"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: lines ~54 and ~150 keep 'No candidate or rollback artifact exists yet'; add one sentence after line 54: 'The signed baseline/candidate/rehearsal operator sequence is written (docs/runbooks/release-rollback-rehearsal.md) and its scripts are unit-tested (rollback-rehearsal-test.sh, acceptance-thresholds-test.sh, coresystem-conformance-artifact-test.sh); it has not been run against real images, and runtime conformance reads blocked.'",
+    "On a Linux host or via the ops-gates CI job run release-contract-test.sh, release-runtime-partition-test.sh, release-input-security-test.sh (they cannot run on Windows).",
+    "Operator: key ceremony or a labelled dev-keyed run per the runbook (sections Two key regimes to 6); build baseline at the D12 revision (non-release) then candidate (release mode) from clean detached worktrees; run rollback-rehearsal.sh; deploy C, R, C; commit rollback-rehearsal-<date>.txt and the conformance JSON.",
+    "Install ripgrep in the Git bash PATH used for scripts/tests (cross-plane preflight and capability-promotion-ledger-test need it).",
+    "Re-run bash scripts/coresystem-conformance.sh --profile runtime on the clean candidate tree after the ledger is fixed; ready is expected only after the operator sequence."
+   ],
+   "deviations": [
+    "No dev-keyed end-to-end run was performed (docker and live proofs forbidden; Windows cannot run release-artifact.sh builds); the pipeline is documented as an operator/lead sequence instead.",
+    "The plan-named 'scripts/coresystem-conformance.sh --profile runtime must read ready' cannot hold on this tree; reported blocked with the real reasons."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/docs/CAPABILITY_PROMOTION_LEDGER.tsv (add the five seeded capability IDs it lacks)",
+    "scripts/coresystem-cross-plane-preflight.sh (check_evidence_open treats missing rg as 'recorded')"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Dev-keyed (or production-keyed) end-to-end run of build, verify, restore, rehearsal, and candidate/baseline/candidate deploys: needs docker and a Linux host, so not done.",
+     "release-contract-test.sh, release-runtime-partition-test.sh and release-input-security-test.sh cannot run on Windows (O_NOFOLLOW); run them on Linux or in the ops-gates CI job.",
+     "scripts/coresystem-conformance.sh --profile runtime reading ready on a clean candidate tree: blocked until a clean tree, signed artifacts, rehearsal evidence and a valid capability ledger exist.",
+     "Committed evidence files (rollback-rehearsal-<date>.txt, conformance JSON, manifest digests) and the key ceremony: operator work.",
+     "shared-edit apps/Model Plane/MODEL_PLANE_STATUS.md: lead applies the implementer's lead_todo sentence after line 54 and keeps lines ~54/150 saying no candidate or rollback artifact exists yet."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "scripts/coresystem-cross-plane-preflight.sh check_evidence_open prints state=recorded when rg is missing (the failing rg falls into the else branch), so a missing tool reads as evidence recorded; it should fail closed with a command -v rg check."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "CAPABILITY_PROMOTION_LEDGER.tsv lacks five capability IDs seeded by capability-core migrations (cap.agent.lineage.read, cap.memory.index, cap.memory.search, cap.process.background, cap.skill.summarize), making conformance report capability_promotion_ledger_invalid and failing coresystem-conformance-test.sh; add them as source_only rows."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "release-*-test.sh and release-artifact.sh build/verify cannot run on Windows (secure_input_snapshot requires O_NOFOLLOW); no local developer can exercise the signing path; only CI/Linux can."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "S12 operator proof is not done: no signed baseline, candidate, rehearsal file or conformance artifact exists; a dev-keyed pipeline run on Linux with ephemeral keys is the cheapest next step and must be labelled DEV-KEYED."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "coresystem-conformance-artifact.sh invokes the conformance command with --json and no profile, so the persisted artifact is the full profile unless CORESYSTEM_CONFORMANCE_PROFILE=runtime is exported; the runbook documents the env var, but the plan's 'conformance --profile runtime' artifact may warrant a --profile pass-through."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A baseline built from a revision before S8 lacks the nats-provisioner image; the rehearsal compose render and candidate deployability then diverge, so the D12 revision should be at or after S8 (runbook says prefer it)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "CAPABILITY_PROMOTION_LEDGER.tsv lacks five capability IDs seeded by capability-core migrations (cap.agent.lineage.read, cap.memory.index, cap.memory.search, cap.process.background, cap.skill.summarize); this gives capability_promotion_ledger_invalid and blocks the runtime profile; it is outside this slice's files."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "scripts/coresystem-cross-plane-preflight.sh check_evidence_open reports state=recorded when rg is missing, so a missing tool reads as evidence recorded; it should fail closed with a command -v rg check."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "No signed baseline, candidate, rehearsal file or conformance artifact exists yet; the pipeline is documented and unit-tested but never exercised, and the evidence doc says so honestly."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "release-*-test.sh and the release-artifact.sh signing path only run on Linux or macOS; only CI can exercise them."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "coresystem-conformance-artifact.sh calls the conformance command with --json and no --profile, so the artifact is the full profile unless CORESYSTEM_CONFORMANCE_PROFILE=runtime is exported; the runbook documents the env var, but a --profile pass-through would be safer."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A baseline built before S8 lacks the nats-provisioner image and diverges from the candidate in the rehearsal compose render; the runbook says to prefer a D12 revision at or after S8 but does not make it a hard check."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "Code half is documentation and evidence only: S10/S11 tooling was already committed (59a37b72d, 9b1f81d0b), so I added the operator runbook release-rollback-rehearsal.md and a pipeline section in MODEL_PLANE_RELEASE_EVIDENCE.md (CRLF kept, register row and promotion list item 4 updated; the open-evidence marker rows the preflight greps are untouched). The end-to-end signing/verify/rehearsal pipeline with dev-only ephemeral keys was NOT exercised: it needs docker (not allowed) and a Linux host (the release scripts cannot run on Windows). The runbook documents ephemeral key generation and requires a DEV-KEYED label, with Candidate/Rollback register columns left absent. Status partial because the conformance runtime profile cannot read ready (dirty tree, no artifacts, no keys, ledger invalid) and operator key custody is needed."
+  }
+ ]
+}

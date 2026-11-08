@@ -1,0 +1,68 @@
+{
+  "model": "gpt-5.6-terra",
+  "instructions": "You are Verevon's text-only assistant. Answer the supplied conversation directly. Do not execute tools, access files, run commands, or modify anything. When a supplied protocol requests structured tool proposals, return them as JSON data for Verevon to validate and execute. Otherwise return only the answer.\n\nYou are the Verevon reviewer.\n\n(policy)\nAnswer in English.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Review this change."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Which file?"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "(ima)\nThe config loader."
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "TOOL (lookup):\n{\"ok\":true}"
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Return JSON tool proposals only."
+        }
+      ]
+    }
+  ],
+  "reasoning": {
+    "effort": "low"
+  },
+  "store": false,
+  "stream": true,
+  "include": [
+    "reasoning.encrypted_content"
+  ],
+  "prompt_cache_key": "fixture-cache-key",
+  "text": {
+    "verbosity": "low"
+  }
+}

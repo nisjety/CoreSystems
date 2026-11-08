@@ -367,14 +367,21 @@ func (s *Server) ReadProcessOutput(ctx context.Context, req *ReadProcessOutputRe
 	if err != nil {
 		return nil, err
 	}
-	if principal.PrincipalType == "user" {
+	// The run narrows the read to the process that run started (the owner read
+	// path). Like the Space it comes from the request and the row is checked
+	// against it, so a process of another run is NotFound for the same reason a
+	// process of another Space is.
+	if principal.PrincipalType == "user" || req.GetRunId() != "" {
 		resolved, getErr := store.Get(ctx, principal.OrganizationID, req.GetProcessId())
 		if getErr != nil {
 			return nil, mapErr(getErr)
 		}
-		if resolved.SpaceID != req.GetSpaceId() {
+		if principal.PrincipalType == "user" && resolved.SpaceID != req.GetSpaceId() {
 			// Not found, not forbidden: telling a caller that the id exists in
 			// a different Space is the disclosure this check exists to stop.
+			return nil, mapErr(process.ErrProcessNotFound)
+		}
+		if req.GetRunId() != "" && resolved.RunID != req.GetRunId() {
 			return nil, mapErr(process.ErrProcessNotFound)
 		}
 	}

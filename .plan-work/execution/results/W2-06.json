@@ -1,0 +1,551 @@
+{
+ "batchId": "W2-06",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS17-S1",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/python/mp-events-py/src/mp_events/_gen/model_plane/v1/sessions_pb2.py",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0049_thread_activity_cursor.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0049_thread_activity_cursor.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/scripts/tests/history-foundation-proof.sh",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/history.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/apps/gateway/src/envelope.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.plan-reload.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.recovery.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.resume-replay.test.ts",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.snapshot-throttle.test.ts"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core cursor",
+     "outcome": "pass: 2 passed, 0 failed (after the grpc.rs fix)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core",
+     "outcome": "pass: 559 passed, 0 failed, 185 ignored (DB tests not run)"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/chat-client.test.ts",
+     "outcome": "pass: 110 passed, 0 failed (was 109; one new multi-page case)"
+    },
+    {
+     "command": "pnpm exec eslint src/shared/api/chat-client.ts src/shared/api/chat-client.test.ts",
+     "outcome": "no output (clean)"
+    },
+    {
+     "command": "pnpm exec tsc -b, filtered to chat-client",
+     "outcome": "no errors in chat-client files; other pre-existing errors in untouched files not re-listed"
+    }
+   ],
+   "db_tests_written": [
+    "cargo test -p session-core --bin session-core list_threads_pages_without_gaps_or_repeats -- --ignored --test-threads=1",
+    "cargo test -p session-core --bin session-core list_threads_by_id_finds_thread_beyond_80 -- --ignored --test-threads=1",
+    "cargo test -p session-core --bin session-core archived_filter_separates_active_archived_and_all -- --ignored --test-threads=1",
+    "cargo test -p session-core --bin session-core foreign_thread_id_is_not_found -- --ignored --test-threads=1"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:25: change `put(history::save_thread).delete(history::delete_thread)` to `put(history::save_thread).get(history::get_thread).delete(history::delete_thread)`. Without it getChatThread gets 405 and history::get_thread is dead code.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs:3973: `ListThreadsResponse { threads: vec![] }` add `next_cursor: String::new()` (or `..Default::default()`).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs:1415: same literal fix.",
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:9659: `pb::ListThreadsResponse { threads: vec![] }` add `next_cursor: String::new()` (or `..Default::default()`).",
+    "Pre-existing, not from this slice: model-gateway lib test target does not compile at HEAD because src/sse_events.rs:2478 builds ProviderSummary without failed_attempts_ms and retry_wait_ms.",
+    "Run the four DB tests with DATABASE_URL set to a disposable Postgres (names in db_tests_written). Migration 0049 is applied by sqlx::migrate!.",
+    "Add a DB test that a scheduled-run result moves its thread to the top of ListThreads (the new UPDATE in append_scheduled_result_in_tx), then run it.",
+    "Rebuild session-core, model-gateway and the BFF gateway after the shared edits, then run apps/Model Plane/scripts/tests/history-foundation-proof.sh with its PROOF_* variables set (never run by this agent).",
+    "Lead commits. Nothing is staged or committed by this agent."
+   ],
+   "deviations": [
+    "Fix 2 runs the bump inside append_scheduled_result_in_tx, so no shared file is touched; no DB test was written for the scheduled-result ordering yet.",
+    "The existing partial-listing test changed its fetch mock from mockResolvedValue to mockImplementation so each page gets a fresh Response."
+   ],
+   "needs_other_files": [
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs (route at line 25: add .get(history::get_thread))",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (line 3973 test literal)",
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs (line 1415 test literal)",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (line 9659 test literal)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat.rs:25 (shared file, lead applies the implementer's shared-edit): change `put(history::save_thread).delete(history::delete_thread)` to `put(history::save_thread).get(history::get_thread).delete(history::delete_thread)`. Without it GET /api/v1/chat/threads/{id} returns 405, FE getChatThread throws, the by-id read that opens thread 81+ and reloads it is unreachable, and history::get_thread is dead code.",
+     "Three struct literals in shared files must gain `next_cursor: String::new()` (or `..Default::default()`) on `ListThreadsResponse { threads: vec![] }`: apps/Model Plane/rust/services/model-gateway/src/grpc.rs:3973, apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs:1415, apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:9659 (lead applies). Confirmed by `cargo test -p model-gateway --all-targets`: error E0063 at grpc.rs:3973 stops the model-gateway lib-test target from compiling.",
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs:2478 builds `ProviderSummary` without `failed_attempts_ms` and `retry_wait_ms`; that breaks the model-gateway lib-test build in this worktree. The cause is WS15-S4's uncommitted struct change in turn_timing.rs, not this slice (HEAD's ProviderSummary has neither field, so HEAD compiles), so the implementer's 'pre-existing' label is wrong. The lead must reconcile it with WS15-S4 before `cargo test -p model-gateway --all-targets` can pass."
+    ],
+    "dod_gaps": [
+     "The four DB tests written in grpc.rs (list_threads_pages_without_gaps_or_repeats, list_threads_by_id_finds_thread_beyond_80, archived_filter_separates_active_archived_and_all, foreign_thread_id_is_not_found) have never run: no DATABASE_URL is set and no local Postgres exists, so the SQL (row comparison on (pinned, last_activity_at, id), NULLIF($7), $11 archive predicate) and migration 0049 are unexecuted. Run them with `cargo test -p session-core --bin session-core <name> -- --ignored --test-threads=1` against a disposable Postgres, plus the scheduled-result test once written.",
+     "Live proof is absent: rebuild session-core, model-gateway and the BFF, run apps/Model Plane/scripts/tests/history-foundation-proof.sh with PROOF_* set, and capture EXPLAIN (ANALYZE) of the production query shape with bound parameters showing idx_threads_owner_activity; the row's DoD requires a 150-thread user to page 3 times and thread 120 to open and reload.",
+     "Record the proto tags (ListThreadsRequest 8, 9, 10; ListThreadsResponse 2; ThreadSummary 15), the ARCHIVE_FILTER_* value names and migration 0049 (in place of 4.4's 0047) in MP/docs/decisions/ledger.md as the 4.3/4.4 reservation entry.",
+     "The zdr golden rows for list and by-id reads (section 6.6) are not added to the [live-only] zdr_posture_matrix.rs and zdr_feature_table.rs; the lead must add them or record why they are not needed for read-only RPCs.",
+     "Once the shared edits land, apply `buf breaking` evidence: this verifier ran `buf breaking apps/Model Plane/proto --against .git#ref=HEAD,subdir=apps/Model Plane/proto` and it exited 0, which can be attached as the tag-diff evidence."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until WS17-S2 adds Load more, the sidebar shows only the first 50 threads; threads 51 to 80 that were visible before this slice disappear from the list, though they still open by id."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "model-gateway list_threads route has no unit test for the archived 400 path or the next_cursor pass-through; the lib test target cannot compile until shared edit 3 and the pre-existing sse_events.rs error are fixed."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test yet for the scheduled-result bump, and no ZDR golden test (list and by-id under a ZDR claim should return durable rows only and write nothing)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The by-id read uses archived=all, so an archived chat thread can be opened by id though the list hides it; the owner should confirm."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Migration 0049 backfill is one UPDATE over all threads rows under a lock; a batched variant is needed on large tables before rollout."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "sessions_pb2.py was generated with local protoc 35.1 (gencode 7.35.1) while the checked-in file had 7.36.0; regenerate with the repo's buf plugin."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Regenerated sessions.pb.go also adds RecordScheduledRunResult* messages that HEAD's proto defines but the checked-in gen lacked; a gen-drift check should confirm nothing else drifted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row names an MG test for the archived 400 path and the next_cursor pass-through (\"MG clamp/legacy-identical\"), and http_routes.rs has none; add a unit test for `archived=bogus` -> 400 and for next_cursor relayed and omitted when empty."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The row's ZDR golden row (list and by-id under a ZDR claim return durable rows only and write nothing) is absent from zdr_posture_matrix.rs and zdr_feature_table.rs, although the risk classes include zdr; the clause holds by construction (both RPCs are read-only), but nothing guards it."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The by-id read sends archived=all, so an archived chat thread opens by id while the list hides it; the access is owner-bound and origin=chat, so no authority leaks, but the owner should confirm this is intended before S2 builds on it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The archived predicate `($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))` is a bound-parameter expression, so the partial index `WHERE archived_at IS NULL` is provably usable only under a custom plan; sqlx prepared statements can switch to a generic plan, so the EXPLAIN gate must run the production query shape with bound parameters."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "apps/Model Plane/scripts/tests/history-foundation-proof.sh runs EXPLAIN on a literal `archived_at IS NULL` query rather than the production query shape, so it does not prove that `idx_threads_owner_activity` serves the paged listing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "BFF test `thread_81_transcript_is_reachable` only asserts the URL builder's output and never exercises the transcript route, so its name overstates what it proves."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test covers the scheduled-result bump added in append_scheduled_result_in_tx (the UPDATE that moves a thread to the top of ListThreads)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The migration backfill is one unbatched UPDATE over every threads row under a table lock; the row's risk section asks for a batched variant or a documented deferral, and neither is present."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "CoreSidebar, DashboardOverview, DashboardComposer and local-retention all call listChatThreads, which now walks every page sequentially on each call, so a large account pays N requests per sidebar load; the depth finding that the sidebar stops at 50 threads is wrong for this code and should be corrected in the register."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "append_message_in_tx now bumps threads.last_activity_at for every append, including any zdr_waived run that persists messages; DEC-32 is undecided, so 'persists nothing new' for waived runs is unverified (timestamp only, no content)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The migration is numbered 0049 while section 4.4 reserves 0047 for WS17.S1; 0047 is taken by run_loop_checkpoints at HEAD and 0049 is free, so the choice is safe, but the reservation must be recorded in the ledger (DEC-39) so no other slice reuses 0049."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The invalid-archived error string in session-core list_threads names ARCHIVE_FILTER_ACTIVE, which is not an enum value (the zero value is ARCHIVE_FILTER_UNSPECIFIED)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The ArchiveFilter values are prefixed ARCHIVE_FILTER_* instead of the row's ACTIVE/ARCHIVED/ALL; the prefix is required because sandboxes.proto declares `ACTIVE = 2` in the same package, so keep it and record it in the ledger."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "sessions.pb.go now also carries the RecordScheduledRunResult messages that HEAD's proto defines but HEAD's gen lacked (gen drift fixed as a side effect); go vet passes, but the gen-drift check should confirm nothing else drifted."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "sessions_pb2.py was regenerated with protoc 35.1 (gencode 7.35.1, previously 7.36.0), and its import could not be checked here because google.protobuf is not installed in this environment; regenerate with the repo's buf plugin and import it once."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "The created_at tie-break was dropped from the list order, so threads with equal last_activity_at can reorder between calls, which weakens the 'Space listing byte-identical' claim in the DoD."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The archived validation in the BFF and MG accepts only active, archived and all, and the implementer's depth note records a deliberate default; no change needed, but the FE has no caller yet for the archived parameter, so it is untested end to end."
+    }
+   ],
+   "unreviewed_risk": [
+    "auth",
+    "zdr"
+   ],
+   "notes": "Required fixes 2 and 4 are done. Fix 2: append_scheduled_result_in_tx in session-core grpc.rs now runs UPDATE threads SET last_activity_at = GREATEST(last_activity_at, now) in the same transaction, after the INSERT into messages and before the MESSAGE_APPENDED event. grpc.rs stays all-CRLF (16178/16178). Fix 4: listChatThreads walks every page, stops on a null nextCursor or a repeated cursor, and reconciles local copies only when the walk reached the last page. The test \"keeps a local copy a partial listing does not show\" now returns a fresh Response per call (mockImplementation), because one Response body can be read only once. A new test covers a two-page walk. Fixes 1 and 3 touch files I do not own (BFF chat.rs route, three test struct literals), so they are handed back as lead_todo. Model-gateway and execution-core test targets will not compile until fix 3 lands, and the model-gateway --lib target also has the pre-existing sse_events.rs error. Nothing committed, staged or pushed."
+  },
+  {
+   "id": "WS25-S4",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/src/tool_result_handles.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib tool_result_handles (from apps/Model Plane/rust)",
+     "outcome": "NOT RUN TO PASS. Build fails before any test runs, in two files this slice does not own: services/model-gateway/src/grpc.rs:3973 (ListThreadsResponse missing next_cursor) and services/model-gateway/src/sse_events.rs:2478 (ProviderSummary missing failed_attempts_ms and retry_wait_ms). Same two errors as the previous report, nothing new."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit services/model-gateway/src/grpc.rs:3973: ListThreadsResponse literal needs next_cursor (owned by WS17-S1, which changed sessions.proto); the lead or WS17-S1 must fix it before any model-gateway test target builds.",
+    "shared-edit services/model-gateway/src/sse_events.rs:2478: ProviderSummary literal needs failed_attempts_ms and retry_wait_ms (owned by WS15-S4, which changed turn_timing.rs); the lead or WS15-S4 must fix it.",
+    "After both are fixed, run from apps/Model Plane/rust with CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0: cargo test -q -p model-gateway --lib tool_result_handles, then the same filter for the new tool_loop tests (names in depth_findings of the previous report).",
+    "Commit when the tests pass. No compose or env change is needed for the code; RESULT_HANDLES_EXTENDED stays unset (off) until the S12 flip."
+   ],
+   "deviations": [
+    "Fixed the test assertion rather than the error message, so the user-facing wording at line 470 is unchanged."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (needed for the build only; WS17-S1 owns it)",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (needed for the build only; WS15-S4 owns it)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Make the model-gateway lib test target compile in the worktree: services/model-gateway/src/grpc.rs:3973 ListThreadsResponse literal needs next_cursor (owned by WS17-S1), and services/model-gateway/src/sse_events.rs:2478 ProviderSummary literal needs failed_attempts_ms and retry_wait_ms (owned by WS15-S4). This slice's files cannot be tested until the lead or those slices fix them; the lead should apply both before re-running the verifier.",
+     "After the build is fixed, run from apps/Model Plane/rust: cargo test -p model-gateway --lib tool_result_handles (29 tests, 21 existing plus 8 new), and cargo test -p model-gateway --lib tool_loop::tests (the 8 new tool_loop tests: a_fetched_page_over_the_cut_is_readable_by_range, an_injection_flagged_page_stays_flagged_on_every_read_back, a_zdr_fetch_is_never_parked, a_colleague_cannot_read_another_users_page_handle, an_external_page_with_no_real_scan_is_never_parked, a_result_within_the_cut_or_not_queryable_stays_inline, an_oversized_web_search_result_parks_as_a_queryable_json_handle, the_range_argument_is_advertised_only_when_extended_parking_is_on). The plan filter tool_result_handles does not select the tool_loop tests, so both runs are needed."
+    ],
+    "dod_gaps": [
+     "Test outcomes for tool_result_handles (29) and the 8 new tool_loop tests are unverified; the worktree does not build.",
+     "No live proof: the row's evidence (proof-stack chat turn fetching a >20k-char page, both read-backs and flag log) needs docker and the lead.",
+     "The ZDR live matrix rows (external_tool_result_not_parked_under_zdr, do_run_result_not_parked_under_zdr) live in MG/tests/zdr_posture_matrix.rs and were not checked.",
+     "The grounding test the row asks for ('read-vs-not-read keys on the call, not handle bytes') is absent from the diff."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "tool_result_handles and the new tool_loop tests have not run to a pass. Run them after grpc.rs (ListThreadsResponse next_cursor, WS17-S1) and sse_events.rs (ProviderSummary failed_attempts_ms and retry_wait_ms, WS15-S4) compile again."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The earlier report's line that tool_result_handles.rs is LF is wrong: it is CRLF throughout. Keep CRLF on any further edit to this file."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "parse_extended accepts only the literal 'true', but the S12 flip in the plan sets RESULT_HANDLES_EXTENDED / EXECUTION_RESULT_HANDLES to 'on'; the flip would silently leave extended parking off."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The row asks for a grounding test (read-vs-not-read keys on the call, not handle bytes); none is in the diff."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "handle_or_inline_output was not given the provenance argument and external-skip refusal the row specifies; the guard exists only in park_extended_result, so a future external caller of verevon_read_outcome would park unscreened content."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The gateway ToolResultStore has no per-handle or total byte cap; with MAX_LIVE_HANDLES 512 and a 900 s TTL, full fetched pages could hold large memory in the gateway process."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "parse_handle_query silently coerces a non-integer or negative range.offset/length to 0, so a malformed range reads from the start instead of returning an error, which can make the model re-read the same window."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "builtin_tool_defs at HEAD defines result_query twice (around tool_loop.rs:4608 and 4653); advertise_text_range patches both, which is harmless but a duplicate-definition cleanup is pending."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "authority"
+   ],
+   "notes": "Required fix 1 applied: in tool_result_handles.rs test a_text_read_refuses_row_operations_and_a_row_read_refuses_a_range (line 1293), the assertion is now contains(\"text result only\"). The apply_query message at line 470 is unchanged (\"range applies to a text result only ...\"), so the user-facing wording is kept. The test assertion now matches that message. Line endings were measured this round: tool_result_handles.rs is CRLF throughout (1381 CRLF / 1381 LF), not LF as the previous report said; the edit kept CRLF. tool_loop.rs was not touched this round; the CRLF state from the earlier round is unchanged. The slice's files_changed list is the same as the previous report: both files."
+  },
+  {
+   "id": "WS15-S4",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\turn_timing.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.tsx",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\src\\features\\chat\\components\\ChatMessages.processing-line.test.tsx"
+   ],
+   "tests_run": [
+    {
+     "command": "cd apps/Frontend Plane/verevonv3 && pnpm exec vitest run src/features/chat/components/ChatMessages.processing-line.test.tsx",
+     "outcome": "PASS: 7 of 7 (re-run this round)"
+    },
+    {
+     "command": "cd apps/Frontend Plane/verevonv3 && pnpm typecheck",
+     "outcome": "FAIL overall with 36 TS errors. Three are in slice files and all three clear once the chat-client.ts shared edit lands: ChatMessages.tsx(492,103) retryWaitMs; processing-line.test.tsx(108,13) failedAttemptsMs; processing-line.test.tsx(128,98) retryWaitMs. The other 33 are in files this slice did not touch (RemoteSupportPage.tsx, src/shared/api/quarry-client.ts, which cannot resolve @quarry/client). Not compared against HEAD."
+    },
+    {
+     "command": "cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib turn_timing --no-run",
+     "outcome": "FAIL, compile only, no test executed. Two errors: (1) E0063 at services/model-gateway/src/sse_events.rs:2478 ProviderSummary literal missing failed_attempts_ms and retry_wait_ms (shared file, lead applies). (2) E0063 at services/model-gateway/src/grpc.rs:3973 ListThreadsResponse missing next_cursor (not owned, not this slice; another batch's edit). provider_summary_reports_wait_only_when_nonzero has not run."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/sse_events.rs: in the test literal `ProviderSummary { ... }` at line 2478, after `attempts: 1,` (line 2482), add `failed_attempts_ms: 0,` and `retry_wait_ms: 0,`. This file is CRLF (2798/2798), so keep CRLF.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts: (a) in `export type TurnTimingProvider` (line 422) add `failedAttemptsMs?: number` and `retryWaitMs?: number`; (b) in `turnTimingProvider()` return object, after `attempts: countValue(raw.attempts),` (line 516), add `...(millis(raw.failed_attempts_ms) !== undefined ? { failedAttemptsMs: millis(raw.failed_attempts_ms) } : {}),` and `...(millis(raw.retry_wait_ms) !== undefined ? { retryWaitMs: millis(raw.retry_wait_ms) } : {}),`. This clears the 3 slice-file typecheck errors.",
+    "Resolve grpc.rs:3973 (ListThreadsResponse missing next_cursor, owned by another batch) before the model-gateway lib test target compiles. Then run: `cd apps/Model Plane/rust && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib turn_timing` and confirm provider_summary_reports_wait_only_when_nonzero passes.",
+    "Run `pnpm lint` in apps/Frontend Plane/verevonv3 (not run by this slice). Re-run `pnpm typecheck` and confirm the three slice-file errors are gone; the other 33 errors are in unrelated files."
+   ],
+   "deviations": [
+    "Did not apply the two reviewer fixes (sse_events.rs and chat-client.ts) because both files are outside this slice's ownership. They are listed as shared-edit lines in lead_todo instead, as the rules require.",
+    "The row's FE copy is meant to ride MODEL_GATEWAY_LIFECYCLE_EVENTS, but the batch JSON gives an empty flag, so no switch is read. See depth_findings P1."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Model Plane/rust/services/model-gateway/src/grpc.rs (ListThreadsResponse next_cursor at line 3973; another batch's edit, blocks the model-gateway lib test build)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs (shared, lead applies): the test literal `ProviderSummary { ... }` at line 2478 lacks the new `failed_attempts_ms` and `retry_wait_ms` fields, so the model-gateway --lib test target does not compile and provider_summary_reports_wait_only_when_nonzero cannot run. Add both fields with value 0 after `attempts: 1,` (line 2482), keeping CRLF.",
+     "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts (outside ownership, lead applies): the TurnTimingProvider type (line 422) and the turnTimingProvider() parser (after `attempts: countValue(raw.attempts),` near line 516) do not read failed_attempts_ms or retry_wait_ms. The wire fields are therefore dropped, so retryWaitMs is never set from a real turn_timing frame and the processing-line note never appears in production. The vitest case passes only because it injects retryWaitMs directly. Add failedAttemptsMs?/retryWaitMs? to the type and map both keys with millis(...), as the implementer's lead_todo describes. This also clears the TS errors at ChatMessages.tsx:492 and processing-line.test.tsx:108 and :128."
+    ],
+    "dod_gaps": [
+     "Live proof (docker, fake provider 429 with retry-after, captured turn_timing frame) is not done and must be run by the lead.",
+     "cargo test -p model-gateway --lib turn_timing has not passed; it needs the sse_events.rs literal fix and the grpc.rs:3973 ListThreadsResponse fix from another batch.",
+     "pnpm typecheck must be re-run after the chat-client.ts edit to confirm the three slice-file TS errors are gone.",
+     "pnpm lint has not been run for the slice files."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "With every switch off, the turn_timing wire changes whenever a provider retry-after wait happened (failed_attempts_ms and retry_wait_ms are emitted). This breaks the byte-identical-when-off rule. The plan row wants the FE copy gated by MODEL_GATEWAY_LIFECYCLE_EVENTS, but the batch JSON gives an empty flag. The owner or lead must decide whether to gate the fields or accept the additive change. Not changed this round."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The per-phase max is a lower bound. A sum over parallel review batches would overstate, and a turn-level retry-wait total computed in the gateway would be exact. Not built."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A restored transcript keeps only the three totals (transcriptTimingToTurnTiming), so the 'waited N s' line disappears after reload. This is acceptable for post-hoc but should be stated in UI copy review."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No live proof: a fake provider returning 429 with retry-after once, plus a captured turn_timing frame. The lead must rebuild and run it."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The wire keys are read or built outside turn_timing.rs only in the sse_events.rs test literal and chat-client.ts. Both must move together with the shared edits listed in lead_todo."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The plan row says the FE copy rides MODEL_GATEWAY_LIFECYCLE_EVENTS, but the batch gives an empty flag with 'no gate'. With every switch off, turn_timing frames gain failed_attempts_ms and retry_wait_ms whenever a provider retry-after wait happened, which conflicts with the byte-identical-when-off rule. The owner or lead must decide whether to gate or accept it. The flag does not exist yet, since WS15-S1 is not built."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Per-phase max of retryWaitMs is only a lower bound on the wait the person sat through; a turn-level total computed in the gateway would be exact."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No live proof yet: a fake provider returning 429 with retry-after once, plus a captured turn_timing frame, is still needed."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A restored transcript keeps only the three totals, so the 'waited N s' line disappears after reload; this should be stated in UI copy review."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "pnpm lint was not run for the slice files, and pnpm typecheck still shows 33 unrelated errors that were not compared against HEAD."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The wire keys appear outside turn_timing.rs only in the sse_events.rs test literal and chat-client.ts, so both must move together with the shared edits."
+    }
+   ],
+   "unreviewed_risk": [],
+   "notes": "No owned file was edited this round. Both reviewer fixes touch files outside this slice's ownership (sse_events.rs and chat-client.ts), so they are handed to the lead as shared edits below. Re-verified the reviewer's line references: sse_events.rs ProviderSummary literal at 2478 (attempts: 1 at 2482); chat-client.ts TurnTimingProvider at 422 and the turnTimingProvider() parser with attempts: countValue at 516. The turn_timing.rs file is fully CRLF (1636/1636 lines) and was not changed this round. The processing-line vitest suite passes 7 of 7. The Rust test provider_summary_reports_wait_only_when_nonzero is written and compiles once the two shared edits and the grpc.rs error are resolved, but it has not run. Nothing committed, pushed, staged or reset."
+  },
+  {
+   "id": "WS23-S2",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\.github\\workflows\\integration-corev2-go.yml",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\internal\\actions\\read_operations_golden_test.go",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Ingestion Plane\\integration-corev2\\internal\\actions\\testdata\\provider-read-operations.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\src\\provider_reads.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\src\\lib.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\tests\\provider_read_operations.rs",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\crates\\mp-contracts\\tests\\fixtures\\provider-read-operations.json",
+    "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\execution-core\\src\\integration_tools.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib integration_tools --no-run",
+     "outcome": "FAILED as before: error[E0063] missing field next_cursor in ListThreadsResponse at services\\execution-core\\src\\runtime_loop\\agent.rs:9659 (the only error in the test target). Not fixed by me: agent.rs is outside S2 ownership. So catalog_reads_match_contract_table and current_gating_table_is_pinned have still NOT executed."
+    },
+    {
+     "command": "go test -count=1 ./internal/actions/... ./internal/api/... (integration-corev2)",
+     "outcome": "ok (fresh run, not cached): actions 5.965s, api 20.081s"
+    },
+    {
+     "command": "go test -count=1 ./internal/actions/ -run TestReadOperations -v",
+     "outcome": "PASS: TestReadOperationsGoldenIsPinned, TestReadOperationsVendoredCopyIsByteIdentical, TestReadOperationsMatchExecutorAndCapabilityTable"
+    },
+    {
+     "command": "go vet ./... (integration-corev2)",
+     "outcome": "clean, no output"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --test provider_read_operations",
+     "outcome": "ok, 2 passed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib",
+     "outcome": "ok, 165 passed"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs: line 9659, change `pb::ListThreadsResponse { threads: vec![] }` to `pb::ListThreadsResponse { threads: vec![], next_cursor: String::new() }`. The owner of agent.rs or the lead applies it.",
+    "After that shared-edit, run `cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib integration_tools` and confirm catalog_reads_match_contract_table and current_gating_table_is_pinned pass. Only then mark WS23-S2 done and promote status from partial.",
+    "Owner sign-off (K3-14) is needed before the dated addendum to the frozen docs/actions-surface-operations.md, which lists mail.messages.get, drive.file.content, sharepoint.sites, sharepoint.drives, gmail.messages.get and profile. The slice row says do not edit it now, so it is untouched.",
+    "Commit the new and modified files together (lead commits): the .github workflow, the Go golden test and testdata, the mp-contracts provider_reads module, its test and fixture, lib.rs, and integration_tools.rs.",
+    "The Go CI workflow has not run on GitHub. The local equivalents pass on Windows."
+   ],
+   "deviations": [
+    "Required fix 1 was not applied by this slice because agent.rs is outside S2's ownership. It is handed back as a shared-edit in lead_todo, as the task instructs."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs (test-only ListThreadsResponse literal at line 9659 needs next_cursor for the execution-core test target to compile; one-line change)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs line 9659 (outside S2's ownership, so the lead or the owner of the uncommitted sessions.proto ListThreadsResponse.next_cursor change must apply it): change `pb::ListThreadsResponse { threads: vec![] }` to `pb::ListThreadsResponse { threads: vec![], next_cursor: String::new() }`. Why: the execution-core test target does not compile (E0063 missing field next_cursor, the only error), so the S2 DoD test `catalog_reads_match_contract_table` and the updated `current_gating_table_is_pinned` have never run. After the edit, run `cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib integration_tools` and confirm both named tests pass; only then S2 can be marked complete."
+    ],
+    "dod_gaps": [
+     "The Go CI workflow .github/workflows/integration-corev2-go.yml has not run on GitHub; a CI run URL is needed as evidence (N1 CI-only evidence rule).",
+     "Both suites must be green in CI logs per the row's DoD; only the local equivalents were run, and the execution-core target still fails to compile at this tree state.",
+     "Owner sign-off (K3-14) for the frozen-doc addendum is outstanding; docs/actions-surface-operations.md is correctly untouched.",
+     "No live proof is possible from this slice (catalogue only); the live Do run evidence belongs to S3/S7."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The execution-core test target still fails to compile (E0063 at agent.rs:9659), so catalog_reads_match_contract_table and the updated current_gating_table_is_pinned are unexecuted. This is the only compile error in that target, so the one-line shared edit should be enough; the lead must run the test after applying it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Catalogued reads run ungated under ask: mail.messages.get returns full message bodies and drive.file.content returns file bytes into model context without a gate. S1 framing is keyed by tool name and no live proof of the new reads exists, so do not switch them on before S1 and a live proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The Rust side does not check the golden's sha256 pin: mp-contracts has no sha2 dependency and its Cargo.toml is not in the owned list. Only the Go test pins the digest. Adding sha2 as a dev-dependency would close this, but it needs the Cargo.toml owner."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Agent-facing summaries advertise maxResults max 100 (the executor cap). The plan row says the agent tool clamps to 25, so WS23-S3 must clamp and then update those summaries to 25."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "docs/actions-surface-operations.md needs the K3-14 dated addendum after owner sign-off. The frozen doc is untouched in this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The catalogue flip makes mail.messages.get, gmail.messages.get and drive.file.content ungated under ask in execute_provider_action (current_gating_table_is_pinned asserts this), so full message bodies and file bytes can enter Do-run context with no approval and no flag; S1 framing and counts-only persistence are present at HEAD, the Ask loop in model-gateway does not offer provider tools, and Do runs are refused under ZDR (grpc.rs:1376), so the exposure is limited to Do runs and should be confirmed off by default before merge."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The same uncommitted ListThreadsResponse.next_cursor change also breaks two model-gateway test fakes (services/model-gateway/src/grpc.rs:3973 inside the cfg(test) module and tests/e2e_invoke_chain_test.rs:1415), which are outside this slice's test commands but will fail the model-gateway test targets in the same pass."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The slice summary says the sha256 pin is checked by Go and Rust, but mp-contracts has no sha2 dependency, so the Rust side only checks rows; the Go byte-identical test still covers the Rust copy, so drift is caught, but the summary overstates the guard."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The agent-facing summaries for the new mail, Gmail and calendar reads advertise maxResults max 100, while the plan row says maxResults<=25; WS23-S3 must clamp to 25 and update these summaries together."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "catalog_reads_match_contract_table compares only (provider, operation) pairs, so parameter names and capability classes in the catalogue prose are not checked against the golden rows; a params drift would pass silently."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "The K3-14 dated addendum to the frozen docs/actions-surface-operations.md is not written, which is correct for now, but it needs owner sign-off before the slice closes."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "policy"
+   ],
+   "notes": "Required fix 1 is NOT applied by this slice. The line apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:9659 (`Ok(Response::new(pb::ListThreadsResponse { threads: vec![] }))`) still lacks the proto field `next_cursor` (sessions.proto line 1121 has `string next_cursor = 2;` in the uncommitted working copy). That file is outside S2's ownership, so the lead or the proto owner must apply the shared edit, and then run the execution-core test. Until then the execution-core test target does not compile and the two named tests have not run. No files were changed in this round. The Go and mp-contracts suites were re-run fresh and are green. No docker, no commits, no pushes."
+  }
+ ]
+}

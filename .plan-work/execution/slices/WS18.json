@@ -1,0 +1,199 @@
+{
+  "ws": "WS18",
+  "header_decisions": [
+    "DEC-28 (OD19 container, D2 opt-in, D3 eligibility, D4 audience confirm): gates S4 and the S2 merge acknowledgement; S1, S2, S3 and S5 build without it; also WS02 S6",
+    "DEC-06 (D5 sandbox tools refused in room projects; D7 follow-up retrieval Space-scoped and fail-closed): needs Space and Control acknowledgement before the S2 merge",
+    "WS18-D6 (local to WS18; content not stated in the section)",
+    "WS18-D8 (local; decision TTL gates S5 enablement)",
+    "WS18-D9 (local; content not stated in the section)"
+  ],
+  "slices": [
+    {
+      "id": "WS18-S0",
+      "title": "Decision records",
+      "tag": "FINISH",
+      "summary": "Records the Spaces-as-chat-project decision: a ledger entry in the Model Plane decisions ledger, an addendum to the authored-instructions ADR, and OD19 and I21 marked superseded in the chat gap-closure plan. Docs only, no code.",
+      "files": [
+        "apps/Model Plane/docs/decisions/ledger.md",
+        "apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md",
+        "apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/CHAT_GAP_CLOSURE_PLAN_2026-10-01.md"
+      ],
+      "depends_on": [],
+      "needs_live_stack": false,
+      "needs_external": "DEC-28 owner ruling (OD19; ADR-0003 sign-off)",
+      "risk": ["policy"],
+      "effort_days_low": 1,
+      "effort_days_high": 1,
+      "decisions": ["DEC-28"],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "new_files": [],
+      "new_files_already_present": [],
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": []
+    },
+    {
+      "id": "WS18-S1",
+      "title": "Space layer in Do runs",
+      "tag": "FINISH",
+      "summary": "Tests only: a Do run in a project applies the Space instruction between the org layer and the persona when WS02's run-context switch is on, and a non-member gets no Space text. Adds one eval case. No new runtime switch; it rides MODEL_GATEWAY_RUN_CONTEXT, which WS02 owns.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/run_context.rs",
+        "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "apps/Model Plane/python/eval-lab-py/cases/run_context/17_do_run_follows_space_instruction.yaml"
+      ],
+      "depends_on": ["WS02-S4", "WS02-S5", "WS02-S6", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "zdr"],
+      "effort_days_low": 2,
+      "effort_days_high": 3,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "new_files": ["apps/Model Plane/python/eval-lab-py/cases/run_context/17_do_run_follows_space_instruction.yaml"],
+      "new_files_already_present": [],
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": [
+        "cargo test -p model-gateway --test e2e_invoke_chain_test",
+        "cargo test --manifest-path \"apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml\" --all-targets space_"
+      ]
+    },
+    {
+      "id": "WS18-S2",
+      "title": "Follow-up turns keep Space retrieval authority",
+      "tag": "FINISH",
+      "summary": "Follow-up turns in a Space carry a retrieval decision token, so turn 2 retrieves only inside the Space as turn 1 does. A FORBIDDEN decision on an append yields an empty token and an ungrounded answer, never an org-wide search. The BFF append branch calls the Control retrieval-decision endpoint, and the gateway reads the token from space_context or space_append_context.",
+      "files": [
+        "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+      ],
+      "depends_on": ["WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-06 D7 Space and Control acknowledgement before merge; DEC-28 merge acknowledgement; staging proof with a Space-only and an org-only document before the default-on flip (K3-18)",
+      "risk": ["authority", "policy"],
+      "effort_days_low": 3,
+      "effort_days_high": 4,
+      "decisions": ["DEC-06 D7", "DEC-28 merge acknowledgement"],
+      "flag": "GATEWAY_SPACE_APPEND_RETRIEVAL (BFF env): default ON in every environment after the staging proof (K3-18); a kill switch only, where =false re-exposes org documents to shared threads",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "new_files": [],
+      "new_files_already_present": [],
+      "planes": ["Frontend Plane", "Model Plane"],
+      "test_commands": []
+    },
+    {
+      "id": "WS18-S3",
+      "title": "Knowledge-mode receipt and badge",
+      "tag": "BUILD",
+      "summary": "Adds an optional knowledge block (mode retrieval, not_entitled or not_searched, plus a source count) to the existing source_scope_applied SSE event, built by a pure knowledge_receipt function, and a knowledge chip on Space turns in the SPA. An absent block means today's behaviour; retrieval_notice is not reused.",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/knowledge_receipt.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/lib.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/docs/sse-event-taxonomy.md",
+        "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/chat-types.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/chat-nodes/derive.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatMessages.tsx"
+      ],
+      "depends_on": ["WS18-S2", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["zdr", "policy"],
+      "effort_days_low": 4,
+      "effort_days_high": 5,
+      "decisions": [],
+      "flag": "",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "new_files": ["apps/Model Plane/rust/services/model-gateway/src/knowledge_receipt.rs"],
+      "new_files_already_present": [],
+      "planes": ["Model Plane", "Frontend Plane"],
+      "test_commands": [
+        "cargo test -p model-gateway --lib knowledge_receipt",
+        "python3 \"apps/Model Plane/scripts/gen-sse-event-taxonomy.py\" --check"
+      ]
+    },
+    {
+      "id": "WS18-S4",
+      "title": "Project picker, chip, project thread list",
+      "tag": "BUILD",
+      "summary": "Adds an opt-in Projects section above the chat organizer that lists eligible Spaces (personal Spaces and non-organization rooms), with a project picker, a Space chip, a first-send audience confirm, and a project thread list. Project chats start as new chats, reuse the existing /api/v1/spaces routes, and stay behind GATEWAY_CHAT_PROJECTS_ENABLED (default off).",
+      "files": [
+        "apps/Frontend Plane/verevonv3/src/shared/actions/chat-project.ts",
+        "apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-projects.ts",
+        "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatProjectsSection.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-project.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPage.tsx"
+      ],
+      "depends_on": ["WS18-S1", "WS18-S2", "WS18-S3", "WS01-S0", "WS12", "EP-8 slice 1 (Dreaming exclusion of space threads, K3-5)"],
+      "needs_live_stack": true,
+      "needs_external": "DEC-28 D1-D4 and DEC-06 D5 owner rulings; EP-8 slice 1 Dreaming exclusion (owned outside WS18, K3-5)",
+      "risk": ["authority", "policy", "zdr"],
+      "effort_days_low": 8,
+      "effort_days_high": 12,
+      "decisions": ["DEC-28 D1-D4", "DEC-06 D5"],
+      "flag": "GATEWAY_CHAT_PROJECTS_ENABLED (default off; staging on). Stays off until Dreaming excludes threads.space_id not null or origin in (space, agent_run), with test space_thread_messages_never_reach_user_memory (K3-5)",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "new_files": [
+        "apps/Frontend Plane/verevonv3/src/shared/actions/chat-project.ts",
+        "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-projects.ts",
+        "apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/ChatProjectsSection.tsx",
+        "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-project.ts"
+      ],
+      "new_files_already_present": [],
+      "planes": ["Frontend Plane"],
+      "test_commands": ["pnpm test:e2e chat-projects.spec.ts"]
+    },
+    {
+      "id": "WS18-S5",
+      "title": "Do runs retrieve from the project",
+      "tag": "BUILD",
+      "summary": "Do runs in a project forward a Space retrieval authorization from model-gateway to execution-core so knowledge_search runs Space-scoped. A Space-scoped run without a token gets a typed 'project knowledge unavailable' tool error, never an unscoped search. Behind AGENTIC_SPACE_RETRIEVAL_ENABLED (default off, where off is today's unscoped Do search).",
+      "files": [
+        "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+        "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+        "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+        "apps/Model Plane/rust/services/execution-core/src/knowledge_tools.rs",
+        "apps/Model Plane/rust/services/execution-core/tests/space_scoped_knowledge_search.rs"
+      ],
+      "depends_on": ["WS18-S2", "WS02-S6", "WS02-S7", "WS03", "WS24", "WS01-S0"],
+      "needs_live_stack": true,
+      "needs_external": "",
+      "risk": ["authority", "policy", "zdr"],
+      "effort_days_low": 6,
+      "effort_days_high": 9,
+      "decisions": ["WS18-D8"],
+      "flag": "AGENTIC_SPACE_RETRIEVAL_ENABLED (gateway env, default off; off = today's unscoped Do search); enablement gated by the WS18-D8 decision-TTL measurement",
+      "migration": false,
+      "proto_change": false,
+      "optional": false,
+      "new_files": ["apps/Model Plane/rust/services/execution-core/tests/space_scoped_knowledge_search.rs"],
+      "new_files_already_present": [],
+      "planes": ["Model Plane"],
+      "test_commands": [
+        "cargo test -p execution-core --lib knowledge_tools",
+        "cargo test -p model-gateway --test e2e_invoke_chain_test"
+      ]
+    }
+  ],
+  "notes": "Sources read: plan lines 1053-1090 (WS18 section and slice table S0-S5) and Appendix B (lines 2253-2321, all rows). Appendix B rows that change WS18: K3-5 applied to S4 (GATEWAY_CHAT_PROJECTS_ENABLED stays off until Dreaming excludes space threads; test space_thread_messages_never_reach_user_memory; the Dreaming slice moves from EP-8 into Wave 2); K3-18 applied to S2 (GATEWAY_SPACE_APPEND_RETRIEVAL default ON after the staging proof; kill switch only). N1 (rebuilt-image evidence) applies to S1-S5; S0 is doc-only and exempt. N2, N4, N5, N6 and N7 do not apply because WS18 adds no proto, migration or durable RPC. N3 applies to S3 and S4, which edit ChatMessages.tsx, chat-client.ts and use-chat-controller.ts that other sessions also touch, so rebase onto the owning session. B.4 (K2-15, K2-16) shows the agentic anchors moved from HEAD 1423 to LIVE 1491 and from 9167 to 9527, so every sse.rs line cite in the plan is stale; re-grep before editing.\n\nBuilt status (Glob, Grep, and git log afb83928..HEAD, 101 commits): no WS18 slice is built. No commit subject mentions projects, knowledge receipts, retrieval decisions or append retrieval. S0: no ledger entry (no 'project container', OD19 or I21 match in apps/Model Plane/docs/decisions/ledger.md), no addendum in the ADR, and OD19 and I21 are not marked superseded in CHAT_GAP_CLOSURE_PLAN (lines 273 and 507). S1: WS02 S6 is absent (model-gateway/src/run_context.rs, AuthoredLayers and compose_authored_instructions do not exist); in range are only the contract module apps/Model Plane/rust/crates/mp-contracts/src/run_context.rs (commit 0736d692) and the run_context = 18 wire (commit 8cff6738). S2: the BFF append branch (spaces.rs around lines 107-189) calls only thread-append-decision and never retrieval-decision; model-gateway sse.rs around lines 1081-1083 reads retrieval_decision_token from req.space_context only; GATEWAY_SPACE_APPEND_RETRIEVAL is absent. S3: knowledge_receipt.rs is absent and there is no knowledge block or knowledge chip text (SourceScopeNotice exists in ChatMessages.tsx around line 3300 with no knowledge mode). S4: none of the four NEW files exist; no GATEWAY_CHAT_PROJECTS_ENABLED, projectSpaceRef or chatProjectSchema. S5: no x-space-retrieval-authorization, AGENTIC_SPACE_RETRIEVAL_ENABLED or space_retrieval identifiers in execution-core; tests/space_scoped_knowledge_search.rs is absent. WS01-S0 appears landed (ZDR-wave commits 5ae7fe13 to b67bb7f0 are in range; zdr_features.rs and zdr_feature_table.rs exist), but its DoD was not checked.\n\nTags: the table tags S0-S2 FINISH and the Type line says FINISH-BUILT-BUT-DARK, yet none of that work is in the tree. Tags are kept as the plan states them; schedule S0-S2 as BUILD until the owner confirms. S1 cannot start until WS02 S6 lands. Plan header: Wave W2, with S0 and S2 startable in W1.\n\nPath mapping: FE = apps/Frontend Plane/verevonv3/src (the plan's FE/features/... is src/features/...). BFF = apps/Frontend Plane/verevonv3/apps/gateway/src/domains. FP/apps/... = apps/Frontend Plane/verevonv3/apps/.... MG = apps/Model Plane/rust/services/model-gateway/src. EC = apps/Model Plane/rust/services/execution-core/src. MP = apps/Model Plane. eval-lab-py is apps/Model Plane/python/eval-lab-py; its cases/ folder exists but is empty, so cases/run_context/ is new.\n\nExcluded from files (the schema takes the Change column only). Test-column files to co-edit: S1 apps/Model Plane/rust/crates/mp-contracts/tests/run_context_posture.rs; S2 apps/Model Plane/rust/services/model-gateway/tests/zdr_feature_table.rs; S3 apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.retrieval-scope.test.ts, apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts, chat-client.replay.test.ts, and NEW SourceScopeNotice.test.tsx; S4 NEW chat-projects.test.ts, ChatProjectsSection.test.tsx, use-chat-project.test.ts and tests/e2e/chat-projects.spec.ts, plus existing ChatSidebarOrganizer.test.tsx and chat-organization.test.ts; S5 apps/Model Plane/rust/services/execution-core/tests/cross_service_loop_contract.rs and compaction_parity_contract.rs. Named but unchanged or used as patterns: session_flow.rs line 141 (S2, unchanged), action-registry.ts (S4, reused), DashboardComposer.tsx lines 1128-1141 (S4 pattern), spaces-client.ts (S4 reused routes).\n\nGaps and inferences: the plan gives no directory for use-chat-project.ts, so it is placed beside use-chat-controller.ts. The plan does not name the BFF file for the chat_projects capability, so no BFF file is listed for S4. The Dreaming exclusion (K3-5, EP-8 slice 1, Space-session migration per K1-10) has no WS18 row and is recorded only as a dependency. S0's ADR-0010 file (apps/SPACE_AS_CHAT_PROJECT_ADR_<date>.md) is absent and is not in S0's Change column, so it is not listed. The plan records a live-tree modification (+13 lines) to ChatPage.tsx that S4 must rebase onto. test_commands holds only literal commands from the Tests columns; the named tests (for example a_scoped_append_turn_carries_the_retrieval_decision, agentic_dispatch_carries_the_space_layer_after_org_and_before_persona, agentic_dispatch_forwards_the_space_retrieval_decision_only_when_scoped, space_thread_messages_never_reach_user_memory) do not exist yet.\n\nEffort: S0 1 + S1 2-3 + S2 3-4 + S3 4-5 + S4 8-12 + S5 6-9 = 24-34 eng-days, matching the WS18 header."
+}

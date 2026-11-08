@@ -1,0 +1,1002 @@
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx
+new file mode 100644
+index 000000000..da7af4cb1
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.test.tsx	
+@@ -0,0 +1,196 @@
++// @vitest-environment jsdom
++
++import { readFileSync } from 'node:fs'
++import { dirname, join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++import { I18nProvider } from '@/shared/i18n'
++import { localeStorageKey } from '@/shared/i18n/locales'
++import { ArtifactDeckView } from './ArtifactDeckView'
++import type { ArtifactRendererProps } from './artifact-renderers'
++import type { ChatArtifact, GeneratedFile, GeneratedFilePreview } from './chat-types'
++
++const here = dirname(fileURLToPath(import.meta.url))
++const fixture = readFileSync(join(here, '..', '..', '..', 'shared', 'api', 'contracts', 'deck_manifest_v1.json'), 'utf8')
++
++const PPTX = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
++
++type Json = Record<string, unknown>
++
++function manifestWith(change: (manifest: Json) => void): string {
++  const manifest = JSON.parse(fixture) as Json
++  change(manifest)
++  return JSON.stringify(manifest)
++}
++
++function artifact(content: string = fixture): ChatArtifact {
++  return { content, id: 'artifact-deck', kind: 'deck', title: 'Kvartalstall Q3', version: 5 }
++}
++
++function generatedFile(overrides: Partial<GeneratedFile> = {}): GeneratedFile {
++  return { id: 'call-1-file-1', name: 'kvartal.pptx', mime: PPTX, size: 3, url: `data:${PPTX};base64,QUFB`, ...overrides }
++}
++
++function preview(): GeneratedFilePreview {
++  return {
++    mime: 'application/pdf',
++    url: 'data:application/pdf;base64,JVBERi0=',
++    pages: 4,
++    fontsSubstituted: false,
++    thumbs: ['data:image/png;base64,iVBORw0KGgo='],
++  }
++}
++
++function renderDeck(
++  options: { content?: string; file?: GeneratedFile; fallback?: ArtifactRendererProps['fallback'] } = {},
++) {
++  return render(() => (
++    <I18nProvider>
++      <ArtifactDeckView artifact={artifact(options.content)} file={options.file} fallback={options.fallback} />
++    </I18nProvider>
++  ))
++}
++
++/** The strip's cards, in slide order. */
++function cards(container: HTMLElement): HTMLButtonElement[] {
++  return Array.from(container.querySelectorAll<HTMLButtonElement>('.verevon-deck__card'))
++}
++
++function titles(container: HTMLElement): Array<string | null | undefined> {
++  return cards(container).map((card) => card.querySelector('.verevon-deck__title')?.textContent)
++}
++
++describe('ArtifactDeckView', () => {
++  beforeEach(() => {
++    window.localStorage.setItem(localeStorageKey, 'en')
++  })
++
++  afterEach(() => {
++    cleanup()
++    window.localStorage.removeItem(localeStorageKey)
++  })
++
++  it('draws one card per slide, in order, each with its state word', () => {
++    const { container } = renderDeck()
++    expect(titles(container)).toEqual([
++      'Kvartalstall Q3',
++      'Salget økte i alle regioner',
++      'Mål og resultat',
++      'Omsetning per måned',
++    ])
++    expect(cards(container).map((card) => card.querySelector('.verevon-deck__chip')?.textContent)).toEqual([
++      'OK',
++      'Warning',
++      'Not built',
++      'Error',
++    ])
++  })
++
++  it('opens on the first slide and moves the findings and the notes with the pick', () => {
++    const { container } = renderDeck()
++    expect(cards(container)[0]?.getAttribute('aria-current')).toBe('true')
++    expect(cards(container)[1]?.getAttribute('aria-current')).toBeNull()
++    expect(screen.getByText('No findings on this slide')).toBeTruthy()
++
++    fireEvent.click(cards(container)[1] as HTMLButtonElement)
++    flush()
++    expect(cards(container)[0]?.getAttribute('aria-current')).toBeNull()
++    expect(cards(container)[1]?.getAttribute('aria-current')).toBe('true')
++    expect(screen.getByText('text may not fit its box; shorten it or split the slide')).toBeTruthy()
++  })
++
++  it('shows the notes of a slide only when asked, and the toggle says which state it is in', () => {
++    const { container } = renderDeck()
++    fireEvent.click(cards(container)[1] as HTMLButtonElement)
++    flush()
++    expect(screen.queryByText('Kilde: regnskapsrapport Q3, side 4.')).toBeNull()
++
++    const toggle = screen.getByRole('button', { name: 'Show notes' })
++    expect(toggle.getAttribute('aria-expanded')).toBe('false')
++    fireEvent.click(toggle)
++    flush()
++    expect(screen.getByText('Kilde: regnskapsrapport Q3, side 4.')).toBeTruthy()
++    expect(screen.getByRole('button', { name: 'Hide notes' }).getAttribute('aria-expanded')).toBe('true')
++  })
++
++  it('lists every line of the picked slide, not only the two the card shows', () => {
++    const { container } = renderDeck()
++    fireEvent.click(cards(container)[1] as HTMLButtonElement)
++    flush()
++    const lines = container.querySelector('.verevon-deck__lines')
++    expect(Array.from(lines?.querySelectorAll('li') ?? []).map((item) => item.textContent)).toEqual([
++      'Omsetning 12,4 MNOK, opp 8 %',
++      'Nord vokste mest',
++      'Marginen holdt seg',
++    ])
++    expect(cards(container)[1]?.querySelectorAll('.verevon-deck__line')).toHaveLength(2)
++  })
++
++  it('says it is a draft until a render exists, and draws the preview only when the file has one', () => {
++    const { container, unmount } = renderDeck()
++    expect(screen.getByText('Draft from manifest')).toBeTruthy()
++    expect(container.querySelector('iframe')).toBeNull()
++    unmount()
++
++    const rendered = renderDeck({ file: generatedFile({ preview: preview() }) })
++    expect(screen.queryByText('Draft from manifest')).toBeNull()
++    const frame = rendered.container.querySelector('iframe')
++    expect(frame?.getAttribute('title')).toBe('Preview of Kvartalstall Q3')
++  })
++
++  it('draws the generated file card below the strip when the turn has one', () => {
++    renderDeck({ file: generatedFile(), fallback: () => <p>kvartal.pptx download</p> })
++    expect(screen.getByText('kvartal.pptx download')).toBeTruthy()
++  })
++
++  it('keeps the cards first in tab order, one per slide, and the notes toggle after them', () => {
++    const { container } = renderDeck()
++    fireEvent.click(cards(container)[1] as HTMLButtonElement)
++    flush()
++    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
++    expect(buttons.slice(0, 4).every((button) => button.classList.contains('verevon-deck__card'))).toBe(true)
++    const toggle = buttons[buttons.length - 1]
++    expect(toggle?.classList.contains('verevon-deck__toggle')).toBe(true)
++    expect(buttons.every((button) => button.tabIndex >= 0)).toBe(true)
++  })
++
++  it('draws slide text as text, never as markup', () => {
++    const { container } = renderDeck({
++      content: manifestWith((manifest) => {
++        const slides = manifest.slides as Json[]
++        slides[0] = { ...slides[0], title: '<img src="x">' }
++      }),
++    })
++    expect(container.querySelector('img')).toBeNull()
++    expect(titles(container)[0]).toBe('<img src="x">')
++  })
++
++  it('shows the raw text, not a deck, for a manifest it cannot read', () => {
++    const { container } = renderDeck({ content: 'not json' })
++    expect(screen.getByText('Could not read the slides')).toBeTruthy()
++    expect(container.querySelector('pre')?.textContent).toBe('not json')
++    expect(container.querySelector('.verevon-deck__strip')).toBeNull()
++  })
++
++  it('refuses another manifest version the same way', () => {
++    const { container } = renderDeck({
++      content: manifestWith((manifest) => {
++        manifest.version = 2
++      }),
++    })
++    expect(screen.getByText('Could not read the slides')).toBeTruthy()
++    expect(container.querySelector('.verevon-deck__strip')).toBeNull()
++  })
++
++  it('says a deck with no slides has none yet', () => {
++    const { container } = renderDeck({
++      content: manifestWith((manifest) => {
++        manifest.slides = []
++      }),
++    })
++    expect(screen.getByText('No slides yet')).toBeTruthy()
++    expect(container.querySelectorAll('.verevon-deck__card')).toHaveLength(0)
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx
+new file mode 100644
+index 000000000..2a6e1d98c
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ArtifactDeckView.tsx	
+@@ -0,0 +1,188 @@
++/**
++ * The slide strip of a deck artifact (EP-5 S4): one 16:9 card per slide, drawn from the manifest the model
++ * gateway keeps, with the lines, state, findings and speaker notes of the slide the person picks. It is the
++ * panel's extra viewer for `deck` artifacts, so the header and the built-in kinds stay as they are.
++ *
++ * The strip is a draft until the deck has been rendered, so it says so: a card shows the manifest, not the
++ * final look. Slide text is model-authored and is drawn as text only; no picture is loaded from a slide's
++ * path. The generated file's own card, and its rendered preview when the file has one, sit below the strip.
++ */
++import type { JSX } from '@solidjs/web'
++import { Dynamic } from '@solidjs/web'
++import { For, Show, createMemo, createSignal } from 'solid-js'
++import {
++  AlertTriangle,
++  ChevronDown,
++  ChevronUp,
++  CircleCheck,
++  CircleDashed,
++  CircleX,
++  Columns3,
++  Image as ImageIcon,
++  LayoutTemplate,
++  List,
++  Presentation,
++  Type,
++} from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import { ArtifactOfficePreview } from './ArtifactOfficePreview'
++import type { ArtifactRenderer, ArtifactRendererProps } from './artifact-renderers'
++import type { IconComponent } from './chat-types'
++import {
++  DECK_ARTIFACT_KIND,
++  type DeckSlideLayout,
++  type DeckSlideState,
++  parseDeckManifest,
++  slideLines,
++} from './deck-manifest'
++
++type Translate = (noText: string, enText: string) => string
++
++const LAYOUT_ICONS: Record<DeckSlideLayout, IconComponent> = {
++  title: Presentation,
++  title_bullets: List,
++  title_only: Type,
++  section: LayoutTemplate,
++  two_column: Columns3,
++  image: ImageIcon,
++}
++
++const STATE_ICONS: Record<DeckSlideState, IconComponent> = {
++  draft: CircleDashed,
++  ok: CircleCheck,
++  warn: AlertTriangle,
++  error: CircleX,
++}
++
++/** The word on a slide's chip. A draft has never been built, or has changed since its last build. */
++function stateLabel(state: DeckSlideState, tr: Translate): string {
++  switch (state) {
++    case 'draft':
++      return tr('Ikke bygget', 'Not built')
++    case 'ok':
++      return tr('OK', 'OK')
++    case 'warn':
++      return tr('Advarsel', 'Warning')
++    case 'error':
++      return tr('Feil', 'Error')
++  }
++}
++
++export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
++  const i18n = useI18n()
++  const manifest = createMemo(() => parseDeckManifest(props.artifact.content))
++  const [pickedIndex, setPickedIndex] = createSignal(0)
++  const [notesOpen, setNotesOpen] = createSignal(false)
++  // A newer revision can have fewer slides than the pick, so the pick stays on a slide that exists.
++  const current = createMemo(() => Math.min(pickedIndex(), Math.max(0, (manifest()?.slides.length ?? 0) - 1)))
++  const selected = createMemo(() => manifest()?.slides[current()])
++
++  return (
++    <Show
++      when={manifest()}
++      fallback={(
++        <div class="verevon-deck">
++          <p class="verevon-deck__notice" role="status">
++            {i18n.tr('Kunne ikke lese lysbildene', 'Could not read the slides')}
++          </p>
++          <pre class="verevon-deck__raw"><code>{props.artifact.content}</code></pre>
++        </div>
++      )}
++    >
++      {(deck) => (
++        <div class="verevon-deck">
++          <Show when={!props.file?.preview}>
++            <p class="verevon-deck__draft">{i18n.tr('Utkast fra manifest', 'Draft from manifest')}</p>
++          </Show>
++          <Show
++            when={deck().slides.length > 0}
++            fallback={<p class="verevon-deck__notice">{i18n.tr('Ingen lysbilder ennå', 'No slides yet')}</p>}
++          >
++            <ol class="verevon-deck__strip" aria-label={i18n.tr('Lysbilder', 'Slides')}>
++              <For each={deck().slides}>
++                {(slide, index) => (
++                  <li>
++                    <button
++                      type="button"
++                      class="verevon-deck__card"
++                      aria-current={index() === current() ? 'true' : undefined}
++                      onClick={() => {
++                        setPickedIndex(index())
++                        setNotesOpen(false)
++                      }}
++                    >
++                      <span class="verevon-deck__head">
++                        <span class="verevon-deck__number">{index() + 1}</span>
++                        <Dynamic component={LAYOUT_ICONS[slide.layout]} size={14} />
++                        <span class={`verevon-deck__chip verevon-deck__chip--${slide.state}`}>
++                          <Dynamic component={STATE_ICONS[slide.state]} size={12} />
++                          {stateLabel(slide.state, i18n.tr)}
++                        </span>
++                      </span>
++                      <span class="verevon-deck__title">{slide.title}</span>
++                      <For each={slideLines(slide).slice(0, 2)}>
++                        {(line) => <span class="verevon-deck__line">{line}</span>}
++                      </For>
++                    </button>
++                  </li>
++                )}
++              </For>
++            </ol>
++          </Show>
++          <Show when={selected()}>
++            {(slide) => (
++              <div class="verevon-deck__detail">
++                <Show when={slideLines(slide()).length > 0}>
++                  <ul class="verevon-deck__lines" aria-label={i18n.tr('Innhold på lysbildet', 'Slide content')}>
++                    <For each={slideLines(slide())}>{(line) => <li>{line}</li>}</For>
++                  </ul>
++                </Show>
++                <Show
++                  when={slide().findings.length > 0}
++                  fallback={(
++                    <p class="verevon-deck__none">
++                      {i18n.tr('Ingen funn på dette lysbildet', 'No findings on this slide')}
++                    </p>
++                  )}
++                >
++                  <ul class="verevon-deck__findings" aria-label={i18n.tr('Funn', 'Findings')}>
++                    <For each={slide().findings}>{(finding) => <li>{finding.message}</li>}</For>
++                  </ul>
++                </Show>
++                <Show when={slide().notes}>
++                  <button
++                    type="button"
++                    class="verevon-deck__toggle"
++                    aria-expanded={notesOpen() ? 'true' : 'false'}
++                    onClick={() => setNotesOpen(!notesOpen())}
++                  >
++                    <Dynamic component={notesOpen() ? ChevronUp : ChevronDown} size={14} />
++                    {notesOpen() ? i18n.tr('Skjul notater', 'Hide notes') : i18n.tr('Vis notater', 'Show notes')}
++                  </button>
++                  <Show when={notesOpen()}>
++                    <p class="verevon-deck__notes">{slide().notes}</p>
++                  </Show>
++                </Show>
++              </div>
++            )}
++          </Show>
++          {props.fallback?.()}
++          <Show when={props.file?.preview}>
++            {(preview) => <ArtifactOfficePreview title={props.artifact.title} preview={preview()} />}
++          </Show>
++        </div>
++      )}
++    </Show>
++  )
++}
++
++/**
++ * The panel's extra viewer for `deck` artifacts. It takes the body of the artifact; the header stays on the
++ * built-in kind, as it does for every extra viewer.
++ */
++export const deckManifestRenderer: ArtifactRenderer<'deck-manifest'> = {
++  id: 'deck-manifest',
++  priority: 0,
++  match: (artifact) => artifact.kind === DECK_ARTIFACT_KIND,
++  component: ArtifactDeckView,
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx
+index ff30ec9b2..ceee5f9b0 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/ChatArtifactPanel.tsx	
+@@ -55,6 +55,7 @@ import {
+   restoreArtifactRevision,
+   type SavedArtifactRevision,
+ } from '@/shared/api/chat-client'
++import { deckManifestRenderer } from './ArtifactDeckView'
+ import { ArtifactEditor } from './ArtifactEditor'
+ import {
+   type ArtifactSelectionRange,
+@@ -123,6 +124,7 @@ import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/art
+ const [activatedPreviews, setActivatedPreviews] = createSignal<ReadonlySet<string>>(new Set())
+ 
+ extraArtifactRenderers.register(officePdfRenderer)
++extraArtifactRenderers.register(deckManifestRenderer)
+ 
+ const KIND_ICONS: Record<ArtifactRenderKind, IconComponent> = {
+   binary: FileSpreadsheet,
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.test.ts
+index 686bb9df2..4544f8875 100644
+--- a/apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/artifact-renderers.test.ts	
+@@ -1,4 +1,7 @@
++// @vitest-environment jsdom
++
+ import { describe, expect, it, vi } from 'vitest'
++import { deckManifestRenderer } from './ArtifactDeckView'
+ import {
+   type ArtifactRenderer,
+   createArtifactRendererRegistry,
+@@ -75,3 +78,19 @@ describe('createArtifactRendererRegistry', () => {
+     expect(registry.resolve(artifact())?.component).toBe(component)
+   })
+ })
++
++describe('the deck manifest viewer (EP-5-S4)', () => {
++  it('claims the deck kind and no other, so a document, an HTML page or code keeps its own viewer', () => {
++    expect(deckManifestRenderer.match(artifact({ kind: 'deck', content: '{}' }))).toBe(true)
++    for (const kind of ['document', 'html', 'code', 'text', 'pdf', 'spreadsheet']) {
++      expect(deckManifestRenderer.match(artifact({ kind })), kind).toBe(false)
++    }
++  })
++
++  it('resolves a deck to its own viewer when it is the only extra viewer registered', () => {
++    const registry = createArtifactRendererRegistry()
++    registry.register(deckManifestRenderer)
++    expect(registry.resolve(artifact({ kind: 'deck', content: '{}' }))?.id).toBe('deck-manifest')
++    expect(registry.resolve(artifact({ kind: 'document', content: '# Rapport' }))).toBeUndefined()
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.test.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.test.ts
+new file mode 100644
+index 000000000..21eff0729
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.test.ts	
+@@ -0,0 +1,128 @@
++import { createHash } from 'node:crypto'
++import { readFileSync } from 'node:fs'
++import { dirname, join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { describe, expect, it } from 'vitest'
++import { DECK_MAX_SLIDES, type DeckManifest, parseDeckManifest, slideLines } from './deck-manifest'
++
++/**
++ * The vendored copy of mp-contracts' manifest fixture (`deck_manifest_v1.json`), pinned by sha256 beside it.
++ * The checks below read only this tree, so a missing or edited copy fails here rather than passing by not running.
++ */
++const here = dirname(fileURLToPath(import.meta.url))
++const contracts = join(here, '..', '..', '..', 'shared', 'api', 'contracts')
++const fixtureBytes = readFileSync(join(contracts, 'deck_manifest_v1.json'))
++const fixture = fixtureBytes.toString('utf8')
++
++type Json = Record<string, unknown>
++
++/** The fixture with one edit applied, as text. */
++function edited(change: (manifest: Json) => void): string {
++  const manifest = JSON.parse(fixture) as Json
++  change(manifest)
++  return JSON.stringify(manifest)
++}
++
++function slideOf(manifest: Json, index: number): Json {
++  return (manifest.slides as Json[])[index] as Json
++}
++
++function parsed(): DeckManifest {
++  const deck = parseDeckManifest(fixture)
++  if (!deck) throw new Error('the vendored fixture must parse')
++  return deck
++}
++
++describe('the vendored manifest contract', () => {
++  it('is the pinned copy, byte for byte', () => {
++    const pin = readFileSync(join(contracts, 'deck_manifest_v1.json.sha256'), 'utf8').split(/\s+/)[0]
++    expect(createHash('sha256').update(fixtureBytes).digest('hex')).toBe(pin)
++  })
++})
++
++describe('parseDeckManifest', () => {
++  it('reads the v1 fixture into a deck the panel can draw', () => {
++    expect(parsed()).toMatchObject({
++      version: 1,
++      deckId: 'deck-01jbx3q9k2m4n5p6r7s8t9v0wx',
++      title: 'Kvartalstall Q3',
++      locale: 'nb-NO',
++      revision: 5,
++      nextSlide: 6,
++    })
++    expect(parsed().slides.map((slide) => [slide.id, slide.layout, slide.state])).toEqual([
++      ['s1', 'title', 'ok'],
++      ['s3', 'title_bullets', 'warn'],
++      ['s4', 'two_column', 'draft'],
++      ['s5', 'image', 'error'],
++    ])
++    expect(parsed().slides[1]?.findings).toEqual([
++      { id: 'text_may_overflow', message: 'text may not fit its box; shorten it or split the slide' },
++    ])
++    expect(parsed().slides[1]?.notes).toBe('Kilde: regnskapsrapport Q3, side 4.')
++  })
++
++  it('refuses another version, an unknown state or layout, and a value outside its type', () => {
++    const refused = [
++      edited((manifest) => {
++        manifest.version = 2
++      }),
++      edited((manifest) => {
++        slideOf(manifest, 0).state = 'done'
++      }),
++      edited((manifest) => {
++        slideOf(manifest, 0).layout = 'cover'
++      }),
++      edited((manifest) => {
++        manifest.revision = 1.5
++      }),
++      edited((manifest) => {
++        manifest.next_slide = 0
++      }),
++      edited((manifest) => {
++        slideOf(manifest, 0).bullets = 'not a list'
++      }),
++      edited((manifest) => {
++        delete manifest.title
++      }),
++    ]
++    for (const raw of refused) {
++      expect(parseDeckManifest(raw)).toBeNull()
++    }
++  })
++
++  it('refuses a deck over the slide cap, which the server would never have stored', () => {
++    const over = edited((manifest) => {
++      const slide = slideOf(manifest, 0)
++      manifest.slides = Array.from({ length: DECK_MAX_SLIDES + 1 }, (_, index) => ({ ...slide, id: `s${index + 1}` }))
++    })
++    expect(parseDeckManifest(over)).toBeNull()
++  })
++
++  it('refuses text that is not JSON or not an object, without throwing', () => {
++    for (const raw of ['', 'not json', '[]', 'null', '"deck"']) {
++      expect(() => parseDeckManifest(raw), raw).not.toThrow()
++      expect(parseDeckManifest(raw), raw).toBeNull()
++    }
++  })
++
++  it('ignores the optional keys later slices add, so an older viewer still reads the slides', () => {
++    const deck = parseDeckManifest(
++      edited((manifest) => {
++        manifest.template = { skill_id: 'brand' }
++        manifest.source = { artifact_id: 'report', version: 2 }
++      }),
++    )
++    expect(deck?.slides).toHaveLength(4)
++    expect(deck).not.toHaveProperty('template')
++    expect(deck).not.toHaveProperty('source')
++  })
++})
++
++describe('slideLines', () => {
++  it('lists the bullets of a slide, or a two-column slide left items then right items', () => {
++    const [, bulleted, twoColumn] = parsed().slides
++    expect(slideLines(bulleted!)).toEqual(['Omsetning 12,4 MNOK, opp 8 %', 'Nord vokste mest', 'Marginen holdt seg'])
++    expect(slideLines(twoColumn!)).toEqual(['Mål: 11 MNOK', 'Resultat: 12,4 MNOK'])
++  })
++})
+diff --git a/apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.ts b/apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.ts
+new file mode 100644
+index 000000000..a0709dbd7
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/features/chat/components/deck-manifest.ts	
+@@ -0,0 +1,93 @@
++/**
++ * The deck manifest the artifact panel reads (EP-5 S4): a pure parser, with no DOM and no i18n.
++ *
++ * It mirrors `DeckManifest` in mp-contracts (`deck_manifest.rs`, manifest v1). The model gateway keeps the
++ * manifest as the content of a `deck` artifact, and the panel checks it before anything is drawn: a manifest
++ * that does not parse, breaks the shape, or is a version this viewer does not read is refused whole, so the
++ * panel shows its raw text rather than a half-read deck. Unknown keys are dropped, not refused, so the
++ * optional keys later slices add to v1 (the template, the source) do not stop an older viewer from reading
++ * the slides.
++ */
++import { z } from 'zod'
++
++/** The artifact kind a deck is kept under in the thread. */
++export const DECK_ARTIFACT_KIND = 'deck'
++
++/** The one manifest version this viewer reads. */
++export const DECK_MANIFEST_VERSION = 1
++
++/** Most slides in one deck (EP-5 decision D11, `MAX_SLIDES` in mp-contracts). */
++export const DECK_MAX_SLIDES = 40
++
++const SLIDE_LAYOUTS = ['title', 'title_bullets', 'title_only', 'section', 'two_column', 'image'] as const
++const SLIDE_STATES = ['draft', 'ok', 'warn', 'error'] as const
++
++const findingSchema = z.object({ id: z.string(), message: z.string() })
++
++const slideSchema = z.object({
++  id: z.string().min(1).max(64),
++  layout: z.enum(SLIDE_LAYOUTS),
++  title: z.string(),
++  bullets: z.array(z.string()),
++  left: z.array(z.string()),
++  right: z.array(z.string()),
++  image: z.string().nullable(),
++  notes: z.string().nullable(),
++  state: z.enum(SLIDE_STATES),
++  findings: z.array(findingSchema),
++})
++
++const manifestSchema = z.object({
++  version: z.literal(DECK_MANIFEST_VERSION),
++  deck_id: z.string().min(1),
++  title: z.string(),
++  locale: z.string(),
++  slides: z.array(slideSchema).max(DECK_MAX_SLIDES),
++  revision: z.number().int().nonnegative(),
++  next_slide: z.number().int().positive(),
++})
++
++export type DeckSlide = z.infer<typeof slideSchema>
++export type DeckSlideLayout = DeckSlide['layout']
++export type DeckSlideState = DeckSlide['state']
++
++/** A deck as the panel holds it. The wire's snake_case names are mapped to camelCase; slide fields are one word. */
++export type DeckManifest = {
++  version: typeof DECK_MANIFEST_VERSION
++  deckId: string
++  title: string
++  locale: string
++  slides: DeckSlide[]
++  revision: number
++  nextSlide: number
++}
++
++/**
++ * The manifest in `raw`, or `null` when it is not JSON, is another version, or breaks the shape or a cap.
++ * Never throws: the caller draws the raw text for a `null`.
++ */
++export function parseDeckManifest(raw: string): DeckManifest | null {
++  let json: unknown
++  try {
++    json = JSON.parse(raw)
++  } catch {
++    return null
++  }
++  const parsed = manifestSchema.safeParse(json)
++  if (!parsed.success) return null
++  const manifest = parsed.data
++  return {
++    version: manifest.version,
++    deckId: manifest.deck_id,
++    title: manifest.title,
++    locale: manifest.locale,
++    slides: manifest.slides,
++    revision: manifest.revision,
++    nextSlide: manifest.next_slide,
++  }
++}
++
++/** The text lines of a slide in reading order: its bullets, or a two-column slide's left items then its right items. */
++export function slideLines(slide: DeckSlide): string[] {
++  return [...slide.bullets, ...slide.left, ...slide.right]
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts
+index ad0ec3836..0d2cedf44 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.test.ts	
+@@ -982,6 +982,29 @@ describe('action registry', () => {
+     }
+   })
+ 
++  it('registers the deck slide open as a low-risk read the model cannot execute (EP-5-S4)', () => {
++    const open = getActionDescriptor('chat.open_deck_slide')
++
++    expect(open).toMatchObject({ ownerPlane: 'model', risk: 'low', requiresApproval: false, reversible: true })
++    expect(isModelExecutableAction('chat.open_deck_slide')).toBe(false)
++    expect(MODEL_ACCESS['chat.open_deck_slide']).toMatchObject({ access: 'none', sideEffectClass: 'read' })
++
++    const schema = open?.inputSchema
++    expect(schema?.safeParse({ artifactId: 'artifact-deck', slideId: 's3' }).success).toBe(true)
++    for (const input of [
++      { artifactId: '', slideId: 's3' },
++      { artifactId: 'artifact-deck', slideId: '' },
++      { artifactId: 'artifact-deck', slideId: 's 3' },
++      { artifactId: 'artifact-deck', slideId: '../s3' },
++      { artifactId: 'artifact-deck', slideId: 'x'.repeat(65) },
++      // The deck is read from the panel's manifest: a client never names a thread, an owner or an index.
++      { artifactId: 'artifact-deck', slideId: 's3', threadId: 'thread-1' },
++      { artifactId: 'artifact-deck', slideId: 's3', index: 2 },
++    ]) {
++      expect(schema?.safeParse(input).success).toBe(false)
++    }
++  })
++
+   function registered(id: string) {
+     return actionRegistry.find((action) => action.id === id)
+   }
+@@ -1404,7 +1427,8 @@ describe('action registry', () => {
+     // +2 after EP-5-S7 registered chat.list_deck_templates and chat.apply_deck_template, the template picker.
+     // +4 after EP-7-S1 registered chat.set_goal, chat.update_goal, chat.clear_goal and chat.continue_goal.
+     // +1 after EP-3-S6 registered chat.edit_artifact_selection, the Output panel's ask about a selection.
+-    expect(ids).toHaveLength(293)
++    // +1 after EP-5-S4 registered chat.open_deck_slide, the slide strip's open-a-slide action.
++    expect(ids).toHaveLength(294)
+ 
+     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
+     // entries are the ones the fragments declare.
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts
+index b5be2a032..bd8df3f04 100644
+--- a/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
++++ b/apps/Frontend Plane/verevonv3/src/shared/actions/action-registry.ts	
+@@ -1221,6 +1221,15 @@ const chatApplyDeckTemplateInput = z
+   })
+   .strict()
+ 
++// The slide a person opens in a deck's strip (EP-5 S4): the artifact the panel holds and the slide's id in its
++// manifest. Strict, so nothing else reaches the strip; the slide itself is read from the manifest the panel has.
++const chatOpenDeckSlideInput = z
++  .object({
++    artifactId: z.string().min(1).max(128),
++    slideId: z.string().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/),
++  })
++  .strict()
++
+ // The person's own edit or restore of a thread artifact (EP-3 S4). `expectedVersion` is the head the panel
+ // showed, the server's compare-and-set; no org or user field, because the server reads the owner from the
+ // session. The text bound is the gateway's text-artifact limit.
+@@ -4465,6 +4474,17 @@ export const actionRegistry = [
+     inputSchema: chatApplyDeckTemplateInput,
+     outputSchema: envelopeStatusOutput,
+   },
++  {
++    id: 'chat.open_deck_slide',
++    label: 'Open a slide of a deck',
++    description: 'Open one slide of a deck in the chat\'s artifact panel: the strip shows the slide\'s lines, its state, its findings and its speaker notes. Read only, and nothing is sent to the server: the panel reads the manifest it already holds. Never model-executable: a model does not choose what the person looks at.',
++    ownerPlane: 'model',
++    risk: 'low',
++    requiresApproval: false,
++    reversible: true,
++    inputSchema: chatOpenDeckSlideInput,
++    outputSchema: envelopeStatusOutput,
++  },
+   {
+     id: 'chat.set_goal',
+     label: 'Set a goal on the conversation',
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json
+new file mode 100644
+index 000000000..45ee9ff07
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json	
+@@ -0,0 +1,62 @@
++{
++  "version": 1,
++  "deck_id": "deck-01jbx3q9k2m4n5p6r7s8t9v0wx",
++  "title": "Kvartalstall Q3",
++  "locale": "nb-NO",
++  "slides": [
++    {
++      "id": "s1",
++      "layout": "title",
++      "title": "Kvartalstall Q3",
++      "bullets": ["Styremøte oktober"],
++      "left": [],
++      "right": [],
++      "image": null,
++      "notes": null,
++      "state": "ok",
++      "findings": []
++    },
++    {
++      "id": "s3",
++      "layout": "title_bullets",
++      "title": "Salget økte i alle regioner",
++      "bullets": ["Omsetning 12,4 MNOK, opp 8 %", "Nord vokste mest", "Marginen holdt seg"],
++      "left": [],
++      "right": [],
++      "image": null,
++      "notes": "Kilde: regnskapsrapport Q3, side 4.",
++      "state": "warn",
++      "findings": [
++        {"id": "text_may_overflow", "message": "text may not fit its box; shorten it or split the slide"}
++      ]
++    },
++    {
++      "id": "s4",
++      "layout": "two_column",
++      "title": "Mål og resultat",
++      "bullets": [],
++      "left": ["Mål: 11 MNOK"],
++      "right": ["Resultat: 12,4 MNOK"],
++      "image": null,
++      "notes": "Kilde: budsjett 2026 og regnskapsrapport Q3.",
++      "state": "draft",
++      "findings": []
++    },
++    {
++      "id": "s5",
++      "layout": "image",
++      "title": "Omsetning per måned",
++      "bullets": [],
++      "left": [],
++      "right": [],
++      "image": "omsetning.png",
++      "notes": null,
++      "state": "error",
++      "findings": [
++        {"id": "image_missing", "message": "omsetning.png is not in the working directory"}
++      ]
++    }
++  ],
++  "revision": 5,
++  "next_slide": 6
++}
+diff --git a/apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json.sha256 b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json.sha256
+new file mode 100644
+index 000000000..b71d6a7cd
+--- /dev/null
++++ b/apps/Frontend Plane/verevonv3/src/shared/api/contracts/deck_manifest_v1.json.sha256	
+@@ -0,0 +1 @@
++1d3eabcd9130cf1207f71ae8f3eb991bcdd5a0ebb315e123142a8f0c6739ad2b *deck_manifest_v1.json
+diff --git a/apps/Frontend Plane/verevonv3/src/styles/global.css b/apps/Frontend Plane/verevonv3/src/styles/global.css
+index fd25c1c0a..d5833e13f 100644
+--- a/apps/Frontend Plane/verevonv3/src/styles/global.css	
++++ b/apps/Frontend Plane/verevonv3/src/styles/global.css	
+@@ -28412,6 +28412,159 @@ body.verevon-chat-canvas-resizing * {
+   border: 0;
+ }
+ 
++/* The slide strip of a deck artifact (EP-5 S4): one 16:9 card per slide, drawn from the manifest. Only the
++   strip scrolls sideways; the panel never does. Colours are tokens, so light and dark both hold. */
++.verevon-deck {
++  display: flex;
++  flex-direction: column;
++  gap: 10px;
++  min-width: 0;
++}
++
++.verevon-deck__draft,
++.verevon-deck__notice,
++.verevon-deck__none {
++  margin: 0;
++  font-size: 12px;
++  color: var(--verevon-e-muted);
++}
++
++.verevon-deck__strip {
++  display: flex;
++  gap: 10px;
++  margin: 0;
++  padding: 2px 2px 6px;
++  overflow-x: auto;
++  list-style: none;
++  scroll-snap-type: x proximity;
++}
++
++.verevon-deck__strip > li {
++  flex: 0 0 auto;
++  scroll-snap-align: start;
++}
++
++.verevon-deck__card {
++  display: flex;
++  flex-direction: column;
++  gap: 4px;
++  width: min(220px, 70vw);
++  aspect-ratio: 16 / 9;
++  padding: 8px 10px;
++  overflow: hidden;
++  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
++  border-radius: 8px;
++  background: var(--verevon-surface-soft);
++  color: var(--verevon-j-text);
++  font: inherit;
++  font-size: 12px;
++  text-align: left;
++  cursor: pointer;
++}
++
++.verevon-deck__card[aria-current='true'] {
++  border-color: var(--accent);
++}
++
++.verevon-deck__head {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  color: var(--verevon-e-muted);
++}
++
++.verevon-deck__number {
++  font-weight: 650;
++  font-variant-numeric: tabular-nums;
++}
++
++.verevon-deck__chip {
++  display: inline-flex;
++  align-items: center;
++  gap: 3px;
++  margin-left: auto;
++  padding: 1px 6px;
++  border-radius: 999px;
++  background: color-mix(in srgb, var(--verevon-e-muted) 12%, transparent);
++  color: var(--verevon-e-muted);
++  font-size: 11px;
++  font-weight: 600;
++  white-space: nowrap;
++}
++
++.verevon-deck__chip--ok {
++  background: color-mix(in srgb, var(--success) 14%, transparent);
++  color: var(--success);
++}
++
++.verevon-deck__chip--warn {
++  background: color-mix(in srgb, var(--warning) 16%, transparent);
++  color: var(--warning-ink);
++}
++
++.verevon-deck__chip--error {
++  background: color-mix(in srgb, var(--danger) 14%, transparent);
++  color: var(--danger);
++}
++
++.verevon-deck__title {
++  display: -webkit-box;
++  overflow: hidden;
++  font-weight: 650;
++  -webkit-line-clamp: 2;
++  -webkit-box-orient: vertical;
++}
++
++.verevon-deck__line {
++  display: block;
++  overflow: hidden;
++  color: var(--verevon-e-muted);
++  white-space: nowrap;
++  text-overflow: ellipsis;
++}
++
++.verevon-deck__detail {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  font-size: 13px;
++}
++
++.verevon-deck__lines,
++.verevon-deck__findings {
++  margin: 0;
++  padding-left: 18px;
++}
++
++.verevon-deck__toggle {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  align-self: flex-start;
++  min-height: var(--verevon-touch-target, 44px);
++  padding: 0;
++  border: 0;
++  background: none;
++  color: var(--accent);
++  font: inherit;
++  font-size: 12px;
++  cursor: pointer;
++}
++
++.verevon-deck__notes {
++  margin: 0;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++
++.verevon-deck__raw {
++  margin: 0;
++  overflow-x: auto;
++  font-size: 12px;
++  white-space: pre-wrap;
++  overflow-wrap: anywhere;
++}
++
+ .verevon-chat-artifact-file {
+   display: flex;
+   flex-wrap: wrap;

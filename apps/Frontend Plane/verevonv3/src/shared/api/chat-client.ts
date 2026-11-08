@@ -3500,6 +3500,77 @@ export async function uploadChatDocument(
   }
 }
 
+/** Which saved documents the chat library lists: generated artifact copies, uploaded text, or both (F-t3-080). */
+export type ChatLibraryKind = 'generated' | 'uploaded' | 'all'
+
+/** One chat library row: the document's metadata. Its text is read by id, never carried on a page. */
+export type ChatLibraryItem = {
+  documentId: string
+  title: string
+  kind: 'generated' | 'uploaded'
+  ownerId: string
+  visibility: string
+  contentBytes: number
+  createdAt: string
+  updatedAt: string
+  /** The thread a generated copy was saved from, from its source trace. Absent for an upload. */
+  threadId?: string
+}
+
+/** One page of the chat library and the total it pages over. */
+export type ChatLibraryPage = {
+  items: ChatLibraryItem[]
+  total: number
+}
+
+function chatLibraryItem(value: unknown): ChatLibraryItem | null {
+  const record = objectValue(value)
+  if (!record || typeof record.document_id !== 'string' || !record.document_id) return null
+  const metadata = objectValue(record.metadata)
+  const threadValue = objectValue(metadata?.source_ref)?.thread_id
+  const threadId = typeof threadValue === 'string' && threadValue ? threadValue : undefined
+  return {
+    documentId: record.document_id,
+    title: typeof record.title === 'string' ? record.title : '',
+    kind: metadata?.origin === 'chat-artifact' ? 'generated' : 'uploaded',
+    ownerId: typeof record.owner_id === 'string' ? record.owner_id : '',
+    visibility: typeof record.visibility === 'string' ? record.visibility : '',
+    contentBytes: typeof record.content_bytes === 'number' ? record.content_bytes : 0,
+    createdAt: typeof record.created_at === 'string' ? record.created_at : '',
+    updatedAt: typeof record.updated_at === 'string' ? record.updated_at : '',
+    threadId,
+  }
+}
+
+/**
+ * One page of the person's chat library (F-t3-080), newest first. Read only: nothing is stored.
+ * The gateway answers 404 `library_disabled` while the artifact-promote switch is off, so a caller
+ * reads a failure as "no library" and shows nothing.
+ */
+export async function listChatLibrary(
+  options: { kind?: ChatLibraryKind; limit?: number; offset?: number } = {},
+): Promise<ChatLibraryPage> {
+  const params = new URLSearchParams({
+    kind: options.kind ?? 'all',
+    limit: String(options.limit ?? 20),
+    offset: String(options.offset ?? 0),
+  })
+  const raw = await requestJson<unknown>(`/api/v1/chat/library?${params.toString()}`)
+  const record = objectValue(raw)
+  const documents = Array.isArray(record?.documents) ? record.documents : []
+  return {
+    items: documents.flatMap((value) => chatLibraryItem(value) ?? []),
+    total: typeof record?.total === 'number' ? record.total : 0,
+  }
+}
+
+/** The text of one library document, read by id through the knowledge document route. */
+export async function readChatLibraryText(documentId: string): Promise<string> {
+  const raw = await requestJson<unknown>(`/api/v1/knowledge/documents/${encodeURIComponent(documentId)}`)
+  const content = objectValue(raw)?.content
+  return typeof content === 'string' ? content : ''
+}
+
 export async function getThreadContext(
   threadId: string,
   runId?: string,
@@ -3857,9 +3928,23 @@ export async function rewindChatThread(
   return postChatBranchMove(threadId, 'rewind', { targetMessageId: messageId, expectedLeafMessageId, confirm: true })
 }
 
+/**
+ * Undo a rewind (WS17 S9): the leaf returns to `messageId`, the turn the rewind left, even when a later branch
+ * continues from it. `expectedLeafMessageId` is the leaf the rewind landed on; a thread that moved on refuses the
+ * undo with `active_leaf_stale`, and the client reloads it.
+ */
+export async function undoChatRewind(
+  threadId: string,
+  messageId: string,
+  expectedLeafMessageId: string,
+): Promise<ChatBranchMove> {
+  parseChatHistoryAction({ type: 'thread.undo_rewind', threadId, messageId })
+  return postChatBranchMove(threadId, 'undo-rewind', { targetMessageId: messageId, expectedLeafMessageId })
+}
+
 async function postChatBranchMove(
   threadId: string,
-  verb: 'branch' | 'rewind',
+  verb: 'branch' | 'rewind' | 'undo-rewind',
   body: Record<string, unknown>,
 ): Promise<ChatBranchMove> {
   const raw = await requestJson<unknown>(
@@ -3885,7 +3970,7 @@ export type SavedArtifactRevision = {
   kind: string
   title: string
   content: string
-  editorKind: string
+  editorKind: ArtifactEditorKind
   restoredFromVersion?: number
   createdAt: string
 }
@@ -3953,7 +4038,7 @@ function normalizeSavedArtifactRevision(raw: unknown): SavedArtifactRevision {
     kind: str(record.kind) ?? '',
     title: typeof record.title === 'string' ? record.title : '',
     content: typeof record.content === 'string' ? record.content : '',
-    editorKind: str(record.editor_kind) ?? 'user',
+    editorKind: isArtifactEditorKind(record.editor_kind) ? record.editor_kind : 'user',
     ...(restored != null && restored > 0 ? { restoredFromVersion: restored } : {}),
     createdAt: str(record.created_at) ?? '',
   }
@@ -5314,20 +5399,61 @@ export async function submitFeedback(
 }
 
 /**
- * User-facing reason a rating did not stick. Keeps the wording in one place so
- * the chat surface only has to decide *where* to show it.
+ * Rate a durable run's result by its run id: an agent run's answer or a scheduled
+ * run's fire, where there is no chat turn to rate.
+ *
+ * Wire contract: `{run_id, rating, note}` → gateway → model-gateway `/v1/feedback`,
+ * which checks that the caller owns the run before it stores anything. A
+ * zero-retention caller is refused (412) and nothing is stored. As in
+ * `submitFeedback`, no skill id is sent.
+ *
+ * Rejects with {@link ApiError} on failure, so a caller never shows a rating that was not stored.
  */
-export function describeFeedbackFailure(error: unknown): string {
+export async function submitRunFeedback(
+  runId: string,
+  rating: ChatFeedbackRating,
+  note?: string,
+): Promise<void> {
+  await requestJson('/api/v1/chat/feedback', {
+    method: 'POST',
+    body: JSON.stringify({ run_id: runId, rating, note }),
+  })
+}
+
+/**
+ * User-facing reason a rating did not stick. Keeps the wording in one place so
+ * the chat surface only has to decide *where* to show it. Norwegian, unless the
+ * caller passes its reader's chooser.
+ */
+export function describeFeedbackFailure(
+  error: unknown,
+  tr: (noText: string, enText: string) => string = (noText) => noText,
+): string {
   if (error instanceof ApiError) {
     if (error.code === 'turn_not_rateable') {
-      return 'Denne meldingen kan ikke vurderes lenger. Vurderingen ble ikke lagret.'
+      return tr(
+        'Denne meldingen kan ikke vurderes lenger. Vurderingen ble ikke lagret.',
+        'This answer can no longer be rated. The rating was not saved.',
+      )
     }
     if (error.status === 401 || error.status === 403) {
-      return 'Du har ikke tilgang til å vurdere denne meldingen. Vurderingen ble ikke lagret.'
+      return tr(
+        'Du har ikke tilgang til å vurdere denne meldingen. Vurderingen ble ikke lagret.',
+        'You do not have access to rate this answer. The rating was not saved.',
+      )
+    }
+    if (error.status === 404) {
+      return tr(
+        'Vi fant ikke kjøringen som skulle vurderes. Vurderingen ble ikke lagret.',
+        'The run to rate could not be found. The rating was not saved.',
+      )
     }
     if (error.status === 412) {
-      return 'Vurderinger lagres ikke når Zero Data Retention er aktivt.'
+      return tr(
+        'Vurderinger lagres ikke når Zero Data Retention er aktivt.',
+        'Ratings are not saved while zero data retention is on.',
+      )
     }
   }
-  return 'Kunne ikke lagre vurderingen. Prøv igjen.'
+  return tr('Kunne ikke lagre vurderingen. Prøv igjen.', 'The rating could not be saved. Try again.')
 }

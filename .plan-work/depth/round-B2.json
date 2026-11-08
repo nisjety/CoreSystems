@@ -1,0 +1,77 @@
+{
+ "packets": [
+  {
+   "key": "ws04-ws05-ws12-execution-core-owner-marker-rungate",
+   "rows": [
+    "D1-274",
+    "D1-275"
+   ],
+   "title": "execution-core: owner-approval marker call sites follow TOOL_CLASS_GATE via RunGate (never weaker)",
+   "brief": "PREVIOUS ATTEMPT: an earlier coder run on this packet died before reporting and left about 380 changed lines in these four files. Start by reading `git diff` of the four files: keep what is correct and matches this brief, fix or finish the rest. Do not start over from HEAD (you may not run git checkout).\n\nContext: WS05-S6 added `permission::RunGate` and `requires_durable_owner_approval_with` / `requires_consent_to_disclose_with` (apps/Model Plane/rust/services/execution-core/src/permission/mod.rs about lines 564-685). The posture path already uses RunGate, but these production sites still call the NAME predicate `crate::permission::requires_durable_owner_approval(tool_name)`, so a registry row with the durable_owner floor (e.g. an MCP tool) is not treated as an owner action even under TOOL_CLASS_GATE=enforce:\n- src/grpc.rs `reject_direct_owner_action` (about line 1196, used by ExecuteStep at about 1372)\n- src/runtime_loop/agent.rs `continuation_descriptor` (about line 7082: forces permission_mode \"ask\")\n- src/runtime_loop/mod.rs `permission_pause_cause` (about line 363, callers at about 751 and 815)\n- src/runtime_loop/resume.rs `releasable` (about line 121, callers about 162 and 500)\n\nDo: give each site the run's org and run id (all four have them in scope at the caller: RunAgentRequest req.org_id/req.run_id, ExecuteStep request, the step context) and make the OWNER marker = `name_predicate(tool) || RunGate::for_run(org, run).requires_durable_owner_approval(tool)`. The OR is deliberate: these sites reduce authority (refuse a direct call, refuse a release, force ask), so a declared view may ADD the owner marker but never remove it from a name the legacy predicate reserves (tickets.create etc.). For permission_pause_cause use the RunGate answer for the owner branch the same way (OR with the name). Thread the extra parameters through the function signatures and update the existing unit tests' call sites (grpc.rs tests at about 2250-2259, resume tests, agent tests).\n\nLeave the DISCLOSURE marker sites on the name predicate: approval_kind_for / approval_reason_for (agent.rs about 6893-6912) and the consent branch of permission_pause_cause. Row D1-273 (an `ask` floor reads as a disclosure under enforce) is an open owner decision; switching those sites would make that mislabel live.\n\nRegression tests: (1) with `RunGate::with_gate(ToolClassGate::Enforce, org, run)` and a recorded view (see `record_run_views` / ToolClassView usage in runtime_loop/effect.rs tests about 584-620) giving `mcp__srv__pay` floor DurableOwner: reject_direct_owner_action refuses it, releasable is false, the pause cause is OwnerEffectReserved, continuation_descriptor forces ask. (2) With the gate Off the same tool is treated exactly as today (not an owner action). (3) Under Enforce with a view that gives `tickets.create` floor None, it is STILL an owner action at all four sites. Since tool_class_gate() is Off under cfg(test), tests must construct RunGate::with_gate explicitly: add a small internal variant taking a RunGate where needed rather than reading the env.\n\nMust NOT change: behaviour with TOOL_CLASS_GATE off or shadow (byte-identical; by_gate returns legacy there); the two-loop separation; no new env vars. Files are CRLF: preserve line endings.",
+   "files": [
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib permission",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib runtime_loop",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib grpc"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  },
+  {
+   "key": "ws04-ws05-ws12-capability-core-tool-policy-wiring",
+   "rows": [
+    "D1-175",
+    "D1-179"
+   ],
+   "title": "capability-core: wire stored tool policies into EvaluatePolicy and main (switch stays off)",
+   "brief": "Context: WS05-S5 built per-tool policies in capability-core (`internal/policy/engine.go` EvaluateTool / DecideWithPolicies / WithToolPolicies / ToolPolicyEnforcedFromLookup, and the HTTP API `internal/api/tool_policies.go` NewToolPoliciesHandler, which also implements policy.ToolPolicySource via ActiveToolPolicies). None of it is wired: `internal/server/server.go` EvaluatePolicy (about lines 503-555) still calls `s.policy.EvaluateCapability(...)` then `policy.Decide(result, binding)`, `cmd/main.go` builds `pol := policy.New(reg).WithScopeResolver(scopeStore)` (about line 166) and never registers the tool-policies handler, and deploy compose has no TOOL_POLICY_ENFORCED line.\n\nDo:\n1. cmd/main.go: construct `toolPolicies := api.NewToolPoliciesHandler(pool)`; call `toolPolicies.Register(protectedMux)` next to the other `api.New...Handler(pool).Register(protectedMux)` calls (about lines 280-330); and change the engine to `policy.New(reg).WithScopeResolver(scopeStore).WithToolPolicies(toolPolicies, policy.ToolPolicyEnforcedFromLookup(os.Getenv))` (the handler must exist before the engine; reorder minimally). Log once at boot whether tool policies are enforced.\n2. internal/server/server.go EvaluatePolicy: replace the EvaluateCapability + Decide pair with `result, err := s.policy.EvaluateTool(ctx, capability, binding, req.GetUserId(), req.RunId, req.AgentId, orgID, req.Scope)` and return `s.policyResponse(req, orgID, capability, result, binding)`. Keep every earlier early return (tool_not_bound, capabilityPolicyBlockReason) exactly as is. With the switch off EvaluateTool equals gate + Decide(riskResult, binding), so decisions and signed evidence must be byte-identical to today.\n3. Same function: before evaluating, refuse a non-service caller that asserts someone else's user_id, exactly like ResolveToolBindings does (server.go about line 798): `principal.PrincipalType != \"service\" && req.GetUserId() != \"\" && req.GetUserId() != principal.ActorID` -> codes.PermissionDenied. (Use verifiedPrincipal instead of verifiedOrganizationID at the top.) Without this, once policies are enforced a person could load another person's `allow` policies by naming their id.\n4. apps/Model Plane/deploy/docker-compose.yml, capability-core service environment: add `TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}` with a one-line comment (WS05-S5: only the literal `true` enables; off = stored and ignored). The file is CRLF and has other people's uncommitted edits: change only your lines, preserve CRLF.\n5. apps/Model Plane/proto/model_plane/v1/capabilities.proto EvaluatePolicyResponse.policy_source comment (about line 219): add the three values \"tool_policy_never\", \"tool_policy_ask\", \"tool_policy_allow\" (a stored per-tool policy produced it; only with TOOL_POLICY_ENFORCED on). Mirror the identical comment text on the PolicySource field doc comment in apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go (comment only; do not touch descriptor bytes or anything else in the generated file).\n\nTests (add to internal/server, e.g. a new evaluate_policy_tool_policies_test.go using the existing fakes in the package): (a) with WithToolPolicies(fakeSource, false) a stored `never` policy does not change the decision and the fake source is never called; (b) with enforced=true a `never` policy denies with policy_source tool_policy_never; (c) a user principal asserting another user_id gets PermissionDenied, a service principal may assert it. Add a cmd/ wiring test like the existing *_wiring_test.go files if a seam exists; otherwise skip it.\n\nMust NOT change: switch default off; decisions with the switch off; the signed-evidence digest input (policy-v2 line around server.go:591); no new env names besides TOOL_POLICY_ENFORCED.",
+   "files": [
+    "apps/Model Plane/go/services/capability-core/cmd/main.go",
+    "apps/Model Plane/go/services/capability-core/internal/server/server.go",
+    "apps/Model Plane/deploy/docker-compose.yml",
+    "apps/Model Plane/proto/model_plane/v1/capabilities.proto",
+    "apps/Model Plane/go/gen/model_plane/v1/capabilities.pb.go"
+   ],
+   "new_files": [
+    "apps/Model Plane/go/services/capability-core/internal/server/evaluate_policy_tool_policies_test.go"
+   ],
+   "tests": [
+    "go test ./internal/server/ ./internal/policy/ ./internal/api/ ./cmd/",
+    "go vet ./..."
+   ],
+   "cwd": "apps/Model Plane/go/services/capability-core",
+   "severity": "high"
+  },
+  {
+   "key": "ws04-ws05-ws12-gateway-grant-fallback-and-probe-scope",
+   "rows": [
+    "D1-026",
+    "D1-463"
+   ],
+   "title": "model-gateway: narrower in-memory grant wins over an older durable one; probe reply carries conversation_only",
+   "brief": "Two independent model-gateway fixes merged because they share http_routes.rs.\n\nA) D1-026 (durable grant switch, WS04-S4). `with_local_fallback` in src/sse.rs (about line 9439) consults this replica's in-memory grant (`PlanModeStore::granted_rung`, coordinator.rs about 390) only when Session Core answered with NO grant. The memory copy is written only when an approval's SetRunMode failed transiently or the credential was waived (http_routes.rs about 8357-8371). So: older broad durable grant (DangerFullAccess) + newer narrower approval whose write failed (WorkspaceWrite in memory) -> the broad durable grant wins for up to 24 h. Fix in with_local_fallback: keep `read_failed` passthrough and the no-grant fallback exactly as now; when Session Core holds a rung AND memory holds one for the same org/thread, return the NARROWER by `mp_contracts::autonomy::rank` (on a tie keep Session Core's grant unchanged); when memory's is narrower, take memory's rung, `peek_approved_plan` and `grant_expires_at` (as the no-grant branch does) and log the same kind of info line (ids and rung label only). To stop a stale narrower copy from shadowing a later successful approval: add `PlanModeStore::clear_grant(&self, org_id, thread_id)` in coordinator.rs (org-checked: removes the entry only if its org matches) and call it in http_routes.rs plan approval when `durable_grant && durably_recorded` (right after line ~8339's computation). Do not touch model-gateway src/grpc.rs (it has someone else's uncommitted edits); its fallback record path stays as is. Tests (sse.rs test module near `this_replicas_unrecorded_grant_is_honoured_only_when_session_core_holds_none`, about line 19989): keep that test passing (Session Core ReadOnly still wins over memory WorkspaceWrite); add: Session Core DangerFullAccess + memory WorkspaceWrite -> WorkspaceWrite with memory's plan id; equal rungs -> Session Core's grant unchanged; other org's memory entry ignored. coordinator.rs test: clear_grant removes own org's entry, leaves another org's.\n\nB) D1-463 (send receipts on, bus on). For a stream on another replica `queued_input::stream_thread` (queued_input.rs about 492) returns `StreamThread::Peer(thread_id)` without the stream's conversation_only scope, so `queue_input_with_receipts` (http_routes.rs about 8835-8844) persists under a guessed ordinary scope and retries as conversation-only on FAILED_PRECONDITION. Fix: add `#[serde(default, skip_serializing_if = \"Option::is_none\")] pub conversation_only: Option<bool>` to `RunControlReply` (run_control.rs about 183); the owner fills it for a probe from the queued-input registry (run_control.rs about 857 fills thread_id via `queued_inputs.thread_for`; use the registry's `stream_for`, which returns (thread_id, conversation_only)); change `StreamThread::Peer` to carry `{ thread_id, conversation_only: Option<bool> }`; in http_routes use the known scope when Some and keep the existing guess-and-retry ONLY when None (an older replica that does not send the field). Update the field-set pin test (run_control.rs about 1263-1271) to include the optional key when set; PROTOCOL_VERSION stays the same (additive optional field). Add a test that a probe reply for a conversation-only stream carries conversation_only=true and that the receipts path persists once, without the retry, when the scope is known (use the existing fake/two-registry test setups in run_control.rs/http_routes.rs tests).\n\nMust NOT change: switches default off (durable grant switch, MODEL_GATEWAY_SEND_RECEIPTS, MODEL_GATEWAY_RUN_CONTROL_BUS); behaviour with those off; no message text or bearer on the bus (the reply carries ids and a bool only); ZDR gate untouched. sse.rs is a size-ratchet hot file: add as few lines as possible. Preserve CRLF.",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/coordinator.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/run_control.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/queued_input.rs"
+   ],
+   "new_files": [],
+   "tests": [
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib grant",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib run_control",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib queued_input",
+    "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib http_routes"
+   ],
+   "cwd": "apps/Model Plane/rust",
+   "severity": "high"
+  }
+ ]
+}

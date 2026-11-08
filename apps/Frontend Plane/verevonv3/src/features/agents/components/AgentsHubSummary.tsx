@@ -53,7 +53,7 @@ export function AgentsHubSummary() {
       </h2>
       <div class="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <AgentsCard agents={agents} />
-        <AutomationsCard schedules={schedules} />
+        <AutomationsCard schedules={schedules} ready={() => Boolean(orgId() && myUserId())} />
         <SummaryCard
           eyebrow={i18n.tr('Kjøringer', 'Runs')}
           href="/agents/runs"
@@ -151,7 +151,7 @@ function AgentsCard(props: { agents: ResourceAccessor<readonly AgentDefinitionIn
   )
 }
 
-function AutomationsCard(props: { schedules: ResourceAccessor<CronSchedule[]> }) {
+function AutomationsCard(props: { schedules: ResourceAccessor<CronSchedule[]>; ready: () => boolean }) {
   const i18n = useI18n()
   const localeTag = () => (i18n.locale() === 'no' ? 'nb-NO' : 'en-US')
   const rows = createMemo((): AutomationRow[] => {
@@ -176,7 +176,7 @@ function AutomationsCard(props: { schedules: ResourceAccessor<CronSchedule[]> })
       linkLabel={i18n.tr('Åpne automatiseringer', 'Open automations')}
     >
       <Show
-        when={!props.schedules.loading}
+        when={props.ready() && !props.schedules.loading}
         fallback={<p role="status">{i18n.tr('Henter automatiseringene …', 'Loading automations…')}</p>}
       >
         <Show

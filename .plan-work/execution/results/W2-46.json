@@ -1,0 +1,209 @@
+{
+ "batchId": "W2-46",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS14-S5",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/proto/model_plane/v1/orchestration.proto",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/0071_run_question_consume.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/migrations/revert/0071_run_question_consume.down.sql",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/resume.rs",
+    "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/ask.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib ask_resume (in apps/Model Plane/rust)",
+     "outcome": "1 passed, 0 failed, exit 0. The moved switch test, rerun on the final resume.rs."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib enforce_",
+     "outcome": "9 passed, 0 failed, exit 0. Round-one question validators in grpc.rs, first observed run."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib resume_names",
+     "outcome": "1 passed, 0 failed, exit 0."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core terminalization",
+     "outcome": "18 passed, 0 failed, 17 ignored (DB, not run here), exit 0. Includes the static order test for the resume hold."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core run_question",
+     "outcome": "19 passed, 0 failed, 14 ignored (DB, not run here), exit 0. Round-one static tests."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core consume_",
+     "outcome": "5 passed, 0 failed, 22 ignored (DB, not run here), exit 0. Round-one consume_question_response and gate-order tests."
+    },
+    {
+     "command": "Not run by this agent: ignored DB tests (docker, harness), go test and vet, buf, BFF gateway cargo test, SPA pnpm suites",
+     "outcome": "Not run. No Go, BFF or SPA file changed this round, and the DB tests are the lead's (db_tests_written)."
+    }
+   ],
+   "db_tests_written": [
+    "run_question_one_answer_is_spent_once_and_the_same_claim_replays_it",
+    "run_question_two_claims_racing_for_one_answer_see_exactly_one_winner",
+    "run_question_a_spend_is_refused_for_another_owner_run_delivery_or_state",
+    "run_question_a_lapsed_resume_question_is_expired_not_spent",
+    "an_answered_resume_question_holds_its_run_until_its_window_closes"
+   ],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/session-core/src/grpc.rs: import run_question_consume_service_server::RunQuestionConsumeServiceServer from mp_contracts::model_plane::v1; clone the OrchestrationGrpc handle before the OrchestrationCoreServiceServer::with_interceptor call; add .add_service(RunQuestionConsumeServiceServer::with_interceptor(<clone>, auth.clone())) beside ApprovalScopeGrantServiceServer. Until this lands ConsumeRunQuestion answers UNIMPLEMENTED.",
+    "Go: buf generate for orchestration.proto (RunQuestionConsumeService and ConsumeRunQuestionRequest/Response); go build and go vet each service that imports model_plane/v1. Not hand-edited.",
+    "deploy/docker-compose.yml (not owned): add AGENT_ASK_USER_RESUME_ENABLED: ${AGENT_ASK_USER_RESUME_ENABLED:-false} to the execution-core block beside AGENT_ASK_USER_ENABLED. Default off.",
+    "Before merge, confirm no database applied the e94252c1b version of migration 0071. The in-place amendment changes its sqlx checksum, and session-core would refuse to start on a changed applied migration.",
+    "Update the WS14-S5 entry in apps/Model Plane/docs/decisions/ledger.md (about line 5580): it still says ConsumeRunQuestion is not built and that the hold covers only requested questions.",
+    "Run the five ignored DB tests in db_tests_written against a scratch Postgres whose database name contains test, e.g. cargo test -p session-core --bin session-core run_question -- --ignored --test-threads=1 and the same with resume_question."
+   ],
+   "deviations": [
+    "The question resume switch lives in runtime_loop/resume.rs (owned, beside loop_resume_enabled), not runtime_loop/mod.rs as the reviewer suggested. resume.rs already holds the other resume switches. ask.rs is back to HEAD.",
+    "Fixes (1), (2), (3) and (5) are not built this round. create_run_question keeps refusing delivery resume, and run_agent keeps refusing question continuations with question_resume_unavailable, so nothing is consumed without being applied.",
+    "The unspent-answer hold in terminalization is one hour from answered_at, taken from DEC-05's resume TTL, because the spend does not read expires_at."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs (one registration, lead_todo 1)",
+    "apps/Model Plane/deploy/docker-compose.yml (one env entry, lead_todo 3)",
+    "apps/Model Plane/docs/decisions/ledger.md (WS14-S5 entry, lead_todo 5)",
+    "The SSE event taxonomy doc under apps/Model Plane/docs (regenerate with scripts/gen-sse-event-taxonomy.py when RunPausedForInput is added; not needed yet)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Missing deliverable, execution-core runtime_loop/agent.rs, resume.rs and mod.rs: the executor input pause is not built. execute_ask_user does not create a resume question, the run does not park with PendingPause kind input (pause_ref question_id), and on resume the answer is not applied as the stage-2 tool result or the stage-1 brief. check_fold and restore_in_place still accept only Approval. The lead's re-scope ('build the rest end to end') makes this the core of the row. Choose the carrier for the authority and tool snapshot first (depth finding 1), then build it.",
+     "Missing deliverable, execution-core grpc.rs run_agent: question continuations are always refused with question_resume_unavailable, so ConsumeRunQuestion is never called and the answer is never applied, even with every switch on. The validators are in place, but the row's resume path cannot run at all.",
+     "Missing deliverable, model-gateway http_routes.rs, sse.rs and sse_events.rs: there is no /continue branch that accepts question_id and answer (409 continuation_already_consumed) and no RunPausedForInput / awaiting_input frame.",
+     "Missing deliverable, the Verevon v3 files orchestration-client.ts, chat-run-continue-contract.ts, apps/gateway domains/orchestration.rs, use-chat-controller.ts and its question test: there is no BFF continue body for a question, and the SPA has no continueRun question form and no answerQuestion for delivery resume.",
+     "Missing deliverable, session-core orchestration_grpc.rs create_run_question: it still refuses delivery resume. The row says to accept it once the pieces above land."
+    ],
+    "dod_gaps": [
+     "Register RunQuestionConsumeServiceServer in session-core/src/grpc.rs (shared edit). Until then ConsumeRunQuestion answers UNIMPLEMENTED.",
+     "Go buf generate for orchestration.proto (RunQuestionConsumeService), then go build and go vet each service that imports model_plane/v1.",
+     "Add AGENT_ASK_USER_RESUME_ENABLED (default false) to the execution-core block of deploy/docker-compose.yml.",
+     "Run the 5 ignored DB tests (the two-consumer race, replay, refusals, lapse, answered-hold) against a scratch Postgres.",
+     "Confirm no database applied the e94252c1b version of migration 0071. The in-place amendment changes its sqlx checksum.",
+     "Update the WS14-S5 entry in the decisions ledger.",
+     "Live proof of the end-to-end ask -> pause -> answer -> /continue -> same-run resume, once it is built."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "The question apply has no authority or tool snapshot. Approvals keep one in approvals.continuation_descriptor_json; a question has no such row. Stage 2 needs the pause fold written for an input pause (PauseFold in fold.rs) and check_fold (resume.rs ~1204 refuses any pending kind but Approval) and restore_in_place (resume.rs ~1595 builds an approval pause_ref) extended. Stage 1 needs the tools and authority from the same snapshot or a full gateway rebuild of the turn. Choose the carrier before building the pause: the pause fold (needs the checkpoint flags on) or a descriptor column on run_questions (amends 0071 again)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 0071 was amended in place after commit e94252c1b. If any database applied the earlier file, sqlx checksum validation stops session-core at startup. Confirm before merge (carried from round one)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "consume_run_question does not check the run status, and the spend ignores expires_at. After the one-hour hold lapses, recovery can terminalize the answered run while a continuation can still be spent. The gateway preflight must refuse a finished run before any spend (carried from round one)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "ConsumeRunQuestion writes no audit or outcome event, unlike ConsumeApproval (RunResumedAfterApproval). The audit risk class needs an owner decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The gateway continue branch needs a client for RunQuestionConsumeService. How the gateway builds its orchestration clients is not checked yet; state.rs and main.rs are outside the owned set."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "For the awaiting_input frame, requested_question_for_run (model-gateway sse.rs, the user_question path) can supply the question id without a new RunAgentResponse field. A new field would touch 43 struct literals across execution-core, model-gateway and tests."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "A question pause has no authority or tool snapshot to resume under (approvals keep one in continuation_descriptor_json). The owner or lead must pick the carrier before the executor pause is built: the pause fold, or a descriptor column on run_questions, which would amend 0071 again."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Migration 0071 was amended in place after commit e94252c1b (it adds consumed_claim_hash and changes the CHECK). Any database that applied the earlier file will fail sqlx checksum validation, and session-core will not start."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "consume_run_question checks neither the run status nor any spend window. After the one-hour answered-hold in has_pending_resume_question lapses, recovery can terminalize the run while its answer can still be spent. A run-status predicate or an answered_at window in the CAS would close this."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "ConsumeRunQuestion writes no audit or outcome event, unlike ConsumeApproval (RunResumedAfterApproval). This matters because audit is one of the slice's risk classes."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The RunQuestionConsumeService impl is not registered anywhere, so it is unreachable at runtime until the shared grpc.rs edit lands. The compiler will not flag it, because it is a trait impl."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "git status lists ask.rs as M, but git diff --quiet shows no content change. It is only a stale stat entry and needs no action beyond a refresh."
+    }
+   ],
+   "tester": {
+    "all_passed": true,
+    "results": [
+     {
+      "command": "cargo test -q -p execution-core --lib ask_resume",
+      "outcome": "1 passed, 0 failed, exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib enforce_",
+      "outcome": "9 passed, 0 failed, exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p execution-core --lib resume_names",
+      "outcome": "1 passed, 0 failed, exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core terminalization",
+      "outcome": "18 passed, 0 failed, 17 ignored (DB), exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core run_question",
+      "outcome": "19 passed, 0 failed, 14 ignored (DB), exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo test -q -p session-core --bin session-core consume_",
+      "outcome": "5 passed, 0 failed, 22 ignored (DB), exit 0",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p execution-core --lib --bins --tests",
+      "outcome": "exit 0, no errors",
+      "passed": true
+     },
+     {
+      "command": "cargo check -p session-core --bins --tests",
+      "outcome": "exit 0, no errors (session-core has no lib target)",
+      "passed": true
+     }
+    ]
+   },
+   "unreviewed_risk": [
+    "authority",
+    "audit"
+   ],
+   "notes": "Partial. Fixed this round: (6) the resume switch moved out of ask.rs into the owned runtime_loop/resume.rs as ASK_RESUME_ENV, ask_resume_on_when and ask_resume_enabled. It still reads the literal \"true\" plus the two continuation switches, as before, and grpc.rs calls runtime_loop::resume::ask_resume_enabled(). ask.rs is byte-identical to HEAD (blob 54f12407); git status shows it as M only from a stale stat entry, so the net change is none. (4) has_pending_resume_question in terminalization.rs also holds a resume question that is answered and not yet spent, for one hour from answered_at (DEC-05's resume window). The spend ignores expires_at, so the window is set from the answer. A new ignored DB test covers it. (5) create_run_question still refuses delivery resume. That is correct while the executor half is unbuilt. NOT done: fixes (1), (2) and (3). There is no executor input pause, no apply on resume, no gateway continue branch or awaiting_input frame, no BFF continue body and no SPA change. The blocker is a design decision (depth finding 1). A question pause has no authority or tool snapshot to resume under: approvals keep one in continuation_descriptor_json, and questions have no such row. Stage 2 needs the pause fold written for an input pause and check_fold and restore_in_place extended past Approval. Stage 1 needs the same snapshot or a full gateway rebuild of the turn. A pause without the apply would park runs on an answer that cannot be applied, so none was added. Everything stays inert with the switches off: the question refusal in run_agent and the refusal of delivery resume both remain."
+  }
+ ]
+}

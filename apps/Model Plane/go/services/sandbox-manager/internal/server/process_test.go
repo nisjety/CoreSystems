@@ -830,3 +830,70 @@ func TestReadProcessOutputRefusesAProcessOutsideTheDecisionsSpace(t *testing.T) 
 		t.Fatal("output was read for a process outside the decision's Space")
 	}
 }
+
+// TestReadProcessOutputRefusesAProcessOfAnotherRun: the owner read path names
+// the run whose process it reads. A process another run started is NotFound,
+// for the reason a process of another Space is: the id alone must not tell the
+// caller that it exists.
+func TestReadProcessOutputRefusesAProcessOfAnotherRun(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{
+		getResp: &process.Process{ID: "proc-1", OrgID: "org-1", SpaceID: "space-1", RunID: "run-other"},
+	}
+	s := admittedReadServer(store, 4)
+
+	_, err := s.ReadProcessOutput(context.Background(), &ReadProcessOutputRequest{
+		ProcessId: "proc-1", SpaceId: "space-1", RunId: "run-1",
+		SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	})
+	if status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound", status.Code(err))
+	}
+	if store.readOrg != "" {
+		t.Fatal("output was read for a process of another run")
+	}
+}
+
+// TestReadProcessOutputReadsTheNamedRunsProcess: the run that did start the
+// process reads it, under the decision's ceiling exactly as any human read does.
+func TestReadProcessOutputReadsTheNamedRunsProcess(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{
+		getResp: &process.Process{ID: "proc-1", OrgID: "org-1", SpaceID: "space-1", RunID: "run-1"},
+	}
+	s := admittedReadServer(store, 4)
+
+	if _, err := s.ReadProcessOutput(context.Background(), &ReadProcessOutputRequest{
+		ProcessId: "proc-1", SpaceId: "space-1", RunId: "run-1", AfterSeq: 2,
+		SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	}); err != nil {
+		t.Fatalf("ReadProcessOutput: %v", err)
+	}
+	if store.readOrg != "org-1" || store.readSeq != 2 {
+		t.Fatalf("read args = %q/%d", store.readOrg, store.readSeq)
+	}
+	if store.readCeiling == nil || store.readCeiling.RecipientAudienceRevision != 4 {
+		t.Fatalf("ceiling = %+v, want the decision's revision 4", store.readCeiling)
+	}
+}
+
+// TestReadProcessOutputWithoutARunIsUnchanged: a read that names no run is the
+// Space-level read it always was, so a process of any run in the Space still
+// reads.
+func TestReadProcessOutputWithoutARunIsUnchanged(t *testing.T) {
+	t.Parallel()
+	store := &stubProcessStore{
+		getResp: &process.Process{ID: "proc-1", OrgID: "org-1", SpaceID: "space-1", RunID: "run-other"},
+	}
+	s := admittedReadServer(store, 4)
+
+	if _, err := s.ReadProcessOutput(context.Background(), &ReadProcessOutputRequest{
+		ProcessId: "proc-1", SpaceId: "space-1",
+		SpaceReadDecisionRef: "read-1", SpaceReadDecisionToken: "token",
+	}); err != nil {
+		t.Fatalf("ReadProcessOutput: %v", err)
+	}
+	if store.readOrg != "org-1" {
+		t.Fatal("a Space-level read of a process in the decision's Space was refused")
+	}
+}

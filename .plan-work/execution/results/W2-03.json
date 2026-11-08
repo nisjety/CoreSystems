@@ -1,0 +1,639 @@
+{
+ "batchId": "W2-03",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS26-S2.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/Cargo.toml",
+    "apps/Model Plane/rust/Cargo.lock (unchanged this round; updated by the earlier cargo build)",
+    "apps/Model Plane/rust/crates/mp-content-safety/Cargo.toml",
+    "apps/Model Plane/rust/crates/mp-content-safety/src/lib.rs",
+    "apps/Model Plane/rust/crates/mp-content-safety/src/normalize.rs",
+    "apps/Model Plane/rust/crates/mp-content-safety/src/rules.rs",
+    "apps/Model Plane/rust/crates/mp-content-safety/src/scan.rs",
+    "apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs",
+    "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus.rs",
+    "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus/attacks.jsonl",
+    "apps/Model Plane/rust/crates/mp-content-safety/tests/corpus/benign.jsonl",
+    "apps/Model Plane/rust/services/model-gateway/Cargo.toml",
+    "apps/Model Plane/rust/services/model-gateway/src/moderation.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/security_events.rs",
+    "apps/Model Plane/rust/services/execution-core/Cargo.toml",
+    "apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/compaction_parity_contract.rs",
+    "apps/Model Plane/rust/services/session-core/Cargo.toml"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p mp-content-safety (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "pass: 18 unit tests and 7 corpus tests"
+    },
+    {
+     "command": "cargo test -q --release -p mp-content-safety --test corpus (three repeat runs)",
+     "outcome": "pass: 7/7 each run, including a_four_mib_benign_payload_scans_within_budget under 250 ms. Stage probe (temporary, removed) gave about 156-158 ms total for the 4 MiB scan in release; before this round it was 240-375 ms."
+    },
+    {
+     "command": "cargo test -q -p execution-core --lib provenance",
+     "outcome": "pass: 12 passed, 1268 filtered"
+    },
+    {
+     "command": "cargo test -q -p execution-core --test compaction_parity_contract",
+     "outcome": "pass: 11 passed"
+    },
+    {
+     "command": "cargo test -p model-gateway --lib moderation / security_events",
+     "outcome": "NOT RUN: the lib test target does not compile until the two shared test-literal edits in lead_todo are applied (fix 2 and fix 3). Production lib build passed in the earlier round."
+    },
+    {
+     "command": "cargo clippy -p mp-content-safety (pedantic workspace lints)",
+     "outcome": "2 warnings, both on code not changed this round: scan.rs:165 redundant closure in flag_raw_characters, normalize.rs:60 identical match arms in confusable_fold"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs: after line 509 (inside fn clean(), ScreeningOutcome literal) and after line 516 (inside fn flagged()), add the line `            rule_ids: Vec::new(),` with the same indentation as the content_hash line above it. Needed before the model-gateway --lib test target compiles.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs: after lines 10506, 10526 and 10548 (the three test ScreeningOutcome literals), add `                rule_ids: Vec::new(),` after each content_hash line. Line numbers have drifted from the plan's 10504/10524/10546.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: add `CONTENT_SAFETY_NORMALIZE: ${CONTENT_SAFETY_NORMALIZE:-true}` to the environment of the model-gateway service and of the execution-core service (default ON, explicit falsey opt-out).",
+    "shared-edit apps/Model Plane/docs/ZDR.md: add a row 'Injection screening (deterministic local; semantic skipped)' noting the scan is pure CPU on the payload, nothing leaves the process, and only rule ids and hashes are published.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add the DEC-31 / WS26-D1 entry: one shared crate mp-content-safety supersedes the hand-sync note on the two scanner and TrustClass copies; CONTENT_SAFETY_NORMALIZE default on, tighten-only; compaction_parity_contract re-pointed.",
+    "After applying the two test-literal edits: cd 'apps/Model Plane/rust' && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib moderation and ... --lib security_events. Those two are not yet run."
+   ],
+   "deviations": [
+    "CONTENT_SAFETY_NORMALIZE defaults ON, not OFF as the general rule requires; the slice row and batch summary both specify default on, tighten-only, with a falsey opt-out and unknown values keeping it on.",
+    "ScreeningOutcome (model-gateway) and Provenance (execution-core) gained a rule_ids field, which forces test-literal edits in two non-owned files (listed in lead_todo).",
+    "session-core/Cargo.toml gained the mp-content-safety path dependency as the row names, but no session-core code uses it yet.",
+    "blake3 is not a dependency of the crate; the content hash stays in the services.",
+    "BidiControl flags only override and isolate controls (U+202A-202E, U+2066-2069); LRM/RLM and soft hyphen are stripped silently."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs (test helpers clean()/flagged(): add rule_ids field)",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs (three test ScreeningOutcome literals: add rule_ids field)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/crates/mp-content-safety/src/scan.rs (spaced_matcher / marker_hits, the letters-only pass): the pass joins ordinary space-separated words and ignores the colon in markers, so default-on normalised mode flags plain English. Reproduced with the crate under the default mode: 'We designed a new system prompt for the support bot last week.' is a hit (injection.new_system_prompt) and 'The team will override the system prompt in the staging config.' is a hit (injection.override_the_system_prompt). Fix so the letters-only pass cannot join ordinary words separated by spaces (only the spelled-out form it exists for, e.g. 'i.g.n.o.r.e p-r-e-v-i-o-u-s', should still hit, and the existing test spaced_out_long_marker_is_caught_by_the_letters_only_pass must stay green). Add these sentences and similar ordinary-prose cases to tests/corpus/benign.jsonl so the zero-benign gate covers them; re-run the corpus gate and the release timing test.",
+     "Shared edits the lead must apply before the model-gateway test target compiles (the slice added ScreeningOutcome.rule_ids, so these literals no longer compile): apps/Model Plane/rust/services/model-gateway/src/semantic_screening.rs after lines 509 and 516 (inside fn clean() and fn flagged()), and apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs after lines 10506, 10526 and 10548, each `rule_ids: Vec::new(),` at the indentation of the content_hash line above. Verified: with exactly these five lines added (in a scratch copy), model-gateway --lib moderation (25 passed) and security_events (13 passed) are green. Without them the lib test target does not compile."
+    ],
+    "dod_gaps": [
+     "Do-run and chat evidence on the dev stack (rebuild model-gateway and execution-core, fixture page with an obfuscated override phrase, NATS subscription capture, counter snapshot, NATS and compose wiring for CONTENT_SAFETY_NORMALIZE) needs docker and the live stack; this verifier did not run docker and cannot close it.",
+     "Shared compose and docs edits (docker-compose.yml CONTENT_SAFETY_NORMALIZE for model-gateway and execution-core, ZDR.md row, decisions ledger DEC-31 entry) are not applied; the lead applies them from lead_todo.",
+     "Model-gateway and execution-core test commands cannot be run in the live worktree until the other slices' uncommitted proto and test-mock work is resolved; the lead needs the owner of WS22-S1 and the record_scheduled_run_result work to make the tree compile before the plan's test commands can be rerun in place."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Release 4 MiB benign scan is about 156 ms here, against a 250 ms budget (margin about 1.6x). fold() is now the largest stage at about 60 ms (strip, NFKC quick check, lowercase, whitespace collapse). Watch the budget on CI hardware."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Emoji subdivision flags (black flag plus tag sequence) contain tag-block characters and will be flagged as TagBlock; add an exemption for a valid subdivision sequence before enforce."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The corpus is synthetic (templated obfuscations of the 41 markers and hand-written benign lines); paraphrase and split-sentence attacks are S8 work."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Two pre-existing pedantic clippy warnings in code this round did not touch: scan.rs:165 (redundant closure) and normalize.rs:60 (identical match arms in confusable_fold)."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "grounding.rs and retrieval.rs call moderation::scan_injection, so they also get normalisation and the new flags; their own tests were not run this round."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "CONTENT_SAFETY_NORMALIZE defaults ON (the slice row and batch summary both specify default on, tighten-only, falsey opt-out), which conflicts with the verifier rule that switches default off; the lead must confirm the default-on decision (it is tighten-only: flags add a NOTE and an audit event, nothing is withheld in frame mode) before this is treated as a pass."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "Emoji subdivision flags (for example England and Scotland flag sequences containing tag-block characters) are flagged as obfuscation.tag_block under default-on mode: a benign false positive, verified by a scratch probe; add an exemption for a valid subdivision tag sequence and a benign corpus row before default-on, as the implementer's own risk note says."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "Formatting: rustfmt --check fails on the new crate (normalize.rs:132, rules.rs:33 and 48, scan.rs at 208, 239, 276, 294, 302, 315, 322, 342, trust.rs:89 and 100) and in owned test code (moderation.rs lines 955 and 982 have a column-zero '};', security_events.rs test lines near 168 and 175); the plan's T1 gate runs cargo fmt --all -- --check, so run cargo fmt on the owned files."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Benign corpus has no English prose using marker-like phrases, no emoji flags and no ordinary Cyrillic or Greek prose beyond the existing rows, so the zero-benign gate could not catch the prose false positive or the emoji false positive; grow benign.jsonl with those classes."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "grounding.rs and retrieval.rs call moderation::scan_injection, which now normalises and adds flags; their tests were not run this round (implementer note, and not run by this verifier either)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Release timing: 4 MiB benign scan passes the 250 ms budget (release corpus 7/7 green) with about 1.6x margin; the implementer measured about 156 ms, and CI hardware may differ; keep the timing test and watch it."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Zero-width InvisibleInWord flag only checks immediate ASCII neighbours, so an invisible character next to a non-ASCII letter is not flagged as InvisibleInWord; the marker still matches after fold, so detection holds, only the flag is missed."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "session-core/Cargo.toml adds mp-content-safety with no use in session-core yet; the plan asks for it, but it is a dead dependency until WS07/WS26-S4 lands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The implementer reports two pedantic clippy warnings in unchanged code (scan.rs:165 redundant closure, normalize.rs:60 identical match arms); not re-run by this verifier."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P1",
+     "text": "Shared worktree is not in a compiling state for this slice's other crates, from uncommitted work in other slices: execution-core lib fails with AcquireLeaseRequest missing field zdr (sandboxes.proto zdr = 8 is uncommitted WS22-S1 work, sandbox_manager_client.rs:201), and the model-gateway test target fails with E0046 missing record_scheduled_run_result in src/grpc.rs test mock; HEAD itself does not compile execution-core tests standalone. The plan's execution-core and model-gateway test commands therefore cannot be run in-tree until those owners land; this verifier used a scratch copy with two scratch-only patches (zdr: false literal, and a stub for the missing trait method)."
+    }
+   ],
+   "unreviewed_risk": [
+    "policy",
+    "zdr"
+   ],
+   "notes": "Fix 1 done: marker matching in scan.rs now uses a Matcher that groups needles by their first byte pair and scans each text once (plain text and letters-only text), replacing about 55 full-text contains passes; letters-only text is built once per marker_hits call with a preallocated buffer. flag_raw_characters skips the flag checks for ASCII characters (no flagged character is ASCII); fold preallocates its strip buffer. Results are unchanged: legacy path untouched, corpus hit and benign counts identical, rule ids identical. Fixes 2 and 3 are shared edits the lead applies (see lead_todo); I did not edit those files. Cargo.lock and dependencies unchanged this round. Only the CARGO_TARGET_DIR C:/dev/mp-target-w2 target was used; no copies were built and no docker or DB harness was run. Temporary probe test and timing lines were removed. A scratch backup of the intermediate scan.rs is in the scratchpad only."
+  },
+  {
+   "id": "WS20-S1",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/proto/model_plane/v1/sessions.proto",
+    "apps/Model Plane/rust/services/session-core/migrations/0056_cron_fire_run_link.sql",
+    "apps/Model Plane/rust/services/session-core/migrations/revert/0056_cron_fire_run_link.down.sql",
+    "apps/Model Plane/rust/services/session-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/session-core/src/terminalization.rs",
+    "apps/Model Plane/rust/services/execution-core/src/grpc.rs",
+    "apps/Model Plane/go/services/capability-core/internal/cron/sweeper.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/workplane_apis.go",
+    "apps/Model Plane/go/services/capability-core/internal/cron/cron_fires_test.go",
+    "apps/Model Plane/go/services/capability-core/internal/api/cron_fires_test.go"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p session-core --bin session-core scheduled (in apps/Model Plane/rust)",
+     "outcome": "ok: 9 passed, 0 failed, 6 ignored (the DB tests need DATABASE_URL and were not run)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib scheduled_result",
+     "outcome": "ok: 2 passed, 0 failed. The test target compiles now because agent.rs already contains the MockSession stub at line 9284 in the tree (not added by me)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo check -q -p execution-core --lib",
+     "outcome": "exit 0, warnings only"
+    },
+    {
+     "command": "go test -count=1 ./internal/cron/... ./internal/api/... (capability-core)",
+     "outcome": "ok, both packages pass"
+    },
+    {
+     "command": "go vet ./internal/cron/... ./internal/api/... (capability-core)",
+     "outcome": "clean"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib --no-run",
+     "outcome": "FAILED to compile: E0046 missing record_scheduled_run_result in model-gateway/src/grpc.rs:3749 (shared file, not mine), plus E0063 missing rule_ids in semantic_screening.rs:507 and :514 (WS26 batch, not this slice)"
+    }
+   ],
+   "db_tests_written": [
+    "session-core grpc.rs: record_scheduled_run_result_appends_once_and_completes_receipt (extended: seeds cron_schedules and cron_fires, asserts the fire is completed with run_id set)",
+    "session-core grpc.rs: record_scheduled_run_result_refuses_zdr_run (unchanged)",
+    "session-core grpc.rs: record_scheduled_step_receipt_settles_failed_and_unknown_fires (new: failed settles to failed, unknown_outcome settles to unknown, with run_id and thread_id linked)"
+   ],
+   "lead_todo": [
+    "Run DB tests (lead only, never by this agent): cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p session-core --bin session-core record_scheduled -- --ignored --test-threads=1 with DATABASE_URL set to the disposable Postgres with session-core migrations.",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/src/grpc.rs (impl SessionCore for MockSessionCore, line 3749): add async fn record_scheduled_run_result(&self, _: Request<mp_contracts::model_plane::v1::RecordScheduledRunResultRequest>) -> Result<Response<mp_contracts::model_plane::v1::RecordScheduledRunResultResponse>, Status> { Err(Status::unimplemented(\"record_scheduled_run_result not used\")) }. Without it model-gateway --lib does not compile (E0046).",
+    "shared-edit apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs (impl SessionCore for ScriptedSession, line 256): same stub, returning unimplemented_rpc(\"record_scheduled_run_result\") in that file's style.",
+    "Already present, no action beyond committing them with this slice: apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs line 9284 (MockSession stub) and apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs line 1268 (stub). Confirm they are in the lead's commit set.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: pass SESSION_CORE_SCHEDULED_RESULT_PERSIST through to session-core and execution-core (default unset/false).",
+    "shared-edit apps/Model Plane/docs/ZDR.md: a scheduled run's answer is persisted only when SESSION_CORE_SCHEDULED_RESULT_PERSIST is true, refused for zdr and zdr_waived runs; receipt and fire status are numeric or status only.",
+    "zdr-posture-matrix.json (not owned): add golden row scheduled_run = refuse for ZDR and waived cells.",
+    "Regenerate Go bindings apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go and sessions_grpc.pb.go (buf generate) after the proto change; no Go code uses the new types yet.",
+    "Deploy order: apply session-core migration 0056 before capability-core starts the new sweeper (it inserts fire_key unconditionally). Ship session-core first, then execution-core with the flag on; never turn the execution-core flag on while session-core is off.",
+    "Live proof (lead only): flag on, fire completes with run_id/thread_id/status in psql; GET /api/v1/cron/{id}/fires; GetThread shows the answer; Temporal history holds no output text."
+   ],
+   "deviations": [
+    "Fix 2 is implemented through the receipt RPC (settle_fire argument, gated by the result switch) instead of routing failed and unknown outcomes through RecordScheduledRunResult. Execution-core is unchanged. Reason: the result RPC refuses terminal runs and checks the thread binding, which would turn early-return failures into errors and leave claims open.",
+    "unknown_outcome settles the fire to status 'unknown' (not 'failed'), matching the sweeper vocabulary in plan S8. cron_fires.outcome holds the step status.",
+    "record_scheduled_step_receipt_inner gained a settle_fire bool argument; its three existing DB test call sites pass false.",
+    "The reviewer's shared-file stubs (items 3 to 6) were not applied by me: they are outside the owned list and go to lead_todo as shared-edit lines."
+   ],
+   "needs_other_files": [],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Shared edit, outside this slice's ownership set, applied by the lead before commit: add `async fn record_scheduled_run_result(&self, _: Request<mpv1::RecordScheduledRunResultRequest>) -> Result<Response<mpv1::RecordScheduledRunResultResponse>, Status> { Err(Status::unimplemented(\"record_scheduled_run_result not used\")) }` to `impl SessionCore for MockSessionCore` in apps/Model Plane/rust/services/model-gateway/src/grpc.rs (about line 3749) and to `impl SessionCore for ScriptedSession` in apps/Model Plane/rust/services/model-gateway/tests/usage_meter_contract.rs (about line 256), in that file's own style. Why: the new sessions.proto RPC is a required trait method, so both impls fail with E0046 and `cargo test -p model-gateway` does not compile. Verified by reading the impl blocks against the new trait method; I did not compile model-gateway. The stubs already present in execution-core agent.rs (about line 9284) and model-gateway tests/e2e_invoke_chain_test.rs (about line 1268) need no change."
+    ],
+    "dod_gaps": [
+     "Lead-only: run the new DB tests against a disposable Postgres with session-core migrations: cd \"apps/Model Plane/rust\" && CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -p session-core --bin session-core record_scheduled -- --ignored --test-threads=1 with DATABASE_URL set. The implementer's report lists the same command; I did not run it.",
+     "Lead-only: run scripts/tests/scheduled-step-receipt-postgres-test.sh and scripts/tests/scheduled-step-proof.sh (docker).",
+     "Lead-only: add the golden row scheduled_run (refuse for ZDR and waived cells) to zdr-posture-matrix.json (not owned) and the ZDR.md text (SESSION_CORE_SCHEDULED_RESULT_PERSIST; persisted only when true; refused for zdr and zdr_waived).",
+     "Lead-only: regenerate apps/Model Plane/go/gen/model_plane/v1/sessions.pb.go and sessions_grpc.pb.go after the proto change (no Go code uses the new types yet).",
+     "Lead-only: live proof per the plan (rebuilt session-core, execution-core and capability-core images; flag on; fire completes with run_id, thread_id and status in psql; GET /api/v1/cron/{id}/fires; GetThread shows the answer; Temporal history holds no output text). Deploy order: session-core with migration 0056 first, then execution-core with the flag on; never the EC flag on while the SC flag is off.",
+     "Lead-only: confirm the revert file apps/Model Plane/rust/services/session-core/migrations/revert/0056_cron_fire_run_link.down.sql and the new test files go into the same commit as the slice (they are not in the new_files list).",
+     "Lead-only: the CRLF working copies must be kept when committing; git diff --stat equals git diff --ignore-cr-at-eol for all six owned tracked files, so there is no whole-file rewrite."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Capability-core sweeper inserts fire_key unconditionally; against a database without migration 0056 the insert fails. Flag-off is not byte-identical at the DB level until the migration ships first."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The receipt RPC does not check run status, so with the switch on an early-return failed step for a cancelled run settles its fire to failed. This is the intended behaviour but is untested against a real cancelled run."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the switch on, ZDR runs also settle fire status through the receipt RPC (numeric and status only, no content). Control refuses ZDR scheduled runs upstream, so this path should not be reached."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No DB test covers the receipt-settled fire for a completed step with the EC flag off and SC flag on (receipt-only completed path)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "RecordScheduledRunResult persists withheld_effects but not rounds_executed, tool_calls, input_tokens or output_tokens, which the plan's S6 cost rows need."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The fires listing is org-scoped with an existence check, but the plan's S3 row says creator-scoped. Either the plan or the handler needs a decision."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "The Space session should confirm the audience predicate treats origin=schedule threads as non-extractable (plan cross-session note)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The capability-core sweeper now inserts cron_fires.fire_key unconditionally (sweeper.go fireOne, both INSERT INTO cron_fires statements), so against a database without migration 0056 every fire insert fails and schedules stop firing; flag-off is therefore not identical at the DB level. The lead must gate the rollout: session-core migration 0056 applied before capability-core starts this sweeper."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The code comment in session-core grpc.rs (append_scheduled_result_in_tx) says a scheduled answer runs no memory extraction, but dreaming.rs load_pending_messages only skips threads with source_scope = 'conversation' (about line 223 and 1268), and a scheduled thread keeps the default 'workspace', so its answer is picked up for extraction; the Dreaming predicate in K3-5 must exclude origin 'space' schedule threads, or the comment must be corrected, before SESSION_CORE_SCHEDULED_RESULT_PERSIST is turned on."
+    },
+    {
+     "kind": "decision",
+     "severity": "P1",
+     "text": "GET /api/v1/cron/{id}/fires is org-scoped (listFires checks only cron_schedules id and org_id), so any org member can list another member's schedule fires with run_id and thread_id; the S1 row asks for creator-scoping 'like get :995', but get itself is org-scoped (workplane_apis.go about line 1076), so the row and the code disagree and the owner must decide before S3 shows the listing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan-named execution-core test scheduled_step_persists_output_through_session_core is absent; the new execution-core tests only cover the request builder and the switch parse, so the EC flag-on branch (record_scheduled_run_result call and its error mapping) has no test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "scripts/tests/scheduled-step-receipt-postgres-test.sh (not owned) runs only scheduled_step_claim_and_unknown_receipt_are_idempotent_against_real_pg, so the three new DB tests (record_scheduled_run_result_appends_once_and_completes_receipt, record_scheduled_run_result_refuses_zdr_run, record_scheduled_step_receipt_settles_failed_and_unknown_fires) never run through the plan's named command; the lead should add run_session_test lines for them."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test covers settle_scheduled_fire in terminalization.rs, the terminal-run path that sets fire status from the run outcome when the switch is on, and no DB test covers a completed receipt-settled fire with the EC flag off and the SC flag on."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Appendix B.1 note N2 requires the proto-tag additivity proof (a diff of tag numbers against git show HEAD of sessions.proto) to be attached to this slice; the implementer did not attach it, and it can be produced from the 36-line diff, which only adds the RPC and two messages at tags 1-14 and 1-3."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "RecordScheduledRunResult persists only output and withheld_effects; rounds_executed, tool_calls, input_tokens and output_tokens are accepted and dropped, which the plan's S6 cost rows will need. The proto comment documents this, so it is a tracked gap, not a defect here."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "With the SC switch on, the receipt RPC settles fires for ZDR runs too (numeric and status only, as the plan allows), and a completed step with the EC flag off settles its fire to completed with no answer stored; both are intended but should be stated in ZDR.md when that doc is updated."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The 0056 migration header says the writes are gated by SESSION_CORE_SCHEDULED_RESULT_PERSIST, but the sweeper's fire_key insert is not gated; the comment is inaccurate."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "audit"
+   ],
+   "notes": "Fix 1 done: record_scheduled_run_result_inner now sets cron_fires status and completed_at in the same transaction, only where status IN ('pending','running'). Fix 2 done differently from the reviewer's first suggestion: the receipt RPC record_scheduled_step_receipt_inner takes a new settle_fire argument (the handler passes the result switch), and when it is on it settles the fire in the same transaction. Execution-core is unchanged, so failed and unknown outcomes, including the early-return branches, now settle their fires with the switch on. Switch off stays byte-identical (settle_fire false skips the new statement). Fire status mapping: completed to completed, failed to failed, unknown_outcome to unknown (the S8 sweeper vocabulary), with cron_fires.outcome holding the step status. Fixes 3 to 6 are NOT applied by me: the four mock files are not in my owned list, so they go to lead_todo. Two of them are already in the tree (agent.rs and e2e_invoke_chain_test.rs). The CRLF note from the previous report was wrong about the direction: HEAD blobs are LF and core.autocrlf=true, so the owned files are now CRLF and git diff --ignore-cr-at-eol equals git diff. Keep the CRLF conversion when committing."
+  },
+  {
+   "id": "WS18-S1",
+   "outcome": "needs-attention",
+   "status": "done",
+   "files_changed": [
+    "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/spaces.rs",
+    "apps/Model Plane/python/eval-lab-py/cases/run_context/17_do_run_follows_space_instruction.yaml",
+    "apps/Model Plane/python/eval-lab-py/tests/test_runner.py"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test agentic_dispatch_carries_the_space_layer_after_org_and_before_persona",
+     "outcome": "ok, 1 passed, 0 failed"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --test e2e_invoke_chain_test (full target)",
+     "outcome": "ok, 142 passed, 0 failed (compiles with the new record_scheduled_run_result stub)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q --manifest-path apps/gateway/Cargo.toml --all-targets space_ (apps/Frontend Plane/verevonv3)",
+     "outcome": "ok, 53 passed, 0 failed in the lib target; other targets matched 0 tests"
+    },
+    {
+     "command": "PYTHONPATH=src <scratch venv>/python -m pytest -q tests/ (apps/Model Plane/python/eval-lab-py), from the earlier round",
+     "outcome": "19 passed, 17 skipped (not re-run this round; no Python file changed in this round)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Commit the four files listed in files_changed after confirming the results above (Conventional Commit, e.g. test(model-plane): cover Space layer in Do runs (WS18-S1)).",
+    "No shared-edit lines required for this slice.",
+    "Eval case 17 still skips until eval_lab/client.py gains a space_instructions passthrough (not owned by this slice)."
+   ],
+   "deviations": [
+    "Edited apps/Model Plane/python/eval-lab-py/tests/test_runner.py (not in the owned list): the baseline case count changed from 16 to 17 with the new case, a test file beside the changed case.",
+    "No edit to run_context.rs: existing unit tests already cover the Space order and Space-scoped memory skip."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-contracts/tests/run_context_posture.rs (the plan asks for a Space row there; not owned)",
+    "apps/Model Plane/python/eval-lab-py/src/eval_lab/client.py (needs a space_instructions passthrough for case 17 to run; not owned)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Model Plane/rust/services/model-gateway/tests/e2e_invoke_chain_test.rs: add the ZDR regression guard the S1 row names (`a_zdr_turn_never_reaches_run_context_composition`, which does not exist anywhere in the tree). It should send an agentic or plan_mode turn with space_instructions and MODEL_GATEWAY_RUN_CONTEXT=full under ZDR, and assert the typed zdr_feature_not_supported refusal (feature agentic or plan_mode), no run_context captured, no context-assembly or memory call, and no model call. Modelled on the existing a_zdr_unary_turn_asking_for_plan_mode test at about line 11281. The implementer's claim that this golden could be reused from WS02 is wrong: it is absent."
+    ],
+    "dod_gaps": [
+     "The cargo verification commands could not be confirmed in this pass: the shared target lock at C:/dev/mp-target-w2 was held by other slices' cargo runs, and the queued runs had not completed when this verdict was written. Re-run `cargo test -p model-gateway --test e2e_invoke_chain_test` and the BFF `cargo test --manifest-path apps/Frontend Plane/verevonv3/apps/gateway/Cargo.toml --all-targets space_` after the lock clears; the implementer's reported results (1 passed, 142 passed, 53 passed) are unverified here.",
+     "Eval-lab suite re-run in this pass: `PYTHONPATH=src pytest -q tests/` gives 19 passed, 17 skipped (the 17 are the live-eval gate). Case 17 is loaded and counted by the baseline test, and it skips by design until the harness passthrough exists.",
+     "Live proof is open: a flagged Do run in a project with a real Space, with the rebuilt model-gateway and BFF images, plus the SPA evidence the row's DoD asks for. This is a lead live proof and needs docker, which this verifier may not run.",
+     "Remember the plan asks for the posture-table Space row and the eval passthrough; both are outside this slice's ownership set."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR golden a_zdr_turn_never_reaches_run_context_composition named in the plan row does not exist in the repo; nearest coverage is the zdr RunFacts unit case in run_context.rs."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "crates/mp-contracts/tests/run_context_posture.rs has no Space row, which the row requires; that file is not owned by this slice."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Eval case 17 always skips until eval_lab/client.py can send space_instructions."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The BFF test exercises inject_authored_instructions directly, not the full stream path; an end-to-end flagged Do run in a project with a real Space is still unproven and is a lead live proof."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No switch-off assertion covers the Space layer: agentic_run_context_off_is_byte_identical_and_makes_no_extra_call uses RUN_CONTEXT_TURN, which carries no space_instructions, so a Space-specific byte-identical-off check is missing."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The BFF non-member test (spaces.rs ~9607) relies on wiremock returning an unmatched 404 for someone-elses-space rather than an explicit Control 403, and asserts only is_err(); a mock with the real non-member status would pin the contract."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "crates/mp-contracts/tests/run_context_posture.rs has no Space row, which the S1 row requires; that file is outside the ownership set, so the lead must route it."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "Eval case 17 always skips: its requires list names space-instruction-fixture, which nothing defines, and eval_lab/client.py has no space_instructions passthrough, so the case cannot run live until both exist."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "The e2e test file gains a record_scheduled_run_result stub on MockSessionCore for another slice's (WS20-S1) proto RPC, coupling this slice's compile to that proto; the lead should confirm the batch order."
+    },
+    {
+     "kind": "decision",
+     "severity": "P3",
+     "text": "test_runner.py is edited outside the owned list (case count 16 to 17); this is a test file beside the changed case, which the batch file permits, but it should be noted in the commit."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr"
+   ],
+   "notes": "Required fix applied: added the record_scheduled_run_result stub to impl SessionCore for MockSessionCore in e2e_invoke_chain_test.rs, after start_scheduled_run, returning Status::unimplemented in the same style as prepare_user_owned_thread. The file was edited via a script that preserved CRLF (12752 CRLF, 12752 LF, all lines CRLF). The previously unverified tests are now confirmed green: agentic_dispatch_carries_the_space_layer_after_org_and_before_persona (model-gateway) and the gateway space_ filter (53 passed). Slice is test-only; no runtime switch was added. Nothing was committed, pushed, or staged."
+  },
+  {
+   "id": "WS19-S2",
+   "outcome": "ready-partial",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/office_verification.rs",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/execution-core/src/office_verify.rs",
+    "apps/Model Plane/rust/services/execution-core/src/office_verify/check.py",
+    "apps/Model Plane/rust/services/execution-core/src/code_interpreter.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib office_verification",
+     "outcome": "6 passed, 0 failed (5 earlier plus the new a_skipped_report_with_a_warnings_reason_stays_skipped)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p mp-contracts --lib",
+     "outcome": "160 passed, 1 failed: zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces (CRLF fixture check in zdr_refusal.rs, pre-existing, file not touched by this slice)"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "Re-run after other batches settle: CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib office_verify (expect 12 passed). Blocked earlier by sandbox_manager_client.rs:201 (AcquireLeaseRequest.zdr) from another batch.",
+    "Re-run: cargo test -q -p model-gateway --lib code_interpreter (expect code_interpreter_summary_carries_verification_and_no_base64 to pass). Blocked earlier by moderation.rs ScreeningOutcome.rule_ids (WS26-S2) and the grpc.rs record_scheduled_run_result mock (WS20-S1).",
+    "Linux rust:1 container (bwrap present): cargo test -q -p execution-core --all-targets and -p model-gateway --all-targets, covering the sandboxed checker run and the timeout-kill path under the real WorkspaceWrite profile.",
+    "shared-edit apps/Model Plane/deploy/docker-compose.yml: not applied. Only after a live proof, set CODE_INTERPRETER_OFFICE_VERIFY=structural on the dev code-interpreter service; the code default stays off.",
+    "Live proof, lead-run: rebuild execution-core and model-gateway, then an Ask turn that writes a corrupt .docx, expecting a failed verdict, the model's repair call and a second passed result, with no verevon-code-office-verify-* directory left in the temp dir."
+   ],
+   "deviations": [
+    "The module is declared with #[path = \"office_verify.rs\"] inside code_interpreter.rs because execution-core/src/lib.rs is not owned by this slice.",
+    "Mode::Render runs the structural checks only, with a warn per call. The render layer belongs to S4.",
+    "CodeResult.verification_unchecked counts Office files not checked (too large, or past MAX_FILES=4) in place of a report list.",
+    "PDF checks use stdlib only (header, %%EOF, startxref, page-object count); pypdf is not used.",
+    "Tool description changed from '~30s timeout' to 'a hard time limit of about two minutes' (EXECUTION_CODE_TIMEOUT_SECS=120 is the real default).",
+    "The checker stages the file as subject.<ext> and never uses the returned name as a path."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/services/execution-core/tests/zdr_feature_table.rs (ZDR golden row for code_interpreter office verify, not owned)",
+    "apps/Model Plane/scripts/tests/office-verify-compose-contract-test.sh (new file named in the row, not in the owned list)",
+    "apps/Model Plane/rust/services/execution-core/src/lib.rs (optional: pub mod office_verify, replacing the #[path] in code_interpreter.rs)"
+   ],
+   "verifier": {
+    "verdict": "pass",
+    "required_fixes": [],
+    "dod_gaps": [
+     "Linux rust:1 container run of cargo test -q -p execution-core --all-targets and -p model-gateway --all-targets, including the bwrap-gated sandboxed checker and timeout-kill path.",
+     "Worktree rerun of execution-core --lib office_verify (expect 12) and model-gateway --lib code_interpreter (expect the summary test to pass) after the other batch fixes sandbox_manager_client.rs:201 and the SessionCore mock; both passed only in the isolated copy with scratch-only shims.",
+     "Live proof, lead-run: rebuild execution-core and model-gateway with CODE_INTERPRETER_OFFICE_VERIFY=structural, then an Ask turn writing a corrupt .docx, expecting failed, a repair call, a second passed result, and no verevon-code-office-verify-* directory left.",
+     "Add the ZDR golden row for code_interpreter office verify in zdr_feature_table.rs and the office-verify-compose-contract-test.sh named in the row (both outside the ownership set).",
+     "Shared edit after live proof only: CODE_INTERPRETER_OFFICE_VERIFY=structural on the dev code-interpreter service in apps/Model Plane/deploy/docker-compose.yml; the code default stays off."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "check.py reads whole zip parts into memory via archive.read() and trusts the header file_size for its total-size guard, so a crafted deflate bomb can exhaust sandbox memory (no cgroup memory cap in the bwrap argv). Add a streamed, byte-capped read per part before the flag is switched on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The sandboxed path (bwrap argv for WorkspaceWrite over the per-file workspace, timeout kill, cleanup under the real policy) has not been run; it is Linux-only and needs the rust:1 container and a rebuilt image."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P1",
+     "text": "The final execution-core lib rerun and the model-gateway code_interpreter test run are still blocked by concurrent batches, so the last execution-core edit and the MG summary test are unverified."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "executor::tests::a_hung_child_is_killed_at_the_timeout and runtime_loop::agent::tests::loop_park_a_structurally_unrestorable_park_is_closed_and_refused exceed 60 s on this Windows host and were skipped in the earlier run."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces fails on CRLF line endings in the Windows working copy (pre-existing, not from this slice)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "formula_sheet detection is a regex over formula text, so string literals containing 'name!' can raise a false warning; it is advisory, but the corpus gate (under 2% false failed) is unmeasured."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "Office files over the 8 MiB return cap get no structural verdict; they are only counted in verification_unchecked, and the model text says so."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The #[path] module declaration in code_interpreter.rs should become pub mod office_verify in lib.rs once that file is next owned."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "check.py reads each zip part with archive.read() and parses it with xml.etree, bounded only by a 256 MiB total of header-declared sizes, and the bwrap argv sets no memory cap, so a crafted package can exhaust sandbox memory through the DOM; add a streamed per-part byte cap and a much smaller XML size cap before CODE_INTERPRETER_OFFICE_VERIFY is switched on."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P1",
+     "text": "The sandboxed path (WorkspaceWrite argv over the per-file workspace, network disabled, timeout kill, workspace removal under the real policy) has not run; it needs the Linux rust:1 container and a live Ask turn with a corrupt .docx (failed verdict, repair call, second passed, no verevon-code-office-verify-* directory left)."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "In the worktree, execution-core --lib does not compile because of another batch's sandbox_manager_client.rs:201 (missing zdr in AcquireLeaseRequest); the office_verify (12) and code_interpreter (33) suites passed only in an isolated HEAD-plus-S2 copy that needed a scratch-only zdr shim, so the worktree rerun is still owed once the other batch lands."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "model-gateway --lib code_interpreter passed (6) and the named summary test passed (1) only in the isolated copy, which needed a scratch-only stub for the SessionCore mock's record_scheduled_run_result; the worktree rerun and the --all-targets runs remain open."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "verify_workspace_is_removed_on_timeout does not exercise a timeout: on Windows it returns on the no-bubblewrap refusal path, so the timeout-kill and cleanup behaviour is untested anywhere."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The row-named test returned_file_bytes_are_never_modified is absent, and non_office_files_are_skipped was renamed to non_office_files_are_not_reported_and_oversize_ones_are_counted."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The ZDR golden row for code_interpreter office verify (zdr_feature_table.rs) and the office-verify-compose-contract-test.sh named in the row are missing; both sit outside the ownership set, so the lead must add them (ZDR is unreachable by construction because ExecuteStep refuses ZDR)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Verification is sequential with a 60 s timeout per file and up to MAX_FILES=4, with no overall budget, so worst-case added latency is about four minutes on top of the program's 120 s limit."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The tool description change ('~30s' to 'about two minutes') reaches the model for every deployment even with the switch off; the row asks for it, but it is not switch-gated, so 'identical with switches off' holds only for the result payload."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "formula_sheet is a regex over formula text, so an external reference like [1]Sheet!A1 or a string literal can raise a false warning; the corpus gate (under 2% false failed) is unmeasured."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "cargo test -p mp-contracts as written exits non-zero in this worktree: zdr_refusal::tests::the_committed_fixture_is_what_the_catalogue_produces fails on CRLF in the working copy. The file is not touched by any slice, so this is pre-existing, but the plan command is not green here."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "VerificationLevel::as_str has no caller anywhere in the tree."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Line endings are mixed across the new files: office_verify.rs is CRLF while office_verification.rs and check.py are LF; the #[path] module in code_interpreter.rs should become pub mod office_verify in lib.rs once that file is owned."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The doc comment for code_interpreter_output_with_no_json_object_is_untouched now sits above the new summary test in tool_loop.rs and describes the wrong function."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Model Plane/scripts/seed_tool_knowledge.sql still says the sandbox has a ~30s timeout; that file is not owned, so the lead should carry the same correction as a shared-edit."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P3",
+     "text": "Files over the 8 MiB return cap get no structural verdict and are only counted in verification_unchecked, which the model text states."
+    }
+   ],
+   "unreviewed_risk": [
+    "authority",
+    "zdr"
+   ],
+   "notes": "Required fix applied. In office_verification.rs, settled_level now returns a Skipped level unchanged before the Failed and Warnings checks run, so a skipped report with one warnings reason stays Skipped after from_untrusted_json. A unit test in the module's tests block asserts this. The file is LF, so Edit was used directly. Round-two scope is that one fix plus its test; the rest of the slice is unchanged from the previous report. The execution-core office_verify tests and the model-gateway code_interpreter test were NOT re-run in this round: they were blocked by other batches' in-flight edits in the previous round. A grep of execution-core office_verify.rs shows its warnings assertions (lines 597 and 601) are for real checker reports, not skipped verdicts, so they are not affected by this change. The model-gateway tool_loop.rs was not re-grepped (the grep timed out), so its skipped-path behaviour is confirmed only by the mp-contracts test. Status stays partial until the lead re-runs the blocked EC and MG tests."
+  }
+ ]
+}

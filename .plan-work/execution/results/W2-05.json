@@ -1,0 +1,353 @@
+{
+ "batchId": "W2-05",
+ "wave": 2,
+ "results": [
+  {
+   "id": "WS15-S1",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/rust/crates/mp-contracts/src/lifecycle_notice.rs (new)",
+    "apps/Model Plane/rust/crates/mp-contracts/src/lib.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse_events.rs",
+    "apps/Model Plane/rust/services/model-gateway/tests/lifecycle_event_contract.rs (new)",
+    "apps/Model Plane/docs/sse-event-taxonomy.md (regenerated, 26 events)",
+    "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ag_ui.rs",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/api/chat-client.test.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.ts",
+    "apps/Frontend Plane/verevonv3/src/shared/chat/verevon-ui-events.test.ts (new)"
+   ],
+   "tests_run": [
+    {
+     "command": "cargo test -q -p mp-contracts --lib lifecycle_notice (CARGO_TARGET_DIR=C:/dev/mp-target-w2, CARGO_INCREMENTAL=0)",
+     "outcome": "PASS: 4 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p mp-contracts (full crate, same env)",
+     "outcome": "PASS: all result blocks ok (165 lib + integration blocks, 0 failed)"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --test lifecycle_event_contract (same env)",
+     "outcome": "PASS: 5 passed, 0 failed"
+    },
+    {
+     "command": "cargo test -q -p model-gateway --lib sse_events (same env)",
+     "outcome": "29 passed, 1 FAILED: sse_events::payload_contract::sse_event_payload_golden. Still failing, as expected, because the committed golden lacks the three new events. Checked the generated output against the committed golden: generated has 24 events, committed 21; only in generated: compaction, context_change, retry_scheduled; no existing entry changed. The fix is the lead's regeneration (lead_todo item 1). Not fixed by me: the golden is a shared file."
+    },
+    {
+     "command": "PYTHONUTF8=1 python3 apps/Model Plane/scripts/gen-sse-event-taxonomy.py --check",
+     "outcome": "PASS: sse taxonomy up to date (26 events)"
+    },
+    {
+     "command": "pnpm exec vitest run src/shared/api/chat-client.test.ts src/shared/chat/verevon-ui-events.test.ts (apps/Frontend Plane/verevonv3)",
+     "outcome": "PASS: 2 files, 108 tests passed"
+    },
+    {
+     "command": "pnpm exec tsc -p tsconfig.app.json --noEmit (verevonv3)",
+     "outcome": "34 errors. 33 are pre-existing in quarry-client.ts (21) and RemoteSupportPage.tsx (12), unresolved @quarry/client and @verevon/remote-core, not touched by me. 1 is mine: src/shared/api/ag-ui-client.ts(126,53) TS2366, still present because the shared edit is not applied (lead_todo item 2)."
+    },
+    {
+     "command": "cargo test -q --manifest-path apps/gateway/Cargo.toml --all-targets (apps/Frontend Plane/verevonv3, same env)",
+     "outcome": "PASS: 674 passed, 1 ignored (lib); 7 passed; 3 passed; 1 passed. The ag_ui test lifecycle_notices_are_carried_as_custom_events_with_their_cursor passes (filtered run: 1 passed)."
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/api/contracts/sse-event-payloads.json: from apps/Model Plane/rust run `MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse_event_payload_golden`, then re-run without MP_UPDATE_GOLDEN to confirm it passes. Expected diff: exactly three added events, retry_scheduled (family steps), compaction and context_change (control, no family); the existing 21 entries are unchanged (verified). Then refresh the golden's .sha256 pin, the SPA vendored copy, and the pinned digest in scripts/tests/zdr-contract-sync.test.sh, and run `bash scripts/tests/zdr-contract-sync.test.sh` from the repository root. The golden is LF; keep it LF.",
+    "shared-edit apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts: in toAgUiEvent, before `    case 'unknown':` (line 193, file is LF) add:\n    // Lifecycle cues are Verevon's own projection; AG-UI names none for them yet.\n    case 'lifecycle.retry':\n    case 'lifecycle.compaction':\n    case 'lifecycle.context':\n      return null\nThis clears TS2366 at ag-ui-client.ts(126,53). Not verified by me, since the file is shared; re-run `pnpm exec tsc -p tsconfig.app.json --noEmit` afterwards and expect only the 33 pre-existing quarry-client.ts and RemoteSupportPage.tsx errors.",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md (append at end): '## Lifecycle events are typed, counts-only, ephemeral (2026-10-23)'. Body: the run lifecycle notices retry_scheduled (steps family), compaction and context_change (control) carry counts and closed tokens only, from the closed lists in mp-contracts lifecycle_notice.rs; no text, args, output, error or summary ever rides them; they are ephemeral stream frames with nothing stored in S1 to S7; the switch is MODEL_GATEWAY_LIFECYCLE_EVENTS, strict literal true, default off. D1 reversal recorded here: the silent Do-run compaction at sse.rs:9862-9873 (log line only) is reversed in S2 (compaction outcome cleared, bool only). Ledger lines L1674 and L1874 are not reversed.",
+    "compose wiring (not in this slice's file list): in the model-gateway block of the Model Plane compose file add `MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}` plus a compose-contract assertion modelled on scripts/tests/letta-tool-search-compose-contract-test.sh. Not opened by me.",
+    "Lead to run after applying the above: `cargo test -q -p model-gateway --lib sse_events` from apps/Model Plane/rust (expect 30/30), and the SPA typecheck (item 2)."
+   ],
+   "deviations": [
+    "RETRY_SCOPES = [\"tool\"] added to mp-contracts lifecycle_notice.rs. The plan lists token sets for reasons, compaction scopes, outcomes and context changes, but no scope set for retry_scheduled; only tool retries exist (S3), so the set is the single token tool. Owner should confirm.",
+    "Typed token fields are &'static str (scope, reason, outcome, change, layer, state) and tool is a String. The closed-token membership is enforced by the test and the lists, not by the type system.",
+    "Per-event key allowlists (RETRY_SCHEDULED_KEYS, COMPACTION_KEYS, CONTEXT_CHANGE_KEYS) and is_closed_token were added in mp-contracts, as the plan's payload-key allowlist requires.",
+    "verevon-ui-events.ts: the three lifecycle names are also added to PROJECTABLE_CUSTOM_NAMES so that an AG-UI CUSTOM envelope carrying them projects the same way as the native frame.",
+    "chat-client.ts: the AG-UI CUSTOM switch in dispatchAgUiEvent has no cases for the three names, so a CUSTOM-carried lifecycle frame reaches onUnknownEvent, the same as run_parked does today. The native SSE path calls the new handlers."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/api/contracts/sse-event-payloads.json (golden: regenerate with MP_UPDATE_GOLDEN=1; LF endings)",
+    "apps/Model Plane/api/contracts/sse-event-payloads.json.sha256 (pin refresh) and the SPA vendored copy of the golden",
+    "scripts/tests/zdr-contract-sync.test.sh (repository root): pinned digest for the golden",
+    "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts (toAgUiEvent switch, before case 'unknown' near line 193): three new cases for lifecycle.retry, lifecycle.compaction, lifecycle.context",
+    "apps/Model Plane/docs/decisions/ledger.md (append-only entry, see lead_todo)",
+    "Model Plane compose file (MP/deploy/docker-compose.yml per the plan; not opened by me): MODEL_GATEWAY_LIFECYCLE_EVENTS line and its compose-contract assertion"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "apps/Frontend Plane/verevonv3/src/shared/api/ag-ui-client.ts (not owned, LF file; lead applies): in toAgUiEvent, before `    case 'unknown':` add `    // Lifecycle cues are Verevon's own projection; AG-UI names none for them yet.` then `    case 'lifecycle.retry':`, `    case 'lifecycle.compaction':`, `    case 'lifecycle.context':` each followed by `      return null`. Why: this slice added three members to the VerevonUiEvent union, so toAgUiEvent is no longer exhaustive; `pnpm exec tsc -p tsconfig.app.json --noEmit` now reports a new error, ag-ui-client.ts(126,53) TS2366, on top of the 33 pre-existing errors in quarry-client.ts and RemoteSupportPage.tsx. The verevonv3 typecheck is a stated gate, so this is a regression.",
+     "apps/Model Plane/api/contracts/sse-event-payloads.json (golden, not owned; lead applies): regenerate with `MP_UPDATE_GOLDEN=1 CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p model-gateway --lib sse_event_payload_golden` from apps/Model Plane/rust, keep it LF, then refresh the .sha256 pin, the SPA vendored copy and the pinned digest in scripts/tests/zdr-contract-sync.test.sh, and run `bash scripts/tests/zdr-contract-sync.test.sh` from the repository root. Why: `cargo test -q -p model-gateway --lib sse_events` is the slice's own test command and it fails 29/30 on sse_events::payload_contract::sse_event_payload_golden, because the committed golden lacks the three new variants (retry_scheduled, compaction, context_change). The new variants themselves are correct; only the golden is stale."
+    ],
+    "dod_gaps": [
+     "Lead: compose wiring not present. The plan's common section requires `MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}` in the model-gateway block of the Model Plane deploy compose file, plus a compose-contract assertion. The code default is already off (strict literal parser), so this is not blocking, but the switch is not visible or asserted in deployment yet.",
+     "Lead: ledger entry 'Lifecycle events are typed, counts-only, ephemeral (2026-10-23)' with the D1 reversal is not yet appended to apps/Model Plane/docs/decisions/ledger.md. Required before S2 relies on the D1 reversal.",
+     "No live proof: S1 adds vocabulary only, nothing emits the variants yet, so no SSE capture or rebuilt-image evidence exists. Those belong to S2/S3. No docker was run here, by instruction.",
+     "The retry_scheduled scope set ['tool'] is an implementer deviation from the plan (no scope set was listed); the owner must confirm it.",
+     "Lead: the shared-edit lines in lead_todo are not verified by this verifier because the files are not owned; re-run tsc and the golden test after the lead applies them."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "The reverse AG-UI adapter (ag-ui-client.ts toAgUiEvent) has no AG-UI name for lifecycle.* and needs the lead's shared edit; until it lands the SPA does not typecheck (TS2366 at ag-ui-client.ts(126,53))."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "No test yet asserts the flag-off stream is byte-identical; that belongs with S2's flag_off_stream_is_byte_identical."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Closed-token membership is not enforced at runtime: ChatEvent::payload emits whatever &'static str a producer passes, so a producer bug that passes an unlisted token is caught only by tests that exercise that producer (S2 and S3)."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "Owner to confirm the retry scope token set ['tool'] and whether tool names in retry_scheduled.tool (a free String, not a closed token) are acceptable under ZDR; the allowlist test admits any tool name."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "CUSTOM-carried lifecycle frames on the AG-UI path reach onUnknownEvent in chat-client.ts rather than the new focused handlers; decide whether AG-UI clients need onRetryScheduled, onCompaction and onContextChange."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The reverse AG-UI adapter returns null for lifecycle.* so an AG-UI consumer of Verevon projections loses these cues; revisit when a second consumer exists."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "Lifecycle frames have no rendering test yet; the SPA handlers only call callbacks, and the S5 chat-node renderer is what gives them a surface."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "lifecycle::enabled() and ENABLED_ENV have no production consumer in S1, so MODEL_GATEWAY_LIFECYCLE_EVENTS is inert until S2 wires it; the switch defaults off as required, but the S1 gate cannot show it is honoured yet."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "retry_scheduled.tool is a free String admitted by RETRY_SCHEDULED_KEYS and not checked against a closed list; if MCP or user-defined tool names can reach it, that is a content path under ZDR, so the owner should confirm the registry-only source or add a bound."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The plan's gate mutation (removing the SPA retry_scheduled case turns CI red) has no test or CI check in this slice; only the taxonomy doc row and the chat-client unit tests exist."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "In chat-client.ts, a CUSTOM-carried retry_scheduled, compaction or context_change reaches onUnknownEvent through dispatchAgUiEvent rather than the new handlers; decide whether AG-UI consumers need the focused callbacks."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "Closed-token membership is enforced only by the lists and tests, not by the ChatEvent type; ChatEvent::payload emits any &'static str a producer passes, so S2 and S3 producers must be tested for membership."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "apps/Model Plane/rust/crates/mp-contracts/src/lifecycle_notice.rs is saved with LF endings while the surrounding worktree files are CRLF; normalise it to match the neighbouring files so the new file does not add mixed endings."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "The new verevon-ui-events.test.ts covers the native path; no test confirms the AG-UI CUSTOM projection of the three names reaches the same lifecycle.* shape."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr"
+   ],
+   "notes": "Fix status: I changed no files in this round. Both required fixes are in shared files outside my ownership (the golden and its pins, and ag-ui-client.ts), so they are handed to the lead as lead_todo items 1 and 2, with the exact lines. Status stays partial until the lead applies them. Confirmed with the tests: the golden is the only failing test in my owned scope, and it fails only because of the three new events; the tsc TS2366 is the only error in a file this slice touches. Every other test in my scope passes: mp-contracts (lifecycle_notice 4/4, whole crate green), model-gateway lifecycle_event_contract 5/5, sse_events 29/30 (the one failure is the golden), taxonomy gate green at 26 events, SPA vitest 108/108, verevonv3 gateway all-targets green including the ag_ui lifecycle test. No commit, stage, push, docker or DB harness was run. The shared CARGO_TARGET_DIR was used on every cargo call with CARGO_INCREMENTAL=0. A scratch copy of the generated golden is at C:/Users/IMAFER~1/AppData/Local/Temp/claude/C--dev-CoresSystem--claude-worktrees-epic-shaw-4d613b/0c471def-955a-414e-8256-870b2ff081a7/scratchpad/generated-golden-check.json (scratch only, not a slice file)."
+  },
+  {
+   "id": "WS23-S1.code",
+   "outcome": "needs-attention",
+   "status": "partial",
+   "files_changed": [
+    "apps/Model Plane/api/contracts/zdr-refusals.json",
+    "apps/Model Plane/api/contracts/zdr-refusals.json.sha256",
+    "apps/Frontend Plane/verevonv3/src/shared/api/zdr-refusals.ts",
+    "apps/Model Plane/rust/crates/mp-contracts/src/zdr_refusal.rs",
+    "apps/Model Plane/rust/services/execution-core/src/provenance.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/mod.rs",
+    "apps/Model Plane/rust/services/execution-core/tests/compaction_parity_contract.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/audit.rs"
+   ],
+   "tests_run": [
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib -- record_tool_step connector a_confirmed_provider_write data_category_for_provider_tool zdr_tool_step non_zdr_tool_step",
+     "outcome": "7 passed, 1 failed: provenance::tests::connector_result_is_framed_untrusted_and_screened (read_provider_action is OrgInternal; blocked on the lead's trust.rs rows)"
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib (full)",
+     "outcome": "1288 passed, 1 failed: the same connector_result_is_framed_untrusted_and_screened (blocked on trust.rs). The new record_tool_step_keeps_only_the_status_of_a_failed_write and the amended a_confirmed_provider_write pass."
+    },
+    {
+     "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --test compaction_parity_contract",
+     "outcome": "10 passed, 1 failed: both_loops_classify_through_one_trust_table_and_one_scanner (blocked on trust.rs, unchanged from the previous report)"
+    },
+    {
+     "command": "rustfmt --check --edition 2021 src/runtime_loop/agent.rs (line ranges of touched hunks only)",
+     "outcome": "no diffs inside the touched hunks; the file has pre-existing rustfmt diffs elsewhere that predate this slice"
+    },
+    {
+     "command": "python3 CRLF count on agent.rs",
+     "outcome": "26258 CRLF of 26258 LF: CRLF style kept"
+    }
+   ],
+   "db_tests_written": [],
+   "lead_todo": [
+    "shared-edit apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs: in TOOL_TRUST after the browser_agent row add `(\"read_provider_action\", TrustClass::ConnectorContent),` and `(\"execute_provider_action\", TrustClass::ConnectorContent),`; in the_untrusted_tools_classify_as_external add asserts for both names; change the ConnectorContent doc from 'No tool maps to it yet.' to 'Content read from, or acted on in, a connected account.' Then rerun: cargo test -q -p execution-core --lib -- connector_result_is_framed ; cargo test -q -p execution-core --test compaction_parity_contract ; cargo test -q -p mp-content-safety",
+    "shared-edit scripts/tests/zdr-contract-sync.test.sh: in the GOLDENS row for apps/Model Plane/api/contracts/zdr-refusals.json replace digest 9c2b5458aac4b2b779ab9b63acb987f63df6c41b85a93a32ccfcaf97251b6d1e with 15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1",
+    "re-vendor the SPA copy: copy apps/Model Plane/api/contracts/zdr-refusals.json to apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json and apps/Model Plane/api/contracts/zdr-refusals.json.sha256 to the same folder (sha 15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1); then pnpm exec vitest run src/shared/api/zdr-refusals.test.ts should be green",
+    "shared-edit apps/Model Plane/docs/decisions/ledger.md: add a deferred entry for WS23-S1 (connector_read in model-gateway): the MG loops offer no provider tool, so the MG-side ZDR refusal and the zdr-posture-matrix feature rows (ask_zdr_connector_read, do_zdr_connector_read) are deferred to WS23-S5, which must add them before any MG loop offers execute_provider_action or read_provider_action; the matrix has no feature-refusal shape and its schema (zdr-contract-schema.mjs) is not owned by this slice.",
+    "Live proof, not run (lead only): rebuild execution-core; with a Do run calling execute_provider_action with a write operation, confirm STEP_COMPLETED holds only `[connector_write op=... content_redacted=true]` plus the verdict line, with no Result body; with a read operation confirm the counts line; under a ZDR run confirm the call is refused with zdr_feature_not_supported before any gateway call. Both need the trust.rs edit first.",
+    "Commit only the nine owned files listed in files_changed (no new files were created in the repo). The worktree has other streams' uncommitted edits; those are not part of this slice."
+   ],
+   "deviations": [
+    "Fix 4 applied: every execute_provider_action call now goes through connector_step_note. A read keeps the connector_read counts note. A write keeps `[connector_write op=<op> content_redacted=true]` plus the postcondition verdict line only when that line is the last line of the result; the Result body is never persisted. A failed write keeps `[connector_write result=error status=<n> content_redacted=true]`, and the provider's message is never kept. This reverses the previous report's deviation that kept write text.",
+    "record_tool_step_never_persists_connector_text still covers the read and failure paths. The new test record_tool_step_keeps_only_the_status_of_a_failed_write covers a failed write. a_confirmed_provider_write_shows_the_model_and_the_trace_the_verdict was amended: the next round still sees the full result and verdict, while the durable step record must carry the verdict and must not contain `Result:` or `Executed gmail.send`.",
+    "Fix 5 is recorded as a deliberate deferral, not implemented. The model-gateway loops offer no provider tool today (the only mentions in model-gateway/src are approval-cause fixtures in http_routes.rs and the audit labels in audit.rs), so there is no gate to refuse there. The matrix has no feature-refusal shape, the existing mcp_execution feature has no matrix row either, and the schema that would need extending (zdr-contract-schema.mjs) is not owned. The execution-core refusal is implemented. WS23-S5 must add the MG-side refusal and the matrix shape before offering a provider tool. The ledger entry is handed to the lead in lead_todo.",
+    "Fixes 1, 2 and 3 were not applied, because trust.rs, the sync script and the SPA vendored contracts are outside this slice's ownership. The exact lines are in lead_todo. Until the lead applies them, the test connector_result_is_framed_untrusted_and_screened and the compaction parity connector row stay red, and the sync script and the SPA vitest stay red on the old digest and the old golden.",
+    "Carried over from the previous report: the counts line has no provider key, and op is sanitised to [A-Za-z0-9._-] up to 64 chars, else `invalid`. list_provider_actions is refused under ZDR and on a waived route, and audited as personal, but its trust class stays OrgInternal, as the plan says. The ZDR refusal lives at execute_step_inner dispatch, before the capability gate."
+   ],
+   "needs_other_files": [
+    "apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs (fix 1: TOOL_TRUST rows for read_provider_action and execute_provider_action as ConnectorContent, asserts in the_untrusted_tools_classify_as_external, ConnectorContent doc update; not applied by me)",
+    "scripts/tests/zdr-contract-sync.test.sh (fix 2: GOLDENS digest for apps/Model Plane/api/contracts/zdr-refusals.json; not applied by me)",
+    "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json and zdr-refusals.json.sha256 (fix 3: SPA re-vendor; not applied by me)",
+    "apps/Model Plane/docs/decisions/ledger.md (fix 5: deferral entry; not owned, so handed back)",
+    "apps/Model Plane/scripts/tests/zdr-contract-schema.mjs and the vendored zdr-posture-matrix fixtures (only if a feature-refusal shape is added to zdr-posture-matrix.json; not done this round)"
+   ],
+   "verifier": {
+    "verdict": "fix",
+    "required_fixes": [
+     "Apply the trust.rs mapping that the row depends on (shared file, outside this slice's ownership, so the lead applies it): in apps/Model Plane/rust/crates/mp-content-safety/src/trust.rs add (\"read_provider_action\", TrustClass::ConnectorContent) and (\"execute_provider_action\", TrustClass::ConnectorContent) to TOOL_TRUST, add asserts for both names in the_untrusted_tools_classify_as_external, and change the ConnectorContent doc from 'No tool maps to it yet.' Without this, assess() returns OrgInternal for both tools: no UNTRUSTED framing and no injection screen, and the named test provenance::tests::connector_result_is_framed_untrusted_and_screened and the compaction_parity_contract connector row stay red.",
+     "Update the golden digest pin in scripts/tests/zdr-contract-sync.test.sh (shared file, lead applies): the GOLDENS row for apps/Model Plane/api/contracts/zdr-refusals.json must change from 9c2b5458aac4b2b779ab9b63acb987f63df6c41b85a93a32ccfcaf97251b6d1e to 15b12d17d34c49270889ce7a3b5fc66471bce3646499888ef7e7ee2cc1178cf1. Run this session, the sync script reports 71 passed and 25 failed; three of the failures (golden digest for zdr-refusals.json, and the SPA vendored copy json and sha256) are introduced by this slice and the other 22 predate it.",
+     "Re-vendor the SPA copy (shared, outside ownership, lead applies): copy apps/Model Plane/api/contracts/zdr-refusals.json and zdr-refusals.json.sha256 to apps/Frontend Plane/verevonv3/src/shared/api/contracts/. The SPA constant ZDR_REFUSALS_CONTRACT_SHA256 in zdr-refusals.ts already moved to 15b12d17..., so the vendored copy is now stale. Run this session: pnpm exec vitest run src/shared/api/zdr-refusals.test.ts gives 2 failed and 11 passed (the feature-label parity test lacks connector_read, and the sha test fails). Both should be green after the copy.",
+     "Resolve the missing ZDR matrix guard for the Ask loop. The row requires rows ask_zdr_connector_read and do_zdr_connector_read in apps/Model Plane/api/contracts/zdr-posture-matrix.json (+ .sha256) and an extension of MG/tests/zdr_posture_matrix.rs. Neither is done. The implementer's finding is correct that the matrix has no feature-refusal shape (its rows cover retention decisions only, refusal_codes has no feature code), and that extending it needs zdr-contract-schema.mjs, which is not owned. The lead must either (a) amend row WS23-S1.code to move the MG refusal and the matrix rows to WS23-S5 and record that deferral in docs/decisions/ledger.md (the implementer's handed-back ledger entry), or (b) widen ownership and add the shape. Until one happens, the summary's claim that connector_read is refused in both loops with matrix rows re-pinned is not true."
+    ],
+    "dod_gaps": [
+     "Live proof of the counts-only and verdict-only STEP_COMPLETED payloads, the personal audit rows and the ZDR refusal on a rebuilt execution-core (lead only, docker).",
+     "Lead must apply the shared-file edits (trust.rs, zdr-contract-sync.test.sh, SPA vendored copy, ledger entry) and then re-run the named tests before this slice is marked done.",
+     "Cargo results for execution-core --lib, compaction_parity_contract, mp-contracts and model-gateway --lib were started but not collected before this verdict."
+    ]
+   },
+   "depth_findings": [
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the lead applies the trust.rs rows, execute_provider_action and read_provider_action results are OrgInternal: no UNTRUSTED framing, no injection screen. Do not enable any connector read before that edit lands."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "The write verdict line is bounded and single-line, but its detail can carry text the provider chose (a status it reported, a record field used in the comparison). That text now reaches the durable record as the only write trace. Accepted as the verdict trace; WS23-S8 / K3-16 should decide whether the detail is reduced further to a closed token."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "WS23-S5 must add the connector_read refusal to the model-gateway Ask loop, and the matrix rows and feature shape, before any MG loop offers a provider tool."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "The items count is parsed from the rendered JSON after the 'Result:' line; a truncated result reports items=unknown. WS23-S3's typed read result should replace text parsing."
+    },
+    {
+     "kind": "risk",
+     "severity": "P2",
+     "text": "A ZDR-refused execute_provider_action on an effectful entry is reserved in the effect ledger in run_rounds before execute_step_inner refuses it; check that the refused call finalises its ledger row (not exercised here)."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Live proof of the counts-only and verdict-only STEP_COMPLETED payloads, the personal audit rows and the ZDR refusal on a rebuilt execution-core was not run (lead only)."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "During the run, another cargo test on C:/dev/mp-target-w2 (a parent cargo test -p execution-core --lib, pid 73320) held the test binary and blocked the link (LNK1104). I waited for it to exit rather than killing it. Do not run two cargo builds on the same target directory at once."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "The ConnectorContent doc in mp-content-safety still says 'No tool maps to it yet.' (lead applies it with the trust.rs edit)."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "zdr_refusal_inventory fails on services/model-gateway/src/browser_run.rs:802 (untyped refusal). That file is not touched by this slice and predates this work. zdr-contract-sync.test.sh has 22 failures that predate this slice."
+    },
+    {
+     "kind": "risk",
+     "severity": "P1",
+     "text": "Until the trust.rs TOOL_TRUST rows land, execute_provider_action and read_provider_action results get no UNTRUSTED framing and no injection screen. Do not enable any connector read before that edit lands."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P2",
+     "text": "provenance::is_connector_content_tool and is_provider_tool keep a second tool list beside TrustClass::classify, which trust.rs says must not happen; derive the connector check from TrustClass::classify(tool) == ConnectorContent once the table row exists."
+    },
+    {
+     "kind": "decision",
+     "severity": "P2",
+     "text": "MG/moderation.rs needs no edit: it re-exports the shared mp_content_safety::TrustClass, so the 'twin enum' in the row no longer exists and the trust.rs row covers both loops."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "In model-gateway/src/audit.rs the new test connected_account_tools_are_audited_as_personal was inserted between the doc comment and reads_of_the_users_own_content_are_never_unclassified, so that doc comment now documents the wrong test."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P2",
+     "text": "A flagged write keeps only its verdict line; the render output puts the screening line before the body, so the verdict stays last, but no test asserts that a Flagged connector write still persists its verdict."
+    },
+    {
+     "kind": "test-gap",
+     "severity": "P3",
+     "text": "A read of an operation unknown to the catalogue is labelled connector_write, because operation_is_write returns None and is treated as a write; the label is misleading but the content is still withheld."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The effect ledger reservation for a ZDR-refused execute_provider_action in run_rounds is not verified to finalise its row; check this in the live proof."
+    },
+    {
+     "kind": "follow-up",
+     "severity": "P2",
+     "text": "The non-screening path of the verdict line keeps provider-chosen detail text in the durable record; WS23-S8 / K3-16 should reduce the verdict to a closed token."
+    },
+    {
+     "kind": "live-proof",
+     "severity": "P2",
+     "text": "Live proof (lead only, docker): rebuild execution-core after the trust.rs edit; confirm a write step keeps only the connector_write note and verdict, a read keeps the counts line, and a ZDR run is refused with zdr_feature_not_supported before any gateway call."
+    },
+    {
+     "kind": "risk",
+     "severity": "P3",
+     "text": "zdr_refusal_inventory fails on services/model-gateway/src/browser_run.rs:802 (untyped refusal) and the 22 sync-script failures predate this slice."
+    },
+    {
+     "kind": "cleanup",
+     "severity": "P3",
+     "text": "Owned-file check: git status shows the nine owned files modified and no edits outside the owned set from this slice; other streams' edits (sse.rs, sse_events.rs, chat-client.ts, ag_ui.rs, lib.rs, untracked lifecycle and cache files) must not be committed with this slice."
+    }
+   ],
+   "unreviewed_risk": [
+    "zdr",
+    "audit",
+    "policy"
+   ],
+   "notes": "Round two fixes: (4) applied in agent.rs: every execute_provider_action call now persists only a counts or status note, and a write keeps only the verdict line; a new test covers a failed write. (5) deferred and recorded as a deviation, with the ledger entry handed to the lead; the MG loops offer no provider tool. (1), (2) and (3) are shared-file edits outside this slice's ownership and are handed back in lead_todo with the exact lines; I did not apply them. Full execution-core --lib: 1288 passed, 1 failed (the trust.rs-blocked test). No docker, no DB harness, no commits, no pushes, no git reset/checkout/stash, no new target directories, no credentials read. The scratch log is in the session scratchpad (ec-lib.txt)."
+  }
+ ]
+}

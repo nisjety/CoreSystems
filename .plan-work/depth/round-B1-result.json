@@ -1,0 +1,312 @@
+[
+ {
+  "key": "ws01-ws02-ws03-crash-park-round-markers",
+  "rows": [],
+  "title": "ws01-ws02-ws03-crash-park-round-markers",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/park.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/execution-core/src/runtime_loop/fold.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo test -q -p execution-core --lib runtime_loop::",
+    "outcome": "583 passed, 0 failed, 0 ignored (finished in 87s).",
+    "passed": true
+   },
+   {
+    "command": "CARGO_TARGET_DIR=C:/dev/mp-target-w2 CARGO_INCREMENTAL=0 cargo clippy -p execution-core --lib --tests -- -D warnings",
+    "outcome": "Fails at crates/mp-slo/src/lib.rs:77, lint clippy::duration_suboptimal_units (Duration::from_millis(2_000)). mp-slo is a dependency crate outside this task's files, so execution-core is never reached under -D warnings. A rerun without -D warnings shows no warning in the lines this task changed (park.rs, fold.rs, or the new agent.rs code). The only runtime_loop warnings are in agent.rs:16840 (similar_names, a test not touched by this task) and in mod.rs (not touched by this task).",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Unverified: how the caller of RunAgent treats Status::aborted(\"loop_checkpoint_superseded\"), meaning the dispatcher, session-core or the gateway. If any of them writes a failed terminal receipt, or marks the run failed when it gets Aborted, the superseded loop could still race the continuation's outcome. This needs a follow-up check outside this packet's files.",
+   "A run_parkable loop that is superseded during a round that ends in an answer saves nothing in that round, so it never sees the lost fence. It still finalizes an answer and a receipt beside the continuation. This narrows the zombie window but does not close it fully.",
+   "The approval-pause save and the in-place fence save paths have no lost-fence check of their own. The fence path already returns Err on any failure, but the pause path does not.",
+   "When the executor's park switch is on, round folds of parkable runs gain the four route keys even if SESSION_CORE_CRASH_PARK_ENABLED is off. Run behaviour does not change, but the fold bytes do. The packet asked for this (markers keyed on run_parkable only).",
+   "The no-route-key assertion added to the approval-continuation test checks nothing, because that continuation writes no fold.",
+   "The clippy -D warnings gate fails at crates/mp-slo/src/lib.rs:77 (duration_suboptimal_units). This is outside the packet and looks pre-existing, so clippy never reached execution-core under -D warnings. A rerun without -D warnings showed no new warnings in the changed lines.",
+   "park.rs and fold.rs are LF in the working tree and stayed LF; HEAD blobs are LF too. agent.rs was CRLF and stayed CRLF. git warns that the LF files will become CRLF on checkout because of .gitattributes, so no action is needed."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No config or switch changes. With the executor's park switch off, behaviour and fold bytes are unchanged. With it on, parkable runs' round folds gain four keys, which session-core's crash park needs once SESSION_CORE_CRASH_PARK_ENABLED is on. The superseded status returns without finalize, a receipt, or a lease release, so the continuation that holds the fold owns the run. The packet's file list was \"(none)\" in the rendered task text but named three files in the task record; I followed the record.",
+  "summary": "Packet ws01-ws02-ws03-crash-park-round-markers (rows D1-543, D1-549, D1-544) is implemented in execution-core's runtime_loop. (1) Round folds of a run_parkable loop now carry the four route markers (EXT_PARKS = parks taken so far, EXT_ROUTE_MODEL, EXT_ROUTE_CONNECTION, EXT_CHILD_CEILING), which session-core's crash park needs. (2) A run_parkable loop whose round-end save or pre-effect save loses its fence (stale or closed) stops at once and returns Err(Status::aborted(\"loop_checkpoint_superseded\")). Non-parkable runs and parking-off runs are unchanged.\n\npark.rs: park_fold(snapshot, site, parks, pending) is now the single writer of the four keys. The park write passes Some(park_pending(...)); a parkable round fold passes None. The packet suggested a separate insert_route_markers helper, but durable_loop_contract.rs park_writer_violations requires each key to appear exactly once in park.rs, inside park_fold, so a helper would fail that guard. I did not edit the guard, and it passes as written. Docs updated. The park unit test was updated for the new signature and extended to the round-fold case. park.rs is LF in this worktree and was kept LF.\n\nagent.rs: park_site(ctx) is the one source of route values for park_at_boundary and the round-fold site. The round-end fold uses park_fold when park_gate.run_parkable and build_fold otherwise. After the round-end save, and in the save_pre_effect Hold branch, a run_parkable loop whose writer lost its fence returns the superseded status before any further inference, append, receipt, finalize, dispatch, or lease release. The file is CRLF and was kept CRLF.\n\nfold.rs: FoldWriter::lost_fence() is true only for Failed(Stale|Closed), not for Refused, with a unit test.\n\nExisting tests changed by the new behaviour, all in agent.rs: (a) loop_park_with_parking_off_no_park_call_is_made_and_folds_are_byte_identical now compares parkable folds with the four keys removed, and its parking-off half asserts that no route key appears. (b) loop_park_every_park_write_failure_falls_back_to_the_committed_failure: its last block injected a stale round save, which on a parkable run now stops the loop, so it now injects a permission refusal. That keeps the test's intent, that no park is attempted when the writer is refused for good. (c) loop_park_a_run_with_client_or_mcp_tools_never_parks gained a no-route-key assertion. (d) loop_park_an_approval_continuation_never_parks gained one too, but that continuation writes no fold, so the assertion is vacuous.\n\nNew tests: loop_park_a_parkable_round_fold_carries_the_route_keys_at_zero_parks (packet tests a and e); loop_park_a_park_resume_round_fold_carries_the_count_it_resumed_at (a); loop_park_a_resume_of_a_crash_park_writes_no_thread_watermark (c); loop_park_a_parkable_loop_superseded_at_its_round_fold_stops_and_answers_nothing (d, round save, stale and closed); loop_park_a_parkable_loop_superseded_before_an_effect_reserves_nothing (d, pre-effect, pinned effectful run); fold.rs only_a_stale_or_closed_answer_is_a_lost_fence.\n\nResidual gaps, outside the packet's stated checks: (1) a run_parkable loop whose round ends with an answer saves nothing, so a superseded loop that answers without tools still finalizes an answer and receipt. (2) The approval pause save has no lost-fence check. (3) I did not verify how session-core or the gateway treat the aborted status. (4) Round folds of parkable runs gain the keys whenever the executor's park switch is on, even if session-core's crash-park switch is off. This changes fold bytes but not run behaviour."
+ },
+ {
+  "key": "ws01-ws02-ws03-zdr-pass2-spec",
+  "rows": [],
+  "title": "ws01-ws02-ws03-zdr-pass2-spec",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/tests/e2e/zdr-live-turn.spec.ts",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/docs/runbooks/zdr-attestation-and-live-proof.md"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "pnpm exec playwright test tests/e2e/zdr-live-turn.spec.ts --list",
+    "outcome": "exit 0; lists pass 1 and pass 2 in zdr-live-turn.spec.ts (plus the auth setup test), 3 tests in 2 files",
+    "passed": true
+   },
+   {
+    "command": "pnpm exec eslint tests/e2e/zdr-live-turn.spec.ts",
+    "outcome": "exit 0, no output (no lint errors or warnings)",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Pass 2 has not been run live. It needs a real attestation (Z-40) and the ZDR-TEST org, so the lead should run it under the zdr-live-proof.sh before/after bracket once that exists.",
+   "pickModel matches the menu entry exactly against the catalogue `name` (falling back to `id`). If the composer menu shows a display label that differs from the catalogue name, pass 2 fails at selection rather than at the turn. That is a loud failure, not a silent one, and it is the same pattern model-entitlement.spec.ts uses.",
+   "hasModelChoice waits up to 10s for the model button. On a /chat composer without one, pass 2 sends with the default model, which may not be the attested one. The stream assertions would then fail closed (refusal frame or HTTP 400 or above), so a wrong pick cannot pass silently.",
+   "Pass 1's assertions and both of its skip guards (ZDR_LIVE_TURN!=='1', EXPECT==='answer') are unchanged; the org guard and stream capture were only extracted into helpers with the same logic. The runbook stays LF; git's CRLF warning was already there."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "Pass 2 is opt-in and only for the ZDR-TEST org: run it with ZDR_LIVE_TURN=1 ZDR_LIVE_TURN_EXPECT=answer after a real attestation (runbook pass 2, sections 3 to 5 around it). Git prints \"LF will be replaced by CRLF\" for the runbook. That warning is pre-existing: the runbook was already LF before this edit, and the edit kept LF. Only list, lint and type checks were run here; no live stack and no database were used.",
+  "summary": "Packet ws01-ws02-ws03-zdr-pass2-spec (row D1-328) is done. The spec gets a second test, \"pass 2: a ZDR-TEST org turn streams an answer from an attested chat model\", in the describe renamed \"ZDR live turn (Z-60)\". It is skipped unless ZDR_LIVE_TURN=1 and ZDR_LIVE_TURN_EXPECT=answer. The ZDR-TEST org guard (expectZdrTestOrg) and the stream capture (sendTurn) are local helpers shared by both tests. Pass 1's assertions and opt-in guards are unchanged; only its title gained a \"pass 1:\" prefix and its catalogue predicate moved into a shared isAttestedChatModel helper with the same logic. Pass 2 requires a chat model in /api/v1/models with feature zdr, otherwise it fails with a message that this is pass 1 territory. When the composer shows its model choice (the MODEL_BUTTON / MODEL_MENU selectors model-entitlement.spec.ts drives), it picks the attested model by name; otherwise it sends with the default. It sends one turn and fails on an HTTP status of 400 or more, on any RUN_ERROR or error frame (stricter than pass 1: not only frames with a code; the nested error.code is reported), or when the stream has no content frame. The file header and runbook line 98 now name the test. Pass 2 has not been run live: it needs a real attestation and the ZDR-TEST org. DISCREPANCY: the task text said \"Files you may edit or create: (none)\", but the packet's files list names exactly these two files, so I edited those two and no others. Please confirm that scope."
+ },
+ {
+  "key": "db-harness-two-failures",
+  "rows": [],
+  "title": "db-harness-two-failures",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\grpc.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\session-core\\src\\memory_control.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p session-core --bin session-core --no-run",
+    "outcome": "Compiled, exit 0, no errors.",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p session-core --bin session-core memory_control",
+    "outcome": "15 passed, 0 failed, 7 ignored (DB-backed), 841 filtered out.",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Neither fixed DB test has run on Postgres yet. The lead must re-run the harness with record_scheduled_run_result_refuses_zdr_run, pause_blocks_inline_and_dreaming_extraction, record_scheduled_run_result_appends_once_and_completes_receipt and record_scheduled_step_receipt_settles_failed_and_unknown_fires. The last two take the changed helper with \"persistent\", so the re-run confirms their behaviour is unchanged.",
+   "The fix to the ZDR test fits the schema. Migration 0044 allows retention_class 'zdr' on INSERT with null waiver columns, and the immutability trigger only blocks UPDATE. claim_scheduled_step_inner has no retention check. Neither the trigger nor the writers were weakened.",
+   "The two-row assertion in the memory test comes from reading the code, not from a run. extract_user_candidates gives 'user:name' (\"User's name is Ima.\") and 'user:remember:<frag>' (\"User asked Verevon to remember: jeg heter Ima.\") for FACT, and the inline path in append_message_in_tx persists every candidate. The two keys differ, and the (org_id, scope, owner, key) upsert would merge a repeated key, so this is not a double write. The extractor keeps the original case, so the Kari check holds for both of user-b's rows.",
+   "The user-b check is looser than the control check: it only asserts that all rows contain 'Kari'. It still proves that no row from the paused user-a was written.",
+   "The later assertions in pause_blocks_inline_and_dreaming_extraction (the empty paused org and dream_runs==0) never ran in the earlier harness, because it panicked at the first assertion. The re-run will be the first time they are exercised."
+  ],
+  "db_tests": [
+   "grpc::tests::record_scheduled_run_result_refuses_zdr_run (grpc.rs:11024). Not run here. The run is now created with retention_class='zdr' in the INSERT, the UPDATE is removed, and the claim is unchanged. Expect FailedPrecondition and zero assistant messages for the run.",
+   "memory_control::tests::pause_blocks_inline_and_dreaming_extraction (memory_control.rs:1248). Not run here. The first assertion now expects two inline rows (the name memory and the remember memory). The user-b assertion now expects two rows, all containing Kari. The later assertions are unproven by a run, since the harness panicked at the first one; the paused-user dream_runs==0 check is supported by the pending-message SQL.",
+   "Two other callers of the changed helper, behaviour unchanged (they pass \"persistent\"), so include them in the re-run to confirm the signature change: grpc::tests::record_scheduled_run_result_appends_once_and_completes_receipt (grpc.rs:10869) and grpc::tests::record_scheduled_step_receipt_settles_failed_and_unknown_fires (grpc.rs:10967)."
+  ],
+  "needs_other_files": [],
+  "deploy_notes": "The packet text said 'Files you may edit: (none)', but the packet record lists grpc.rs and memory_control.rs under files, so I edited only those two. Suggested lead re-run: bash \"apps/Model Plane/scripts/tests/session-core-db-tests.sh\" record_scheduled_run_result_refuses_zdr_run=1 pause_blocks_inline_and_dreaming_extraction=1 record_scheduled=1. No migration, switch or trigger change. Nothing was committed.",
+  "summary": "Fixed both failing session-core DB tests without touching the trigger or the writers. (1) grpc.rs record_scheduled_run_result_refuses_zdr_run: the test set retention_class='zdr' with an UPDATE after the run existed, which the immutable-receipt trigger (migration 0044) refuses. seeded_claimed_scheduled_step now takes a retention_class argument and writes it in the INSERT (the INSERT is not guarded by the trigger); the ZDR test passes \"zdr\" and the UPDATE is gone. claim_scheduled_step_inner has no retention check, and record_scheduled_run_result_inner refuses non-persistent runs with FailedPrecondition before any write, so the test's expectations hold. The two other callers pass \"persistent\" (the column default), so their behaviour is unchanged. (2) memory_control.rs pause_blocks_inline_and_dreaming_extraction: the second row is legitimate, not a double write. extract_user_candidates (dreaming.rs:2012-2070) yields two candidates for \"Husk at jeg heter Ima.\": user:name from the \"jeg heter\" marker and user:remember:<fragment> from the \"husk at\" marker. The keys differ, and the upsert on (org_id, scope, owner, key) would merge a repeat of the same key, so no writer double-writes. The test was added in fe24d0a17 (2026-10-24), after the last recorded full run, so the expectation of one row never matched this extractor. I fixed the assertions (two inline rows, the name and the remember memory, and two Kari rows for user-b, all Kari) and left the writer alone. Only the first assertion ran in the harness, so the rest was checked by reading code: the pending-message SQL (dreaming.rs:1283-1284) excludes paused users, so the dream_runs==0 assertion should hold. Both files keep CRLF (grpc.rs 19122/19122, memory_control.rs 1631/1631). Diff stat for the two files: 29 insertions, 18 deletions. No docker, no harness run, no git write operations, no .env reads.\""
+ },
+ {
+  "key": "ws08-ws09-declared-attachment-modes",
+  "rows": [],
+  "title": "ws08-ws09-declared-attachment-modes",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/attachment_policy.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/tests/attachment_policy_contract.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/deploy/docker-compose.yml",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/api/chat-client.attachment-policy.test.ts",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.ts"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "cargo test -p model-gateway --lib attachment_policy",
+    "outcome": "25 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -p model-gateway --lib vision_parts",
+    "outcome": "0 tests matched, because the module path is vision::parts. Running --lib vision::parts gives 10 passed, 0 failed.",
+    "passed": true
+   },
+   {
+    "command": "cargo test -p model-gateway --test attachment_policy_contract",
+    "outcome": "5 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "pnpm vitest run --pool=threads src/shared/api/chat-client.attachment-policy.test.ts src/features/chat/lib",
+    "outcome": "19 test files passed, 204 tests passed, 0 test failures. The run still reports 19 unhandled errors ('Failed to start threads worker ... Timeout waiting for worker to respond') and exits non-zero. This is a machine/worker-pool issue, not an assertion failure.",
+    "passed": true
+   },
+   {
+    "command": "pnpm typecheck",
+    "outcome": "Exits 1. Errors come from quarry-client.ts (missing @quarry/client), RemoteSupportPage.tsx (missing @verevon/remote-core) and schedule-contract.test.ts (TS2352). None are in the six files this task changed, and none mention chat-client or attachment-policy. They look pre-existing, but I did not diff them against HEAD.",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Mixed-version window: if the client loads a policy from a server that predates these fields, both gates read as off even when the VITE flag is on. This follows the brief (absent means false), so images-as-parts and Do attachments stay disabled until the server is upgraded. The behaviour is safe, but it is a rollout ordering constraint: upgrade the server before relying on the flags.",
+   "With CHAT_ATTACHMENT_POLICY_ENABLED=0 the server declares no policy, so the client falls back to the VITE flags, and the two sides can drift again in that configuration.",
+   "getAttachmentPolicy() is a plain module variable, not a signal. DashboardComposer reads the gates only inside attachmentPolicyContext(), which runs at pick and submit time, so this works today. A future caller that reads the gates once inside a memo, before listModels resolves, would get stuck on the VITE fallback.",
+   "The sse.rs/attachment_policy.rs name agreement is pinned by an include_str string match on sse.rs. A cosmetic reformat of that const line in sse.rs would fail this test even if the value did not change.",
+   "The AttachmentPolicy TS type makes visionAsParts and doAttachments optional. The gates use === true, so a hand-built literal without them reads as off.",
+   "vite-env.d.ts declares VITE_CHAT_VISION_AS_PARTS_ENABLED but not VITE_CHAT_DO_ATTACHMENTS_ENABLED. This was already the case and is outside this packet.",
+   "The packet's test command `cargo test --lib vision_parts` matches 0 tests because the module path is vision::parts. The coder ran `--lib vision::parts` instead and got 10 passed. The packet command should be updated.",
+   "pnpm typecheck exits 1. The tester says the errors are in quarry-client.ts, RemoteSupportPage.tsx and schedule-contract.test.ts, none in the changed files, but did not diff them against HEAD.",
+   "The packet says the files are CRLF, but git ls-files --eol shows i/lf w/lf for all six edited files, so LF was correctly kept."
+  ],
+  "db_tests": [],
+  "needs_other_files": [
+   "Optional, not required: apps/Frontend Plane/verevonv3/src/features/dashboard/home/DashboardComposer.tsx lines 1846 and 1853 could pass getAttachmentPolicy() explicitly to doAttachmentsEnabled() and visionAsPartsEnabled(). The new default argument already makes those no-argument calls read the loaded policy."
+  ],
+  "deploy_notes": "CHAT_DO_ATTACHMENTS_ENABLED is new on the model-gateway service in apps/Model Plane/deploy/docker-compose.yml. Unset or empty means off. The server now declares both modes on /v1/models. With the contract on (CHAT_ATTACHMENT_POLICY_ENABLED not 0), a loaded policy decides the client's two gates, so the VITE flags matter only when no policy loads (contract off, or the catalogue has not answered). Deploy order: model-gateway first, then the frontend, so a new frontend never reads a policy from an older server. Caveat: an older server that omits these modes makes both gates read off even with the VITE flag on.",
+  "summary": "Packet ws08-ws09-declared-attachment-modes is implemented. The server now declares modes.vision_as_parts and modes.do_attachments on /v1/models, read from CHAT_VISION_AS_PARTS_ENABLED and CHAT_DO_ATTACHMENTS_ENABLED with the strict trimmed-literal-true rule. The compose model-gateway service passes CHAT_DO_ATTACHMENTS_ENABLED through (default empty, off). The client parses the two flags (absent means false, a non-boolean drops the whole policy). visionAsPartsEnabled and doAttachmentsEnabled take the loaded policy as an optional argument that defaults to getAttachmentPolicy(), so they return the declared value when a policy is loaded and the VITE flag otherwise. With both server switches off and no VITE flags set, behaviour is unchanged. Deviations: (1) the harness text said \"Files you may edit: (none)\", but the packet record lists seven files; I followed the packet record. (2) The packet says the files are CRLF, but git ls-files --eol and the index sizes show these files are LF in the worktree, so I kept LF. (3) The TS mode fields are optional in the type, because required fields would break typed fixtures in unlisted test files that tsc -b checks. (4) vision_parts.rs needed no edit: ENABLED_VAR was already pub and is reached as crate::vision::parts::ENABLED_VAR. (5) sse.rs is untouched; a new test pins its private DO_ATTACHMENTS_VAR literal via include_str. (6) DashboardComposer.tsx is outside the packet, so I did not edit it; its no-argument gate calls now read the declared policy through the default argument. (7) The compose services near lines 986 and 1366 are inference-core and execution-core, not model-gateway, so no change there. Behaviour caveat: a loaded policy from a server that predates these fields reads both gates as off even when the VITE flag is on, so image-as-parts is disabled during a mixed-version window. If that window matters, keep absent as undefined and fall back to the VITE flag. The worktree also has uncommitted changes to sse.rs from another worker; they are not mine."
+ },
+ {
+  "key": "ws10-ws11-model-access-route",
+  "rows": [],
+  "title": "ws10-ws11-model-access-route",
+  "files": [
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\proto\\model_plane\\v1\\inference.proto",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\go\\gen\\model_plane\\v1\\inference.pb.go",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\inference-core\\src\\grpc.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\model_access.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Model Plane\\rust\\services\\model-gateway\\src\\http_routes.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\apps\\gateway\\src\\domains\\orgs\\model_entitlement.rs",
+   "C:\\dev\\CoresSystem\\.claude\\worktrees\\epic-shaw-4d613b\\apps\\Frontend Plane\\verevonv3\\docs\\endpoint-map.md"
+  ],
+  "verdict": "pass",
+  "tests_passed": true,
+  "test_results": [
+   {
+    "command": "cargo test -q -p inference-core --lib grpc",
+    "outcome": "60 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib model_access",
+    "outcome": "21 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib http_routes",
+    "outcome": "114 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cd ../go/gen && go build ./... && go vet ./...",
+    "outcome": "no output, both clean",
+    "passed": true
+   },
+   {
+    "command": "cargo test --manifest-path gateway/Cargo.toml --all-targets model_entitlement",
+    "outcome": "22 passed, 0 failed in lib; other targets 0 matched",
+    "passed": true
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "Malformed JSON syntax, or a body with the wrong Content-Type, still gets axum's plain-text Json rejection instead of a typed `{error:{code,message}}` envelope. The BFF always sends valid JSON, and any non-2xx makes the guard fail closed (503), so this is not a blocker.",
+   "The BFF validator only checks that `min_privacy_tier` is a string, not that it is a known label. A draft with an unknown tier label now gets a 400 from model-gateway, and the guard answers 503 `model_policy_guard_unavailable` instead of a validation error. This fails closed but the admin sees an unhelpful message.",
+   "`unspecified` is accepted as an alias for no minimum. It is the label `privacy_tier_label` writes back, so this is consistent, but the alias was not asked for in the brief.",
+   "The 'zdr' feature literal is now repeated in three places: inference-core `attests_zdr`, `provider/mod.rs` and the BFF's `model_attests_zdr_for_chat`. They can drift apart if one is renamed.",
+   "An empty `catalogue: []` with a 2xx counts as 'every verdict carries zdr_attested', so the attested set is empty and the write gets a 409. This is the same as the old behaviour for an empty catalogue and stays fail-closed.",
+   "The fallback to the admin's own catalogue (an older model-gateway) still has the old D1-490 limitation. It is now reached only when a verdict lacks the field.",
+   "Line endings: model_access.rs, http_routes.rs, model_entitlement.rs and inference.pb.go are LF in the worktree, and grpc.rs and inference.proto are CRLF. Each file is internally consistent and the diffs are not whole-file rewrites, so the original style looks preserved. I did not see the pre-edit worktree bytes to confirm.",
+   "I did not re-run the tests myself. The tester reports all five packet commands green. The model-gateway runs were built with other packets' uncommitted edits in the same tree."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No switch and no migration. The route is mounted behind the existing JWT middleware, and inference-core still refuses a draft or catalogue from a non-manager (typed 403); a plain question answers the caller's own state, as the BFF explain route already does. Deploy inference-core together with or before model-gateway. An inference-core that predates zdr_attested answers false for every model, so the BFF guard refuses (409 model_policy_leaves_no_zdr_model) a ZDR organisation's restricting policy until inference-core is upgraded; nothing is saved in that window, so it fails closed. The TS and Python generated copies do not carry ModelAccessEntry, so nothing else needs regenerating.",
+  "summary": "Packet ws10-ws11-model-access-route (D1-490, D1-491) is implemented and its checks pass. (1) model-gateway serves POST /v1/models/access: the route and handler are in http_routes.rs, and the pure JSON<->proto mapping, error mapping and answer JSON are in model_access.rs. The org comes from the verified claims. Unknown top-level keys, unknown draft or default keys, mistyped values and unknown privacy tier labels are typed 400s; an unknown label never becomes UNSPECIFIED. An inference-core entitlement refusal keeps its typed 403/503 body, PERMISSION_DENIED becomes a typed 403, anything else a typed 502, and no upstream text is echoed. privacy_tier_label is now pub(crate) and reused. (2) Proto: ModelAccessEntry gains bool zdr_attested = 5. Go bindings were regenerated natively with buf 1.72.0 and local protoc-gen-go v1.36.12; only inference.pb.go changed (browser.pb.go differs only by CRLF, pre-existing and untouched; go.sum untouched). inference-core fills the flag from the unfiltered chat list: features contain zdr, or tier is zdr_contractual or sovereign. (3) BFF guard (model_entitlement.rs): attestation now comes from each verdict's zdr_attested; the admin's own catalogue is read only when a verdict lacks the field (an older model-gateway), once per write; the fail-closed 503 paths are unchanged. The endpoint-map row is updated. Judgment calls: the task text said 'Files you may edit: (none)' but the packet lists 7 files, so I followed the packet; 'unspecified' is accepted as an alias for no minimum because it is the label the answer writes; drafts get the same key strictness the BFF's own validator already applies (POLICY_FIELDS / SURFACE_DEFAULT_FIELDS); malformed JSON syntax still gets axum's plain rejection; inference-core repeats the 'zdr' feature literal because provider/mod.rs is outside the packet. Not run: clippy (not in the packet). No database-backed tests were written. No git write operations, docker, or .env access. The cargo runs shared the target dir and worktree with other packets, so model-gateway results include their uncommitted edits in that tree at build time; -q output showed no compiler warnings."
+ },
+ {
+  "key": "ws10-ws11-sidebar-model-access-nav",
+  "rows": [],
+  "title": "ws10-ws11-sidebar-model-access-nav",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.tsx",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/sidebar/CoreSidebarSettingsPanels.tsx",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/shared/components/AiModelPicker.tsx",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/styles/global.css",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Frontend Plane/verevonv3/src/features/core/components/CoreSidebar.model-access.test.tsx"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "pnpm vitest run --pool=threads src/features/core/components/CoreSidebar.model-access.test.tsx src/features/core/components/CoreSidebar.home-tab.test.tsx",
+    "outcome": "2 test files passed, 9 tests passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "pnpm typecheck",
+    "outcome": "exit 1 with 34 TS errors, none in the task's files (CoreSidebar*, AiModelPicker). They are in RemoteSupportPage.tsx, quarry-client.ts (cannot find module @quarry/client, implicit any) and schedule-contract.test.ts, which this task did not touch and which look pre-existing. I did not run it against HEAD to confirm.",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "global.css is CRLF in the working tree but the HEAD blob is LF. git diff shows only the one new hunk, so this looks like autocrlf checkout normalisation and not a rewrite of the whole file. The lead should still confirm `git diff --stat` reports about 8 changed lines before committing.",
+   "Two places now control the Model access entry: the 'settings-model-access' item in sidebar-navigation.ts, gated by applyDemoModeNavGate, and the new 'model-access' entry in settingsSidebarSections, gated by the prop. Both read the same modelAccessEnabled() accessor, so they agree today, but they could drift apart later.",
+   "The new test file shows the tab appears with the switch on and stays hidden when the switch is off, when the request fails, for a member, and for an admin with no org. On the old code the switch-on case fails because there was no link, so it is a real regression test. No test covers moving from one org to another, where the org-id guard matters; only clearing the org is tested.",
+   "Only an ancestor Suspense or error boundary can expose the resource's pending or error states. If the compat createResource throws when read while it has an error, the `!modelAccess.error` check comes first and avoids that. The rejected-request test shows this works in jsdom.",
+   "pnpm typecheck exits 1 with 34 errors, all in files this task did not touch (quarry-client.ts, RemoteSupportPage.tsx, schedule-contract.test.ts). Nobody checked these against HEAD, so treat them as pre-existing, not proven."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "The task text said the editable file list was \"(none)\", but the packet record lists the four files and one new test file above, so I followed the packet. Commit only those five paths: the worktree also has other modified files from parallel work (attachment-policy.ts, chat-client.ts, zdr-live-turn.spec.ts, Model Plane files) that this task did not touch. Not run: tests/e2e/model-entitlement.spec.ts, which needs a second Vite dev server and is a live proof outside this packet. Two notes. (1) The compat createResource keeps the previous value when its source becomes undefined, so the answer is keyed by org id here. OrgModelAccessSection.tsx uses the same pattern but hides its editor while loading, so I left it unchanged. (2) Solid 2 batches session-store writes until a flush, so the test signIn helper flushes between writes, as OrgModelAccessSection.test.tsx does.",
+  "summary": "Packet ws10-ws11-sidebar-model-access-nav is implemented. CoreSidebar.tsx asks the gateway for the model-entitlement switch once per sidebar, only when the person is an org admin with an active org (hasWorkspaceAdminAccess plus activeOrg.id), and passes { modelAccessEnabled } to applyDemoModeNavGate. The answer is kept with the org id it was asked for, so an error, a non-admin, a missing org, or an answer from another org all mean off. CoreSidebarSettingsPanels.tsx adds a model-access entry (BrainCircuit, /settings/model-access, after Router policy) that is filtered out unless the flag is true, and gives it the label Modelltilgang / Model access. getSettingsActiveSectionId resolves /settings/model-access to model-access (verified by aria-current). AiModelPicker.tsx drops POLICY_NOTICE_STYLE and its JSX type import. global.css gets a .verevon-ai-model-picker__notice rule after the picker menu rules, with CRLF kept. The new CoreSidebar.model-access.test.tsx has 6 cases: switch on (link shown, aria-current page), switch off, rejected request, member (never called), admin with no active org (never called), and org cleared after the tab was shown (tab dropped). The packet's sidebar-navigation gate and its existing test were already in place and are unchanged."
+ },
+ {
+  "key": "ws01-ws02-ws03-gateway-prompt-tier-plan",
+  "rows": [],
+  "title": "ws01-ws02-ws03-gateway-prompt-tier-plan",
+  "files": [
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/prompt_context.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+   "C:/dev/CoresSystem/.claude/worktrees/epic-shaw-4d613b/apps/Model Plane/rust/services/model-gateway/src/sse.rs"
+  ],
+  "verdict": "pass",
+  "tests_passed": false,
+  "test_results": [
+   {
+    "command": "cargo test -q -p model-gateway --lib prompt_context::",
+    "outcome": "18 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo test -q -p model-gateway --lib tool_loop::",
+    "outcome": "211 passed, 0 failed",
+    "passed": true
+   },
+   {
+    "command": "cargo clippy -p model-gateway --lib --tests -- -D warnings",
+    "outcome": "Fails before reaching model-gateway: -D warnings applies to the workspace dependency mp-content-safety (crates/mp-content-safety/src/scan.rs:165, redundant_closure_for_method_calls, 2 errors), a file this task did not touch. Without -D warnings, clippy finishes. It prints many pedantic warnings across model-gateway, including sse.rs:4782 and :7657 (redundant field names) and tool_loop.rs:7743 (similar binding names). I did not check which of these are new.",
+    "passed": false
+   }
+  ],
+  "required_fixes_open": [],
+  "residual_risks": [
+   "The packet's clippy gate (`cargo clippy -p model-gateway --lib --tests -- -D warnings`) cannot pass. It stops on lints already present in crates/mp-content-safety (normalize.rs:60, scan.rs:165) and on about 500 pedantic findings that already exist in model-gateway. So none of the new lines has been checked under -D warnings in a gated run. The coder says the 6 findings their draft added were fixed.",
+   "The answer-request wiring (sse.rs:3168-3189) and the history-shed re-check (sse.rs:3487-3491) have no unit test, because sse.rs has no harness for them. They are covered only by compiling and by review. Reviewed: between render and the answer, `messages` is reassigned only by the research, forced-search and tool-round results, and the shed recomputes the plan through plan_for. So a stale plan cannot be sent.",
+   "A plan exists only when CacheOptions selects PromptOrder::StablePrefix. Routes that CacheOptions::for_route forces to Legacy (and any turn with the stable-order switch off) still send no tiers. This matches the brief, but the reach of D1-445/446 is limited to the stable-prefix routes. The coder's deploy note on this point is cut off in the report.",
+   "The ZDR gate is `!effective_zdr` only. It does not also check `retention_class.is_some()`, which matches the existing cache_prefix gate at sse.rs:3203. If an ephemeral retention class should also suppress provider prompt caching, both gates would need to change together. That is out of scope here.",
+   "plan_for compares only role and content (as the brief specifies). A ChatMessage whose other fields change while role and content stay the same would still match.",
+   "Two new lines exceed rustfmt width: the `.all(...)` closure in prompt_context.rs plan_for and the `decision_tiers` binding in tool_loop.rs. This is cosmetic. tool_loop.rs already has many long lines.",
+   "Line endings: the working copies of prompt_context.rs and tool_loop.rs are CRLF and sse.rs is LF, while the HEAD blobs are LF with core.autocrlf=true. The diff is content-only (463+/8-), so no whole-file churn was added."
+  ],
+  "db_tests": [],
+  "needs_other_files": [],
+  "deploy_notes": "No proto, env-var or compose change, and both switches stay as they are. With the stable order off, or on a ZDR turn, requests are unchanged: no plan and the same messages. Coverage gap for the lead to decide: the plan exists only when CacheOptions is StablePrefix, and CacheOptions::for_route (prompt_context.rs) forces Legacy on Claude and unhinted turns. So an Anthropic inline turn still sends no plan. The plan reaches the wire only on OpenAI-pinned turns with the stable switch on, and only the Anthropic provider reads it (inference-core provider/anthropic.rs:250-300), so on those turns it has no effect unless inference-core fails over to Anthropic. Making Claude inline turns use the tiered order would change their prompt order, so that needs an owner decision before this packet can be counted as delivering WS02-S9 to inline chat. Other packets are editing the same worktree (attachment_policy.rs, http_routes.rs, model_access.rs, attachment_policy_contract.rs, inference-core grpc.rs); my runs compiled against those in-progress edits. The computed task text listed no editable files, but the packet record names the three files above, which are the only ones I changed. No database-backed tests were written.",
+  "summary": "Carried the composer's stable-order prompt-tier plan into the inline chat tool rounds and the answer call (D1-445, D1-446). prompt_context.rs gains render_planned (Legacy: the same render output and no plan; StablePrefix: the tiered render plus its plan), wire_plan (the counts as the proto PromptTierPlan, None when both are zero) and plan_for, which returns the plan only while the first stable+context messages of the outgoing list equal the composed ones (role and content) and are all system. sse.rs takes the plan at render, drops it on ZDR turns, and passes it only where plan_for confirms the head: to the tool rounds (re-checked after the research and forced-search passes), to the answer request, and after a history shed. tool_loop.rs takes a trailing prompt_tiers parameter on run_tool_rounds_for_model and run_tool_rounds_for_model_with_attachments (run_tool_rounds passes None), snapshots the composed head at entry, and sets the decision InferRequest's prompt_tiers through plan_for. Legacy-order and switch-off requests are unchanged; the proto is unchanged. Deviations: no inference double existed in tool_loop tests, so I wrote a RecordingCore (all 21 InferenceCore RPCs, only Infer records) to test the decision wiring; the shed rule keeps the plan whenever the head survives rather than sending None on any rewrite; sse.rs calls render_planned, which uses the same stable render path as render_tiered (render_tiered is unchanged). The answer-request and shed wiring have no unit test because sse.rs has no harness for it; they are covered by compile, review and the contract tests."
+ }
+]

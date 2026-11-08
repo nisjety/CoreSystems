@@ -1,0 +1,43 @@
+{
+ "batchId": "W1-26",
+ "wave": 1,
+ "goal": "Wave 1 build: Provider cache scope key (code half)",
+ "slices": [
+  {
+   "id": "WS02-S10.code",
+   "title": "Provider cache scope key (code half)",
+   "tag": "BUILD",
+   "summary": "Adds cache_scope_key(org_id, thread_id) in mp-contracts prompt_tier.rs (first 32 hex characters of blake3 over the versioned domain string verevon.prompt-cache.v1 and length-prefixed ids; subagents append :sub) and InferRequest.cache_scope_key = 19; openai.rs sends prompt_cache_key only for verified providers and never under ZDR. This is not a response cache; cache.rs is unchanged.",
+   "remaining": "Code half: Provider cache scope key behind its switch (default off), proto field and unit tests.",
+   "files": [
+    "apps/Model Plane/proto/model_plane/v1/inference.proto",
+    "apps/Model Plane/rust/crates/mp-contracts/src/prompt_tier.rs",
+    "apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/openai.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/sse.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs"
+   ],
+   "new_files": [],
+   "test_commands": [
+    "[cwd: apps/Model Plane/rust] cargo test -p inference-core --lib openai (new prompt_cache_key_sent_only_when_enabled_and_not_zdr, openai_zdr_body_has_no_prompt_cache_key)",
+    "[cwd: apps/Model Plane/rust] cargo test -p mp-contracts (cache_scope_key determinism and domain separation)"
+   ],
+   "flag": "INFERENCE_OPENAI_PROMPT_CACHE_KEY (default off)",
+   "risk": [
+    "zdr"
+   ],
+   "importance": "sonnet",
+   "implementer": "sonnet",
+   "strict": true,
+   "depends_on": [
+    "WS02-S8.code",
+    "WS12-S2"
+   ],
+   "decisions_defaults": {
+    "DEC-39": "Integrator reserves (section 2.6 row 1). Land the live ZDR + session-core wave (WS01 S0) before anyone edits `grpc.rs`, `auth.rs`, `sessions.proto`. CI: drop `branches` filters on `pull_request`, add integration branch to `push`. Add matrix row + CODEOWNERS fo",
+    "D7 (local)": "WS-local decision: the plan's recommended default in the WS02 section"
+   },
+   "notes": "Lead note 2026-10-26: a test result counts only if it names the exact test or filter, quotes cargo's 'test result:' line, and comes from a binary rebuilt after your last edit (cargo prints 'Compiling <crate>'; touch the file if it does not). A pass reported without that was found wrong today (D1-778). inference.proto changes rebuild mp-contracts: run cargo clean -p mp-contracts on the shared target before the first build, or the stale-build trap returns old generated code. Do not regenerate the Go bindings: list the buf regen under lead_todo. The switch INFERENCE_OPENAI_PROMPT_CACHE_KEY stays default off with the strict literal parser, and a prompt cache key must never carry or be derived from content (zero data retention): derive it from scope identifiers only."
+  }
+ ]
+}

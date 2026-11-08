@@ -1,0 +1,2470 @@
+diff --git a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs
+index f1f2505cd..2d07ada2c 100644
+--- a/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs	
++++ b/apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs	
+@@ -542,8 +542,8 @@ async fn get_lineage(
+ /// browser-action decision surface (a granted decision lets execution-core's
+ /// in-loop poller in `browser_agent.rs` proceed with the exact action that
+ /// was gated; a denial/timeout aborts the run without dispatching it).
+-/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once"}`; see
+-/// [`DecideBody`].
++/// Body: `{"decision": "approve" | "reject", "reason"?: string, "scope"?: "once",
++/// "edit"?: {"patch": {...}, "baseFingerprint": string}}`; see [`DecideBody`].
+ pub(crate) async fn decide_approval(
+     State(state): State<AppState>,
+     Extension(user): Extension<AuthenticatedUser>,
+@@ -583,6 +583,69 @@ struct DecideBody {
+     scope: Option<String>,
+     #[serde(default)]
+     promote: bool,
++    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send. Forwarded
++    /// as `edit {patch, base_fingerprint}`; model-gateway and Session Core decide whether it is
++    /// allowed (both refuse it while APPROVAL_EDIT_ENABLED is off).
++    #[serde(default)]
++    edit: Option<DecideEditBody>,
++}
++
++/// The edit a decision may carry, in the SPA's camelCase. `patch` holds the mail fields the
++/// person changed (`to`, `subject`, `bodyText`); Session Core refuses any other key.
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields, rename_all = "camelCase")]
++struct DecideEditBody {
++    patch: Value,
++    base_fingerprint: String,
++}
++
++/// The largest edit patch forwarded: the 48 KiB body cap plus room for recipients and subject.
++const DECIDE_EDIT_PATCH_MAX_BYTES: usize = 64 * 1024;
++
++fn edit_refusal(code: &'static str, message: &'static str) -> (StatusCode, Json<Value>) {
++    (StatusCode::UNPROCESSABLE_ENTITY, Json(error(code, message)))
++}
++
++/// The upstream form of a decision's edit (EP-10-S4): an approval for this one call only, a JSON
++/// object patch within the cap and a 64-hex base fingerprint.
++fn decide_upstream_edit(
++    edit: DecideEditBody,
++    decision: &str,
++    scope: Option<&str>,
++    promote: bool,
++) -> Result<Value, (StatusCode, Json<Value>)> {
++    if decision != "approve" {
++        return Err(edit_refusal(
++            "edit_requires_grant",
++            "An edit is sent with an approval only.",
++        ));
++    }
++    if !matches!(scope, None | Some("once")) || promote {
++        return Err(edit_refusal(
++            "edit_requires_once",
++            "An edited action is approved for this one time only.",
++        ));
++    }
++    if !edit.patch.is_object() {
++        return Err(edit_refusal(
++            "invalid_patch",
++            "The edit is not in the expected shape.",
++        ));
++    }
++    if edit.patch.to_string().len() > DECIDE_EDIT_PATCH_MAX_BYTES {
++        return Err(edit_refusal(
++            "edit_too_large",
++            "The edited message is too long.",
++        ));
++    }
++    let base = edit.base_fingerprint.trim();
++    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
++        return Err(edit_refusal(
++            "invalid_base_fingerprint",
++            "The edit does not say which draft it changes.",
++        ));
++    }
++    Ok(serde_json::json!({ "patch": edit.patch, "base_fingerprint": base }))
+ }
+ 
+ /// The upstream body, rebuilt from the accepted fields alone, or the refusal to send. An
+@@ -624,6 +687,11 @@ fn decide_upstream_body(raw: Value) -> Result<Value, (StatusCode, Json<Value>)>
+         }
+         upstream["promote"] = Value::Bool(true);
+     }
++    if let Some(edit) = body.edit {
++        let scope = upstream["scope"].as_str().map(str::to_owned);
++        let edit = decide_upstream_edit(edit, &body.decision, scope.as_deref(), body.promote)?;
++        upstream["edit"] = edit;
++    }
+     Ok(upstream)
+ }
+ 
+@@ -954,6 +1022,68 @@ mod tests {
+         );
+     }
+ 
++    /// EP-10-S4: an edit crosses as `{patch, base_fingerprint}` for a once-approval only; an
++    /// unknown key inside the edit is refused like one beside it.
++    #[test]
++    fn decide_body_accepts_edit_and_refuses_unknown_keys() {
++        let base = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++        let forwarded = decide_upstream_body(json!({
++            "decision": "approve",
++            "scope": "once",
++            "edit": { "patch": { "subject": "New", "bodyText": "Hei" }, "baseFingerprint": base },
++        }))
++        .expect("an edited approval");
++        assert_eq!(
++            forwarded,
++            json!({
++                "decision": "approve",
++                "reason": "",
++                "scope": "once",
++                "edit": { "patch": { "subject": "New", "bodyText": "Hei" }, "base_fingerprint": base },
++            })
++        );
++        let plain = decide_upstream_body(json!({"decision": "approve"})).expect("no edit");
++        assert!(plain.get("edit").is_none(), "an edit is sent only when made");
++
++        for edit in [
++            json!({ "patch": {}, "baseFingerprint": base, "connectionId": "conn-2" }),
++            json!({ "patch": {}, "base_fingerprint": base }),
++            json!({ "patch": {} }),
++        ] {
++            let (status, Json(refusal)) =
++                decide_upstream_body(json!({"decision": "approve", "edit": edit}))
++                    .expect_err("an unknown or missing edit key is refused");
++            assert_eq!(status, StatusCode::BAD_REQUEST);
++            assert_eq!(refusal["error"]["code"], "invalid_request");
++        }
++
++        let cases = [
++            (json!({"decision": "reject"}), "edit_requires_grant"),
++            (json!({"decision": "approve", "scope": "thread"}), "edit_requires_once"),
++            (json!({"decision": "approve", "scope": "thread", "promote": true}), "edit_requires_once"),
++        ];
++        for (mut body, code) in cases {
++            body["edit"] = json!({ "patch": { "subject": "New" }, "baseFingerprint": base });
++            let (status, Json(refusal)) = decide_upstream_body(body.clone()).expect_err("refused");
++            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
++            assert_eq!(refusal["error"]["code"], code, "{body}");
++        }
++        for (edit, code) in [
++            (json!({ "patch": ["subject"], "baseFingerprint": base }), "invalid_patch"),
++            (json!({ "patch": { "subject": "New" }, "baseFingerprint": "abc" }), "invalid_base_fingerprint"),
++            (
++                json!({ "patch": { "bodyText": "x".repeat(64 * 1024) }, "baseFingerprint": base }),
++                "edit_too_large",
++            ),
++        ] {
++            let (status, Json(refusal)) =
++                decide_upstream_body(json!({"decision": "approve", "edit": edit}))
++                    .expect_err("refused");
++            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
++            assert_eq!(refusal["error"]["code"], code);
++        }
++    }
++
+     #[test]
+     fn a_decision_with_a_field_the_client_does_not_own_is_a_400() {
+         for extra in [
+diff --git a/apps/Model Plane/proto/model_plane/v1/orchestration.proto b/apps/Model Plane/proto/model_plane/v1/orchestration.proto
+index f61eba0a4..992833945 100644
+--- a/apps/Model Plane/proto/model_plane/v1/orchestration.proto	
++++ b/apps/Model Plane/proto/model_plane/v1/orchestration.proto	
+@@ -530,6 +530,10 @@ message Approval {
+ 
+   // Where the turn came from (`direct`, `ambient`, `automation`); empty reads as `direct`.
+   string turn_origin = 23;
++
++  // EP-10 S4: how many times the person edited the approved call before granting it; 0 = never
++  // edited. Read from `approval_continuation_descriptors.revision` (at most 3).
++  uint32 revision = 25;
+ }
+ 
+ // Who recorded an approval decision (build plan WS13 S3). Stored as
+@@ -1149,6 +1153,12 @@ message ConsumeApprovalResponse {
+   // S3). A continuation runs under this snapshot only: nothing a client sends
+   // replaces it. Absent for an approval raised cold (no snapshot was taken).
+   ApprovedAuthority authority = 7;
++  // EP-10 S4: how many times the person edited the call before granting it; 0 = the call is
++  // the one the model drafted.
++  uint32 revision = 8;
++  // EP-10 S4: the fingerprint of the call as first drafted, set only when revision > 0. A digest,
++  // never the original content: the loop matches its own pending fingerprint against it.
++  string original_action_fingerprint = 9;
+ }
+ 
+ // The authority an approval was raised under, snapshotted at pause time.
+@@ -1306,6 +1316,21 @@ message DecideApprovalRequest {
+   // rule is not in force until the person confirms it.
+   // Field 8 was renumbered to 12 when main was merged: main already used 8-11 for the Space member decide.
+   bool rule_proposed = 12;
++
++  // EP-10 S4: "Send with my edits". Set only with a GRANTED, ONCE-scoped decision: session-core
++  // replaces the approved call with the edited one and grants it in one transaction. Refused while
++  // APPROVAL_EDIT_ENABLED is off. Tag 9 in the design was taken by the Space member decide.
++  ApprovalEdit edit = 13;
++}
++
++// EP-10 S4: the person's edit of a pending approval's call.
++message ApprovalEdit {
++  // EP-10 S4: a JSON object with only `to`, `subject` and `body_text`
++  // (mp_contracts::approval_edit::MailSendPatch); any other key is refused.
++  string patch_json = 1;
++  // EP-10 S4: the action fingerprint the person saw in the preview. A mismatch with the stored
++  // descriptor is refused as `approval_changed`.
++  string base_fingerprint = 2;
+ }
+ 
+ message DecideApprovalResponse {
+@@ -1688,6 +1713,12 @@ message OrchestrationEvent {
+ 
+     // True when a recent re-authentication was verified for the decision (WS13 S5).
+     bool step_up_verified = 10;
++
++    // EP-10 S4: the descriptor revision after this decision; 0 when the call was not edited.
++    uint32 revision = 11;
++
++    // EP-10 S4: names of the fields the person edited ("to", "subject", "body_text"), never values.
++    repeated string edited_fields = 12;
+   }
+ 
+   message SubagentAttached {
+diff --git a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs
+index cd449ad52..60a2029b3 100644
+--- a/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/src/http_routes.rs	
+@@ -2574,6 +2574,149 @@ struct DecideApprovalBody {
+     /// carries one reads exactly as it did before the switch existed.
+     #[serde(default)]
+     promote: Value,
++    /// "Send with my edits" (EP-10-S4): the person's changes to a pending mail send, granted with
++    /// the approval in one act. Refused while APPROVAL_EDIT_ENABLED is off; absent, the decision is
++    /// exactly what it was before edits existed.
++    #[serde(default)]
++    edit: Option<DecideEditBody>,
++}
++
++/// The edit a decision may carry (EP-10-S4). `patch` holds only `to`, `subject` and `bodyText`;
++/// Session Core refuses any other key, so this gateway forwards it as the person wrote it.
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct DecideEditBody {
++    patch: Value,
++    base_fingerprint: String,
++}
++
++/// The approve-with-edits switch (EP-10-S4). Off: a decision carrying an edit is refused with 403
++/// `approval_edit_disabled` before anything reaches Session Core. Only the literal `true` enables
++/// it.
++const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
++
++fn approval_edit_enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(env::var(APPROVAL_EDIT_ENV).ok().as_deref())
++}
++
++/// The largest patch an edit may carry: the 48 KiB body cap plus room for recipients and subject.
++const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
++
++fn edit_refusal(status: StatusCode, code: &str, message: &str) -> HttpJsonError {
++    (
++        status,
++        Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
++    )
++}
++
++/// Check a decision's edit before any upstream call (EP-10-S4, decision D1): the switch, a grant,
++/// the `once` scope with no "Always", a JSON object patch and a 64-hex base fingerprint. `None`
++/// when the body carries no edit, whatever the switch says.
++fn checked_decision_edit(
++    edit: Option<&DecideEditBody>,
++    body_scope: &str,
++    promote: bool,
++    target: ApprovalState,
++    enabled: bool,
++) -> Result<Option<mp_contracts::model_plane::v1::ApprovalEdit>, HttpJsonError> {
++    let Some(edit) = edit else {
++        return Ok(None);
++    };
++    if !enabled {
++        return Err(edit_refusal(
++            StatusCode::FORBIDDEN,
++            "approval_edit_disabled",
++            "Editing before approving is not enabled on this deployment.",
++        ));
++    }
++    if !matches!(target, ApprovalState::Granted) {
++        return Err(edit_refusal(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "edit_requires_grant",
++            "An edit is sent with an approval only.",
++        ));
++    }
++    if !matches!(body_scope, "" | SCOPE_ONCE) || promote {
++        return Err(edit_refusal(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "edit_requires_once",
++            "An edited action is approved for this one time only.",
++        ));
++    }
++    if !edit.patch.is_object() {
++        return Err(edit_refusal(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "invalid_patch",
++            "The edit is not in the expected shape.",
++        ));
++    }
++    let base = edit.base_fingerprint.trim();
++    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
++        return Err(edit_refusal(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "invalid_base_fingerprint",
++            "The edit does not say which draft it changes.",
++        ));
++    }
++    let patch_json = edit.patch.to_string();
++    if patch_json.len() > MAX_EDIT_PATCH_BYTES {
++        return Err(edit_refusal(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "edit_too_large",
++            "The edited message is too long.",
++        ));
++    }
++    Ok(Some(mp_contracts::model_plane::v1::ApprovalEdit {
++        patch_json,
++        base_fingerprint: base.to_owned(),
++    }))
++}
++
++/// The HTTP form of a decision that carried an edit (EP-10-S4). Session Core sends the closed code
++/// as the status message: a changed approval is 409, a refused patch 422, a switch or owner refusal
++/// 403. A typed ZDR refusal and every other status keep the shared mapping.
++fn edit_decision_status_to_http(error: &tonic::Status) -> HttpJsonError {
++    if mp_contracts::zdr_refusal::Refusal::from_status(error).is_some() {
++        return grpc_status_to_http(error);
++    }
++    let code = error.message();
++    let contract_code = mp_contracts::approval_edit::EditError::ALL
++        .iter()
++        .any(|known| known.code() == code);
++    match (error.code(), code) {
++        (tonic::Code::Aborted, "approval_changed") => edit_refusal(
++            StatusCode::CONFLICT,
++            "approval_changed",
++            "This approval changed since you opened it. Review it again.",
++        ),
++        (tonic::Code::FailedPrecondition, "revision_limit") => edit_refusal(
++            StatusCode::CONFLICT,
++            "revision_limit",
++            "This action was edited too many times.",
++        ),
++        (tonic::Code::FailedPrecondition, "not_editable") => edit_refusal(
++            StatusCode::UNPROCESSABLE_ENTITY,
++            "not_editable",
++            "This action cannot be edited; approve or reject it as drafted.",
++        ),
++        (tonic::Code::InvalidArgument, code)
++            if contract_code
++                || matches!(code, "invalid_patch" | "edit_requires_once" | "edit_requires_grant") =>
++        {
++            edit_refusal(
++                StatusCode::UNPROCESSABLE_ENTITY,
++                code,
++                "The edit was not accepted.",
++            )
++        }
++        (tonic::Code::FailedPrecondition, "approval_edit_disabled")
++        | (tonic::Code::PermissionDenied, "edit_owner_only") => edit_refusal(
++            StatusCode::FORBIDDEN,
++            code,
++            "Editing this approval is not available.",
++        ),
++        _ => grpc_status_to_http(error),
++    }
+ }
+ 
+ /// The scope a decision may carry (build plan WS13 S6). `once` is always available. A standing
+@@ -2821,6 +2964,15 @@ async fn decide_approval(
+             ))
+         }
+     };
++    // Approve with edits (EP-10-S4): refused before any upstream call unless it is a `once` grant
++    // under the switch. A body without `edit` takes exactly the path it always did.
++    let edit = checked_decision_edit(
++        body.edit.as_ref(),
++        &body.scope,
++        body.promote == Value::Bool(true),
++        target_state,
++        approval_edit_enabled(),
++    )?;
+     let prior_approval = if matches!(target_state, ApprovalState::Granted) {
+         state
+             .orchestration_client
+@@ -2879,23 +3031,29 @@ async fn decide_approval(
+             }
+         }
+     }
++    let edited = edit.is_some();
++    let mut decision = user_decision_request(
++        approval_id,
++        target_state,
++        &claims.user_id,
++        &claims.org_id,
++        body.reason,
++        scope,
++        asks_rule,
++    );
++    decision.edit = edit;
+     let resp = state
+         .orchestration_client
+         .clone()
+-        .decide_approval(authenticated_session_request(
+-            user_decision_request(
+-                approval_id,
+-                target_state,
+-                &claims.user_id,
+-                &claims.org_id,
+-                body.reason,
+-                scope,
+-                asks_rule,
+-            ),
+-            &session_bearer,
+-        )?)
++        .decide_approval(authenticated_session_request(decision, &session_bearer)?)
+         .await
+-        .map_err(|e| grpc_status_to_http(&e))?
++        .map_err(|e| {
++            if edited {
++                edit_decision_status_to_http(&e)
++            } else {
++                grpc_status_to_http(&e)
++            }
++        })?
+         .into_inner();
+     let approval = resp
+         .approval
+@@ -8546,7 +8704,7 @@ fn todo_value(todo: &Todo) -> Value {
+ }
+ 
+ pub(crate) fn approval_value(approval: &Approval) -> Value {
+-    json!({
++    let mut value = json!({
+         "id": approval.id,
+         "run_id": approval.run_id,
+         "step_id": empty_to_null(&approval.step_id),
+@@ -8576,7 +8734,13 @@ pub(crate) fn approval_value(approval: &Approval) -> Value {
+         })),
+         "grant_ref": empty_to_null(&approval.grant_ref),
+         "turn_origin": empty_to_null(&approval.turn_origin),
+-    })
++    });
++    // EP-10-S4: present only for an approval the person edited before granting, so every other
++    // approval projects exactly as before.
++    if approval.revision > 0 {
++        value["revision"] = json!(approval.revision);
++    }
++    value
+ }
+ 
+ /// The scopes this process offers a person (build plan WS13 S6): `once` alone while standing scopes
+@@ -8980,6 +9144,162 @@ mod approval_rule_tests {
+     }
+ }
+ 
++#[cfg(test)]
++mod approval_edit_route_tests {
++    //! EP-10-S4: the gateway half of approve-with-edits. Every check runs before an upstream call;
++    //! the switch is off by default and a body without `edit` is untouched by it.
++    use super::*;
++
++    const BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
++    fn edit_body() -> DecideEditBody {
++        DecideEditBody {
++            patch: json!({ "subject": "New subject" }),
++            base_fingerprint: BASE.to_owned(),
++        }
++    }
++
++    fn code_of(error: &HttpJsonError) -> (StatusCode, String) {
++        (error.0, error.1 .0["error"]["code"].as_str().unwrap_or_default().to_owned())
++    }
++
++    #[test]
++    fn approval_edit_switch_is_off_by_default_and_strict() {
++        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
++        for value in [None, Some("1"), Some("yes"), Some("on"), Some("")] {
++            assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
++        }
++    }
++
++    #[test]
++    fn edit_off_by_default_is_forbidden() {
++        let refused =
++            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Granted, false)
++                .expect_err("off");
++        assert_eq!(code_of(&refused), (StatusCode::FORBIDDEN, "approval_edit_disabled".to_owned()));
++        assert!(refused.1 .0["error"]["details"].is_object(), "details is an object");
++    }
++
++    #[test]
++    fn a_decision_without_an_edit_is_unchanged_by_the_switch() {
++        for enabled in [false, true] {
++            assert!(checked_decision_edit(None, "thread", true, ApprovalState::Denied, enabled)
++                .expect("no edit")
++                .is_none());
++        }
++    }
++
++    #[test]
++    fn edit_with_scope_thread_is_refused() {
++        for (scope, promote) in [("thread", false), ("run", false), ("", true)] {
++            let refused =
++                checked_decision_edit(Some(&edit_body()), scope, promote, ApprovalState::Granted, true)
++                    .expect_err("wide scope");
++            assert_eq!(
++                code_of(&refused),
++                (StatusCode::UNPROCESSABLE_ENTITY, "edit_requires_once".to_owned()),
++                "{scope} {promote}"
++            );
++        }
++    }
++
++    #[test]
++    fn a_rejection_with_an_edit_is_refused() {
++        let refused =
++            checked_decision_edit(Some(&edit_body()), "", false, ApprovalState::Denied, true)
++                .expect_err("rejection");
++        assert_eq!(code_of(&refused).1, "edit_requires_grant");
++    }
++
++    #[test]
++    fn an_edit_is_forwarded_as_its_patch_and_base() {
++        let edit = checked_decision_edit(Some(&edit_body()), "once", false, ApprovalState::Granted, true)
++            .expect("accepted")
++            .expect("an edit");
++        assert_eq!(edit.base_fingerprint, BASE);
++        let patch: Value = serde_json::from_str(&edit.patch_json).expect("json");
++        assert_eq!(patch, json!({ "subject": "New subject" }));
++    }
++
++    #[test]
++    fn a_malformed_edit_is_refused_before_the_upstream() {
++        let mut not_object = edit_body();
++        not_object.patch = json!(["subject"]);
++        let refused = checked_decision_edit(Some(&not_object), "", false, ApprovalState::Granted, true)
++            .expect_err("array patch");
++        assert_eq!(code_of(&refused).1, "invalid_patch");
++
++        let mut short = edit_body();
++        short.base_fingerprint = "abc".to_owned();
++        let refused = checked_decision_edit(Some(&short), "", false, ApprovalState::Granted, true)
++            .expect_err("short base");
++        assert_eq!(code_of(&refused).1, "invalid_base_fingerprint");
++
++        let mut large = edit_body();
++        large.patch = json!({ "bodyText": "x".repeat(MAX_EDIT_PATCH_BYTES) });
++        let refused = checked_decision_edit(Some(&large), "", false, ApprovalState::Granted, true)
++            .expect_err("large");
++        assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, "edit_too_large".to_owned()));
++    }
++
++    #[test]
++    fn decide_body_parses_an_edit_and_refuses_unknown_edit_keys() {
++        let body: DecideApprovalBody = serde_json::from_value(json!({
++            "decision": "approve",
++            "edit": { "patch": { "to": ["a@example.com"] }, "base_fingerprint": BASE },
++        }))
++        .expect("an edit parses");
++        assert!(body.edit.is_some());
++        let plain: DecideApprovalBody =
++            serde_json::from_value(json!({ "decision": "approve" })).expect("no edit");
++        assert!(plain.edit.is_none());
++        assert!(serde_json::from_value::<DecideApprovalBody>(json!({
++            "decision": "approve",
++            "edit": { "patch": {}, "base_fingerprint": BASE, "connection_id": "conn-2" },
++        }))
++        .is_err());
++    }
++
++    #[test]
++    fn approval_changed_is_409() {
++        let refused = edit_decision_status_to_http(&tonic::Status::aborted("approval_changed"));
++        assert_eq!(code_of(&refused), (StatusCode::CONFLICT, "approval_changed".to_owned()));
++        assert!(refused.1 .0["error"]["details"].is_object());
++    }
++
++    #[test]
++    fn edit_refusals_map_to_typed_statuses() {
++        for error in mp_contracts::approval_edit::EditError::ALL {
++            let refused =
++                edit_decision_status_to_http(&tonic::Status::invalid_argument(error.code()));
++            assert_eq!(code_of(&refused), (StatusCode::UNPROCESSABLE_ENTITY, error.code().to_owned()));
++        }
++        let cases = [
++            (tonic::Status::failed_precondition("not_editable"), StatusCode::UNPROCESSABLE_ENTITY),
++            (tonic::Status::failed_precondition("revision_limit"), StatusCode::CONFLICT),
++            (tonic::Status::failed_precondition("approval_edit_disabled"), StatusCode::FORBIDDEN),
++            (tonic::Status::permission_denied("edit_owner_only"), StatusCode::FORBIDDEN),
++        ];
++        for (status, http) in cases {
++            let refused = edit_decision_status_to_http(&status);
++            assert_eq!(code_of(&refused), (http, status.message().to_owned()));
++        }
++        let other = edit_decision_status_to_http(&tonic::Status::not_found("approval not found"));
++        assert_eq!(other.0, StatusCode::NOT_FOUND, "everything else keeps the shared mapping");
++    }
++
++    #[test]
++    fn an_edited_approval_projects_its_revision_and_an_unedited_one_does_not() {
++        let mut approval = Approval {
++            id: "appr_1".to_owned(),
++            ..Approval::default()
++        };
++        assert!(approval_value(&approval).get("revision").is_none());
++        approval.revision = 1;
++        assert_eq!(approval_value(&approval)["revision"], 1);
++    }
++}
++
+ #[cfg(test)]
+ mod approval_value_tests {
+     use super::*;
+diff --git a/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs
+index fb8013ebe..d3cd0fe71 100644
+--- a/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs	
++++ b/apps/Model Plane/rust/services/model-gateway/tests/orchestration_http_test.rs	
+@@ -207,6 +207,8 @@ struct CaptureState {
+     list_approvals: Arc<Mutex<Option<(String, String)>>>,
+     get_approval_id: Arc<Mutex<Option<String>>>,
+     decide_approval: CapturedTransition,
++    /// EP-10-S4: `(patch_json, base_fingerprint)` of the last decide that carried an edit.
++    decide_edit: Arc<Mutex<Option<(String, String)>>>,
+     lineage_thread_id: Arc<Mutex<Option<String>>>,
+     stream_run_id: Arc<Mutex<Option<String>>>,
+     /// `(run_id, org_id)` of the last `ListRunQuestions` call.
+@@ -578,6 +580,14 @@ impl OrchestrationCoreService for MockOrchestration {
+     ) -> Result<Response<GetApprovalResponse>, Status> {
+         let request = request.into_inner();
+         *self.state.get_approval_id.lock().unwrap() = Some(request.approval_id.clone());
++        // An id that starts with `appr-stepup` stands for a cause that needs a fresh step-up.
++        let cause = request.approval_id.starts_with("appr-stepup").then(|| {
++            mp_contracts::model_plane::v1::ApprovalCause {
++                code: "provider_write".into(),
++                step_up_required: true,
++                ..Default::default()
++            }
++        });
+         Ok(Response::new(GetApprovalResponse {
+             approval: Some(Approval {
+                 consumed_at: None,
+@@ -585,7 +595,7 @@ impl OrchestrationCoreService for MockOrchestration {
+                 action_label: String::new(),
+                 continuation: None,
+                 continuation_mode: String::new(),
+-                cause: None,
++                cause,
+                 id: request.approval_id,
+                 run_id: "run-1".into(),
+                 step_id: "step-1".into(),
+@@ -659,6 +669,14 @@ impl OrchestrationCoreService for MockOrchestration {
+             request.decided_by.clone(),
+             request.decision_reason.clone(),
+         ));
++        if let Some(edit) = request.edit.as_ref() {
++            *self.state.decide_edit.lock().unwrap() =
++                Some((edit.patch_json.clone(), edit.base_fingerprint.clone()));
++            // Session Core answers a base it no longer holds with its closed code.
++            if edit.base_fingerprint == "f".repeat(64) {
++                return Err(Status::aborted("approval_changed"));
++            }
++        }
+         Ok(Response::new(DecideApprovalResponse {
+             approval: Some(Approval {
+                 consumed_at: None,
+@@ -1323,6 +1341,164 @@ async fn decide_approval_grant_of_a_loop_owned_approval_reports_awaiting_continu
+     );
+ }
+ 
++// ---------------------------------------------------------------------------
++// EP-10-S4: approve with edits. The switch is off by default; on, the edit reaches Session Core
++// with the grant and its closed refusals come back typed.
++// ---------------------------------------------------------------------------
++
++const EDIT_BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
++fn edited_decide_request(tokens: &UserTokens, approval_id: &str, body: &str) -> Request<Body> {
++    Request::builder()
++        .method("POST")
++        .uri(format!("/v1/orchestration/approvals/{approval_id}/decide"))
++        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
++        .header(
++            "x-session-authorization",
++            format!("Bearer {}", tokens.session),
++        )
++        .header(
++            "x-execution-authorization",
++            format!("Bearer {}", tokens.execution),
++        )
++        .header("content-type", "application/json")
++        .body(Body::from(body.to_owned()))
++        .unwrap()
++}
++
++fn edit_body(base: &str, scope: &str) -> String {
++    serde_json::json!({
++        "decision": "approve",
++        "scope": scope,
++        "edit": { "patch": { "subject": "New subject" }, "base_fingerprint": base },
++    })
++    .to_string()
++}
++
++async fn json_of(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
++    let status = resp.status();
++    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
++    (status, serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null))
++}
++
++#[tokio::test]
++#[serial_test::serial]
++async fn edit_off_by_default_is_forbidden() {
++    let _auth = AuthFixture::start().await;
++    std::env::remove_var("APPROVAL_EDIT_ENABLED");
++    let tokens = AuthFixture::user_tokens("org-1", "user-1");
++    let (mock, capture) = MockOrchestration::new();
++    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
++
++    let resp = app
++        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "once")))
++        .await
++        .unwrap();
++    let (status, json) = json_of(resp).await;
++    assert_eq!(status, StatusCode::FORBIDDEN, "body={json}");
++    assert_eq!(json["error"]["code"], "approval_edit_disabled");
++    assert!(json["error"]["details"].is_object());
++    assert!(
++        capture.decide_approval.lock().unwrap().is_none()
++            && capture.get_approval_id.lock().unwrap().is_none(),
++        "nothing reaches Session Core while the switch is off"
++    );
++}
++
++#[tokio::test]
++#[serial_test::serial]
++async fn edit_is_forwarded_with_the_grant_when_the_switch_is_on() {
++    let _auth = AuthFixture::start().await;
++    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
++    let tokens = AuthFixture::user_tokens("org-1", "user-1");
++    let (mock, capture) = MockOrchestration::new();
++    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
++
++    let resp = app
++        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "once")))
++        .await
++        .unwrap();
++    std::env::remove_var("APPROVAL_EDIT_ENABLED");
++    let (status, json) = json_of(resp).await;
++    assert_eq!(status, StatusCode::OK, "body={json}");
++    let (patch, base) = capture.decide_edit.lock().unwrap().clone().expect("the edit reached it");
++    assert_eq!(base, EDIT_BASE);
++    assert_eq!(
++        serde_json::from_str::<serde_json::Value>(&patch).unwrap(),
++        serde_json::json!({ "subject": "New subject" })
++    );
++    assert_eq!(
++        capture.decide_approval.lock().unwrap().as_ref().map(|d| d.1),
++        Some(ApprovalState::Granted as i32)
++    );
++}
++
++#[tokio::test]
++#[serial_test::serial]
++async fn edit_with_scope_thread_is_refused() {
++    let _auth = AuthFixture::start().await;
++    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
++    let tokens = AuthFixture::user_tokens("org-1", "user-1");
++    let (mock, capture) = MockOrchestration::new();
++    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
++
++    let resp = app
++        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(EDIT_BASE, "thread")))
++        .await
++        .unwrap();
++    std::env::remove_var("APPROVAL_EDIT_ENABLED");
++    let (status, json) = json_of(resp).await;
++    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body={json}");
++    assert_eq!(json["error"]["code"], "edit_requires_once");
++    assert!(capture.decide_approval.lock().unwrap().is_none());
++}
++
++#[tokio::test]
++#[serial_test::serial]
++async fn approval_changed_is_409() {
++    let _auth = AuthFixture::start().await;
++    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
++    let tokens = AuthFixture::user_tokens("org-1", "user-1");
++    let (mock, _capture) = MockOrchestration::new();
++    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
++
++    let stale = "f".repeat(64);
++    let resp = app
++        .oneshot(edited_decide_request(&tokens, "appr-42", &edit_body(&stale, "")))
++        .await
++        .unwrap();
++    std::env::remove_var("APPROVAL_EDIT_ENABLED");
++    let (status, json) = json_of(resp).await;
++    assert_eq!(status, StatusCode::CONFLICT, "body={json}");
++    assert_eq!(json["error"]["code"], "approval_changed");
++    assert!(json["error"]["details"].is_object());
++}
++
++#[tokio::test]
++#[serial_test::serial]
++async fn edit_passes_step_up_like_a_grant() {
++    let _auth = AuthFixture::start().await;
++    std::env::set_var("APPROVAL_EDIT_ENABLED", "true");
++    std::env::set_var("APPROVAL_STEP_UP_ENFORCED", "enforce");
++    let tokens = AuthFixture::user_tokens("org-1", "user-1");
++    let (mock, capture) = MockOrchestration::new();
++    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
++
++    let resp = app
++        .oneshot(edited_decide_request(&tokens, "appr-stepup-1", &edit_body(EDIT_BASE, "once")))
++        .await
++        .unwrap();
++    std::env::remove_var("APPROVAL_EDIT_ENABLED");
++    std::env::remove_var("APPROVAL_STEP_UP_ENFORCED");
++    let (status, json) = json_of(resp).await;
++    assert_eq!(status, StatusCode::FORBIDDEN, "body={json}");
++    assert_eq!(
++        json["error"]["code"], "step_up_required",
++        "an edited grant needs the same fresh re-authentication as any grant"
++    );
++    assert!(capture.decide_edit.lock().unwrap().is_none());
++}
++
+ #[tokio::test]
+ #[serial_test::serial]
+ async fn decide_approval_reject_has_no_continuation_delivery_field() {
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/0102_approval_descriptor_revision.sql b/apps/Model Plane/rust/services/session-core/migrations/0102_approval_descriptor_revision.sql
+new file mode 100644
+index 000000000..545d8428f
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/0102_approval_descriptor_revision.sql	
+@@ -0,0 +1,28 @@
++-- 0102_approval_descriptor_revision.sql
++--
++-- Approve with edits (EP-10 S4; reserved as 0074 in round A, renumbered to 0102 by round B C-B2).
++-- A person may change a pending mail send's recipients, subject or plain-text body and grant it in the
++-- same act (decision D1). The edited call replaces the input inside the existing encrypted descriptor;
++-- these columns record that it happened:
++--
++--   revision                     how many times the call was edited before the grant (0 = as drafted,
++--                                at most 3). An edit grants in its own transaction, so in practice 0 or 1.
++--   original_action_fingerprint  the fingerprint of the call as first drafted, kept once (COALESCE) when
++--                                the first edit lands. A 64-hex digest only: the original content is not
++--                                kept anywhere, so the person's replaced draft is gone with the edit.
++--   revised_at                   when the last edit landed.
++--
++-- ZDR. A zero-retention run has no descriptor, and an edit is refused for ZDR and waived callers before
++-- any read (DEC-32: a waived run counts as ZDR for a new store dimension). The columns carry no content;
++-- the edited input stays in `ciphertext` with the same lifetime and erasure as before (the row is
++-- deleted with its approval and cascades on run delete, migration 0022).
++--
++-- Additive and idempotent. Written only while APPROVAL_EDIT_ENABLED is on in session-core, so the
++-- migration is inert on its own: every existing row reads revision 0.
++
++ALTER TABLE approval_continuation_descriptors
++    ADD COLUMN IF NOT EXISTS revision SMALLINT NOT NULL DEFAULT 0
++        CHECK (revision BETWEEN 0 AND 3),
++    ADD COLUMN IF NOT EXISTS original_action_fingerprint TEXT NULL
++        CHECK (original_action_fingerprint IS NULL OR length(original_action_fingerprint) = 64),
++    ADD COLUMN IF NOT EXISTS revised_at TIMESTAMPTZ NULL;
+diff --git a/apps/Model Plane/rust/services/session-core/migrations/revert/0102_approval_descriptor_revision.down.sql b/apps/Model Plane/rust/services/session-core/migrations/revert/0102_approval_descriptor_revision.down.sql
+new file mode 100644
+index 000000000..36d478494
+--- /dev/null
++++ b/apps/Model Plane/rust/services/session-core/migrations/revert/0102_approval_descriptor_revision.down.sql	
+@@ -0,0 +1,23 @@
++-- Reverses 0102_approval_descriptor_revision.sql: drops the edit revision columns of
++-- approval_continuation_descriptors.
++--
++-- Not applied by sqlx: this file lives in a subdirectory, and sqlx's migrate! reads only the top level of
++-- migrations/. Run it by hand, against the database only, inside one transaction.
++--
++-- ORDER: roll session-core back to a build without the approve-with-edits path first (or keep
++-- APPROVAL_EDIT_ENABLED off), or a decide with an edit fails on the missing columns. A descriptor
++-- already revised keeps its edited input and its new fingerprint in the row; only the record that it was
++-- edited (revision, the original fingerprint, the time) is dropped. A granted, revised approval still
++-- waiting to be consumed by an execution-core that matches on the original fingerprint (EP-10 S5) falls
++-- back as it would for any changed call, so drain or expire such approvals before reverting.
++--
++-- Safe to run twice (every DROP is IF EXISTS).
++
++BEGIN;
++
++ALTER TABLE approval_continuation_descriptors
++    DROP COLUMN IF EXISTS revised_at,
++    DROP COLUMN IF EXISTS original_action_fingerprint,
++    DROP COLUMN IF EXISTS revision;
++
++COMMIT;
+diff --git a/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs
+index cb59a2202..d78047ea8 100644
+--- a/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/orchestration_grpc.rs	
+@@ -410,12 +410,78 @@ pub(crate) fn check_scope_grant_startup() -> Result<(), &'static str> {
+ /// A refused standing scope reaches the caller as its typed token; any other store failure is
+ /// internal (build plan WS13 S6).
+ fn decision_error_status(error: anyhow::Error) -> Status {
++    if let Some(refusal) = error.downcast_ref::<store::EditRefusal>() {
++        return edit_refusal_status(*refusal);
++    }
+     match error.downcast_ref::<store::ScopeGrantRefusal>() {
+         Some(refusal) => Status::failed_precondition(refusal.code()),
+         None => Status::internal(error.to_string()),
+     }
+ }
+ 
++/// The gRPC form of a refused edit (EP-10-S4), the closed code as the message. The gateway maps
++/// ABORTED to 409, INVALID_ARGUMENT to 422 and FAILED_PRECONDITION to 409 or 403 by code.
++fn edit_refusal_status(refusal: store::EditRefusal) -> Status {
++    match refusal {
++        store::EditRefusal::NotFound => Status::not_found("approval not found"),
++        store::EditRefusal::ApprovalChanged => Status::aborted(refusal.code()),
++        store::EditRefusal::Invalid(_) | store::EditRefusal::OnceOnly => {
++            Status::invalid_argument(refusal.code())
++        }
++        store::EditRefusal::NotEditable | store::EditRefusal::RevisionLimit => {
++            Status::failed_precondition(refusal.code())
++        }
++    }
++}
++
++/// Approve with edits (EP-10-S4). Off by default: only the literal `true` enables it, and with it
++/// off a decide that carries an edit is refused, so every decision behaves exactly as before.
++const APPROVAL_EDIT_ENV: &str = "APPROVAL_EDIT_ENABLED";
++
++fn approval_edit_enabled() -> bool {
++    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
++}
++
++/// The largest `patch_json` an edit may carry: the body cap plus room for the recipients and the
++/// subject. A larger patch could never pass the edit contract.
++const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
++
++/// Parse and bound a decide's edit before any lookup (EP-10-S4). `Ok(None)` when the request
++/// carries none. Refused when the switch is off, when the decision is not a `once` grant, or when
++/// the patch is not a mail-send patch. Unspecified scope reads as `once`, as everywhere else.
++#[allow(clippy::result_large_err)]
++fn decide_edit_from_request(
++    req: &proto::DecideApprovalRequest,
++    enabled: bool,
++) -> Result<Option<(mp_contracts::approval_edit::MailSendPatch, String)>, Status> {
++    let Some(edit) = req.edit.as_ref() else {
++        return Ok(None);
++    };
++    if !enabled {
++        return Err(Status::failed_precondition("approval_edit_disabled"));
++    }
++    if req.decision != proto::ApprovalState::Granted as i32 {
++        return Err(Status::invalid_argument("edit_requires_grant"));
++    }
++    let once = matches!(approval_scope_to_str(req.scope), Some("once"));
++    if !once || req.rule_proposed {
++        return Err(Status::invalid_argument(store::EditRefusal::OnceOnly.code()));
++    }
++    let base = edit.base_fingerprint.trim();
++    if base.len() != 64 || !base.bytes().all(|byte| byte.is_ascii_hexdigit()) {
++        return Err(Status::invalid_argument("base_fingerprint is invalid"));
++    }
++    if edit.patch_json.len() > MAX_EDIT_PATCH_BYTES {
++        return Err(Status::invalid_argument(
++            mp_contracts::approval_edit::EditError::EditTooLarge.code(),
++        ));
++    }
++    let patch: mp_contracts::approval_edit::MailSendPatch =
++        serde_json::from_str(&edit.patch_json)
++            .map_err(|_| Status::invalid_argument("invalid_patch"))?;
++    Ok(Some((patch, base.to_owned())))
++}
++
+ /// The verified caller's own user, after its org is checked. Every grant call binds to this owner.
+ fn grant_owner(caller: &VerifiedIdentity, org_id: &str) -> Result<String, Status> {
+     validate_approval_org(org_id)?;
+@@ -928,18 +994,9 @@ fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<
+     Ok(())
+ }
+ 
+-/// The largest plaintext descriptor a continuation may retain. The mirror value in
+-/// execution-core (`runtime_loop::resume::MAX_SNAPSHOT_BYTES`) must match it.
+-///
+-/// The ceiling is the encrypted row, not the plaintext: `approval_continuation_descriptors`
+-/// CHECKs `length(ciphertext) <= 131072`, and the ciphertext is `v1:` plus base64 of
+-/// nonce + plaintext + tag. 64 KiB leaves headroom under that CHECK (about 87 KB of
+-/// ciphertext); the const assertion below fails the build if the cap ever outgrows it.
+-const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 64 * 1024;
+-const _: () = assert!(
+-    3 + (MAX_CONTINUATION_DESCRIPTOR_BYTES + 28) * 4 / 3 + 4 <= 131_072,
+-    "descriptor cap must fit the approval_continuation_descriptors ciphertext CHECK"
+-);
++/// The largest plaintext descriptor a continuation may retain. Defined beside the store, which
++/// applies the same cap to an edited descriptor (EP-10-S4).
++const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = store::MAX_CONTINUATION_DESCRIPTOR_BYTES;
+ 
+ /// Validate a retained continuation as an exact, approval-scoped action
+ /// description. It cannot carry reusable credentials; execution remains
+@@ -1036,6 +1093,10 @@ fn consume_response(done: store::ConsumeOutcome, omit_call: bool) -> proto::Cons
+         tool_input_json: call.tool_input_json,
+         step_id: call.step_id,
+         authority: approved_authority(&call.offered_json),
++        // EP-10-S5 reads the revision back from the descriptor row; until then a consume
++        // reports the call as drafted.
++        revision: 0,
++        original_action_fingerprint: String::new(),
+     }
+ }
+ 
+@@ -1440,6 +1501,7 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
+         addressee: None,
+         grant_ref: String::new(),
+         turn_origin: String::new(),
++        revision: store::approval_revision(&row.metadata).0,
+     }
+ }
+ 
+@@ -2272,6 +2334,8 @@ fn broadcast_approval_decision_events(
+         return;
+     }
+     let fields = decision_fields(approval);
++    // Field names only: the edited values stay in the encrypted descriptor (EP-10-S4).
++    let (revision, edited_fields) = store::approval_revision(&approval.metadata);
+ 
+     broadcast_event(
+         tx,
+@@ -2291,6 +2355,8 @@ fn broadcast_approval_decision_events(
+                     scope: fields.scope,
+                     decision_source: fields.decision_source,
+                     step_up_verified: fields.step_up_verified,
++                    revision,
++                    edited_fields,
+                 },
+             )),
+         },
+@@ -2393,8 +2459,8 @@ fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(),
+     Ok(())
+ }
+ 
+-/// The wire form of an approval preview (EP-10-S1). The revision stays 0 until edited descriptors
+-/// exist (EP-10-S4).
++/// The wire form of an approval preview (EP-10-S1). The revision is always 0: an edit grants in
++/// its own transaction (EP-10-S4), so a pending approval, the only kind previewed, is never revised.
+ fn approval_preview_to_proto(
+     view: mp_contracts::write_preview::ApprovalPreviewView,
+     action_fingerprint: String,
+@@ -4444,6 +4510,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+             }
+             pin_approval_decision_identity(&caller, &mut req)?;
+             validate_approval_decision_context(&req.org_id, &req.decided_by)?;
++            // Approve with edits (EP-10-S4, D1, D9): checked before any lookup. A waived caller
++            // counts as ZDR for the revision columns, so it is refused like a ZDR one (above).
++            let edit = decide_edit_from_request(&req, approval_edit_enabled())?;
++            if edit.is_some() {
++                refuse_zdr_or_waived_question_caller(&caller)?;
++            }
+             // Member decide (build plan WS10 S6): a Space member other than the run owner decides
+             // with a Control-signed decision. `Some(space)` once it verified; the owner path below
+             // is unchanged when the request carries no Space fields.
+@@ -4453,6 +4525,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+                 &req,
+             )
+             .await?;
++            // The person who sees the draft is its owner; a Space member approves it as drafted.
++            if edit.is_some() && member_space.is_some() {
++                return Err(Status::permission_denied("edit_owner_only"));
++            }
+             let owner_filter = if member_space.is_some() {
+                 None
+             } else {
+@@ -4509,8 +4585,27 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+                 rule_proposed: req.rule_proposed,
+                 authz_audit: crate::audit_publisher::authz_decision_audit_enabled(),
+             };
+-            let decision_write = match member_space.as_deref() {
+-                Some(space_id) => {
++            let decision_write = match (member_space.as_deref(), edit.as_ref()) {
++                (None, Some((patch, base_fingerprint))) => {
++                    let owner = caller.user_id().ok_or_else(|| {
++                        Status::permission_denied("user-bound approval credential required")
++                    })?;
++                    store::decide_approval_with_edit(
++                        &self.pool,
++                        &req.approval_id,
++                        &req.org_id,
++                        owner,
++                        &req.decided_by,
++                        &req.decision_reason,
++                        &record,
++                        &store::ApprovalEdit {
++                            patch,
++                            base_fingerprint,
++                        },
++                    )
++                    .await
++                }
++                (Some(space_id), _) => {
+                     store::decide_approval_as_member(
+                         &self.pool,
+                         &req.approval_id,
+@@ -4523,7 +4618,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
+                     )
+                     .await
+                 }
+-                None => {
++                (None, None) => {
+                     store::decide_approval_recorded(
+                         &self.pool,
+                         &req.approval_id,
+@@ -9958,3 +10053,223 @@ mod approval_scope_grant_tests {
+         assert_eq!(other.code(), tonic::Code::Internal);
+     }
+ }
++
++#[cfg(test)]
++mod approval_edit_tests {
++    //! EP-10-S4: the decide checks an edit passes before any lookup, the gRPC form of every refusal,
++    //! and the audit event of an edited grant.
++    use super::*;
++    use mp_contracts::approval_edit::EditError;
++
++    const BASE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
++
++    fn edited_grant() -> proto::DecideApprovalRequest {
++        proto::DecideApprovalRequest {
++            approval_id: "appr_1".to_owned(),
++            decision: proto::ApprovalState::Granted as i32,
++            org_id: "org-1".to_owned(),
++            scope: proto::ApprovalScope::Once as i32,
++            edit: Some(proto::ApprovalEdit {
++                patch_json: r#"{"subject":"New subject"}"#.to_owned(),
++                base_fingerprint: BASE.to_owned(),
++            }),
++            ..Default::default()
++        }
++    }
++
++    #[test]
++    fn approval_edit_switch_is_strict_and_off_by_default() {
++        assert!(!mp_contracts::loop_fold::switch_from(None));
++        for value in ["1", "yes", "on", ""] {
++            assert!(!mp_contracts::loop_fold::switch_from(Some(value)), "{value}");
++        }
++        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
++        assert_eq!(APPROVAL_EDIT_ENV, "APPROVAL_EDIT_ENABLED");
++    }
++
++    #[test]
++    fn a_decide_without_an_edit_is_unchanged_whatever_the_switch() {
++        let mut plain = edited_grant();
++        plain.edit = None;
++        assert_eq!(decide_edit_from_request(&plain, false).expect("no edit"), None);
++        assert_eq!(decide_edit_from_request(&plain, true).expect("no edit"), None);
++    }
++
++    #[test]
++    fn edit_off_by_default_is_refused() {
++        let status = decide_edit_from_request(&edited_grant(), false).expect_err("off");
++        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
++        assert_eq!(status.message(), "approval_edit_disabled");
++    }
++
++    #[test]
++    fn edit_with_the_switch_on_parses_the_patch_and_the_base() {
++        let (patch, base) = decide_edit_from_request(&edited_grant(), true)
++            .expect("accepted")
++            .expect("an edit");
++        assert_eq!(patch.subject.as_deref(), Some("New subject"));
++        assert_eq!(patch.to, None);
++        assert_eq!(base, BASE);
++    }
++
++    #[test]
++    fn denial_with_edit_is_invalid() {
++        let mut denial = edited_grant();
++        denial.decision = proto::ApprovalState::Denied as i32;
++        let status = decide_edit_from_request(&denial, true).expect_err("denial");
++        assert_eq!(status.code(), tonic::Code::InvalidArgument);
++        assert_eq!(status.message(), "edit_requires_grant");
++    }
++
++    #[test]
++    fn edit_refused_for_thread_scope_and_rule_proposal() {
++        for scope in [proto::ApprovalScope::Thread, proto::ApprovalScope::Run] {
++            let mut wide = edited_grant();
++            wide.scope = scope as i32;
++            let status = decide_edit_from_request(&wide, true).expect_err("wide scope");
++            assert_eq!(status.code(), tonic::Code::InvalidArgument);
++            assert_eq!(status.message(), "edit_requires_once");
++        }
++        let mut proposal = edited_grant();
++        proposal.rule_proposed = true;
++        let status = decide_edit_from_request(&proposal, true).expect_err("rule proposal");
++        assert_eq!(status.message(), "edit_requires_once");
++        let mut unspecified = edited_grant();
++        unspecified.scope = proto::ApprovalScope::Unspecified as i32;
++        assert!(decide_edit_from_request(&unspecified, true).is_ok(), "unspecified is once");
++    }
++
++    #[test]
++    fn edit_patch_with_another_key_or_a_bad_base_is_refused() {
++        let mut extra = edited_grant();
++        extra.edit.as_mut().expect("edit").patch_json =
++            r#"{"subject":"S","connection_id":"conn-2"}"#.to_owned();
++        let status = decide_edit_from_request(&extra, true).expect_err("unknown key");
++        assert_eq!(status.message(), "invalid_patch", "an edit may not retarget a connection");
++
++        let mut secret = edited_grant();
++        secret.edit.as_mut().expect("edit").patch_json = r#"{"access_token":"x"}"#.to_owned();
++        assert!(
++            decide_edit_from_request(&secret, true).is_err(),
++            "only three fields are writable, so no credential key can enter a descriptor"
++        );
++
++        let mut base = edited_grant();
++        base.edit.as_mut().expect("edit").base_fingerprint = "abc".to_owned();
++        let status = decide_edit_from_request(&base, true).expect_err("short base");
++        assert_eq!(status.code(), tonic::Code::InvalidArgument);
++
++        let mut large = edited_grant();
++        large.edit.as_mut().expect("edit").patch_json =
++            format!(r#"{{"bodyText":"{}"}}"#, "x".repeat(MAX_EDIT_PATCH_BYTES));
++        let status = decide_edit_from_request(&large, true).expect_err("large");
++        assert_eq!(status.message(), "edit_too_large");
++    }
++
++    #[test]
++    fn edit_error_codes_map_to_invalid_argument() {
++        for error in EditError::ALL {
++            let status =
++                decision_error_status(anyhow::Error::from(store::EditRefusal::Invalid(error)));
++            assert_eq!(status.code(), tonic::Code::InvalidArgument, "{error}");
++            assert_eq!(status.message(), error.code());
++        }
++    }
++
++    #[test]
++    fn edit_refusals_reach_the_caller_as_their_typed_codes() {
++        let cases = [
++            (store::EditRefusal::ApprovalChanged, tonic::Code::Aborted, "approval_changed"),
++            (store::EditRefusal::NotEditable, tonic::Code::FailedPrecondition, "not_editable"),
++            (store::EditRefusal::RevisionLimit, tonic::Code::FailedPrecondition, "revision_limit"),
++            (store::EditRefusal::OnceOnly, tonic::Code::InvalidArgument, "edit_requires_once"),
++            (store::EditRefusal::NotFound, tonic::Code::NotFound, "approval not found"),
++        ];
++        for (refusal, code, message) in cases {
++            let status = decision_error_status(anyhow::Error::from(refusal));
++            assert_eq!(status.code(), code, "{refusal}");
++            assert_eq!(status.message(), message);
++        }
++    }
++
++    #[test]
++    fn edit_refused_for_zdr_and_waived_callers() {
++        use crate::auth::VerifiedIdentity as Id;
++        let zdr =
++            refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_zdr("org-1", "user-1", true))
++                .expect_err("zdr");
++        assert_eq!(zdr.code(), tonic::Code::FailedPrecondition);
++        assert!(Refusal::from_status(&zdr).is_some(), "a typed refusal");
++        let waived = refuse_zdr_or_waived_question_caller(&Id::user_for_test_with_waiver(
++            "org-1", "user-1", "conn-1", "ack-1",
++        ))
++        .expect_err("a waived run counts as ZDR for the revision columns (D9)");
++        assert_eq!(waived.code(), tonic::Code::PermissionDenied);
++    }
++
++    /// The handler refuses ZDR at its top and a waived caller as soon as it sees an edit, both
++    /// before the member lookup or any decision read.
++    #[test]
++    fn the_decide_handler_refuses_a_waived_edit_before_any_lookup() {
++        let source = include_str!("orchestration_grpc.rs");
++        let start = source.find("    async fn decide_approval(").expect("the handler");
++        let body = &source[start..];
++        let edit_gate = body.find("refuse_zdr_or_waived_question_caller(&caller)?;").expect("gate");
++        let member = body.find("authorize_member_decide(").expect("member lookup");
++        assert!(edit_gate < member, "the waived refusal comes before the member lookup");
++        let zdr = body.find("refuse_zdr_continuation(&caller)?;").expect("zdr gate");
++        assert!(zdr < edit_gate);
++    }
++
++    #[tokio::test]
++    async fn audit_event_carries_field_names_only() {
++        let row = store::ApprovalRow {
++            id: "appr_1".to_owned(),
++            run_id: "run-1".to_owned(),
++            plan_id: None,
++            kind: "tool_call".to_owned(),
++            status: "granted".to_owned(),
++            requested_by: "user-1".to_owned(),
++            decided_by: "user-1".to_owned(),
++            decision_reason: String::new(),
++            org_id: "org-1".to_owned(),
++            user_id: "user-1".to_owned(),
++            idempotency_key: String::new(),
++            metadata: serde_json::json!({
++                "reason": "The agent would send an email to bob@example.com with the subject \"Secret plan\".",
++                "revision": { "n": 1, "edited_fields": ["to", "subject"], "at": "2026-11-04T00:00:00Z" },
++            }),
++            requested_at: Utc::now(),
++            decided_at: Some(Utc::now()),
++            expires_at: None,
++            continuation_mode: String::new(),
++            consumed_at: None,
++        };
++        let (events_tx, mut events_rx) = broadcast::channel(8);
++        broadcast_approval_decision_events(
++            &events_tx,
++            &ReplayBuffer::default(),
++            &row,
++            proto::ApprovalState::Granted as i32,
++            true,
++        );
++        let event = events_rx.try_recv().expect("state-change event");
++        let Some(orchestration_event::Event::ApprovalStateChanged(changed)) = event.event else {
++            panic!("an approval state change");
++        };
++        assert_eq!(changed.revision, 1);
++        assert_eq!(changed.edited_fields, ["to", "subject"]);
++        let wire = format!("{changed:?}");
++        for value in ["bob@example.com", "Secret plan", "The agent would"] {
++            assert!(!wire.contains(value), "the event carries no edited value: {value}");
++        }
++        assert_eq!(approval_from_row(&row).revision, 1);
++    }
++
++    #[test]
++    fn an_unedited_approval_reads_revision_zero() {
++        let (revision, fields) = store::approval_revision(&serde_json::json!({}));
++        assert_eq!(revision, 0);
++        assert!(fields.is_empty());
++    }
++}
+diff --git a/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs
+index 6d4af051c..162a31454 100644
+--- a/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs	
++++ b/apps/Model Plane/rust/services/session-core/src/orchestration_store.rs	
+@@ -1092,6 +1092,51 @@ pub async fn decide_approval_recorded(
+         decided_by,
+         decision_reason,
+         record,
++        None,
++    )
++    .await
++}
++
++/// Grant an approval with the owner's edit of its call (EP-10-S4, decision D1): the edited call
++/// replaces the retained descriptor's input, the fingerprint, the reason and the cause's call digest
++/// follow it, and the grant is recorded, all in one transaction. Nothing else about the approval
++/// changes, and a refused edit leaves it pending exactly as it was.
++///
++/// Owner only, a `once` grant only, never with a rule proposal. The caller has already refused ZDR
++/// and waived callers and checked `APPROVAL_EDIT_ENABLED`; this checks the rest under the row lock.
++///
++/// # Errors
++///
++/// An [`EditRefusal`] (downcast it) for a refused edit; any other error when a query, the key or
++/// the cipher fails.
++#[allow(clippy::too_many_arguments)]
++pub async fn decide_approval_with_edit(
++    pool: &Pool,
++    id: &str,
++    org_id: &str,
++    user_id: &str,
++    decided_by: &str,
++    decision_reason: &str,
++    record: &DecisionRecord<'_>,
++    edit: &ApprovalEdit<'_>,
++) -> Result<ApprovalDecisionWrite> {
++    if user_id.trim().is_empty() {
++        bail!("user_id is required");
++    }
++    if record.scope != "once" || record.rule_proposed {
++        return Err(EditRefusal::OnceOnly.into());
++    }
++    decide_approval_inner(
++        pool,
++        id,
++        org_id,
++        Some(user_id),
++        None,
++        "granted",
++        decided_by,
++        decision_reason,
++        record,
++        Some(edit),
+     )
+     .await
+ }
+@@ -1128,6 +1173,7 @@ pub async fn decide_approval_as_member(
+         decided_by,
+         decision_reason,
+         record,
++        None,
+     )
+     .await
+ }
+@@ -1143,6 +1189,7 @@ async fn decide_approval_inner(
+     decided_by: &str,
+     decision_reason: &str,
+     record: &DecisionRecord<'_>,
++    edit: Option<&ApprovalEdit<'_>>,
+ ) -> Result<ApprovalDecisionWrite> {
+     if org_id.trim().is_empty() {
+         bail!("org_id is required");
+@@ -1165,6 +1212,14 @@ async fn decide_approval_inner(
+         decision["via"] = JsonValue::String("space_member".to_owned());
+     }
+     let mut transaction = pool.begin().await?;
++    // The edit lands under the approval's row lock and before the compare-and-set below, so the
++    // grant records the edited call or, on any refusal, the dropped transaction leaves both as
++    // they were (EP-10-S4).
++    if let Some(edit) = edit {
++        let owner = user_id.filter(|_| member_space.is_none() && status == "granted");
++        let owner = owner.ok_or_else(|| anyhow::anyhow!("an edit is the owner's grant only"))?;
++        revise_descriptor_for_edit(&mut transaction, id, org_id, owner, edit).await?;
++    }
+     let updated = if let Some(space_id) = member_space {
+         sqlx::query_as::<_, (String,)>(DECIDE_APPROVAL_AS_MEMBER_SQL)
+             .bind(id)
+@@ -1189,6 +1244,11 @@ async fn decide_approval_inner(
+             .await?
+     };
+     let updated = updated.is_some();
++    if edit.is_some() && !updated {
++        // The row was locked as pending and unexpired a moment ago in this transaction, so this is
++        // not reachable; refusing keeps an edit from ever standing without its grant.
++        return Err(EditRefusal::ApprovalChanged.into());
++    }
+ 
+     if updated && matches!(status, "denied" | "timed_out") {
+         sqlx::query(
+@@ -1370,6 +1430,312 @@ impl std::fmt::Display for ScopeGrantRefusal {
+ 
+ impl std::error::Error for ScopeGrantRefusal {}
+ 
++/// The largest plaintext descriptor a continuation may retain, created or edited. The mirror value
++/// in execution-core (`runtime_loop::resume::MAX_SNAPSHOT_BYTES`) must match it.
++///
++/// The ceiling is the encrypted row, not the plaintext: `approval_continuation_descriptors`
++/// CHECKs `length(ciphertext) <= 131072`, and the ciphertext is `v1:` plus base64 of
++/// nonce + plaintext + tag. 64 KiB leaves headroom under that CHECK (about 87 KB of
++/// ciphertext); the const assertion below fails the build if the cap ever outgrows it.
++pub(crate) const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 64 * 1024;
++const _: () = assert!(
++    3 + (MAX_CONTINUATION_DESCRIPTOR_BYTES + 28) * 4 / 3 + 4 <= 131_072,
++    "descriptor cap must fit the approval_continuation_descriptors ciphertext CHECK"
++);
++
++/// The most times one approval's call may be edited (EP-10 D1; the column CHECK says the same).
++pub const MAX_APPROVAL_REVISIONS: i16 = 3;
++
++/// The tool whose calls an edit may change: a provider write, and of those only a mail send.
++const EDITABLE_TOOL: &str = "execute_provider_action";
++
++/// The owner's edit of a pending approval's call (EP-10-S4).
++#[derive(Debug, Clone, Copy)]
++pub struct ApprovalEdit<'a> {
++    /// The fields the person changed; any other key was refused when it was parsed.
++    pub patch: &'a mp_contracts::approval_edit::MailSendPatch,
++    /// The action fingerprint the person saw in the preview.
++    pub base_fingerprint: &'a str,
++}
++
++/// Why an edit was refused (EP-10-S4). Every refusal is decided before anything is written, or
++/// rolls back with the transaction, so the approval stays pending and unchanged.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum EditRefusal {
++    /// Not a pending approval of the caller's in this org. One answer for every such case, so an
++    /// edit discloses nothing about another owner's approval.
++    NotFound,
++    /// The approval moved on since the person saw it: decided, expired, or another call.
++    ApprovalChanged,
++    /// Nothing to edit: no retained call (a browser takeover, round B C-B4), another tool or
++    /// operation, a run that is not persistent, or a descriptor that does not reproduce its own
++    /// fingerprint.
++    NotEditable,
++    /// An edit is a `once` grant only, never a standing scope or a rule proposal (D1).
++    OnceOnly,
++    /// The call was already edited `MAX_APPROVAL_REVISIONS` times.
++    RevisionLimit,
++    /// The edit contract refused the patch, or the edited descriptor is over the cap
++    /// (`edit_too_large`).
++    Invalid(mp_contracts::approval_edit::EditError),
++}
++
++impl EditRefusal {
++    /// The closed token the refusal reaches the caller as.
++    #[must_use]
++    pub const fn code(self) -> &'static str {
++        match self {
++            Self::NotFound => "approval_not_found",
++            Self::ApprovalChanged => "approval_changed",
++            Self::NotEditable => "not_editable",
++            Self::OnceOnly => "edit_requires_once",
++            Self::RevisionLimit => "revision_limit",
++            Self::Invalid(error) => error.code(),
++        }
++    }
++}
++
++impl std::fmt::Display for EditRefusal {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str(self.code())
++    }
++}
++
++impl std::error::Error for EditRefusal {}
++
++/// Whether a provider operation is a mail send the person may edit, whichever provider serves it
++/// (the retained input names a connection, not a provider).
++fn operation_is_editable_mail(operation: &str) -> bool {
++    use mp_contracts::provider_writes::{editable_kind, EditableKind, WRITE_OPERATIONS};
++    WRITE_OPERATIONS
++        .iter()
++        .any(|write| editable_kind(write.provider, operation) == Some(EditableKind::MailSend))
++}
++
++/// Rebuild a descriptor's fingerprinted scope with `input` in place of its own, through the same
++/// function execution-core fingerprints with, and hash it. `None` when the descriptor lacks a scope
++/// field or is another version or kind.
++fn descriptor_fingerprint_with(descriptor: &JsonValue, input: &JsonValue) -> Option<String> {
++    let text = |key: &str| descriptor.get(key).and_then(JsonValue::as_str);
++    if descriptor.get("version").and_then(JsonValue::as_u64)
++        != Some(u64::from(mp_contracts::approval_descriptor::DESCRIPTOR_VERSION))
++        || text("action_kind") != Some("tool_call")
++    {
++        return None;
++    }
++    let scope = mp_contracts::approval_descriptor::descriptor_scope(
++        text("run_id")?,
++        text("org_id")?,
++        text("user_id")?,
++        text("step_id")?,
++        text("tool_name")?,
++        input,
++        text("permission_mode")?,
++    );
++    mp_contracts::approval_descriptor::action_fingerprint(&scope).ok()
++}
++
++/// The approval reason for an edited mail send, in the wording the approval was raised with:
++/// execution-core's cold pause says "provider write '<op>' requires approval: the agent would ...",
++/// its loop pause "The agent would ... Approve to let it send." Scrubbed like the original
++/// (K3-16); it names the edited recipients and subject, never the replaced ones.
++fn edited_approval_reason(previous: &str, operation: &str, input: &JsonValue) -> String {
++    let cold = format!("provider write '{operation}' requires approval");
++    let summary = serde_json::to_string(input)
++        .ok()
++        .and_then(|raw| mp_contracts::provider_writes::provider_effect_summary(&raw));
++    let Some(summary) = summary else {
++        // No summary for the edited call: say nothing of the old one either.
++        return cold;
++    };
++    let reason = if previous.starts_with("provider write '") {
++        format!("{cold}: the agent would {summary}")
++    } else {
++        format!("The agent would {summary}. Approve to let it send.")
++    };
++    mp_scrub::scrub_string(&reason)
++}
++
++/// The approval's state, owner run and metadata, locked for the edit (EP-10-S4).
++const LOCK_APPROVAL_FOR_EDIT_SQL: &str = "SELECT a.run_id, a.status, \
++     (a.expires_at IS NULL OR a.expires_at > now()), r.retention_class, a.metadata \
++     FROM approvals a \
++     JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
++     WHERE a.id = $1 AND a.org_id = $2 AND a.user_id = $3 AND r.user_id = $3 \
++     FOR UPDATE OF a";
++
++/// Replace a pending approval's retained call with the owner's edit, inside the grant's
++/// transaction (EP-10-S4). Checks, in order: the approval is the owner's, pending and unexpired on
++/// a persistent run; it retains a call; that call was edited fewer than three times; the person
++/// saw this call (`base_fingerprint`); it is an editable mail send whose descriptor reproduces its
++/// own fingerprint; the patch passes the edit contract; the result fits the cap. Then the
++/// descriptor is re-encrypted with the edited input and its new fingerprint, the first fingerprint
++/// is kept as a digest, and the reason, the cause's call digest and `metadata.revision` (field
++/// names only) follow the edited call. Nothing here is logged.
++async fn revise_descriptor_for_edit(
++    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
++    approval_id: &str,
++    org_id: &str,
++    user_id: &str,
++    edit: &ApprovalEdit<'_>,
++) -> Result<()> {
++    let locked: Option<(String, String, bool, String, JsonValue)> =
++        sqlx::query_as(LOCK_APPROVAL_FOR_EDIT_SQL)
++            .bind(approval_id)
++            .bind(org_id)
++            .bind(user_id)
++            .fetch_optional(&mut **transaction)
++            .await?;
++    let (run_id, status, live, retention_class, mut metadata) =
++        locked.ok_or(EditRefusal::NotFound)?;
++    if status != "requested" || !live {
++        return Err(EditRefusal::ApprovalChanged.into());
++    }
++    // A waived run counts as ZDR for a new store dimension (D9), and a ZDR run keeps no call.
++    if retention_class != "persistent" {
++        return Err(EditRefusal::NotEditable.into());
++    }
++
++    let stored: Option<(String, String, String, i16)> = sqlx::query_as(
++        "SELECT user_id, action_fingerprint, ciphertext, revision \
++         FROM approval_continuation_descriptors \
++         WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 \
++         FOR UPDATE",
++    )
++    .bind(approval_id)
++    .bind(org_id)
++    .bind(&run_id)
++    .fetch_optional(&mut **transaction)
++    .await?;
++    // Round B C-B4: a cause with no retained call (a browser takeover) has nothing to edit.
++    let (descriptor_user, old_fingerprint, ciphertext, revision) =
++        stored.ok_or(EditRefusal::NotEditable)?;
++    if revision >= MAX_APPROVAL_REVISIONS {
++        return Err(EditRefusal::RevisionLimit.into());
++    }
++    if edit.base_fingerprint != old_fingerprint {
++        return Err(EditRefusal::ApprovalChanged.into());
++    }
++
++    let cipher = DescriptorCipher::from_env()?;
++    let plaintext = cipher.decrypt(approval_id, org_id, &descriptor_user, &ciphertext)?;
++    let mut descriptor: JsonValue = serde_json::from_str(&plaintext)
++        .map_err(|_| anyhow::anyhow!("stored continuation descriptor is invalid"))?;
++    let tool_name = descriptor
++        .get("tool_name")
++        .and_then(JsonValue::as_str)
++        .unwrap_or_default()
++        .to_owned();
++    let input = descriptor.get("input").cloned().unwrap_or(JsonValue::Null);
++    let operation = input
++        .get("operation")
++        .and_then(JsonValue::as_str)
++        .unwrap_or_default()
++        .to_owned();
++    if tool_name != EDITABLE_TOOL || !operation_is_editable_mail(&operation) {
++        return Err(EditRefusal::NotEditable.into());
++    }
++    // The rebuilt fingerprint must be the one stored, or the edited call would be bound by a
++    // scope that differs from the one execution-core bound the draft with.
++    let reproduced = descriptor_fingerprint_with(&descriptor, &input);
++    if reproduced.as_deref() != Some(old_fingerprint.as_str()) {
++        return Err(EditRefusal::NotEditable.into());
++    }
++
++    // A draft the contract finds not editable (a Gmail raw draft) is refused like any other
++    // uneditable call, not as a bad patch.
++    let edited =
++        mp_contracts::approval_edit::apply_edit(&input, edit.patch).map_err(|error| match error {
++            mp_contracts::approval_edit::EditError::NotEditable => EditRefusal::NotEditable,
++            other => EditRefusal::Invalid(other),
++        })?;
++    let new_fingerprint = descriptor_fingerprint_with(&descriptor, &edited.input)
++        .ok_or(EditRefusal::NotEditable)?;
++    descriptor["input"] = edited.input.clone();
++    descriptor["action_fingerprint"] = JsonValue::String(new_fingerprint.clone());
++    let plaintext = serde_json::to_string(&descriptor)?;
++    if plaintext.len() > MAX_CONTINUATION_DESCRIPTOR_BYTES {
++        let too_large = mp_contracts::approval_edit::EditError::EditTooLarge;
++        return Err(EditRefusal::Invalid(too_large).into());
++    }
++    let ciphertext = cipher.encrypt(approval_id, org_id, &descriptor_user, &plaintext)?;
++    let revised = sqlx::query(
++        "UPDATE approval_continuation_descriptors \
++         SET ciphertext = $4, action_fingerprint = $5, revision = revision + 1, \
++             original_action_fingerprint = COALESCE(original_action_fingerprint, $6), \
++             revised_at = now() \
++         WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 AND action_fingerprint = $6",
++    )
++    .bind(approval_id)
++    .bind(org_id)
++    .bind(&run_id)
++    .bind(&ciphertext)
++    .bind(&new_fingerprint)
++    .bind(&old_fingerprint)
++    .execute(&mut **transaction)
++    .await?;
++    if revised.rows_affected() != 1 {
++        return Err(EditRefusal::ApprovalChanged.into());
++    }
++
++    let previous_reason = metadata["reason"].as_str().unwrap_or_default();
++    let reason = edited_approval_reason(previous_reason, &operation, &edited.input);
++    let edited_input = serde_json::to_string(&edited.input)?;
++    let object = metadata
++        .as_object_mut()
++        .ok_or_else(|| anyhow::anyhow!("approval metadata is not an object"))?;
++    object.insert("reason".to_owned(), JsonValue::String(reason));
++    if let Some(cause) = object.get_mut("cause").and_then(JsonValue::as_object_mut) {
++        if cause.contains_key("call_digest") {
++            cause.insert(
++                "call_digest".to_owned(),
++                JsonValue::String(mp_contracts::approval_cause::call_digest(
++                    &run_id,
++                    &tool_name,
++                    &edited_input,
++                )),
++            );
++        }
++    }
++    object.insert(
++        "revision".to_owned(),
++        serde_json::json!({
++            "n": revision + 1,
++            "edited_fields": edited.edited_fields,
++            "at": Utc::now().to_rfc3339(),
++        }),
++    );
++    sqlx::query("UPDATE approvals SET metadata = $3 WHERE id = $1 AND org_id = $2")
++        .bind(approval_id)
++        .bind(org_id)
++        .bind(&metadata)
++        .execute(&mut **transaction)
++        .await?;
++    Ok(())
++}
++
++/// The descriptor revision an approval's metadata records (EP-10-S4), and the fields the edit
++/// changed. `(0, [])` for an approval that was never edited.
++#[must_use]
++pub fn approval_revision(metadata: &JsonValue) -> (u32, Vec<String>) {
++    let revision = &metadata["revision"];
++    let n = revision["n"]
++        .as_u64()
++        .and_then(|value| u32::try_from(value).ok())
++        .unwrap_or(0);
++    let fields = revision["edited_fields"]
++        .as_array()
++        .map(|items| {
++            items
++                .iter()
++                .filter_map(JsonValue::as_str)
++                .map(str::to_owned)
++                .collect()
++        })
++        .unwrap_or_default();
++    (n, fields)
++}
++
+ /// The approval's owner, run, thread and cause, read in the decision's own transaction.
+ const APPROVAL_GRANT_CONTEXT_SQL: &str = "SELECT a.user_id, a.run_id, r.thread_id, \
+      COALESCE(t.space_id, ''), a.metadata, r.retention_class \
+@@ -6691,3 +7057,708 @@ mod approval_preview_db_tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod approval_edit_tests {
++    //! EP-10-S4: the pure parts of an edit (reason wording, fingerprint rebuild, the migration).
++    use super::*;
++
++    fn mail_input(subject: &str) -> JsonValue {
++        serde_json::json!({
++            "connection_id": "conn-1",
++            "operation": "gmail.send",
++            "body": { "to": ["alice@example.com"], "subject": subject, "bodyText": "Hei" },
++        })
++    }
++
++    fn descriptor(input: &JsonValue) -> JsonValue {
++        serde_json::json!({
++            "version": 1,
++            "run_id": "run-1",
++            "org_id": "org-1",
++            "user_id": "user-1",
++            "step_id": "step-1",
++            "action_kind": "tool_call",
++            "tool_name": "execute_provider_action",
++            "input": input,
++            "permission_mode": "ask",
++        })
++    }
++
++    #[test]
++    fn the_rebuilt_fingerprint_is_the_one_execution_core_binds() {
++        let input = mail_input("Status");
++        let scope = mp_contracts::approval_descriptor::descriptor_scope(
++            "run-1",
++            "org-1",
++            "user-1",
++            "step-1",
++            "execute_provider_action",
++            &input,
++            "ask",
++        );
++        let expected = mp_contracts::approval_descriptor::action_fingerprint(&scope).expect("hash");
++        assert_eq!(descriptor_fingerprint_with(&descriptor(&input), &input), Some(expected));
++        let edited = mail_input("Changed");
++        assert_ne!(
++            descriptor_fingerprint_with(&descriptor(&input), &edited),
++            descriptor_fingerprint_with(&descriptor(&input), &input),
++            "an edited input binds a new fingerprint"
++        );
++    }
++
++    #[test]
++    fn a_descriptor_of_another_version_or_kind_has_no_fingerprint() {
++        let input = mail_input("Status");
++        let mut other_version = descriptor(&input);
++        other_version["version"] = serde_json::json!(2);
++        assert_eq!(descriptor_fingerprint_with(&other_version, &input), None);
++        let mut other_kind = descriptor(&input);
++        other_kind["action_kind"] = serde_json::json!("plan");
++        assert_eq!(descriptor_fingerprint_with(&other_kind, &input), None);
++        let mut missing = descriptor(&input);
++        missing.as_object_mut().expect("object").remove("step_id");
++        assert_eq!(descriptor_fingerprint_with(&missing, &input), None);
++    }
++
++    #[test]
++    fn edited_reason_keeps_the_wording_and_names_the_edited_send_only() {
++        let loop_reason = edited_approval_reason(
++            "The agent would send an email to alice@example.com with the subject \"Old\". Approve to let it send.",
++            "gmail.send",
++            &mail_input("New subject"),
++        );
++        assert!(loop_reason.starts_with("The agent would "), "{loop_reason}");
++        assert!(loop_reason.contains("New subject"), "{loop_reason}");
++        assert!(!loop_reason.contains("Old"), "{loop_reason}");
++
++        let cold_reason = edited_approval_reason(
++            "provider write 'gmail.send' requires approval: the agent would send ...",
++            "gmail.send",
++            &mail_input("New subject"),
++        );
++        assert!(
++            cold_reason.starts_with("provider write 'gmail.send' requires approval: the agent would "),
++            "{cold_reason}"
++        );
++        assert_eq!(cold_reason, mp_scrub::scrub_string(&cold_reason), "the reason is scrubbed");
++    }
++
++    #[test]
++    fn an_edited_call_without_a_summary_keeps_no_trace_of_the_old_reason() {
++        let reason = edited_approval_reason(
++            "The agent would send an email to alice@example.com.",
++            "gmail.send",
++            &serde_json::json!({ "operation": "gmail.send" }),
++        );
++        assert_eq!(reason, "provider write 'gmail.send' requires approval");
++    }
++
++    #[test]
++    fn only_a_mail_send_is_an_editable_operation() {
++        assert!(operation_is_editable_mail("gmail.send"));
++        assert!(operation_is_editable_mail("mail.send"));
++        assert!(!operation_is_editable_mail("message.send"));
++        assert!(!operation_is_editable_mail("unknown.op"));
++    }
++
++    #[test]
++    fn approval_descriptor_revision_migration_adds_three_columns_and_its_revert_drops_them() {
++        let up = include_str!("../migrations/0102_approval_descriptor_revision.sql");
++        let down = include_str!("../migrations/revert/0102_approval_descriptor_revision.down.sql");
++        let sql = |text: &'static str| -> String {
++            text.lines()
++                .filter(|line| !line.trim_start().starts_with("--"))
++                .collect::<Vec<_>>()
++                .join("\n")
++        };
++        let up = sql(up);
++        for column in ["revision SMALLINT", "original_action_fingerprint TEXT", "revised_at TIMESTAMPTZ"] {
++            assert!(up.contains(&format!("ADD COLUMN IF NOT EXISTS {column}")), "{column}");
++        }
++        assert!(up.contains("CHECK (revision BETWEEN 0 AND 3)"));
++        assert!(!up.contains("BEGIN;"), "sqlx wraps the migration in its own transaction");
++        let down = sql(down);
++        for column in ["revised_at", "original_action_fingerprint", "revision"] {
++            assert!(down.contains(&format!("DROP COLUMN IF EXISTS {column}")), "{column}");
++        }
++        assert_eq!(MAX_APPROVAL_REVISIONS, 3, "the column CHECK and the code agree");
++    }
++}
++
++#[cfg(test)]
++mod approval_edit_db_tests {
++    //! EP-10-S4: approve with edits against a real Postgres. The edit and the grant are one
++    //! transaction; every refusal leaves the approval pending and its descriptor as it was.
++    use super::*;
++    use base64::Engine as _;
++    use mp_contracts::approval_edit::{EditError, MailSendPatch};
++    use sqlx::postgres::PgPoolOptions;
++
++    async fn scratch_pool() -> Option<Pool> {
++        let Ok(url) = std::env::var("DATABASE_URL") else {
++            eprintln!("skipping: DATABASE_URL unset");
++            return None;
++        };
++        assert!(url.contains("test"), "the scratch database name must say test");
++        let pool = PgPoolOptions::new()
++            .max_connections(4)
++            .connect(&url)
++            .await
++            .expect("connect pg");
++        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
++        std::env::set_var(
++            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
++            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
++        );
++        Some(pool)
++    }
++
++    struct Seed {
++        run_id: String,
++        org: String,
++        user: String,
++    }
++
++    async fn seed_run(pool: &Pool, tag: &str, class: &str) -> Seed {
++        let sfx = mp_ids::new_ulid();
++        let (thread_id, run_id, org, user) = (
++            format!("ed-t-{tag}-{sfx}"),
++            format!("ed-r-{tag}-{sfx}"),
++            format!("ed-org-{sfx}"),
++            "u1".to_owned(),
++        );
++        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
++            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
++        let (ack, connection) = if class == "zdr_waived" {
++            (Some("ack-1"), Some("conn-1"))
++        } else {
++            (None, None)
++        };
++        sqlx::query(
++            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id) \
++             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
++        )
++        .bind(&run_id).bind(&thread_id).bind(&org).bind(&user)
++        .bind(class).bind(ack).bind(connection)
++        .execute(pool).await.expect("seed run");
++        Seed { run_id, org, user }
++    }
++
++    fn mail_input(operation: &str) -> JsonValue {
++        serde_json::json!({
++            "connection_id": "conn-1",
++            "operation": operation,
++            "body": {
++                "to": ["alice@example.com"],
++                "subject": "Old subject",
++                "bodyText": "the drafted body",
++            },
++        })
++    }
++
++    /// A descriptor as execution-core builds it, with its real fingerprint.
++    fn descriptor_for(seed: &Seed, tool_name: &str, input: &JsonValue) -> (JsonValue, String) {
++        let scope = mp_contracts::approval_descriptor::descriptor_scope(
++            &seed.run_id, &seed.org, &seed.user, "tool_1_call-1", tool_name, input, "ask",
++        );
++        let fingerprint = mp_contracts::approval_descriptor::action_fingerprint(&scope).expect("hash");
++        let mut descriptor = scope;
++        descriptor["action_fingerprint"] = JsonValue::String(fingerprint.clone());
++        (descriptor, fingerprint)
++    }
++
++    async fn pending(pool: &Pool, seed: &Seed, descriptor: Option<&JsonValue>) -> String {
++        let id = format!("appr_{}", mp_ids::new_ulid());
++        let input = descriptor.map_or_else(String::new, |d| d["input"].to_string());
++        let metadata = serde_json::json!({
++            "reason": "The agent would send an email to alice@example.com with the subject \"Old subject\". Approve to let it send.",
++            "cause": {
++                "code": "provider_write",
++                "tool": "execute_provider_action",
++                "call_digest": mp_contracts::approval_cause::call_digest(
++                    &seed.run_id, "execute_provider_action", &input,
++                ),
++            },
++        });
++        request_approval(
++            pool,
++            &id,
++            &seed.run_id,
++            None,
++            "tool_call",
++            &seed.user,
++            &seed.org,
++            &seed.user,
++            "",
++            &metadata,
++            descriptor,
++            Some(Utc::now() + chrono::Duration::minutes(5)),
++            "",
++        )
++        .await
++        .expect("request approval")
++        .expect("inserted");
++        id
++    }
++
++    const RECORD: DecisionRecord<'static> = DecisionRecord {
++        source: "user",
++        scope: "once",
++        audit: false,
++        grant_ttl_secs: mp_contracts::approval_cause::THREAD_GRANT_TTL_DEFAULT_SECS,
++        rule_proposed: false,
++        authz_audit: false,
++    };
++
++    fn subject_patch(subject: &str) -> MailSendPatch {
++        MailSendPatch {
++            subject: Some(subject.to_owned()),
++            body_text: Some("the edited body".to_owned()),
++            ..MailSendPatch::default()
++        }
++    }
++
++    async fn edit(
++        pool: &Pool,
++        seed: &Seed,
++        id: &str,
++        patch: &MailSendPatch,
++        base: &str,
++    ) -> Result<ApprovalDecisionWrite> {
++        decide_approval_with_edit(
++            pool,
++            id,
++            &seed.org,
++            &seed.user,
++            &seed.user,
++            "",
++            &RECORD,
++            &ApprovalEdit {
++                patch,
++                base_fingerprint: base,
++            },
++        )
++        .await
++    }
++
++    fn refusal(result: Result<ApprovalDecisionWrite>) -> EditRefusal {
++        *result
++            .expect_err("refused")
++            .downcast_ref::<EditRefusal>()
++            .expect("a typed refusal")
++    }
++
++    /// The stored descriptor columns and the approval's state.
++    async fn stored(pool: &Pool, id: &str) -> (String, i16, Option<String>, String) {
++        let (fingerprint, revision, original): (String, i16, Option<String>) = sqlx::query_as(
++            "SELECT action_fingerprint, revision, original_action_fingerprint \
++             FROM approval_continuation_descriptors WHERE approval_id = $1",
++        )
++        .bind(id)
++        .fetch_one(pool)
++        .await
++        .expect("descriptor row");
++        let status: String = sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
++            .bind(id)
++            .fetch_one(pool)
++            .await
++            .expect("approval");
++        (fingerprint, revision, original, status)
++    }
++
++    async fn stored_input(pool: &Pool, seed: &Seed, id: &str) -> JsonValue {
++        let ciphertext: String = sqlx::query_scalar(
++            "SELECT ciphertext FROM approval_continuation_descriptors WHERE approval_id = $1",
++        )
++        .bind(id)
++        .fetch_one(pool)
++        .await
++        .expect("ciphertext");
++        let plaintext = DescriptorCipher::from_env()
++            .expect("key")
++            .decrypt(id, &seed.org, &seed.user, &ciphertext)
++            .expect("decrypt");
++        let descriptor: JsonValue = serde_json::from_str(&plaintext).expect("json");
++        descriptor["input"].clone()
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_changes_fingerprint_and_keeps_the_original_hash() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "fp", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++
++        let write = edit(&pool, &seed, &id, &subject_patch("New subject"), &original)
++            .await
++            .expect("edited grant");
++        assert!(write.updated);
++        assert!(write.delivery_id.is_some(), "a cold grant still leaves its delivery row");
++
++        let (fingerprint, revision, kept, status) = stored(&pool, &id).await;
++        assert_eq!(status, "granted");
++        assert_eq!(revision, 1);
++        assert_ne!(fingerprint, original);
++        assert_eq!(kept.as_deref(), Some(original.as_str()), "the original is kept as a hash");
++        let input = stored_input(&pool, &seed, &id).await;
++        assert_eq!(input["body"]["subject"], "New subject");
++        assert_eq!(input["body"]["bodyText"], "the edited body");
++        assert_eq!(input["connection_id"], "conn-1", "an edit never retargets the connection");
++        assert_eq!(input["operation"], "gmail.send");
++        let (_, expected) = descriptor_for(&seed, "execute_provider_action", &input);
++        assert_eq!(fingerprint, expected, "the new fingerprint is execution-core's for the edit");
++
++        let metadata: JsonValue = sqlx::query_scalar("SELECT metadata FROM approvals WHERE id = $1")
++            .bind(&id)
++            .fetch_one(&pool)
++            .await
++            .expect("metadata");
++        assert_eq!(metadata["revision"]["n"], 1);
++        assert_eq!(metadata["revision"]["edited_fields"], serde_json::json!(["subject", "body_text"]));
++        assert_eq!(
++            metadata["cause"]["call_digest"],
++            mp_contracts::approval_cause::call_digest(
++                &seed.run_id,
++                "execute_provider_action",
++                &serde_json::to_string(&input).expect("input"),
++            ),
++            "the cause's digest follows the edited call"
++        );
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edited_reason_is_scrubbed_and_recomputed() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "reason", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        edit(&pool, &seed, &id, &subject_patch("New subject"), &original).await.expect("edit");
++        let reason: String =
++            sqlx::query_scalar("SELECT metadata->>'reason' FROM approvals WHERE id = $1")
++                .bind(&id)
++                .fetch_one(&pool)
++                .await
++                .expect("reason");
++        assert!(reason.contains("New subject"), "{reason}");
++        assert!(!reason.contains("Old subject"), "the replaced draft is not described: {reason}");
++        assert_eq!(reason, mp_scrub::scrub_string(&reason));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn stale_base_fingerprint_is_approval_changed() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "stale", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        let stale = "f".repeat(64);
++        let refused = refusal(edit(&pool, &seed, &id, &subject_patch("New"), &stale).await);
++        assert_eq!(refused, EditRefusal::ApprovalChanged);
++        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn two_concurrent_edits_one_wins() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "race", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        let (first, second) = (subject_patch("First"), subject_patch("Second"));
++        let (a, b) = tokio::join!(
++            edit(&pool, &seed, &id, &first, &original),
++            edit(&pool, &seed, &id, &second, &original),
++        );
++        let wins = [a.is_ok(), b.is_ok()].iter().filter(|won| **won).count();
++        assert_eq!(wins, 1, "exactly one edit is granted");
++        let loser = if a.is_ok() { b } else { a };
++        assert_eq!(refusal(loser), EditRefusal::ApprovalChanged);
++        let (_, revision, _, status) = stored(&pool, &id).await;
++        assert_eq!((revision, status.as_str()), (1, "granted"));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_and_grant_is_one_transaction() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "atomic", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        // Fail the grant itself, after the descriptor was re-encrypted in the same transaction.
++        let function = format!("ed_fail_{}", id.to_lowercase());
++        sqlx::query(&format!(
++            "CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS \
++             $$ BEGIN RAISE EXCEPTION 'grant refused for the test'; END $$"
++        ))
++        .execute(&pool)
++        .await
++        .expect("function");
++        sqlx::query(&format!(
++            "CREATE TRIGGER {function} BEFORE UPDATE OF status ON approvals FOR EACH ROW \
++             WHEN (NEW.id = '{id}' AND NEW.status = 'granted') EXECUTE FUNCTION {function}()"
++        ))
++        .execute(&pool)
++        .await
++        .expect("trigger");
++
++        let failed = edit(&pool, &seed, &id, &subject_patch("New"), &original).await;
++
++        sqlx::query(&format!("DROP TRIGGER {function} ON approvals"))
++            .execute(&pool)
++            .await
++            .expect("drop trigger");
++        sqlx::query(&format!("DROP FUNCTION {function}()"))
++            .execute(&pool)
++            .await
++            .expect("drop function");
++        assert!(failed.is_err(), "the grant failed");
++        assert_eq!(
++            stored(&pool, &id).await,
++            (original, 0, None, "requested".to_owned()),
++            "the edit rolled back with the grant"
++        );
++        let input = stored_input(&pool, &seed, &id).await;
++        assert_eq!(input["body"]["subject"], "Old subject");
++        let metadata: JsonValue = sqlx::query_scalar("SELECT metadata FROM approvals WHERE id = $1")
++            .bind(&id)
++            .fetch_one(&pool)
++            .await
++            .expect("metadata");
++        assert!(metadata.get("revision").is_none());
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_refused_for_non_mail_writes() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "nonmail", "persistent").await;
++        let (slack, slack_fp) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("message.send"));
++        let id = pending(&pool, &seed, Some(&slack)).await;
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &slack_fp).await),
++            EditRefusal::NotEditable
++        );
++        let (other_tool, other_fp) =
++            descriptor_for(&seed, "delete_records", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&other_tool)).await;
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &other_fp).await),
++            EditRefusal::NotEditable
++        );
++        let mut raw_input = mail_input("gmail.send");
++        raw_input["body"] = serde_json::json!({ "raw": "RnJvbTogYQ==" });
++        let (raw, raw_fp) = descriptor_for(&seed, "execute_provider_action", &raw_input);
++        let id = pending(&pool, &seed, Some(&raw)).await;
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &raw_fp).await),
++            EditRefusal::NotEditable,
++            "a Gmail raw draft is preview-only"
++        );
++        assert_eq!(stored(&pool, &id).await.3, "requested");
++    }
++
++    /// Integration round B C-B4: a cause with no retained call (`browser_human_assist`) is not
++    /// editable, and the approval stays pending.
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_refused_for_an_approval_without_a_descriptor() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "assist", "persistent").await;
++        let id = pending(&pool, &seed, None).await;
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &"a".repeat(64)).await),
++            EditRefusal::NotEditable
++        );
++        let status: String = sqlx::query_scalar("SELECT status FROM approvals WHERE id = $1")
++            .bind(&id)
++            .fetch_one(&pool)
++            .await
++            .expect("status");
++        assert_eq!(status, "requested");
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_refused_for_thread_scope_and_rule_proposal() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "scope", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        let patch = subject_patch("New");
++        for record in [
++            DecisionRecord { scope: "thread", ..RECORD },
++            DecisionRecord { rule_proposed: true, ..RECORD },
++        ] {
++            let refused = decide_approval_with_edit(
++                &pool,
++                &id,
++                &seed.org,
++                &seed.user,
++                &seed.user,
++                "",
++                &record,
++                &ApprovalEdit {
++                    patch: &patch,
++                    base_fingerprint: &original,
++                },
++            )
++            .await;
++            assert_eq!(refusal(refused), EditRefusal::OnceOnly);
++        }
++        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_refused_for_zdr_and_waived() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "waived", "zdr_waived").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &original).await),
++            EditRefusal::NotEditable,
++            "a waived run counts as ZDR (D9); a ZDR caller is refused by the handler"
++        );
++        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn fourth_revision_is_refused() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "limit", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        sqlx::query("UPDATE approval_continuation_descriptors SET revision = 3 WHERE approval_id = $1")
++            .bind(&id)
++            .execute(&pool)
++            .await
++            .expect("three revisions");
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &subject_patch("New"), &original).await),
++            EditRefusal::RevisionLimit
++        );
++        assert_eq!(stored(&pool, &id).await.3, "requested");
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn edit_of_another_owner_or_org_is_not_found() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "owner", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        let patch = subject_patch("New");
++        for (org, user) in [("ed-org-other", seed.user.as_str()), (seed.org.as_str(), "u2")] {
++            let refused = decide_approval_with_edit(
++                &pool,
++                &id,
++                org,
++                user,
++                user,
++                "",
++                &RECORD,
++                &ApprovalEdit {
++                    patch: &patch,
++                    base_fingerprint: &original,
++                },
++            )
++            .await;
++            assert_eq!(refusal(refused), EditRefusal::NotFound, "{org} {user}");
++        }
++        assert_eq!(stored(&pool, &id).await.3, "requested");
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn an_invalid_patch_leaves_the_approval_pending() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "invalid", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        let bad = MailSendPatch {
++            subject: Some("Line\r\nBcc: eve@example.com".to_owned()),
++            ..MailSendPatch::default()
++        };
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &bad, &original).await),
++            EditRefusal::Invalid(EditError::InvalidSubject)
++        );
++        let unchanged = MailSendPatch {
++            subject: Some("Old subject".to_owned()),
++            ..MailSendPatch::default()
++        };
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &unchanged, &original).await),
++            EditRefusal::Invalid(EditError::NoChange)
++        );
++        assert_eq!(stored(&pool, &id).await, (original, 0, None, "requested".to_owned()));
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn an_edit_replayed_after_its_grant_is_approval_changed() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "replay", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        let patch = subject_patch("New");
++        edit(&pool, &seed, &id, &patch, &original).await.expect("first");
++        assert_eq!(
++            refusal(edit(&pool, &seed, &id, &patch, &original).await),
++            EditRefusal::ApprovalChanged,
++            "a second edit never lands on a granted approval"
++        );
++        assert_eq!(stored(&pool, &id).await.1, 1);
++    }
++
++    #[tokio::test]
++    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
++    async fn revised_descriptor_is_erased_with_the_run() {
++        let Some(pool) = scratch_pool().await else { return };
++        let seed = seed_run(&pool, "erase", "persistent").await;
++        let (descriptor, original) =
++            descriptor_for(&seed, "execute_provider_action", &mail_input("gmail.send"));
++        let id = pending(&pool, &seed, Some(&descriptor)).await;
++        edit(&pool, &seed, &id, &subject_patch("New"), &original).await.expect("edit");
++        sqlx::query("DELETE FROM approval_delivery_outbox WHERE approval_id = $1")
++            .bind(&id)
++            .execute(&pool)
++            .await
++            .expect("drop delivery");
++        sqlx::query("DELETE FROM approvals WHERE run_id = $1")
++            .bind(&seed.run_id)
++            .execute(&pool)
++            .await
++            .expect("erase approvals");
++        sqlx::query("DELETE FROM runs WHERE id = $1")
++            .bind(&seed.run_id)
++            .execute(&pool)
++            .await
++            .expect("erase run");
++        let left: i64 = sqlx::query_scalar(
++            "SELECT count(*) FROM approval_continuation_descriptors WHERE approval_id = $1",
++        )
++        .bind(&id)
++        .fetch_one(&pool)
++        .await
++        .expect("count");
++        assert_eq!(left, 0, "the edited descriptor goes with its approval and run");
++    }
++}

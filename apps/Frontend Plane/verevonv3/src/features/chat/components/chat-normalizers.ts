@@ -100,6 +100,8 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     createdAt: msg.createdAt || '',
     streaming: false,
     model: msg.model,
+    // The message-tree position, on a versioned thread only (WS17 S9); the server sends none otherwise.
+    ...(msg.version ? { version: msg.version } : {}),
     // Persisted answer quality, so a thread opened on a device that never saw
     // the stream shows the same score the stream reported. Absent for turns
     // recorded before the score was persisted — which stays distinguishable
@@ -1054,6 +1056,9 @@ export function mergeServerTurnsWithCachedMetadata(
       grantedRung: serverTurn.grantedRung ?? cachedTurn.grantedRung,
       effectClass: serverTurn.effectClass ?? cachedTurn.effectClass,
       status: serverTurn.status ?? mergedCachedStatus(serverTurn, cachedTurn),
+      // This client's own terminal-frame stamp (EP-14 S1). The server's copy never has one, so the cached turn's
+      // is kept for the session; the stored transcript never carries it. Keyed only when set, as the other shapes are.
+      ...(cachedTurn.settledAt ? { settledAt: cachedTurn.settledAt } : {}),
       inputTokens: serverTurn.inputTokens ?? cachedTurn.inputTokens,
       outputTokens: serverTurn.outputTokens ?? cachedTurn.outputTokens,
       latencyMs: serverTurn.latencyMs ?? cachedTurn.latencyMs,
