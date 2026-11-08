@@ -1506,7 +1506,9 @@ mod tests {
             ..Default::default()
         })
         .await;
-        let sink = OrchestrationEventSink::new(channel, None).with_verified_bearer("test-bearer");
+        let sink = OrchestrationEventSink::new(channel, None)
+            .with_verified_bearer("test-bearer")
+            .with_receipt_persistence_confirmed(true);
         let config = test_config();
 
         sink.run_paused(&config).await;
@@ -1521,9 +1523,18 @@ mod tests {
         sink.attach_shared_jar(&no_run, "run_user", "att_1", "tab_9").await;
 
         let sent = recorded.lock().unwrap();
+        // The signed compatibility receipt after a shared-jar event exists only while
+        // BROWSER_ATTACH_COMPAT_HMAC_KEY is set, and a sibling test sets it process-wide.
         let events: Vec<_> = sent
             .iter()
             .filter_map(|request| request.event.as_ref()?.event.clone())
+            .filter(|event| {
+                !matches!(
+                    event,
+                    orchestration_event::Event::BrowserObservationReceived(received)
+                        if received.action_id == "verevon-attach-compat-v1"
+                )
+            })
             .collect();
         assert_eq!(events.len(), 4);
         let orchestration_event::Event::BrowserRunPaused(user_pause) = &events[0] else {

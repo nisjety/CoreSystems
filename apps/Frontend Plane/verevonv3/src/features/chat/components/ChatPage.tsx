@@ -98,8 +98,11 @@ import {
 } from '@/features/browser/dock/browser-dock-state'
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
 import { createSettledFoldChoices } from '../lib/settled-fold-choices'
+import { chapterEntries, turnSelector } from '../lib/chapter-toc'
+import { createReaderAppearance, readerPolishEnabled, readerSpacingFor } from '../lib/reader-polish'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
+import { ReaderTools } from './ReaderTools'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -229,6 +232,10 @@ export default function ChatPage() {
   // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
   // switch off the rules change nothing, so the transcript renders as it did.
   const transcriptDensity = createTranscriptDensity()
+  // F-t3-098, behind `VITE_CHAT_READER_POLISH`. The text size, the dyslexia-friendly font and the spacing the workspace
+  // carries, and the outline of the answers. With the switch off the attributes are empty and no outline is built.
+  const readerAppearance = createReaderAppearance()
+  const chapters = createMemo(() => (readerPolishEnabled ? chapterEntries(state.turns) : []))
   const projectName = () => {
     if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
     const context = projectContext()
@@ -658,6 +665,16 @@ export default function ChatPage() {
     requestAnimationFrame(() => {
       if (!listElement || !anchor?.isConnected) return
       listElement.scrollTop += anchor.getBoundingClientRect().top - topBefore
+    })
+  }
+  // The outline's jump. A turn the window has left out is mounted first, by making it the focused turn, which the window
+  // always keeps mounted. The turn then goes to the top of the list, and takes the focus when it can hold it.
+  const jumpToChapter = (turnId: string): void => {
+    if (virtualizeTranscript) setFocusedTurnId(turnId)
+    requestAnimationFrame(() => {
+      const turn = threadElement?.querySelector<HTMLElement>(turnSelector(turnId))
+      turn?.scrollIntoView?.({ block: 'start' })
+      turn?.focus({ preventScroll: true })
     })
   }
   const measureViewport = () => {
@@ -1368,6 +1385,7 @@ export default function ChatPage() {
       <section
         class="verevon-chat-section"
         data-transcript-process={transcriptDensity.rules().showProcess ? undefined : 'hidden'}
+        {...readerAppearance.attributes(readerSpacingFor(transcriptDensityEnabled, transcriptDensity.level()))}
         aria-label={i18n.tr('Verevon chat-arbeidsflate', 'Verevon chat workspace')}
       >
         <Show when={hasMessages()}>
@@ -1392,6 +1410,14 @@ export default function ChatPage() {
           />
           <Show when={transcriptDensityEnabled}>
             <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
+          </Show>
+          <Show when={readerPolishEnabled}>
+            <ReaderTools
+              chapters={chapters()}
+              dyslexiaFont={readerAppearance.dyslexiaFont()}
+              onDyslexiaFont={readerAppearance.setDyslexiaFont}
+              onJump={jumpToChapter}
+            />
           </Show>
         </Show>
         <Show when={hasMessages() && state.threadId && !isActiveThreadTemporary()}>

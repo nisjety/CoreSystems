@@ -19,6 +19,7 @@ func TestIsSeededHighRiskCapability(t *testing.T) {
 		{id: "cap.tool.shipping.book", want: true},
 		{id: "cap.tool.social.publish", want: true},
 		{id: "cap.tool.provider.execute", want: true},
+		{id: "cap.computer.act", want: true},
 		{id: "cap.self_owned.misp_opencti", want: true},
 		{id: "cap.self_owned.quarry_url_reputation_feeds", want: true},
 		{id: "cap.self_owned.opensanctions_yente", want: true},

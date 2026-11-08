@@ -1,0 +1,155 @@
+/*
+ * Reader and appearance polish (F-t3-098). Every reading rule is keyed on a `data-reader-*` attribute that the page
+ * writes only with `VITE_CHAT_READER_POLISH` on, so with the switch off nothing here applies. The medium size is the
+ * size the transcript already uses, so the default changes no pixel.
+ *
+ * Spacing follows the transcript level (`data-reader-spacing`, EP-14 S2) when its switch is on. Otherwise, while
+ * the level is not set and the stored compact flag is on (`html[data-density]`), the same tighter rhythm applies.
+ */
+
+.verevon-chat-section[data-reader-font-size='small'] {
+  --verevon-reader-font-size: 14px;
+}
+
+.verevon-chat-section[data-reader-font-size='medium'] {
+  --verevon-reader-font-size: 15px;
+}
+
+.verevon-chat-section[data-reader-font-size='large'] {
+  --verevon-reader-font-size: 17px;
+}
+
+.verevon-chat-section[data-reader-font-size] :is(.verevon-chat-markdown, .verevon-chat-content, .verevon-chat-bubble) {
+  font-size: var(--verevon-reader-font-size, 15px);
+}
+
+/* No font file is bundled. A reader with Atkinson Hyperlegible installed gets it; the rest get wide system faces. */
+.verevon-chat-section[data-reader-font='dyslexia'] {
+  --verevon-reader-font-family: 'Atkinson Hyperlegible', Verdana, Arial, sans-serif;
+}
+
+.verevon-chat-section[data-reader-font='dyslexia'] :is(.verevon-chat-markdown, .verevon-chat-content, .verevon-chat-bubble) {
+  font-family: var(--verevon-reader-font-family);
+  letter-spacing: 0.03em;
+  word-spacing: 0.12em;
+  line-height: 1.8;
+}
+
+.verevon-chat-section[data-reader-spacing='compact'] .verevon-chat-thread,
+html[data-density='compact'] .verevon-chat-section[data-reader-font-size]:not([data-reader-spacing]) .verevon-chat-thread {
+  gap: 18px;
+}
+
+.verevon-chat-section[data-reader-spacing='compact'] .verevon-chat-markdown :where(p, ul, ol, blockquote, pre),
+html[data-density='compact'] .verevon-chat-section[data-reader-font-size]:not([data-reader-spacing])
+  .verevon-chat-markdown
+  :where(p, ul, ol, blockquote, pre) {
+  margin: 0 0 9px;
+}
+
+.verevon-chat-reader-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.verevon-chat-reader-tools__outline {
+  position: relative;
+}
+
+.verevon-chat-reader-tools__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-reader-tools__button:hover {
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-reader-tools__button[aria-pressed='true'],
+.verevon-chat-reader-tools__button[aria-expanded='true'] {
+  color: var(--verevon-j-text);
+  box-shadow: inset 0 0 0 1px var(--verevon-border);
+}
+
+.verevon-chat-reader-tools__button:focus-visible,
+.verevon-chat-reader-tools__item:focus-visible {
+  outline: 2px solid var(--verevon-accent-ink);
+  outline-offset: 2px;
+}
+
+.verevon-chat-reader-tools__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: min(320px, calc(100vw - 32px));
+  max-height: min(60vh, 420px);
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface-soft);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 12%);
+}
+
+.verevon-chat-reader-tools__list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-chat-reader-tools__item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.verevon-chat-reader-tools__item:hover {
+  color: var(--verevon-j-text);
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, transparent);
+}
+
+.verevon-chat-reader-tools__item[data-level='2'] {
+  padding-left: 22px;
+  font-size: 12.5px;
+}
+
+.verevon-chat-reader-tools__item[data-level='3'] {
+  padding-left: 34px;
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-chat-reader-tools__button {
+    transition: none;
+  }
+}

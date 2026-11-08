@@ -80,6 +80,7 @@ func IsSupportedPrivacyTier(raw string) bool {
 // Sourced by grepping `risk_level` ... 'high' across migrations/*.sql:
 //   - migrations/0004_seed_self_owned_systems.up.sql
 //   - migrations/0008_execution_dispatch_capabilities.up.sql
+//   - migrations/0038_computer_tool_capabilities.up.sql
 //
 // Any future migration that seeds a RiskHigh capability MUST add its id here.
 // This list is a floor, not the whole mechanism: Upsert also floors any
@@ -92,6 +93,7 @@ var seededHighRiskCapabilityIDs = map[string]bool{
 	"cap.tool.shipping.book":                     true,
 	"cap.tool.social.publish":                    true,
 	"cap.tool.provider.execute":                  true,
+	"cap.computer.act":                           true,
 	"cap.self_owned.misp_opencti":                true,
 	"cap.self_owned.quarry_url_reputation_feeds": true,
 	"cap.self_owned.opensanctions_yente":         true,

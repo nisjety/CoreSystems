@@ -94,6 +94,7 @@ import type { SettledFold } from '../lib/settled-fold'
 import type { SettledFoldChoices } from '../lib/settled-fold-choices'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
+import { readerPolishEnabled } from '../lib/reader-polish'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
@@ -900,6 +901,7 @@ export function AssistantMessage(props: {
     <article
       class="verevon-chat-message verevon-chat-message--assistant"
       data-latest={props.isLatest ? '' : undefined}
+      data-turn-id={readerPolishEnabled ? props.message.id : undefined}
       tabindex={-1}
     >
       <div class="verevon-chat-message__avatar">
@@ -1370,7 +1372,7 @@ export function UserMessage(props: {
   }
 
   return (
-    <article class="verevon-chat-message verevon-chat-message--user" tabindex={-1}>
+    <article class="verevon-chat-message verevon-chat-message--user" data-turn-id={readerPolishEnabled ? props.message.id : undefined} tabindex={-1}>
       <div class="verevon-chat-user-meta">
         <span>Meg</span>
         <time>{formatRelative(props.message.createdAt, i18n.locale())}</time>

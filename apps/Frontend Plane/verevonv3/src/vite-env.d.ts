@@ -48,6 +48,8 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_COMPUTER_PANEL?: string;
 	/** "true" folds settled agent turns to one row (EP-14 S1). Default off. */
 	readonly VITE_CHAT_SETTLED_FOLD?: string;
+	/** "true" shows the reader's outline and dyslexia-friendly font, and applies the stored text size (F-t3-098). Default off. */
+	readonly VITE_CHAT_READER_POLISH?: string;
 	/** "true" shows thumbs and reasons on agent run answers and scheduled results (F-t3-078). Default off. */
 	readonly VITE_AGENT_RESULT_FEEDBACK?: string;
 	readonly VITE_QUOTA_READOUT?: string;

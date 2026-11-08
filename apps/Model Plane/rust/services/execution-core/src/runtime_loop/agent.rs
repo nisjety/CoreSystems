@@ -4517,6 +4517,11 @@ async fn run_rounds(
         ));
         let released_step_replayed = std::sync::atomic::AtomicBool::new(false);
         let released_step_replayed = &released_step_replayed;
+        // EP-1 S3: the person's note on a released call, by step id. The loop frames it onto the
+        // call's result after the call is recorded, so the step record never holds it.
+        let hand_back_notes =
+            std::sync::Mutex::new(std::collections::HashMap::<String, String>::new());
+        let hand_back_notes = &hand_back_notes;
         let release_prereserved = release_prereserved.as_deref();
         let outcomes_by_slot: Vec<Option<runtime_loop::StepOutcome>> = {
             let dispatches: Vec<Option<LoopSubagentDispatch<'_, '_>>> = slots
@@ -4782,6 +4787,25 @@ async fn run_rounds(
                             org_id: &req.org_id,
                             run_id: &req.run_id,
                         });
+                    // EP-1 S3: the person's note on a released call. It is read before the
+                    // refusal check, so a refused give-back still carries it to the model.
+                    // Phase 3 frames it onto the call's result once the call is recorded, so the
+                    // step record never holds it.
+                    let person_note = if is_release
+                        && !zdr
+                        && crate::browser_session::is_do_tool(&call.name)
+                        && crate::browser_session::takeover_pause_enabled()
+                    {
+                        released_hand_back_note(ctx).await
+                    } else {
+                        None
+                    };
+                    if let Some(note) = &person_note {
+                        hand_back_notes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(step_id.clone(), note.clone());
+                    }
                     // EP-1 S1: the browser call a takeover paused runs only once the person has given
                     // the browser back. While Quarry still says the person holds it, the call is not
                     // dispatched and the model reads that the person is using the browser. EP-1 S5:
@@ -4814,7 +4838,7 @@ async fn run_rounds(
                                 && crate::browser_session::is_do_tool(&call.name)
                                 && crate::browser_session::takeover_pause_enabled() =>
                         {
-                            match released_hand_back_note(ctx).await {
+                            match person_note.clone() {
                                 Some(note) => {
                                     let quarry =
                                         crate::quarry_agent::QuarryAgentClient::from_env()
@@ -4928,7 +4952,7 @@ async fn run_rounds(
                         .await,
                     )
                     .map(|dispatched| match hand_back.as_ref() {
-                        Some((look, note)) => after_hand_back(dispatched, look, note),
+                        Some((look, _)) => after_hand_back(dispatched, look),
                         None => dispatched,
                     })
                     };
@@ -5227,14 +5251,18 @@ async fn run_rounds(
                 grounded = true;
             }
 
+            // EP-1 S3: the person's note, framed after the result it came with. The record above
+            // kept the result alone.
+            let person_note = hand_back_notes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(step_id.as_str());
+            let (output, error) =
+                model_result(outcome.output, outcome.error, person_note.as_deref());
             outcomes.push(ToolStepResult {
                 name: call.name.clone(),
-                output: outcome.output,
-                error: if outcome.error.is_empty() {
-                    None
-                } else {
-                    Some(outcome.error)
-                },
+                output,
+                error,
             });
         }
 
@@ -10212,24 +10240,42 @@ fn hand_back_observed(
 }
 
 /// The paused call's outcome after a hand-back (EP-1 S3): a call that completed is read after the
-/// fresh look and the note; a failed one keeps its refusal alone, so the closed refusal text the
-/// loop and the retry classifier read is unchanged. A look that failed still carries the note.
+/// fresh look. A failed one, or one whose look failed, is kept as it ran, so the closed refusal
+/// text the loop and the retry classifier read is unchanged. The note is not added here: it is
+/// framed onto the result the model reads (see [`model_result`]), so the recorded result never
+/// holds it.
 fn after_hand_back(
     dispatched: runtime_loop::StepOutcome,
     look: &Result<String, crate::browser_session::Refusal>,
-    note: &str,
 ) -> runtime_loop::StepOutcome {
-    if dispatched.status != "completed" {
-        return dispatched;
+    match look {
+        Ok(view) if dispatched.status == "completed" => {
+            let output = format!("{view}\n{}", dispatched.output);
+            runtime_loop::StepOutcome {
+                output,
+                ..dispatched
+            }
+        }
+        _ => dispatched,
     }
-    let output = match look {
-        Ok(view) => format!("{view}\n{}", dispatched.output),
-        Err(_) => crate::browser_session::with_person_note(dispatched.output.clone(), note),
+}
+
+/// The model's copy of a call's result (EP-1 S3): the person's note, when a give-back carried one,
+/// is framed after the result it came with. It is applied once the call is recorded, so the step
+/// record keeps the result alone. A blank note adds nothing.
+fn model_result(
+    output: String,
+    error: String,
+    person_note: Option<&str>,
+) -> (String, Option<String>) {
+    let (output, error) = match person_note {
+        Some(note) if error.is_empty() => {
+            (crate::browser_session::with_person_note(output, note), error)
+        }
+        Some(note) => (output, crate::browser_session::with_person_note(error, note)),
+        None => (output, error),
     };
-    runtime_loop::StepOutcome {
-        output,
-        ..dispatched
-    }
+    (output, (!error.is_empty()).then_some(error))
 }
 
 #[cfg(test)]
@@ -10275,27 +10321,65 @@ mod browser_hand_back {
     }
 
     #[test]
-    fn a_redispatched_call_is_read_after_the_look_and_the_note() {
-        let look = Ok("view\n<person_note>n</person_note>".to_owned());
+    fn a_redispatched_call_is_read_after_the_look() {
+        let look = Ok("view".to_owned());
         let closed = after_hand_back(
             StepOutcome::completed(r#"{"ok":true,"closed":true}"#.to_owned()),
             &look,
-            "n",
         );
-        assert_eq!(
-            closed.output,
-            "view\n<person_note>n</person_note>\n{\"ok\":true,\"closed\":true}"
-        );
+        assert_eq!(closed.output, "view\n{\"ok\":true,\"closed\":true}");
 
         let without_look = after_hand_back(
             StepOutcome::completed("out".to_owned()),
             &Err(crate::browser_session::SESSION_LOST),
-            "n",
         );
-        assert_eq!(without_look.output, "out\n<person_note>n</person_note>");
+        assert_eq!(without_look.output, "out");
 
         let failed = StepOutcome::failed(&crate::browser_session::SESSION_FAILED.text());
-        assert_eq!(after_hand_back(failed.clone(), &look, "n"), failed);
+        assert_eq!(after_hand_back(failed.clone(), &look), failed);
+    }
+
+    /// EP-1 S3: the person's note reaches the model framed after the result, and the result the
+    /// loop records never holds it.
+    #[test]
+    fn the_person_note_is_framed_for_the_model_and_never_recorded() {
+        let recorded = after_hand_back(
+            StepOutcome::completed("out".to_owned()),
+            &Ok("view".to_owned()),
+        );
+        assert!(!recorded.output.contains("person_note"), "{}", recorded.output);
+
+        assert_eq!(
+            model_result("out".to_owned(), String::new(), Some("Go on.")),
+            ("out\n<person_note>Go on.</person_note>".to_owned(), None)
+        );
+        assert_eq!(
+            model_result("out".to_owned(), String::new(), None),
+            ("out".to_owned(), None)
+        );
+        assert_eq!(
+            model_result("out".to_owned(), String::new(), Some(" \n ")),
+            ("out".to_owned(), None),
+            "a blank note adds no line"
+        );
+    }
+
+    /// EP-1 S3: a refused call still carries the note, and its refusal text stays first, so the
+    /// classifiers that read the refusal see the text they always did.
+    #[test]
+    fn a_refused_call_still_carries_the_note_after_its_refusal() {
+        let refusal = crate::browser_session::SESSION_LOST.text();
+        assert_eq!(
+            model_result(String::new(), refusal.clone(), Some("Go on.")),
+            (
+                String::new(),
+                Some(format!("{refusal}\n<person_note>Go on.</person_note>"))
+            )
+        );
+        assert_eq!(
+            model_result(String::new(), refusal.clone(), None),
+            (String::new(), Some(refusal))
+        );
     }
 
     /// EP-1 S1: a Do browser call that finds the person still holding the browser pauses again on
@@ -17604,7 +17688,7 @@ mod tests {
     #[test]
     fn only_a_takeover_pause_waits_the_assist_ttl() {
         let assist = crate::browser_session::assist_ttl_seconds();
-        assert!((300..=3600).contains(&assist), "{assist}");
+        assert!((300..=1800).contains(&assist), "{assist}");
         assert_eq!(approval_ttl_seconds(CauseCode::BrowserHumanAssist), assist);
         for cause in CauseCode::ALL {
             if cause != CauseCode::BrowserHumanAssist {
