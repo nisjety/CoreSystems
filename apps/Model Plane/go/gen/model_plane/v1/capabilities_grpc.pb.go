@@ -29,6 +29,7 @@ const (
 	CapabilityCore_ListSkillBundles_FullMethodName       = "/model_plane.v1.CapabilityCore/ListSkillBundles"
 	CapabilityCore_GetSkillBundleManifest_FullMethodName = "/model_plane.v1.CapabilityCore/GetSkillBundleManifest"
 	CapabilityCore_GetSkillBlob_FullMethodName           = "/model_plane.v1.CapabilityCore/GetSkillBlob"
+	CapabilityCore_GetProcedureVersion_FullMethodName    = "/model_plane.v1.CapabilityCore/GetProcedureVersion"
 )
 
 // CapabilityCoreClient is the client API for CapabilityCore service.
@@ -67,6 +68,12 @@ type CapabilityCoreClient interface {
 	GetSkillBundleManifest(ctx context.Context, in *GetSkillBundleManifestRequest, opts ...grpc.CallOption) (*SkillBundleManifest, error)
 	// Read one blob of a skill bundle by its sha256 digest.
 	GetSkillBlob(ctx context.Context, in *GetSkillBlobRequest, opts ...grpc.CallOption) (*GetSkillBlobResponse, error)
+	// Read one saved browser procedure version (plan 3.4 E4.2 step 3): its canonical body, its digest,
+	// its name and the tags that point at it. A user caller reads its own procedures; a service caller
+	// reads for the person named in for_user_id. Read only: writes nothing.
+	// The response is the ProcedureVersion message itself; the name is fixed by the contract.
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	GetProcedureVersion(ctx context.Context, in *GetProcedureVersionRequest, opts ...grpc.CallOption) (*ProcedureVersion, error)
 }
 
 type capabilityCoreClient struct {
@@ -177,6 +184,16 @@ func (c *capabilityCoreClient) GetSkillBlob(ctx context.Context, in *GetSkillBlo
 	return out, nil
 }
 
+func (c *capabilityCoreClient) GetProcedureVersion(ctx context.Context, in *GetProcedureVersionRequest, opts ...grpc.CallOption) (*ProcedureVersion, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProcedureVersion)
+	err := c.cc.Invoke(ctx, CapabilityCore_GetProcedureVersion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CapabilityCoreServer is the server API for CapabilityCore service.
 // All implementations must embed UnimplementedCapabilityCoreServer
 // for forward compatibility.
@@ -213,6 +230,12 @@ type CapabilityCoreServer interface {
 	GetSkillBundleManifest(context.Context, *GetSkillBundleManifestRequest) (*SkillBundleManifest, error)
 	// Read one blob of a skill bundle by its sha256 digest.
 	GetSkillBlob(context.Context, *GetSkillBlobRequest) (*GetSkillBlobResponse, error)
+	// Read one saved browser procedure version (plan 3.4 E4.2 step 3): its canonical body, its digest,
+	// its name and the tags that point at it. A user caller reads its own procedures; a service caller
+	// reads for the person named in for_user_id. Read only: writes nothing.
+	// The response is the ProcedureVersion message itself; the name is fixed by the contract.
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	GetProcedureVersion(context.Context, *GetProcedureVersionRequest) (*ProcedureVersion, error)
 	mustEmbedUnimplementedCapabilityCoreServer()
 }
 
@@ -252,6 +275,9 @@ func (UnimplementedCapabilityCoreServer) GetSkillBundleManifest(context.Context,
 }
 func (UnimplementedCapabilityCoreServer) GetSkillBlob(context.Context, *GetSkillBlobRequest) (*GetSkillBlobResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSkillBlob not implemented")
+}
+func (UnimplementedCapabilityCoreServer) GetProcedureVersion(context.Context, *GetProcedureVersionRequest) (*ProcedureVersion, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetProcedureVersion not implemented")
 }
 func (UnimplementedCapabilityCoreServer) mustEmbedUnimplementedCapabilityCoreServer() {}
 func (UnimplementedCapabilityCoreServer) testEmbeddedByValue()                        {}
@@ -454,6 +480,24 @@ func _CapabilityCore_GetSkillBlob_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CapabilityCore_GetProcedureVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetProcedureVersionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CapabilityCoreServer).GetProcedureVersion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CapabilityCore_GetProcedureVersion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CapabilityCoreServer).GetProcedureVersion(ctx, req.(*GetProcedureVersionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CapabilityCore_ServiceDesc is the grpc.ServiceDesc for CapabilityCore service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -500,6 +544,10 @@ var CapabilityCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetSkillBlob",
 			Handler:    _CapabilityCore_GetSkillBlob_Handler,
+		},
+		{
+			MethodName: "GetProcedureVersion",
+			Handler:    _CapabilityCore_GetProcedureVersion_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

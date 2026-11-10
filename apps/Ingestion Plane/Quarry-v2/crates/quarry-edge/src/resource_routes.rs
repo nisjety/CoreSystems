@@ -689,6 +689,43 @@ pub async fn create_source(
             ),
         ));
     }
+    // Q4-E4.1-6c: a saved job definition at `config.definition` is checked here with the
+    // same validators the live scrape and crawl routes use (control only checks its
+    // structure). Dark behind QUARRY_EDGE__SAVED_JOBS: a definition on a create is a 501
+    // while the switch is off. The canonical form replaces what the caller sent, so only
+    // what the validators accepted is stored.
+    let mut config = req.config.clone();
+    if let Some(raw) = config
+        .as_ref()
+        .and_then(|value| value.get(crate::saved_job::DEFINITION_KEY))
+        .cloned()
+    {
+        saved_jobs_gate().map_err(|e| err_response(&request_id, e))?;
+        let canonical = if raw.is_null() {
+            None
+        } else {
+            Some(
+                crate::saved_job::check(
+                    kind,
+                    url,
+                    &raw,
+                    crate::crawl_request::CrawlRequestSettings::current(),
+                )
+                .map_err(|fields| definition_refusal(&request_id, &fields))?,
+            )
+        };
+        if let Some(map) = config.as_mut().and_then(serde_json::Value::as_object_mut) {
+            match canonical {
+                Some(canonical) => {
+                    map.insert(crate::saved_job::DEFINITION_KEY.to_owned(), canonical);
+                }
+                // `definition: null` on a create is "no definition".
+                None => {
+                    map.remove(crate::saved_job::DEFINITION_KEY);
+                }
+            }
+        }
+    }
     let tag = optional_monitor_tag(req.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
     // A source is a URL the platform fetches later, so a denied URL is refused at create
     // time, under the same org web policy as the scrape family. The fetch itself is gated
@@ -711,7 +748,7 @@ pub async fn create_source(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
-        config: req.config.clone(),
+        config,
         tag,
         zdr: monitor_zdr,
     };
@@ -824,6 +861,151 @@ pub async fn patch_source(
         &state,
         reqwest::Method::PATCH,
         &path,
+        &claims.org_id,
+        &body_bytes,
+    )
+    .await
+    .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, updated)))
+}
+
+/// The 501 a saved-definition route answers while `QUARRY_EDGE__SAVED_JOBS` is off, naming
+/// the switch as `job_results_routes::gate` names its own (Q4-E4.1-6c). Shared with the schedule
+/// create that runs a saved definition (Q4-E4.1-6d).
+pub(crate) fn saved_jobs_gate() -> Result<(), QuarryError> {
+    if crate::saved_job::enabled() {
+        return Ok(());
+    }
+    Err(QuarryError::new(
+        ErrorCode::Unsupported,
+        format!(
+            "saved job definitions are not enabled on this edge: set {}=1",
+            crate::saved_job::ENV_SAVED_JOBS
+        ),
+    ))
+}
+
+/// A refused saved definition as the canonical 400: `details.fields[] {path, code, message}`,
+/// the envelope the crawl handoff answers with (Q4-E4.1-6c). Nothing was stored.
+fn definition_refusal(
+    request_id: &str,
+    fields: &[crate::crawl_request::RequestField],
+) -> (StatusCode, Json<Envelope<()>>) {
+    let error = QuarryError::new(
+        ErrorCode::BadRequest,
+        "the saved job definition has invalid fields",
+    )
+    .with_details(serde_json::json!({
+        "fields": crate::crawl_request::fields_json(fields),
+    }));
+    err_response(request_id, error)
+}
+
+/// The id of a source route, or a 400 when it is not a source id.
+fn parse_source_id(
+    request_id: &str,
+    id: &str,
+) -> Result<quarry_core::ids::kinds::SourceKind, (StatusCode, Json<Envelope<()>>)> {
+    id.parse::<quarry_core::ids::kinds::SourceKind>().map_err(|_| {
+        err_response(
+            request_id,
+            QuarryError::new(ErrorCode::BadRequest, "invalid source id"),
+        )
+    })
+}
+
+/// `GET /v1/sources/{id}` (Q4-E4.1-6c): one live source of the verified org, config included
+/// (a saved job definition sits at `config.definition`). Control answers in its own wire
+/// shape, which is passed through unchanged; a missing, deleted or other-tenant id is a 404.
+/// The org is the verified JWT org, never a request value.
+pub async fn get_source(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    let id = parse_source_id(&request_id, &id)?;
+    if state.control_base_url.is_empty() {
+        return Err(err_response(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::Unsupported,
+                "control plane URL not configured; source CRUD routes are inert",
+            ),
+        ));
+    }
+    let source =
+        crate::control_client::get_json(&state, &format!("/v1/sources/{id}"), &claims.org_id, &[])
+            .await
+            .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, source)))
+}
+
+/// `PUT /v1/sources/{id}/definition` (Q4-E4.1-6c): replace the source's saved job definition
+/// with `{"definition": {...}}`, or clear it with `{"definition": null}`. Dark behind
+/// `QUARRY_EDGE__SAVED_JOBS`. The source is read through control to learn its kind and URL, the
+/// definition is checked against them with the live validators, and a URL the org web policy
+/// denies is refused (a clear is not refused: it fetches nothing). Control stores the canonical
+/// definition and answers the updated source, which is passed through unchanged.
+pub async fn put_source_definition(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    saved_jobs_gate().map_err(|e| err_response(&request_id, e))?;
+    let id = parse_source_id(&request_id, &id)?;
+    let Some(raw) = body.as_object().and_then(|map| map.get("definition")) else {
+        return Err(definition_refusal(
+            &request_id,
+            &[crate::crawl_request::RequestField {
+                path: crate::saved_job::DEFINITION_KEY.to_owned(),
+                code: "required",
+                message: "definition is required; send null to clear it".to_owned(),
+            }],
+        ));
+    };
+    let path = format!("/v1/sources/{id}");
+    let source = crate::control_client::get_json(&state, &path, &claims.org_id, &[])
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    let forwarded = if raw.is_null() {
+        serde_json::json!({ "definition": serde_json::Value::Null })
+    } else {
+        let (Some(kind), Some(url)) = (
+            source.get("kind").and_then(serde_json::Value::as_str),
+            source.get("url").and_then(serde_json::Value::as_str),
+        ) else {
+            return Err(err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::Internal, "control source is missing kind or url"),
+            ));
+        };
+        // The same org web policy as `create_source`: a denied URL cannot carry a saved job.
+        let source_zdr = claims.effective_zdr(false);
+        crate::web_policy_edge::decide(&state.policy, &claims, source_zdr, None)
+            .and_then(|decision| crate::web_policy_edge::gate_url(&decision, url))
+            .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
+        let canonical = crate::saved_job::check(
+            kind,
+            url,
+            raw,
+            crate::crawl_request::CrawlRequestSettings::current(),
+        )
+        .map_err(|fields| definition_refusal(&request_id, &fields))?;
+        serde_json::json!({ "definition": canonical })
+    };
+    let body_bytes = serde_json::to_vec(&forwarded).map_err(|e| {
+        err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::Internal, format!("encode body: {e}")),
+        )
+    })?;
+    let updated = forward_mutation(
+        &state,
+        reqwest::Method::PUT,
+        &format!("{path}/definition"),
         &claims.org_id,
         &body_bytes,
     )

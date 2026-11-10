@@ -713,6 +713,35 @@ fn proxy_routes() -> Router<AppState> {
             "/v1/skills/:id/versions/:version/restore",
             post(restore_skill_version_proxy),
         )
+        // Saved recipes (plan 3.4 E4.2 step 3): thin proxies over capability-core's /api/v1/procedures
+        // store. capability-core owns the owner scoping, the immutable versions and the switch
+        // (PROCEDURES_API: 404 procedures_disabled while it is off), so the gateway has no switch of its own.
+        .route(
+            "/v1/recipes",
+            get(list_recipes_proxy)
+                .post(create_recipe_proxy)
+                .layer(DefaultBodyLimit::max(RECIPE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/recipes/:id",
+            get(get_recipe_proxy).delete(delete_recipe_proxy),
+        )
+        .route(
+            "/v1/recipes/:id/versions",
+            get(list_recipe_versions_proxy)
+                .post(add_recipe_version_proxy)
+                .layer(DefaultBodyLimit::max(RECIPE_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/recipes/:id/versions/:version",
+            get(get_recipe_version_proxy),
+        )
+        .route(
+            "/v1/recipes/:id/tags/:tag",
+            put(set_recipe_tag_proxy)
+                .delete(delete_recipe_tag_proxy)
+                .layer(DefaultBodyLimit::max(RECIPE_BODY_LIMIT_BYTES)),
+        )
         // Plugins
         .route(
             "/v1/plugins",
@@ -9179,6 +9208,212 @@ async fn list_skill_versions_proxy(
         path.push_str(&paging.join("&"));
     }
     proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+// ---------------------------------------------------------------------------
+// Saved recipes (plan 3.4 E4.2 step 3): thin proxies over capability-core's /api/v1/procedures.
+// The org and the person come from the verified bearer. No query or body field naming either is read.
+// ---------------------------------------------------------------------------
+
+/// The largest body a saved-recipe write forwards. capability-core refuses a procedure body and its
+/// envelope above 256 KiB, so the gateway caps the body at the same size before it reads it.
+const RECIPE_BODY_LIMIT_BYTES: usize = 256 * 1024;
+
+/// The longest recipe id or `after_id` the gateway forwards. A procedure id is `proc_` and a UUID.
+const RECIPE_KEY_MAX_LEN: usize = 128;
+
+/// Whether `value` may stand as a recipe id or paging cursor in a capability-core URL: letters, digits,
+/// `_` and `-` only. A dot is refused, so `.` and `..` never reach a URL to be normalised away.
+fn is_plain_recipe_key(value: &str) -> bool {
+    (1..=RECIPE_KEY_MAX_LEN).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// Whether `tag` is a recipe tag under capability-core's rule, `^[a-z0-9._-]{1,32}$`. `.` and `..` match
+/// that pattern but are dot segments a URL would normalise away, so they are refused here.
+fn is_recipe_tag(tag: &str) -> bool {
+    (1..=32).contains(&tag.len())
+        && tag != "."
+        && tag != ".."
+        && tag.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// Refuses a recipe id the gateway will not put in a URL. The message names the field, never the value.
+fn require_recipe_id(id: &str) -> Result<(), HttpJsonError> {
+    if is_plain_recipe_key(id) {
+        return Ok(());
+    }
+    Err(run_trace_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_recipe_id",
+        "the recipe id is not a valid identifier",
+    ))
+}
+
+/// Refuses a recipe tag the gateway will not put in a URL. The message names the field, never the value.
+fn require_recipe_tag(tag: &str) -> Result<(), HttpJsonError> {
+    if is_recipe_tag(tag) {
+        return Ok(());
+    }
+    Err(run_trace_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_recipe_tag",
+        "the recipe tag is not valid",
+    ))
+}
+
+/// `GET /v1/recipes` - the caller's recipes, one page at a time. Only `limit` (digits) and `after_id` (a
+/// plain key) pass to capability-core, as the skill listing passes its paging; any other value is dropped.
+async fn list_recipes_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let limit = q
+        .get("limit")
+        .filter(|v| (1..=9).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_digit()));
+    let after_id = q.get("after_id").filter(|v| is_plain_recipe_key(v));
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+    if let Some(limit) = limit {
+        pairs.push(("limit", limit.as_str()));
+    }
+    if let Some(after_id) = after_id {
+        pairs.push(("after_id", after_id.as_str()));
+    }
+    let path = capability_query_path("procedures", &pairs);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+
+/// `POST /v1/recipes` - a new recipe with its version 1. The body is forwarded as sent: capability-core
+/// decodes it strictly, so an org or user id in it is refused rather than read.
+async fn create_recipe_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "procedures", "POST", Some(&b)).await
+}
+
+/// `GET /v1/recipes/:id` - a recipe's metadata, its newest version's summary and its tags. No body.
+async fn get_recipe_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    proxy_to_capability_core(&s, &c, &bearer, &format!("procedures/{id}"), "GET", None).await
+}
+
+/// `DELETE /v1/recipes/:id` - the recipe with all of its versions and tags.
+async fn delete_recipe_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    proxy_to_capability_core(&s, &c, &bearer, &format!("procedures/{id}"), "DELETE", None).await
+}
+
+/// `GET /v1/recipes/:id/versions` - the recipe's summary: its newest version and its tags. capability-core
+/// has no version list; `GET /api/v1/procedures/{id}` carries the newest version's summary and the tags, so
+/// this proxies that read. A version's body is read at `GET /v1/recipes/:id/versions/:version`.
+async fn list_recipe_versions_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    proxy_to_capability_core(&s, &c, &bearer, &format!("procedures/{id}"), "GET", None).await
+}
+
+/// `POST /v1/recipes/:id/versions` - the next immutable version of a recipe the caller owns.
+async fn add_recipe_version_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("procedures/{id}/versions"),
+        "POST",
+        Some(&b),
+    )
+    .await
+}
+
+/// `GET /v1/recipes/:id/versions/:version` - one version with its full body. capability-core checks the body
+/// against the digest the version recorded before it answers.
+async fn get_recipe_version_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((id, version)): Path<(String, u32)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("procedures/{id}/versions/{version}"),
+        "GET",
+        None,
+    )
+    .await
+}
+
+/// `PUT /v1/recipes/:id/tags/:tag` - points the tag at one of the recipe's versions, creating it or moving it.
+async fn set_recipe_tag_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((id, tag)): Path<(String, String)>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    require_recipe_tag(&tag)?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("procedures/{id}/tags/{tag}"),
+        "PUT",
+        Some(&b),
+    )
+    .await
+}
+
+/// `DELETE /v1/recipes/:id/tags/:tag` - removes the tag. The version it pointed at stays.
+async fn delete_recipe_tag_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path((id, tag)): Path<(String, String)>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_recipe_id(&id)?;
+    require_recipe_tag(&tag)?;
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        &format!("procedures/{id}/tags/{tag}"),
+        "DELETE",
+        None,
+    )
+    .await
 }
 
 /// `GET /v1/runs/:run_id/watchers` — the caller's own watch status on this

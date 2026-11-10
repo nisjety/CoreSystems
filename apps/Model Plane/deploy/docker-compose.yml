@@ -1908,6 +1908,9 @@ services:
       EXECUTION_BROWSER_ASSIST_TTL_SECONDS: ${EXECUTION_BROWSER_ASSIST_TTL_SECONDS:-1800}
       # WS21-S5b: browser.act. Never on until Quarry's read_only contract test (K3-6) passes.
       EXECUTION_DO_BROWSER_ACT_ENABLED: ${EXECUTION_DO_BROWSER_ACT_ENABLED:-false}
+      # Quarry v2 E4.3: org skills whose url_patterns match the page a Do-loop browser.observe returned are appended to
+      # that result as advisory guidance (at most 2 skills, 8000 characters, each once per run). Only the literal true.
+      EXECUTION_CORE_SKILL_URL_MATCH: ${EXECUTION_CORE_SKILL_URL_MATCH:-false}
       # W4-C C1: the Do loop's computer tools (computer.observe, computer.act). Only the literal true turns them on, and
       # even on, no computer backend is built yet, so every call is refused computer_unavailable.
       EXECUTION_DO_COMPUTER_ENABLED: ${EXECUTION_DO_COMPUTER_ENABLED:-false}

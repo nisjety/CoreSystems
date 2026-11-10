@@ -425,6 +425,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
+	app.Get("/api/v1/actions/catalog", chainHandlers(rateLimited, internalOrBearerAuth, actionsCatalogReadScope, actionsCatalogHandler)...)
+
 	app.Patch("/api/v1/connections/:id/capabilities", internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		connection, err := scopedConnection(c, cfg, c.Params("id"))
 		if err != nil {
@@ -3479,6 +3481,8 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 		case "user", "notion.user":
 			return "workspace.read", false
 		case "databases", "notion.databases", "pages", "notion.pages":
+			return "content.read", true
+		case "page.content", "notion.page.content":
 			return "content.read", true
 		}
 	case "shopify":

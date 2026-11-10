@@ -32,7 +32,9 @@ use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::resources::OverlapPolicy;
 
-use crate::resource_routes::{optional_monitor_tag, tag_patch_body, TagPatchRequest};
+use crate::resource_routes::{
+    optional_monitor_tag, saved_jobs_gate, tag_patch_body, TagPatchRequest,
+};
 use crate::state::AppState;
 
 // =============================================================================
@@ -47,7 +49,8 @@ use crate::state::AppState;
 /// * an executable schedule: `kind` (scrape | crawl | batch), a 5-field `cron`,
 ///   and a `config` holding `url` (scrape, crawl) or `urls` (batch). It is
 ///   created disabled unless the caller sends `activate: true`, and only a user
-///   token may activate it.
+///   token may activate it. With `source_id` a saved crawl definition supplies
+///   the config instead.
 ///
 /// `schedule_at` is not supported yet and answers 400 `unsupported_schedule_at`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -87,6 +90,13 @@ pub struct CreateScheduleRequest {
     /// optional `max_pages`, `max_depth`, `ingest`.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Q4-E4.1-6d: the id of a saved crawl definition (`src_` and a ULID) that an executable
+    /// schedule runs in place of `config`. The schedule's `target_ref` becomes this id and its
+    /// config is built from the definition at create time. Only a crawl is schedulable (and a
+    /// scrape with no options); a batch is refused. Answers 501 while `QUARRY_EDGE__SAVED_JOBS`
+    /// is off, and 400 `config_conflicts_with_source_id` with a non-empty `config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
     /// Start the schedule when it is created. Honoured only for a user token; a
     /// service principal's value is ignored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -366,6 +376,141 @@ fn gate_schedule_urls<'a>(
         .map_err(|error| crate::web_policy_edge::envelope_error(request_id, error))
 }
 
+/// Q4-E4.1-6d: the target and the config of an executable schedule that runs a saved crawl
+/// definition. The source is read through control for the verified org (a missing or other-tenant
+/// source is control's 404). Its definition is checked again with the live validators, because
+/// the stored row is not trusted, and rebuilt into the fire config. The target is the source id,
+/// and the URL the schedule fetches is gated as a plain create's is. Dark behind
+/// `QUARRY_EDGE__SAVED_JOBS`.
+async fn saved_source_schedule(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    zdr: bool,
+    request_id: &str,
+    source_id: &str,
+    kind: &str,
+    config: &serde_json::Value,
+) -> Result<(String, serde_json::Value), (StatusCode, Json<Envelope<()>>)> {
+    saved_jobs_gate().map_err(|e| err_response(request_id, e))?;
+    let id = source_id
+        .parse::<quarry_core::ids::kinds::SourceKind>()
+        .map_err(|_| {
+            bad_schedule(
+                request_id,
+                "invalid_source_id",
+                "source_id must be a source id (src_ and a ULID)",
+            )
+        })?;
+    let config_given = match config {
+        serde_json::Value::Null => false,
+        serde_json::Value::Object(map) => !map.is_empty(),
+        _ => true,
+    };
+    if config_given {
+        return Err(bad_schedule(
+            request_id,
+            "config_conflicts_with_source_id",
+            "send either config or source_id: the saved definition supplies the config",
+        ));
+    }
+    // A batch names up to 200 URLs in its config and has no saved form.
+    if kind == "batch" {
+        return Err(bad_schedule(
+            request_id,
+            "saved_job_not_schedulable",
+            "a batch schedule cannot run a saved job",
+        ));
+    }
+    if state.control_base_url.is_empty() {
+        return Err(err_response(
+            request_id,
+            QuarryError::new(
+                ErrorCode::Unsupported,
+                "control plane URL not configured; schedule lifecycle routes are inert",
+            ),
+        ));
+    }
+    let source =
+        crate::control_client::get_json(state, &format!("/v1/sources/{id}"), &claims.org_id, &[])
+            .await
+            .map_err(|e| err_response(request_id, e))?;
+    let definition = source
+        .get("config")
+        .and_then(|source_config| source_config.get(crate::saved_job::DEFINITION_KEY))
+        .filter(|definition| !definition.is_null())
+        .ok_or_else(|| {
+            bad_schedule(
+                request_id,
+                "source_has_no_definition",
+                "the source has no saved job definition",
+            )
+        })?;
+    let (Some(source_kind), Some(source_url)) = (
+        source.get("kind").and_then(serde_json::Value::as_str),
+        source.get("url").and_then(serde_json::Value::as_str),
+    ) else {
+        return Err(err_response(
+            request_id,
+            QuarryError::new(ErrorCode::Internal, "control source is missing kind or url"),
+        ));
+    };
+    let canonical = crate::saved_job::check(
+        source_kind,
+        source_url,
+        definition,
+        crate::crawl_request::CrawlRequestSettings::current(),
+    )
+    .map_err(|fields| {
+        err_response(
+            request_id,
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                "the source's saved job definition is no longer valid; save it again",
+            )
+            .with_details(serde_json::json!({
+                "reason": "source_definition_invalid",
+                "fields": crate::crawl_request::fields_json(&fields),
+            })),
+        )
+    })?;
+    // The saved job's kind must be the schedule's kind. Only a crawl is schedulable, and a scrape
+    // only when it has no options: `saved_job::crawl_schedule_config` makes that call.
+    let job_kind = canonical
+        .get("job_kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if job_kind != kind {
+        return Err(bad_schedule(
+            request_id,
+            "saved_job_kind_mismatch",
+            format!("the saved job is a {job_kind}, not a {kind}"),
+        ));
+    }
+    let mut fire_config =
+        crate::saved_job::crawl_schedule_config(source_url, &canonical).map_err(|field| {
+            err_response(
+                request_id,
+                QuarryError::new(ErrorCode::BadRequest, field.message.clone()).with_details(
+                    serde_json::json!({
+                        "reason": "saved_job_not_schedulable",
+                        "fields": crate::crawl_request::fields_json(std::slice::from_ref(&field)),
+                    }),
+                ),
+            )
+        })?;
+    if let Some(map) = fire_config.as_object_mut() {
+        map.insert(
+            "source_id".to_owned(),
+            serde_json::Value::String(id.to_string()),
+        );
+    }
+    // The same URL shape check as a plain create, then the same gate on the URL that is fetched.
+    schedule_target(kind, &fire_config)
+        .map_err(|(reason, message)| bad_schedule(request_id, reason, message))?;
+    gate_schedule_urls(state, claims, zdr, [source_url], request_id)?;
+    Ok((id.to_string(), fire_config))
+}
+
 pub async fn create_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -389,6 +534,14 @@ pub async fn create_schedule(
     // org comes from the verified JWT (never the body), the cron from the preset on
     // the control side, and the monitor starts when created, as it always has.
     if let Some(preset) = req.preset.as_deref() {
+        // Q4-E4.1-6d: a change monitor watches its target_ref; a source_id would be dropped here.
+        if req.source_id.is_some() {
+            return Err(bad_schedule(
+                &request_id,
+                "source_id_not_for_monitor",
+                "source_id applies to an executable schedule, not a change monitor",
+            ));
+        }
         const PRESETS: [&str; 3] = ["hourly", "daily", "weekly"];
         if !PRESETS.contains(&preset) {
             return Err(bad_schedule(
@@ -484,11 +637,37 @@ pub async fn create_schedule(
             "cron must be a 5-field expression",
         ));
     }
-    let target_ref = schedule_target(&target_kind, &req.config)
-        .map_err(|(reason, message)| bad_schedule(&request_id, reason, message))?;
-    // Every URL the schedule will fetch is gated now: a batch names up to 200, the others one.
-    let urls = schedule_urls(&target_kind, &req.config, &target_ref);
-    gate_schedule_urls(&state, &claims, zdr, urls.iter().map(String::as_str), &request_id)?;
+    // Q4-E4.1-6d: a saved crawl definition is the target and supplies the config. Otherwise the
+    // config names its own URL, as it always has.
+    let (target_ref, config) = match req.source_id.as_deref() {
+        Some(source_id) => {
+            saved_source_schedule(
+                &state,
+                &claims,
+                zdr,
+                &request_id,
+                source_id,
+                &target_kind,
+                &req.config,
+            )
+            .await?
+        }
+        None => {
+            let target_ref = schedule_target(&target_kind, &req.config)
+                .map_err(|(reason, message)| bad_schedule(&request_id, reason, message))?;
+            // Every URL the schedule will fetch is gated now: a batch names up to 200, the
+            // others one.
+            let urls = schedule_urls(&target_kind, &req.config, &target_ref);
+            gate_schedule_urls(
+                &state,
+                &claims,
+                zdr,
+                urls.iter().map(String::as_str),
+                &request_id,
+            )?;
+            (target_ref, req.config.clone())
+        }
+    };
     let body = ControlScheduleCreate {
         org_id: claims.org_id.clone(),
         created_by: claims.user_id.clone(),
@@ -497,7 +676,7 @@ pub async fn create_schedule(
         target_kind,
         target_ref,
         preset: None,
-        config: req.config.clone(),
+        config,
         timezone: req.timezone.clone(),
         overlap_policy: req.overlap_policy,
         catchup_window_s: req.catchup_window_s,
@@ -723,6 +902,7 @@ mod tests {
             target_ref: None,
             tag: None,
             config: serde_json::json!({}),
+            source_id: None,
             activate: None,
             zdr: None,
         };

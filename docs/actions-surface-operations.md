@@ -197,13 +197,16 @@ of these land, the operation is inert.
 | `issues.update` / `github.issues.update` | **PATCH** `/repos/{owner}/{repo}/issues/{issueNumber}` | `owner`*, `repo`*, `issueNumber`* | JSON, forwarded verbatim; **required** | `issues.write` | yes | **yes** | 298 |
 | `issues.comment.create` / `github.issues.comment.create` | POST `/repos/{owner}/{repo}/issues/{issueNumber}/comments` | `owner`*, `repo`*, `issueNumber`* | JSON, forwarded verbatim; **required** (`body`) | `issues.write` | yes | **yes** | 311 |
 
-### notion (3 ops) — `NotionAPIBaseURL`, Bearer token, header `Notion-Version: 2022-06-28`
+### notion (4 ops) — `NotionAPIBaseURL`, Bearer token, header `Notion-Version: 2022-06-28`
 
 | Operation (aliases) | Method + Endpoint | Required params | Body semantics | Capability | Sensitive | Approval | service.go |
 |---|---|---|---|---|---|---|---|
 | `user` / `notion.user` | GET `/v1/users/me` | — | ignored | `workspace.read` | no | no | 333 |
 | `databases` / `notion.databases` | POST `/v1/search` (fixed payload `{filter:{value:"database",property:"object"}}`) | — | ignored (payload is fixed) | `content.read` | yes | no | 335 |
 | `pages` / `notion.pages` | with `databaseId`: POST `/v1/databases/{databaseId}/query`; else POST `/v1/search` (fixed page filter) | `databaseId` (opt) | when `databaseId` set: body is the query payload (empty `{}` if omitted); else ignored | `content.read` | yes | no | 338 |
+| `page.content` / `notion.page.content` | GET `/v1/blocks/{pageId}/children?page_size=` (+ `&start_cursor=` when set) | `pageId`* (32 hex digits, optionally in 8-4-4-4-12 form), `pageSize` (d=50, max=100), `startCursor` (opt, max 200 bytes) | ignored | `content.read` | yes | no | 708 |
+
+`page.content` is read-only and not approval-gated. It returns one page of the page's block children as the provider sends it (`results` plus `next_cursor`). The response is workspace content: callers should not cache it. This service stores none of it: a read writes no action receipt, and its audit metadata carries only the operation name.
 
 ### shopify (3 ops) — `https://{shop}/admin/api/2026-01` (shop from connection `providerContext`), auth via `X-Shopify-Access-Token` header
 
@@ -318,7 +321,7 @@ of these land, the operation is inert.
 | `spotlight.post` / `snapchat.spotlight.post` | POST `{profile}/public_profiles/{profileId}/spotlights` | `profileId`* | JSON, forwarded verbatim; **required** (`media_id`, `description`, `locale`); returns status `SUBMITTED` → review → `LIVE`/`REJECTED` | `social.post.write` | yes | **yes** | 1016 |
 | `saved_story.create` / `snapchat.saved_story.create` | POST `{profile}/public_profiles/{profileId}/saved_stories` | `profileId`* | JSON, forwarded verbatim; **required** (`saved_stories` list with `snap_sources[]`, `title`) | `social.post.write` | yes | **yes** | 1025 |
 
-Row totals: microsoft 5, slack 5, google 5, github 15, notion 3, shopify 3, stripe 4, okta 5, linkedin 19, meta family 37, snapchat 15 — **116 operations**.
+Row totals: microsoft 5, slack 5, google 5, github 15, notion 4, shopify 3, stripe 4, okta 5, linkedin 19, meta family 37, snapchat 15 — **117 operations**.
 
 ---
 
@@ -380,3 +383,23 @@ removing an operation) or to `requiredCapabilityForOperation` /
 same change**. When adding an operation, add its capability mapping (and approval entry for
 writes) in the same commit — see §6.1 for why an unmapped operation silently skips both
 gates.
+
+## 8. Catalog endpoint
+
+```
+GET /api/v1/actions/catalog   (server.go, registered beside GET /api/v1/connections/:id/capabilities)
+```
+
+The catalog lists a curated subset of the provider operations the executor serves, each with the kind, capability and sensitivity that gate it. It is read-only static metadata: no organization data, no connection ids, no secrets. Nothing is stored, no receipt is written and no audit event is published, so it is ZDR-neutral.
+
+- **Auth.** `internalOrBearerAuth` and the `rateLimited` chain, like the other read routes. A service principal must hold `integration:read` (403 `integration_read_scope_required` otherwise). The internal key and user bearers are not scope-gated here.
+- **Body.** The catalog document itself, not the `{success, data}` envelope:
+  `{"version": 1, "etag": "<sha256 hex>", "providers": [{"provider": "<key>", "operations": [{"operation", "kind", "summary", "params", "capability", "sensitive"}]}]}`.
+  - `kind` is `write` when `actionRequiresApproval` admits the operation, and `read` otherwise.
+  - `capability` and `sensitive` are the values `requiredCapabilityForOperation` returns.
+  - `params` lists the `params.*` names the operation reads. Body fields are described in `summary`.
+- **Derived, never hand-edited.** Rows come from `catalogRows` in `internal/api/actions_catalog.go`. Kind, capability and sensitivity are computed per request from `actionRequiresApproval` and `requiredCapabilityForOperation`. A row whose operation has no capability entry is dropped (fail closed, see §3). Changing an approval entry or a capability mapping changes the served catalog. Do not copy or edit the catalog by hand.
+- **ETag.** `etag` is the SHA-256 hex digest of the document with `etag` omitted. The same value is sent as the quoted `ETag` header. A request whose `If-None-Match` names the current etag gets `304 Not Modified` with no body.
+- **Versioning.** `version` is `1`. New rows, operations and fields are additive and keep version 1. A breaking change to the shape bumps it.
+- **Consumer rule.** execution-core, the Model Plane consumer, treats the catalog as an addition-only hint. It may add operations its static table lacks. It never removes or relaxes an operation. For an operation in both sources, `is_write` is the OR of the two, so a served read cannot downgrade a static write. An operation the catalog does not list is still treated as a write.
+- **No new operations.** Every row names an operation the Execute switch already serves. Send the operation strings exactly as listed.

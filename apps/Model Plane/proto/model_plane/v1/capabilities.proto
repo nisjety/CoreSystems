@@ -45,6 +45,13 @@ service CapabilityCore {
 
   // Read one blob of a skill bundle by its sha256 digest.
   rpc GetSkillBlob(GetSkillBlobRequest) returns (GetSkillBlobResponse);
+
+  // Read one saved browser procedure version (plan 3.4 E4.2 step 3): its canonical body, its digest,
+  // its name and the tags that point at it. A user caller reads its own procedures; a service caller
+  // reads for the person named in for_user_id. Read only: writes nothing.
+  // The response is the ProcedureVersion message itself; the name is fixed by the contract.
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc GetProcedureVersion(GetProcedureVersionRequest) returns (ProcedureVersion);
 }
 
 message ListCapabilitiesRequest {
@@ -395,4 +402,41 @@ message GetSkillBlobRequest {
 message GetSkillBlobResponse {
   // Raw bytes of the blob.
   bytes content = 1;
+}
+
+// Request to read one saved browser procedure version, by procedure ID (plan 3.4 E4.2 step 3).
+message GetProcedureVersionRequest {
+  // Saved procedure identifier: "proc_" and a UUID.
+  string procedure_id = 1;
+
+  // Version number to read. Zero reads the version the tag names, or the newest version when no tag is named.
+  uint32 version = 2;
+
+  // Tag to resolve when version is zero. Naming both a version and a tag is refused.
+  string tag = 3;
+
+  // The person the procedure belongs to. A service caller must name one, and only execution-core may
+  // assert it. A user caller reads as itself and this field is ignored.
+  string for_user_id = 4;
+}
+
+// One saved browser procedure version: its canonical body and the digest it was stored under.
+message ProcedureVersion {
+  // Saved procedure identifier.
+  string procedure_id = 1;
+
+  // The version number that was read.
+  uint32 version = 2;
+
+  // Lowercase hex SHA-256 of body_json. The caller verifies the body against it before it is used.
+  string digest = 3;
+
+  // The procedure's name.
+  string name = 4;
+
+  // Canonical BrowserProcedure v2 JSON: the exact bytes the digest was computed over.
+  bytes body_json = 5;
+
+  // Tags that point at this version, in tag order.
+  repeated string tags = 6;
 }

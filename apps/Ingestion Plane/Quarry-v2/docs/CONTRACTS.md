@@ -1021,6 +1021,63 @@ Status: built and tested in tests, dark. Two flags, one per half, both default o
 
 **ZDR.** Crawls are refused under ZDR, so neither option has a ZDR path. The internal route declares non-ZDR and answers 400 to a body that sets `zdr`; it stores nothing. See the row `internal_crawl_sitemap` in `docs/ZDR_MATRIX.md`.
 
+## Saved job definitions (E4.1-6, built, NOT run, 2026-11-10)
+
+Status: built in code, dark behind `QUARRY_EDGE__SAVED_JOBS` (default off, read from the edge's process environment, so a change takes a restart of the edge). The module is `crates/quarry-edge/src/saved_job.rs`. The routes are `GET /v1/sources/{source_id}` and `PUT /v1/sources/{source_id}/definition`, a definition on `POST /v1/sources` (`config.definition`), and `source_id` on `POST /v1/schedules`. Their wire is in `docs/openapi.yaml`. Operator steps and the refusals are in RUNBOOKS, "Saved job definitions". No test covers these routes yet, and none was run.
+
+**What a definition is.** A source (`src_`, kind `crawl`, `scrape` or `search`) holds at most one saved definition, at `config.definition`:
+
+```json
+{"version": 1, "job_kind": "crawl", "options": {"max_pages": 20, "ingest": true}}
+```
+
+- `version` is `1`. Any other value is `unsupported_version`.
+- `job_kind` is `scrape` or `crawl`, and it must equal the source's kind (otherwise `unsupported_kind`). A `search` source takes no definition. `batch` is not a saved kind: a source has one URL.
+- `options` holds the job's options. The URL is not one of them: the source's URL is the seed, and a `url` key is `not_saveable`.
+- Only the keys `version`, `job_kind` and `options` are allowed (`unknown_field`). The definition is at most 16 KiB of compact JSON (`too_long`).
+
+**Validation (on the edge, before anything is stored).** The validators the live routes use:
+- `crawl`: the options, with the source URL as the seed, go through the `POST /v1/crawl` body parser in strict mode, whatever the process setting. An option whose feature the live route has off stays refused as `unsupported_option`: `sitemap` other than `skip` without `QUARRY_EDGE__CRAWL_SITEMAP`, and `scrape_options` without `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS`.
+- `scrape`: the options go through the `POST /v1/scrape` option reader (`ScrapeOptions::from_value`) and its default limits (`resolve`). Reserved keys are `reserved_field`, unknown keys are `unknown_field`, and two spellings of one key are `conflicting_aliases`.
+- Every problem found at one level is reported together, in `details.fields[]` as `{path, code, message}`. The paths start at `definition`: `definition.job_kind`, `definition.options.<key>` and so on.
+- Not saveable: `url`, `zdr`, `webhook` and `ignore_robots_txt` (with the camelCase spellings `ignoreRobotsTxt` and `ignoreRobots`) are `not_saveable`, whatever the process allows. A robots override, a webhook target and a ZDR declaration change what a run may do or keep, so a saved job never carries one. These keys are refused before the crawl parser runs.
+- The stored form is canonical: the options the validators accepted, re-serialised under their canonical names. `allow_subdomains` and `allow_external_links` are written only when `true`, and `crawl_entire_domain` only when `false`.
+
+**Storage and the routes.**
+- `POST /v1/sources` with `config.definition` checks the definition before the row is written, and control keeps the canonical form. A repeat registration of the same URL returns the row that exists and does not rewrite its config (in the Postgres and the in-memory store alike). A definition sent with a repeat POST is therefore checked and not stored. Change a stored definition with PUT.
+- `PUT /v1/sources/{source_id}/definition` with `{"definition": <definition>}` replaces `config.definition`, and with `{"definition": null}` it clears it. The key is required. The edge reads the source through control (its kind and URL; another organization's id, or a deleted one, is a 404), checks the definition against them, applies the org web policy to the URL, and forwards the canonical form. Control replaces that one key of `config` and keeps the rest. Control checks the shape again (version 1, `job_kind` equal to the source's kind, an `options` object, 16 KiB), so a definition the edge accepts passes it.
+- `GET /v1/sources/{source_id}` returns the source with its config, so the stored definition can be read back. It is not behind the switch.
+- The read and the write of the definition proxy Control Plane records and keep no copy.
+
+**Schedules from a saved definition.** `POST /v1/schedules` with `source_id` and no `config` makes an executable schedule from a source's definition:
+- `target_ref` is the source id. The schedule's config is built when the schedule is created, from the definition as it is stored, and the edge checks the stored row again first, because the row is not trusted. A crawl's config is `url`, the keys the definition sets out of `max_pages`, `max_depth`, `ingest` and `scrape_options`, then `definition_version` and `source_id`. A scrape with no options is `url`, `definition_version` and `source_id`.
+- A snapshot: control copies the schedule's config into each fire's params, so a fire reads the schedule and not the source. A later PUT reaches only the schedules created after it. A schedule's config has no update route (PATCH sets the tag only), so to change a schedule's options, create a new one and delete the old one.
+- The request `kind` must equal the definition's `job_kind`, otherwise `saved_job_kind_mismatch`. A `batch` schedule is `saved_job_not_schedulable`: a batch has no saved form.
+- Only a crawl is schedulable, and a scrape only with no options. A scheduled crawl carries only `max_pages`, `max_depth`, `ingest` and `scrape_options` from its config. Any other option in the definition (`allow_subdomains`, `allow_external_links`, `crawl_entire_domain: false`, `include_paths`, `exclude_paths`, `deny_extensions`, `sitemap` other than `skip`) is refused as `not_schedulable`, naming the key, and never dropped without a word.
+- Why a scrape with options is refused: a scheduled scrape runs with the URL alone (`ScrapeJobWF` reads only `url` and `ingest`). Saving and firing such a definition would silently drop its options, so it is refused at create, naming the first option key. A scrape with no options is schedulable, and it fires as the plain scrape of the URL.
+- The source's URL is gated as a plain schedule's URL is: a denied URL is `403 policy_denied`.
+- Everything else is as for any executable schedule: a 5-field cron, created disabled unless a user token sends `activate: true`, and the ZDR refusal of the `schedules` row, which runs before the source is read. `source_id` with `preset` (a change monitor) is `source_id_not_for_monitor`, and a non-empty `config` with `source_id` is `config_conflicts_with_source_id`.
+
+**ZDR.** A definition holds options only: no page content, no title, and no URL but the source's own. It needs no ZDR matrix row of its own. Creating a schedule is the `schedules` create as before: the row of `docs/ZDR_MATRIX.md` applies, and with `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` on, a ZDR organization is refused before the source is read. The saved path adds no exception to that row.
+
+**The switch.** While `QUARRY_EDGE__SAVED_JOBS` is off, these answer `501 UNSUPPORTED`, with a message that names the switch: a `config.definition` on `POST /v1/sources` (null included), any `PUT .../definition` (null included), and `source_id` on `POST /v1/schedules`. `GET` is not behind it. The fire path does not read the switch, so a schedule made from a definition keeps firing while the scheduled-jobs switch on control allows it.
+
+**Error reasons.** No new `ErrorCode`.
+- `400 BAD_REQUEST` with `details.fields[]`: a definition the validators refuse. The codes are `unsupported_version`, `unsupported_kind`, `not_saveable`, `unknown_field`, `reserved_field`, `conflicting_aliases`, `too_long`, `invalid_type`, `required`, and the validator codes of `/v1/crawl` and `/v1/scrape` (for example `invalid_option`, `unsupported_option`, `out_of_range`, `invalid_pattern`).
+- `400 BAD_REQUEST` with `details.fields[]` code `required` at `definition`: a `PUT` body with no `definition` key.
+- `400 BAD_REQUEST` with `details.reason`: `invalid_source_id`, `config_conflicts_with_source_id`, `source_id_not_for_monitor`, `source_has_no_definition`, `saved_job_kind_mismatch`, and `saved_job_not_schedulable`. For a batch that is the whole answer; for an option the fire path cannot honour, `details.fields[]` carries code `not_schedulable` at `definition.options.<key>`.
+- `400 BAD_REQUEST` with `details.reason` `source_definition_invalid` and `details.fields[]`: at schedule create, the stored definition no longer passes the validators (for example, the process's crawl limits were lowered after it was saved). Save it again.
+- `400 BAD_REQUEST` with the message `invalid source id`: a malformed id on the source routes.
+- `403 FORBIDDEN` with `details.reason` `policy_denied`: the URL is denied by the org web policy, on a definition save or a schedule create.
+- `404 NOT_FOUND`: no source of the token's organization has that id, or it is deleted.
+- `403 FORBIDDEN`: a service principal. The route scope fails closed for `/v1/sources` and for the new path, as it does for the other source routes.
+
+**Not in this build.**
+- Nothing runs a saved definition once. It is a schedule template: its only consumer is `source_id` on `POST /v1/schedules`.
+- Batch definitions, the `dataset` result kind, and an update to a schedule's config.
+- Firing a saved schedule waits for X-9 and for `QUARRY_SCHEDULED_JOBS_ENABLED` on control (RUNBOOKS, "Schedules go-live").
+- The generated SDKs (`sdks/generate.sh`) do not carry these routes until the generator runs.
+
 ## Answer synthesis: `/v1/answer`, `/v1/answer/stream` and `include_answer` (INNH-8a, 2026-10-31)
 
 One pipeline (search, read the top pages, synthesize through the Model Plane) serves three surfaces. Before INNH-8a, when it was not wired `/v1/answer` said 501 with a hint that named two of the gates and `include_answer` said `answer: null` with no reason, and cached that null. This section is the contract after INNH-8a, merged with the QB-T17 boot gate. The enablement steps are in `docs/RUNBOOKS.md`, "Answer synthesis".

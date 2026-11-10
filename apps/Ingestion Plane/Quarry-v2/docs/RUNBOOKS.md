@@ -1349,12 +1349,15 @@ Nothing is switched on by this section. Every switch below is at its default in 
 | `QUARRY_EDGE__SCHEDULE_POSTURE` | edge | `observe` | `enforce` denies skipped fires and pauses on ZDR. `off` restores the S2 answer | 1 (observe), 2 (enforce) |
 | `QUARRY_CONTROL__ZDR_EVENT_CONSUMER` | control | `off` | `observe` logs would-pause; `enforce` writes events and pauses | 1 (observe), 2 (enforce) |
 | `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` | edge | `false` (observe) | Refuses ZDR create, unpause, trigger and backfill with 403 | Not part of this go-live (ADR-4) |
+| `QUARRY_EDGE__SAVED_JOBS` | edge | unset (off) | `1` lets `POST /v1/schedules` take a `source_id` (a schedule from a saved crawl definition) and turns on the definition routes. Firing still needs `QUARRY_SCHEDULED_JOBS_ENABLED` | 1 |
 | `QUARRY_CONTROL__SCHEDULE_REQUESTS` | control | off | `1` answers trigger and backfill with 202 request rows | 4 |
 | `QUARRY_SCHEDULE_REQUESTS` | orchestrator | off | `1` runs the request loop | 4 |
 | `QUARRY_SCHEDULE_CAPABILITIES` | gateway (Frontend Plane) | every capability off | Lets the SPA offer the kinds, trigger, backfill and overlap | 5 |
 | `QUARRY_SCHEDULE_MIN_INTERVAL_S` | control | unset (5 min for scrape, 15 min for crawl and batch) | Replaces the cadence floor for every kind. Evidence runs only | evidence |
 
 All of these are read at process start. A change means a restart of the process that reads it.
+
+**Update (applied 2026-11-10, E4.1-6).** `QUARRY_EDGE__SAVED_JOBS` is in the table above. A schedule made from a saved definition is an ordinary executable schedule once it exists, so it has the same gates as any other. Its operator section is "Saved job definitions: enable, disable and the refusals".
 
 ### Gate 0: before any switch
 
@@ -2219,6 +2222,40 @@ Exports (E4.1-4): `format=csv` or `format=jsonl`, with an optional `fields` proj
 **Cost and scale.** A read is one indexed page of the job's events (`events_job_id_idx` is on `job_id`; the type and seq filters run over that job's rows). A 5 000-page crawl is 10 pages at the maximum limit. `latest=true` reads the whole job (up to 20 000 fetches) on every call, so page through it with `after_seq` rather than polling it.
 
 **ZDR.** A ZDR run stores no artifact and its `page_fetched` carries none of the ids; the routes are refused for a ZDR caller anyway. The events already hold each page's url and title (existing posture); this makes them easy to read, which is why the routes are dark. To check by hand on a side-by-side stack: crawl five fixture pages, call `GET /v1/crawl/{id}/results` and confirm five rows whose `markdown_artifact_id` each return the page from `GET /v1/artifacts/{id}`; repeat with a ZDR token and confirm 403. Not done here: Go and Rust unit and route tests only, no stack, no Temporal and no Postgres were run.
+
+## Saved job definitions: enable, disable and the refusals (E4.1-6, built, NOT run, 2026-11-10)
+
+The contract is `docs/CONTRACTS.md`, "Saved job definitions (E4.1-6)"; the wire is in `docs/openapi.yaml`. A saved definition is a source's job options, checked when it is saved, and a schedule made with `source_id` runs it. It is off: `QUARRY_EDGE__SAVED_JOBS` is unset in the default composes, which is off, and no compose line is needed. Control has no switch of its own for it. Its source routes are mounted with the rest of the source CRUD, behind the same internal HMAC as the other control `/v1` routes, and the edge is the caller.
+
+**Enable.** Deploy control first, then the edge. An older control has no `GET /v1/sources/{id}` and no `PUT /v1/sources/{id}/definition`, so the edge answers those calls `404 NOT_FOUND`. Then set `QUARRY_EDGE__SAVED_JOBS=1` (also `true`, `yes` or `on`) on the edge and restart it.
+
+**Disable.** Unset the variable or set it to `0`, and restart the edge. The routes that take a definition answer 501 again, null included. Stored definitions stay on their sources, and `GET` still returns them. A schedule already made from a definition keeps its config and keeps firing as far as the scheduled-jobs switch on control allows, because the fire path does not read this switch. To stop one, pause it (`POST /v1/schedules/<id>/pause`) or delete it (`DELETE /v1/schedules/<id>`). To stop every scrape, crawl and batch fire, set `QUARRY_SCHEDULED_JOBS_ENABLED=0` on control (see "Schedules go-live", Rollback).
+
+**Going live waits for two things.** A saved schedule is stored and listed when it is made. It fires only when `QUARRY_SCHEDULED_JOBS_ENABLED=1` on control (compose default `0`: no Temporal schedule is created for a scrape, crawl or batch kind) and the schedule is active. Going live waits for X-9: counsel's answer on ZDR for schedules and control's X-9 wiring (Schedules go-live, Gate 0), and then the observe week with `QUARRY_SCHEDULED_JOBS_ENABLED=1` (Gate 1). Until then a saved schedule is listed and does not fire.
+
+**Answers.**
+| Answer | When |
+|---|---|
+| 501 `UNSUPPORTED`, message names `QUARRY_EDGE__SAVED_JOBS` | the switch is off: a `config.definition` on `POST /v1/sources` (null included), any `PUT /v1/sources/{id}/definition` (null included), or `source_id` on `POST /v1/schedules` |
+| 400 `BAD_REQUEST`, `details.fields[]` | a definition the validators refuse, with the message `the saved job definition has invalid fields`. Paths start at `definition`. Codes: `unsupported_version`, `unsupported_kind`, `not_saveable`, `unknown_field`, `reserved_field`, `conflicting_aliases`, `too_long`, `invalid_type`, `required`, or a validator code of `/v1/crawl` or `/v1/scrape` (for example `invalid_option`, `unsupported_option`, `out_of_range`) |
+| 400 `BAD_REQUEST`, `details.fields[]` code `required` at `definition` | a `PUT` with no `definition` key (send `null` to clear) |
+| 400 `BAD_REQUEST`, `details.reason` | a schedule with `source_id` refused: `config_conflicts_with_source_id`, `invalid_source_id`, `source_id_not_for_monitor`, `source_has_no_definition`, `saved_job_kind_mismatch`, or `saved_job_not_schedulable` (a batch) |
+| 400 `BAD_REQUEST`, `details.reason` `saved_job_not_schedulable`, `details.fields[]` code `not_schedulable` | the definition holds an option the fire path does not carry (at `definition.options.<key>`), or a scrape with options |
+| 400 `BAD_REQUEST`, `details.reason` `source_definition_invalid` | at schedule create, the stored definition no longer passes the validators. Save it again |
+| 400 `BAD_REQUEST`, message `invalid source id` | a malformed id on `GET` or `PUT` |
+| 403 `FORBIDDEN`, `details.reason` `policy_denied` | the source's URL is denied by the org web policy, on a definition save or a schedule create |
+| 404 `NOT_FOUND` | no source of this organization has that id, or it is deleted |
+| 403 `FORBIDDEN` | a service principal (the route scope fails closed, as on `/v1/sources`) |
+
+**Read it back.** `GET /v1/sources/<id>` shows `config.definition` in the canonical form the edge stored. A schedule made with `source_id` keeps its own copy of the options it was made with (`definition_version` and `source_id` mark where they came from), and a later PUT does not change it.
+
+**Check by hand (not run).** On a side-by-side stack with the switch on, and a crawl source:
+1. `PUT /v1/sources/<id>/definition` with `{"definition": {"version": 1, "job_kind": "crawl", "options": {"max_pages": 5}}}` answers 200, and `GET /v1/sources/<id>` shows the definition under `config.definition`.
+2. The same PUT with `"ignore_robots_txt": true` in `options` answers 400 with `details.fields[]` code `not_saveable` at `definition.options.ignore_robots_txt`.
+3. `POST /v1/schedules` with `kind` `crawl`, a 5-field cron, `source_id` and no `config` answers 200 with `target_ref` equal to the source id. The schedule starts disabled (`needs_activation`) unless a user token sends `activate: true`.
+4. `PUT` with `{"definition": null}`, then the same schedule create answers 400 `source_has_no_definition`.
+
+**Not run.** Code only: no test covers these routes yet, and no stack, Postgres or Temporal was used.
 
 ## Change text fingerprint: enable and roll out (E3.5-4, built, NOT run, 2026-11-04)
 

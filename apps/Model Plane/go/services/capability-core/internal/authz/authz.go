@@ -186,6 +186,25 @@ func AuthorizeGRPC(principal authctx.Principal, method string, request any) erro
 		}
 		return errDenied
 	}
+	if method == mpv1.CapabilityCore_GetProcedureVersion_FullMethodName {
+		// A saved procedure is read by its owner, or by execution-core for the person its run acts for.
+		// A service reads only with the capability read scope, as GetSkillBlob does under the bundle read
+		// rule, and only execution-core may assert the person (for_user_id), as it may assert user_id above.
+		get, _ := request.(*mpv1.GetProcedureVersionRequest)
+		switch principal.PrincipalType {
+		case "user":
+			return nil
+		case "service":
+			if !principal.HasScope(ReadScope) {
+				return errDenied
+			}
+			if get.GetForUserId() != "" && principal.ActorID != ExecutionCoreServiceID {
+				return errDenied
+			}
+			return nil
+		}
+		return errDenied
+	}
 	if method == mpv1.CapabilityCore_PromoteSkill_FullMethodName {
 		// Promotion changes the shared registry scope. Its caller has no body
 		// field that may weaken the signed retention posture, so reject both

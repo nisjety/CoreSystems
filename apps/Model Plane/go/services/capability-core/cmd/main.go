@@ -32,6 +32,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
+	"github.com/triodelab/model-plane/services/capability-core/internal/procedures"
 	"github.com/triodelab/model-plane/services/capability-core/internal/processwatch"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
@@ -505,10 +506,18 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPCWith(authz.BundleReadRuleFromLookup(os.Getenv)))))
+	// Saved browser recipes, read over gRPC by execution-core (plan 3.4 E4.2 step 3). It is the same store the
+	// /api/v1/procedures routes use; PROCEDURES_API gates the read, and off it answers Unavailable procedures_disabled.
+	procedureStore, err := procedures.NewStore(pool)
+	if err != nil {
+		slog.Error("saved procedure store", "error", err)
+		os.Exit(1)
+	}
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
 		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)).
+		WithProcedures(procedureStore, api.ProceduresAPIFromLookup(os.Getenv)).
 		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
 		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv))
 	if lettaToolSearcher != nil {

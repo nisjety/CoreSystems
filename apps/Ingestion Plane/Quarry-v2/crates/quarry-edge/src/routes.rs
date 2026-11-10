@@ -318,7 +318,12 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/v1/sources/:id",
             delete(crate::resource_routes::delete_source)
-                .patch(crate::resource_routes::patch_source),
+                .patch(crate::resource_routes::patch_source)
+                .get(crate::resource_routes::get_source),
+        )
+        .route(
+            "/v1/sources/:id/definition",
+            axum::routing::put(crate::resource_routes::put_source_definition),
         )
         .route("/v1/snapshots", get(crate::resource_routes::list_snapshots))
         .route("/v1/:kind/jobs", get(crate::resource_routes::list_jobs))

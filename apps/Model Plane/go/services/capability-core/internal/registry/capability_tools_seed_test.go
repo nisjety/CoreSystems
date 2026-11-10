@@ -21,7 +21,7 @@ var seedRowPattern = regexp.MustCompile(`\('global', '([^']+)', '([^']+)', '([a-
 
 func readSeedRows(t *testing.T) []seedRow {
 	t.Helper()
-	// 0016 seeds the classes; 0018, 0019, 0020, 0024, 0025, 0026, 0027, 0029, 0031, 0033, 0034 and 0038 add the rows of the tools registered after it.
+	// 0016 seeds the classes; 0018, 0019, 0020, 0024, 0025, 0026, 0027, 0029, 0031, 0033, 0034, 0038 and 0040 add the rows of the tools registered after it.
 	sql := readMigration(t, "0016_capability_tool_classes.up.sql") +
 		readMigration(t, "0018_workspace_read_capability.up.sql") +
 		readMigration(t, "0019_workspace_write_capability.up.sql") +
@@ -33,7 +33,8 @@ func readSeedRows(t *testing.T) []seedRow {
 		readMigration(t, "0031_web_crawl_tool_capabilities.up.sql") +
 		readMigration(t, "0033_deck_tool_class.up.sql") +
 		readMigration(t, "0034_browser_console_tool.up.sql") +
-		readMigration(t, "0038_computer_tool_capabilities.up.sql")
+		readMigration(t, "0038_computer_tool_capabilities.up.sql") +
+		readMigration(t, "0040_web_crawl_plan_tool.up.sql")
 	// 0025 moves these two tools off cap.browser.open; its DELETE is the record of the move, so the
 	// effective seed no longer carries them there. The text check keeps the exclusion honest.
 	moved := map[string]bool{"cap.browser.open/browser.observe": true, "cap.browser.open/browser.act": true}

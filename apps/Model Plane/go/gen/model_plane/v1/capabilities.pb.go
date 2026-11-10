@@ -1755,6 +1755,171 @@ func (x *GetSkillBlobResponse) GetContent() []byte {
 	return nil
 }
 
+// Request to read one saved browser procedure version, by procedure ID (plan 3.4 E4.2 step 3).
+type GetProcedureVersionRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Saved procedure identifier: "proc_" and a UUID.
+	ProcedureId string `protobuf:"bytes,1,opt,name=procedure_id,json=procedureId,proto3" json:"procedure_id,omitempty"`
+	// Version number to read. Zero reads the version the tag names, or the newest version when no tag is named.
+	Version uint32 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	// Tag to resolve when version is zero. Naming both a version and a tag is refused.
+	Tag string `protobuf:"bytes,3,opt,name=tag,proto3" json:"tag,omitempty"`
+	// The person the procedure belongs to. A service caller must name one, and only execution-core may
+	// assert it. A user caller reads as itself and this field is ignored.
+	ForUserId     string `protobuf:"bytes,4,opt,name=for_user_id,json=forUserId,proto3" json:"for_user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetProcedureVersionRequest) Reset() {
+	*x = GetProcedureVersionRequest{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetProcedureVersionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetProcedureVersionRequest) ProtoMessage() {}
+
+func (x *GetProcedureVersionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetProcedureVersionRequest.ProtoReflect.Descriptor instead.
+func (*GetProcedureVersionRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *GetProcedureVersionRequest) GetProcedureId() string {
+	if x != nil {
+		return x.ProcedureId
+	}
+	return ""
+}
+
+func (x *GetProcedureVersionRequest) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *GetProcedureVersionRequest) GetTag() string {
+	if x != nil {
+		return x.Tag
+	}
+	return ""
+}
+
+func (x *GetProcedureVersionRequest) GetForUserId() string {
+	if x != nil {
+		return x.ForUserId
+	}
+	return ""
+}
+
+// One saved browser procedure version: its canonical body and the digest it was stored under.
+type ProcedureVersion struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Saved procedure identifier.
+	ProcedureId string `protobuf:"bytes,1,opt,name=procedure_id,json=procedureId,proto3" json:"procedure_id,omitempty"`
+	// The version number that was read.
+	Version uint32 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	// Lowercase hex SHA-256 of body_json. The caller verifies the body against it before it is used.
+	Digest string `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
+	// The procedure's name.
+	Name string `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
+	// Canonical BrowserProcedure v2 JSON: the exact bytes the digest was computed over.
+	BodyJson []byte `protobuf:"bytes,5,opt,name=body_json,json=bodyJson,proto3" json:"body_json,omitempty"`
+	// Tags that point at this version, in tag order.
+	Tags          []string `protobuf:"bytes,6,rep,name=tags,proto3" json:"tags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ProcedureVersion) Reset() {
+	*x = ProcedureVersion{}
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ProcedureVersion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ProcedureVersion) ProtoMessage() {}
+
+func (x *ProcedureVersion) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_capabilities_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ProcedureVersion.ProtoReflect.Descriptor instead.
+func (*ProcedureVersion) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_capabilities_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *ProcedureVersion) GetProcedureId() string {
+	if x != nil {
+		return x.ProcedureId
+	}
+	return ""
+}
+
+func (x *ProcedureVersion) GetVersion() uint32 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *ProcedureVersion) GetDigest() string {
+	if x != nil {
+		return x.Digest
+	}
+	return ""
+}
+
+func (x *ProcedureVersion) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ProcedureVersion) GetBodyJson() []byte {
+	if x != nil {
+		return x.BodyJson
+	}
+	return nil
+}
+
+func (x *ProcedureVersion) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
 var File_model_plane_v1_capabilities_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_capabilities_proto_rawDesc = "" +
@@ -1901,7 +2066,19 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x16\n" +
 	"\x06sha256\x18\x02 \x01(\tR\x06sha256\"0\n" +
 	"\x14GetSkillBlobResponse\x12\x18\n" +
-	"\acontent\x18\x01 \x01(\fR\acontent2\x8c\b\n" +
+	"\acontent\x18\x01 \x01(\fR\acontent\"\x8b\x01\n" +
+	"\x1aGetProcedureVersionRequest\x12!\n" +
+	"\fprocedure_id\x18\x01 \x01(\tR\vprocedureId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\rR\aversion\x12\x10\n" +
+	"\x03tag\x18\x03 \x01(\tR\x03tag\x12\x1e\n" +
+	"\vfor_user_id\x18\x04 \x01(\tR\tforUserId\"\xac\x01\n" +
+	"\x10ProcedureVersion\x12!\n" +
+	"\fprocedure_id\x18\x01 \x01(\tR\vprocedureId\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\rR\aversion\x12\x16\n" +
+	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x12\n" +
+	"\x04name\x18\x04 \x01(\tR\x04name\x12\x1b\n" +
+	"\tbody_json\x18\x05 \x01(\fR\bbodyJson\x12\x12\n" +
+	"\x04tags\x18\x06 \x03(\tR\x04tags2\xf1\b\n" +
 	"\x0eCapabilityCore\x12e\n" +
 	"\x10ListCapabilities\x12'.model_plane.v1.ListCapabilitiesRequest\x1a(.model_plane.v1.ListCapabilitiesResponse\x12W\n" +
 	"\rGetCapability\x12$.model_plane.v1.GetCapabilityRequest\x1a .model_plane.v1.CapabilityDetail\x12_\n" +
@@ -1912,7 +2089,8 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\fPromoteSkill\x12#.model_plane.v1.PromoteSkillRequest\x1a$.model_plane.v1.PromoteSkillResponse\x12e\n" +
 	"\x10ListSkillBundles\x12'.model_plane.v1.ListSkillBundlesRequest\x1a(.model_plane.v1.ListSkillBundlesResponse\x12l\n" +
 	"\x16GetSkillBundleManifest\x12-.model_plane.v1.GetSkillBundleManifestRequest\x1a#.model_plane.v1.SkillBundleManifest\x12Y\n" +
-	"\fGetSkillBlob\x12#.model_plane.v1.GetSkillBlobRequest\x1a$.model_plane.v1.GetSkillBlobResponseB\xb9\x01\n" +
+	"\fGetSkillBlob\x12#.model_plane.v1.GetSkillBlobRequest\x1a$.model_plane.v1.GetSkillBlobResponse\x12c\n" +
+	"\x13GetProcedureVersion\x12*.model_plane.v1.GetProcedureVersionRequest\x1a .model_plane.v1.ProcedureVersionB\xb9\x01\n" +
 	"\x12com.model_plane.v1B\x11CapabilitiesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1927,7 +2105,7 @@ func file_model_plane_v1_capabilities_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_capabilities_proto_rawDescData
 }
 
-var file_model_plane_v1_capabilities_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_model_plane_v1_capabilities_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_model_plane_v1_capabilities_proto_goTypes = []any{
 	(*ListCapabilitiesRequest)(nil),       // 0: model_plane.v1.ListCapabilitiesRequest
 	(*ListCapabilitiesResponse)(nil),      // 1: model_plane.v1.ListCapabilitiesResponse
@@ -1952,11 +2130,13 @@ var file_model_plane_v1_capabilities_proto_goTypes = []any{
 	(*SkillBundleFile)(nil),               // 20: model_plane.v1.SkillBundleFile
 	(*GetSkillBlobRequest)(nil),           // 21: model_plane.v1.GetSkillBlobRequest
 	(*GetSkillBlobResponse)(nil),          // 22: model_plane.v1.GetSkillBlobResponse
-	(PrivacyTier)(0),                      // 23: model_plane.v1.PrivacyTier
+	(*GetProcedureVersionRequest)(nil),    // 23: model_plane.v1.GetProcedureVersionRequest
+	(*ProcedureVersion)(nil),              // 24: model_plane.v1.ProcedureVersion
+	(PrivacyTier)(0),                      // 25: model_plane.v1.PrivacyTier
 }
 var file_model_plane_v1_capabilities_proto_depIdxs = []int32{
 	3,  // 0: model_plane.v1.ListCapabilitiesResponse.capabilities:type_name -> model_plane.v1.CapabilityDetail
-	23, // 1: model_plane.v1.CapabilityDetail.privacy_tier:type_name -> model_plane.v1.PrivacyTier
+	25, // 1: model_plane.v1.CapabilityDetail.privacy_tier:type_name -> model_plane.v1.PrivacyTier
 	8,  // 2: model_plane.v1.ResolveToolBindingsResponse.bindings:type_name -> model_plane.v1.ToolBinding
 	3,  // 3: model_plane.v1.ValidateSkillBundleResponse.capability:type_name -> model_plane.v1.CapabilityDetail
 	3,  // 4: model_plane.v1.PromoteSkillResponse.capability:type_name -> model_plane.v1.CapabilityDetail
@@ -1972,18 +2152,20 @@ var file_model_plane_v1_capabilities_proto_depIdxs = []int32{
 	15, // 14: model_plane.v1.CapabilityCore.ListSkillBundles:input_type -> model_plane.v1.ListSkillBundlesRequest
 	18, // 15: model_plane.v1.CapabilityCore.GetSkillBundleManifest:input_type -> model_plane.v1.GetSkillBundleManifestRequest
 	21, // 16: model_plane.v1.CapabilityCore.GetSkillBlob:input_type -> model_plane.v1.GetSkillBlobRequest
-	1,  // 17: model_plane.v1.CapabilityCore.ListCapabilities:output_type -> model_plane.v1.ListCapabilitiesResponse
-	3,  // 18: model_plane.v1.CapabilityCore.GetCapability:output_type -> model_plane.v1.CapabilityDetail
-	5,  // 19: model_plane.v1.CapabilityCore.EvaluatePolicy:output_type -> model_plane.v1.EvaluatePolicyResponse
-	7,  // 20: model_plane.v1.CapabilityCore.ResolveToolBindings:output_type -> model_plane.v1.ResolveToolBindingsResponse
-	10, // 21: model_plane.v1.CapabilityCore.ValidateSkillBundle:output_type -> model_plane.v1.ValidateSkillBundleResponse
-	12, // 22: model_plane.v1.CapabilityCore.CheckSkillPromotion:output_type -> model_plane.v1.CheckSkillPromotionResponse
-	14, // 23: model_plane.v1.CapabilityCore.PromoteSkill:output_type -> model_plane.v1.PromoteSkillResponse
-	16, // 24: model_plane.v1.CapabilityCore.ListSkillBundles:output_type -> model_plane.v1.ListSkillBundlesResponse
-	19, // 25: model_plane.v1.CapabilityCore.GetSkillBundleManifest:output_type -> model_plane.v1.SkillBundleManifest
-	22, // 26: model_plane.v1.CapabilityCore.GetSkillBlob:output_type -> model_plane.v1.GetSkillBlobResponse
-	17, // [17:27] is the sub-list for method output_type
-	7,  // [7:17] is the sub-list for method input_type
+	23, // 17: model_plane.v1.CapabilityCore.GetProcedureVersion:input_type -> model_plane.v1.GetProcedureVersionRequest
+	1,  // 18: model_plane.v1.CapabilityCore.ListCapabilities:output_type -> model_plane.v1.ListCapabilitiesResponse
+	3,  // 19: model_plane.v1.CapabilityCore.GetCapability:output_type -> model_plane.v1.CapabilityDetail
+	5,  // 20: model_plane.v1.CapabilityCore.EvaluatePolicy:output_type -> model_plane.v1.EvaluatePolicyResponse
+	7,  // 21: model_plane.v1.CapabilityCore.ResolveToolBindings:output_type -> model_plane.v1.ResolveToolBindingsResponse
+	10, // 22: model_plane.v1.CapabilityCore.ValidateSkillBundle:output_type -> model_plane.v1.ValidateSkillBundleResponse
+	12, // 23: model_plane.v1.CapabilityCore.CheckSkillPromotion:output_type -> model_plane.v1.CheckSkillPromotionResponse
+	14, // 24: model_plane.v1.CapabilityCore.PromoteSkill:output_type -> model_plane.v1.PromoteSkillResponse
+	16, // 25: model_plane.v1.CapabilityCore.ListSkillBundles:output_type -> model_plane.v1.ListSkillBundlesResponse
+	19, // 26: model_plane.v1.CapabilityCore.GetSkillBundleManifest:output_type -> model_plane.v1.SkillBundleManifest
+	22, // 27: model_plane.v1.CapabilityCore.GetSkillBlob:output_type -> model_plane.v1.GetSkillBlobResponse
+	24, // 28: model_plane.v1.CapabilityCore.GetProcedureVersion:output_type -> model_plane.v1.ProcedureVersion
+	18, // [18:29] is the sub-list for method output_type
+	7,  // [7:18] is the sub-list for method input_type
 	7,  // [7:7] is the sub-list for extension type_name
 	7,  // [7:7] is the sub-list for extension extendee
 	0,  // [0:7] is the sub-list for field type_name
@@ -2001,7 +2183,7 @@ func file_model_plane_v1_capabilities_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_capabilities_proto_rawDesc), len(file_model_plane_v1_capabilities_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   23,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

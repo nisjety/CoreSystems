@@ -2962,6 +2962,13 @@ mod tests {
         ) -> Result<Response<mp_contracts::model_plane::v1::GetSkillBlobResponse>, Status> {
             Err(Status::unimplemented("not used"))
         }
+
+        async fn get_procedure_version(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::GetProcedureVersionRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ProcedureVersion>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
     }
 
     fn wire_binding(name: &str, class: &str, floor: &str) -> WireToolBinding {

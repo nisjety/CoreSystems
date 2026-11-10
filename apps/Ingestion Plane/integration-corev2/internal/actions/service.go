@@ -15,6 +15,7 @@ import (
 	"net/mail"
 	"net/textproto"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -676,6 +677,14 @@ func (s *Service) executeGitHub(ctx context.Context, token, operation string, pa
 	}
 }
 
+// notionPageIDPattern is a Notion page id: 32 hex digits, optionally grouped
+// 8-4-4-4-12 with dashes. Anything else is refused before the provider call.
+var notionPageIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}$`)
+
+// notionStartCursorMaxBytes caps the startCursor a caller may pass back to
+// page.content. Notion cursors are short opaque tokens.
+const notionStartCursorMaxBytes = 200
+
 func (s *Service) executeNotion(ctx context.Context, token, operation string, params, body map[string]any) (any, error) {
 	base := strings.TrimRight(s.cfg.NotionAPIBaseURL, "/")
 	headers := map[string]string{"Notion-Version": "2022-06-28"}
@@ -696,6 +705,29 @@ func (s *Service) executeNotion(ctx context.Context, token, operation string, pa
 		}
 		payload := map[string]any{"filter": map[string]any{"value": "page", "property": "object"}}
 		return s.postBearer(ctx, token, base+"/v1/search", payload, headers)
+	case "page.content", "notion.page.content":
+		// Read-only: one page of block children (the page's content) with
+		// next_cursor, passed through as the provider returns it. Nothing
+		// here stores the blocks; reads write no receipt (server.go).
+		pageID, err := requiredStringParam(params, "pageId")
+		if err != nil {
+			return nil, err
+		}
+		if !notionPageIDPattern.MatchString(pageID) {
+			return nil, fmt.Errorf("pageId must be a Notion page id: 32 hex digits, dashes optional")
+		}
+		values := url.Values{"page_size": {limitParam(params, "pageSize", 50, 100)}}
+		startCursor, err := mailStringParam(params, "startCursor")
+		if err != nil {
+			return nil, err
+		}
+		if len(startCursor) > notionStartCursorMaxBytes {
+			return nil, fmt.Errorf("startCursor is too long")
+		}
+		if startCursor != "" {
+			values.Set("start_cursor", startCursor)
+		}
+		return s.getBearer(ctx, token, base+"/v1/blocks/"+url.PathEscape(pageID)+"/children?"+values.Encode(), headers)
 	default:
 		return nil, fmt.Errorf("unsupported Notion operation %q", operation)
 	}

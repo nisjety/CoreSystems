@@ -64,6 +64,8 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_BROWSER_STEER?: string;
 	/** "1" or "true" shows the downloads drawer of a browser session and reads its download list (E3.4-7). Default off. */
 	readonly VITE_BROWSER_DOWNLOADS_DRAWER?: string;
+	/** "true" renders a crawl-plan fence in chat as an approval card instead of a plain code block (E4.3-055c). Default off. */
+	readonly VITE_CRAWL_PLAN_CARD?: string;
 }
 
 interface ImportMeta {

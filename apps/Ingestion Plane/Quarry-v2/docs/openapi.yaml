@@ -1849,6 +1849,12 @@ paths:
     post:
       operationId: create_source
       summary: Register an ingestion source
+      description: >-
+        config.definition (E4.1-6) is a saved job definition for the source. The edge checks it with the same
+        validators as POST /v1/crawl (crawl) or POST /v1/scrape (scrape) before anything is stored, and control keeps
+        the canonical form. A refused definition is a 400 with details.fields[]. Sending the key at all, null included,
+        needs QUARRY_EDGE__SAVED_JOBS on, else 501. A repeat registration of the same URL returns the row that exists and
+        does not rewrite its config: change a stored definition with PUT /v1/sources/{source_id}/definition.
       tags:
       - resources
       security:
@@ -1882,7 +1888,58 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: config.definition is sent while QUARRY_EDGE__SAVED_JOBS is off (UNSUPPORTED; the message names the switch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/sources/{source_id}:
+    get:
+      operationId: get_source
+      summary: Read one ingestion source
+      description: >-
+        The source of the caller's organization, config included: a saved job definition sits at config.definition
+        (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a
+        400; a missing, deleted or other organization's id is a 404.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The source (control-plane wire shape)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Source'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: Malformed source id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown source for this org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
     delete:
       operationId: delete_source
       summary: Soft-delete an ingestion source
@@ -1965,6 +2022,76 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
         '404':
           description: Unknown source for this org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/sources/{source_id}/definition:
+    put:
+      operationId: put_source_definition
+      summary: Replace or clear a source's saved job definition
+      description: >-
+        Replaces config.definition of a source the caller's organization owns, or clears it with `definition: null`
+        (E4.1-6). Dark: 501 while QUARRY_EDGE__SAVED_JOBS is off, null included. A definition is checked against the
+        source's kind and URL with the validators of POST /v1/crawl (crawl) or POST /v1/scrape (scrape), and the
+        canonical form is stored; the other keys of config are kept. The URL must pass the org web policy: a denied
+        URL is a 403 with details.reason policy_denied. Clearing fetches nothing, so the policy does not apply to it.
+        The answer is the updated source.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceDefinitionRequest'
+      responses:
+        '200':
+          description: Updated source (control-plane wire shape)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: >-
+            Malformed source id; a body that names no definition (details.fields[] with code required); or a
+            definition the validators refuse (details.fields[] with path, code and message, as on SavedJobDefinition)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The source URL is denied by the org web policy (details.reason policy_denied)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown source for this org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: QUARRY_EDGE__SAVED_JOBS is off (UNSUPPORTED; the message names the switch)
           content:
             application/json:
               schema:
@@ -3648,6 +3775,12 @@ paths:
     post:
       operationId: create_schedule
       summary: Create a cron / one-shot / change-monitor schedule
+      description: >-
+        An executable schedule (scrape, crawl or batch, with a 5-field cron) or a change monitor (preset). With
+        source_id (E4.1-6) an executable crawl runs a source's saved job definition: target_ref becomes the source id,
+        and the config is built from the definition as it is stored when the schedule is created, so a later change to
+        the definition does not reach this schedule. Only a crawl is schedulable, and a scrape with no options. Dark:
+        501 while QUARRY_EDGE__SAVED_JOBS is off. The 400 reasons are on the response.
       tags:
       - schedules
       security:
@@ -3675,7 +3808,30 @@ paths:
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
         '400':
-          description: Invalid schedule definition
+          description: >-
+            Invalid schedule definition. With source_id, details.reason is one of config_conflicts_with_source_id,
+            invalid_source_id, source_id_not_for_monitor, source_has_no_definition, saved_job_kind_mismatch or
+            saved_job_not_schedulable (a batch). source_definition_invalid carries details.fields[]. An option the fire
+            path cannot honour is saved_job_not_schedulable with details.fields[] (code not_schedulable, path
+            definition.options.<key>).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: The source URL is denied by the org web policy (details.reason policy_denied). The schedules ZDR refusal is also a 403 when it is on.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: source_id names no source of this organization, or a deleted one
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: source_id is sent while QUARRY_EDGE__SAVED_JOBS is off (UNSUPPORTED; the message names the switch)
           content:
             application/json:
               schema:
@@ -5043,7 +5199,9 @@ components:
           type: string
           format: date-time
         config:
-          description: Free-form per-source configuration
+          description: >-
+            Free-form per-source configuration. A saved job definition (E4.1-6) sits at config.definition, in the
+            canonical form the edge stored.
         tag:
           type: string
           maxLength: 32
@@ -5489,11 +5647,73 @@ components:
           description: Required when monitor=true
         config:
           type: object
+          description: >-
+            The source's config. A saved job definition (E4.1-6) sits at config.definition: the edge checks it and
+            stores the canonical form (see POST /v1/sources and SavedJobDefinition). Other keys are kept as sent.
           additionalProperties: true
+          properties:
+            definition:
+              nullable: true
+              description: >-
+                A saved job definition, or null for none. While QUARRY_EDGE__SAVED_JOBS is off, a definition key
+                (null included) is a 501.
+              allOf:
+              - $ref: '#/components/schemas/SavedJobDefinition'
         tag:
           type: string
           maxLength: 32
           description: The operator label that groups this source (E3.5-6). Trimmed and lowercased; 1 to 32 characters of letters a to z, digits, dot, underscore or hyphen, starting with a letter or digit. Blank is untagged. A repeat registration keeps the tag the row already has.
+    SavedJobDefinition:
+      type: object
+      description: >-
+        A saved job definition (E4.1-6), kept at a source's config.definition and used by a schedule made with
+        source_id. It holds options only: the URL is the source's own, and a definition never carries a robots
+        override, a webhook or a ZDR declaration. Dark behind QUARRY_EDGE__SAVED_JOBS (default off). A definition the
+        validators refuse is a 400 with details.fields[] {path, code, message}; every problem found at one level is
+        reported together, under paths that start with definition. The keys url, zdr, webhook and ignore_robots_txt
+        (and the camelCase spellings ignoreRobotsTxt and ignoreRobots) are refused with code not_saveable. The stored
+        form is the canonical one, re-serialised from what the validators accepted. At most 16 KiB of compact JSON
+        (code too_long). Only version, job_kind and options are keys (code unknown_field otherwise).
+      additionalProperties: false
+      required:
+      - version
+      - job_kind
+      - options
+      properties:
+        version:
+          type: integer
+          const: 1
+          description: The definition version. Only 1 is accepted; any other value is a 400 with code unsupported_version.
+        job_kind:
+          type: string
+          enum:
+          - scrape
+          - crawl
+          description: >-
+            scrape or crawl. It must equal the kind of the source (otherwise code unsupported_kind), so a search source
+            takes no definition. batch is not a saved kind: a source has one URL.
+        options:
+          type: object
+          additionalProperties: true
+          description: >-
+            For crawl, the POST /v1/crawl body fields other than url, checked by the crawl body parser in strict mode
+            with the source URL as the seed. For scrape, the POST /v1/scrape options (snake_case or camelCase), checked
+            by the scrape option reader and its default limits. An option whose feature flag is off on the live route is
+            a 400 unsupported_option, as there. Errors are under definition.options.
+    SourceDefinitionRequest:
+      type: object
+      description: >-
+        The body of PUT /v1/sources/{source_id}/definition. definition replaces the source's saved job definition, and
+        null clears it. The key is required: a body that names no definition is a 400 (details.fields[] code required),
+        so a PUT never clears a definition by omission.
+      required:
+      - definition
+      properties:
+        definition:
+          nullable: true
+          description: A saved job definition (see SavedJobDefinition), or null to clear the source's definition.
+          allOf:
+          - $ref: '#/components/schemas/SavedJobDefinition'
     TagPatchRequest:
       type: object
       required:
@@ -6052,6 +6272,15 @@ components:
         config:
           type: object
           additionalProperties: true
+        source_id:
+          type: string
+          nullable: true
+          description: >-
+            The id of a saved job definition (src_ and a ULID) that an executable schedule runs in place of config
+            (E4.1-6). The schedule's target_ref becomes this id, and its config is built from the definition when the
+            schedule is created. Only a crawl is schedulable, and a scrape with no options; a batch is refused with 400
+            saved_job_not_schedulable, and a non-empty config with 400 config_conflicts_with_source_id. Answers 501 while
+            QUARRY_EDGE__SAVED_JOBS is off.
     StartAgentRunRequest:
       type: object
       properties:
@@ -10387,10 +10616,10 @@ components:
           type: string
           maxLength: 200
         notify_on_change:
+          nullable: true
           description: The filter to set. `null` removes it, so the subscription takes every change again. An absent key leaves it as it is.
-          oneOf:
+          allOf:
           - $ref: '#/components/schemas/NotifyOnChangeFilter'
-          - type: 'null'
     NotifyOnChangeFilter:
       type: object
       description: The change types a subscription takes, and the paragraph threshold for a changed page. A subscription without one takes every change. It filters `change_detected` events only.

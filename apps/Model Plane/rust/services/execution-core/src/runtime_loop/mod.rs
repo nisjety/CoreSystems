@@ -15,6 +15,7 @@ pub(crate) mod run_effort;
 #[path = "../scheduled_agent.rs"]
 pub(crate) mod scheduled_agent;
 pub(crate) mod skill_budget;
+pub(crate) mod skill_url;
 pub mod subagent_results;
 // WS24-S8. The file lives at the crate root; lib.rs should declare it there (shared edit).
 #[path = "../owner_reads.rs"]
@@ -1681,6 +1682,14 @@ async fn execute_step_inner(
     }
 
     let output = exec.output;
+    // Site skills (Quarry v2 E4.3): the address a successful `browser.observe` names, read before
+    // the output moves into screening. Off unless EXECUTION_CORE_SKILL_URL_MATCH is the literal
+    // `true`; the guidance itself is added below, after the page text was screened and rendered.
+    let observed_page_url = (!zdr
+        && tool_name == QUARRY_MCP_BROWSER_OBSERVE_TOOL
+        && skill_url::enabled())
+    .then(|| skill_url::page_url_of_observation(&output))
+    .flatten();
     // Provenance/screening render seam (this service's own slice — see
     // `crate::provenance` module docs): classify the tool and screen the
     // COMPLETE, untruncated output BEFORE anything downstream summarizes or
@@ -1760,6 +1769,21 @@ async fn execute_step_inner(
     outcome.screening_taint = (tool_name == READ_PROVIDER_ACTION_TOOL
         && screened.provenance.is_audit_worthy())
         || screened.taint;
+    // Advisory site-skill guidance goes AFTER the screened, labelled page text, so it is never
+    // screened or framed as page content, and it grants no tool or permission. Any failure
+    // leaves the result as it was.
+    if let Some(page_url) = observed_page_url {
+        outcome.output = skill_url::annotate_observation(
+            std::mem::take(&mut outcome.output),
+            org_id,
+            run_id,
+            &page_url,
+            zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await;
+    }
     outcome
 }
 

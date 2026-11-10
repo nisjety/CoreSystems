@@ -298,6 +298,7 @@ pub const ROWS: &[Row] = &[
         routes: &[
             "/v1/sources",
             "/v1/sources/{id}",
+            "/v1/sources/{id}/definition",
             "/v1/snapshots",
             "/v1/{kind}/jobs",
             "/v1/request-queues",

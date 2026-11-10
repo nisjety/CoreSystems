@@ -16,6 +16,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
+	"github.com/triodelab/model-plane/services/capability-core/internal/procedures"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/telemetry"
@@ -44,6 +45,12 @@ type Server struct {
 	toolDB              toolBindingDatabase // optional: enables tool-level binding
 	skillBundles        skillBundleReader
 	skillBundlesEnabled bool
+
+	// savedProcedures reads the saved browser procedures GetProcedureVersion serves (plan 3.4 E4.2
+	// step 3). proceduresEnabled is PROCEDURES_API, parsed by the api package; off, or with no store,
+	// the read answers Unavailable procedures_disabled.
+	savedProcedures   procedureReader
+	proceduresEnabled bool
 
 	// deckTemplatesEnabled reports which bundles are deck templates (SKILL_DECK_TEMPLATES_ENABLED).
 	deckTemplatesEnabled bool
@@ -76,6 +83,13 @@ type skillBundleReader interface {
 // *skillbundle.Store satisfies it; a reader without it serves the live bundle only.
 type skillBundleVersionReader interface {
 	ManifestAt(ctx context.Context, orgID, skillID, manifestSHA256 string) (skillbundle.Manifest, error)
+}
+
+// procedureReader is the read side of the saved-procedure store. *procedures.Store satisfies it; the RPC
+// takes the narrow slice so tests can stand a fake in.
+type procedureReader interface {
+	Get(ctx context.Context, who procedures.Owner, id string) (*procedures.Procedure, error)
+	GetVersion(ctx context.Context, who procedures.Owner, id string, ref procedures.Ref) (*procedures.Version, error)
 }
 
 type toolDefinitionSearcher interface {
@@ -194,6 +208,15 @@ func (s *Server) WithToolBindingDatabase(db toolBindingDatabase) *Server {
 func (s *Server) WithSkillBundles(store skillBundleReader, enabled bool) *Server {
 	s.skillBundles = store
 	s.skillBundlesEnabled = enabled && store != nil
+	return s
+}
+
+// WithProcedures attaches the saved-procedure store GetProcedureVersion reads from. The switch arrives
+// already parsed by api.ProceduresAPIFromLookup; with it off, or with no store, the read answers
+// Unavailable procedures_disabled.
+func (s *Server) WithProcedures(store procedureReader, enabled bool) *Server {
+	s.savedProcedures = store
+	s.proceduresEnabled = enabled && store != nil
 	return s
 }
 
@@ -1071,6 +1094,96 @@ func skillBundleErr(err error) error {
 		return status.Error(codes.NotFound, "skill bundle not found")
 	}
 	return status.Error(codes.Internal, "skill bundle store unavailable")
+}
+
+// GetProcedureVersion returns one saved browser procedure version: its canonical body, which hashes to the digest
+// it was stored under, and its name and tags, so the caller can verify the body before it runs. A user caller
+// reads its own procedures. A service caller reads for the person it names in for_user_id, which the authorizer
+// lets only execution-core assert. The org is always the verified one, never a request field. The read writes
+// nothing, and a saved procedure is org configuration rather than conversation content, so a zero-retention
+// caller may read it.
+func (s *Server) GetProcedureVersion(ctx context.Context, req *mpv1.GetProcedureVersionRequest) (*mpv1.ProcedureVersion, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetProcedureVersion")))
+	principal, err := verifiedPrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !s.proceduresEnabled {
+		return nil, status.Error(codes.Unavailable, "procedures_disabled")
+	}
+	owner, err := procedureReaderFor(principal, req.GetForUserId())
+	if err != nil {
+		return nil, err
+	}
+	id := req.GetProcedureId()
+	procedure, err := s.savedProcedures.Get(ctx, owner, id)
+	if err != nil {
+		return nil, procedureStoreErr(err)
+	}
+	version, err := s.savedProcedures.GetVersion(ctx, owner, id, procedures.Ref{Version: int(req.GetVersion()), Tag: req.GetTag()})
+	if err != nil {
+		return nil, procedureStoreErr(err)
+	}
+	// The store reads a body back from a JSONB column, which respells it (key order and spacing), so the body is
+	// served in the canonical form the digest was taken over, as the HTTP route serves it. A body that no longer
+	// hashes to the digest it was recorded under is refused, not served.
+	canonical, digest, err := procedures.Canonicalize(version.Body)
+	if err != nil || digest != version.Digest {
+		return nil, status.Error(codes.Internal, "procedure_digest_mismatch")
+	}
+	return &mpv1.ProcedureVersion{
+		ProcedureId: version.ProcedureID,
+		Version:     uint32(version.Version),
+		Digest:      version.Digest,
+		Name:        procedure.Name,
+		BodyJson:    canonical,
+		Tags:        tagsAtVersion(procedure.Tags, version.Version),
+	}, nil
+}
+
+// procedureReaderFor is the person a saved-procedure read is for. A user caller reads as itself and
+// for_user_id is ignored, so it cannot reach another person's procedure. A service caller reads as the
+// person it names, and must name one.
+func procedureReaderFor(principal authctx.Principal, forUserID string) (procedures.Owner, error) {
+	switch principal.PrincipalType {
+	case "user":
+		if principal.ActorID == "" {
+			return procedures.Owner{}, status.Error(codes.PermissionDenied, "a saved procedure belongs to a person")
+		}
+		return procedures.Owner{OrgID: principal.OrganizationID, UserID: principal.ActorID}, nil
+	case "service":
+		user := strings.TrimSpace(forUserID)
+		if user == "" {
+			return procedures.Owner{}, status.Error(codes.PermissionDenied, "a service caller must name the person a saved procedure belongs to")
+		}
+		return procedures.Owner{OrgID: principal.OrganizationID, UserID: user}, nil
+	}
+	return procedures.Owner{}, status.Error(codes.PermissionDenied, "a saved procedure belongs to a person")
+}
+
+// procedureStoreErr maps a saved-procedure store error to a status. A missing procedure, version or tag, and a
+// procedure that belongs to someone else, all answer NotFound. Any other failure answers a fixed message, never
+// the store's own text.
+func procedureStoreErr(err error) error {
+	switch {
+	case errors.Is(err, procedures.ErrNotFound):
+		return status.Error(codes.NotFound, "procedure_not_found")
+	case errors.Is(err, procedures.ErrInvalidRef):
+		return status.Error(codes.InvalidArgument, "invalid_version_reference")
+	default:
+		return status.Error(codes.Internal, "saved procedure store unavailable")
+	}
+}
+
+// tagsAtVersion names the tags that point at one version, in the store's tag order.
+func tagsAtVersion(tags []procedures.Tag, version int) []string {
+	var names []string
+	for _, tag := range tags {
+		if tag.Version == version {
+			names = append(names, tag.Tag)
+		}
+	}
+	return names
 }
 
 // CheckSkillPromotion validates whether a skill may move between scopes.
