@@ -530,6 +530,7 @@ func TestModelAuditProducerACLsEnforceNamespacesAndSessionConsumer(t *testing.T)
 		"MODEL_CAPABILITY_CORE_NATS_PASSWORD":     "capability-runtime-0123456789abcdef012345",
 		"MODEL_ORCHESTRATOR_CORE_NATS_PASSWORD":   "orchestrator-runtime-0123456789abcdef01234",
 		"MODEL_TOOL_COMPLETION_NATS_PASSWORD":     "tool-completion-0123456789abcdef0123456789",
+		"MODEL_QUARRY_TRACE_NATS_PASSWORD":        "quarry-trace-0123456789abcdef012345678901",
 		"MODEL_COST_CORE_NATS_PASSWORD":           "cost-runtime-0123456789abcdef012345678901",
 		"AUDIT_MODEL_NATS_PASSWORD":               "audit-consumer-0123456789abcdef012345678",
 		"MODEL_NATS_PROVISIONER_PASSWORD":         "topology-admin-0123456789abcdef01234567",
