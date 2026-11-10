@@ -272,6 +272,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
     /// production (see `dev_only_flag`); the counters never carry a URL either way.
     pub(crate) csp_report_log_hosts: bool,
+    /// `CLIENT_ENV_IDENTITY` (F-t3-098): the closed environment label `GET /api/v1/client-config` reports
+    /// as `environment` (`production`, `staging`, `development` or `other`), derived once from `APP_ENV`
+    /// by `client_environment_label`. `None` while the switch is off (the default), and the key is then
+    /// left out. The raw `APP_ENV` value is never stored. A display identity only, never an
+    /// authorization input.
+    pub(crate) client_environment: Option<&'static str>,
     /// `SPACE_CONNECTIVITY_BANNER_UI` (WS01-S5): reported to the SPA as `features.connectivity_banner`
     /// (the offline versus service-down banner). A rollout control, never an authorization input.
     pub(crate) connectivity_banner_ui: bool,
@@ -518,6 +524,7 @@ impl SpaceFeatureFlags {
             reactions_api: space_flag("SPACE_REACTIONS_API"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            client_environment: client_environment_identity(),
             connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
             human_posts_api: space_flag("SPACE_HUMAN_POSTS_API"),
             membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
@@ -998,6 +1005,31 @@ fn chat_process_output_from(value: Option<&str>) -> bool {
 /// copying thread work product into the knowledge base before anyone chose to.
 fn chat_artifact_promote_from(value: Option<&str>) -> bool {
     value == Some("true")
+}
+
+/// `CLIENT_ENV_IDENTITY` (F-t3-098), read once by `build_state` through `SpaceFeatureFlags::from_env`.
+/// Off unless it is exactly `true`; when on, the closed label of `APP_ENV`.
+fn client_environment_identity() -> Option<&'static str> {
+    client_env_identity_from(env::var("CLIENT_ENV_IDENTITY").ok().as_deref())
+        .then(|| client_environment_label(&env::var("APP_ENV").unwrap_or_default()))
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` would
+/// publish the environment name before anyone chose to.
+fn client_env_identity_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The four words the environment identity publishes, from `APP_ENV`: `production` (or `prod`),
+/// `staging` (or `stage`), `development` (or `dev`), and `other` for anything else, unset included,
+/// so an unrecognised value never reads as production. The raw value never leaves this function.
+fn client_environment_label(app_env: &str) -> &'static str {
+    match app_env.trim().to_ascii_lowercase().as_str() {
+        "production" | "prod" => "production",
+        "staging" | "stage" => "staging",
+        "development" | "dev" => "development",
+        _ => "other",
+    }
 }
 
 fn dev_flags_allowed(app_env: &str) -> bool {

@@ -23,18 +23,32 @@ export const CONTRACT_CHECK_GAP_MS = 30_000
 
 export type ClientVersionPolicy = 'off' | 'banner' | 'enforce'
 
+/**
+ * Where the gateway runs, as `CLIENT_ENV_IDENTITY` reports it (F-t3-098): a closed set, never the
+ * raw `APP_ENV`. The gateway leaves the field out while its switch is off.
+ */
+export type ClientEnvironment = 'production' | 'staging' | 'development' | 'other'
+
+const CLIENT_ENVIRONMENTS: readonly ClientEnvironment[] = ['production', 'staging', 'development', 'other']
+
 export interface ClientConfig {
   contract: number
   minContract: number
   policy: ClientVersionPolicy
   revision: string
   buildDate: string
+  environment?: ClientEnvironment
 }
 
 const [mismatch, setMismatch] = createSignal(false)
 
 /** True when the gateway's minimum contract is above this bundle's and the policy allows a notice. */
 export const clientContractMismatch = mismatch
+
+const [environment, setEnvironment] = createSignal<ClientEnvironment | null>(null)
+
+/** The environment the gateway last reported, or null when it reports none (switch off, or not asked yet). */
+export const clientEnvironment = environment
 
 /** Parse the `{data}` envelope; null for anything else (an HTML fallback, an error envelope). */
 export function clientConfigFrom(body: unknown): ClientConfig | null {
@@ -50,12 +64,14 @@ export function clientConfigFrom(body: unknown): ClientConfig | null {
   ) {
     return null
   }
+  const reported = CLIENT_ENVIRONMENTS.find((known) => known === d.environment)
   return {
     contract: d.contract,
     minContract: d.min_contract,
     policy,
     revision: typeof d.revision === 'string' ? d.revision : '',
     buildDate: typeof d.build_date === 'string' ? d.build_date : '',
+    ...(reported === undefined ? {} : { environment: reported }),
   }
 }
 
@@ -98,6 +114,7 @@ export function checkClientContract(options: { force?: boolean } = {}): Promise<
       if (!res.ok || !type.includes('json')) return
       const config = clientConfigFrom(await res.json())
       if (config === null) return
+      setEnvironment(config.environment ?? null)
       const action = contractAction(config, {
         registered: hasUnsavedWorkProbes(),
         dirty: hasUnsavedWork(),

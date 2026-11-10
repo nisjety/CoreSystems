@@ -8,11 +8,14 @@ import {
   BellRing,
   Bot,
   Brain,
+  Check,
   CheckCircle2,
   CheckSquare,
   CircleDot,
   Clock,
   Coins,
+  Copy,
+  Download,
   Gauge,
   Globe2,
   History,
@@ -37,6 +40,7 @@ import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { agentBlueprints } from '@/features/agents/lib/verevon-agent-blueprints'
 import type { AgentBlueprint } from '@/features/agents/lib/verevon-agent-page-types'
 import { controlFocusClass } from '@/features/agents/lib/verevon-agent-page-styles'
+import { buildSupportBundle, supportBundleFileName } from '@/features/agents/lib/support-bundle'
 import {
   getPresetAgent,
   presetAgentActionsEnabled,
@@ -93,6 +97,8 @@ import {
 import type { RunMeter } from '@/features/chat/components/chat-types'
 import { RunCostMeter, applyUsageProgress, applyUsageTotal } from '@/features/chat/components/RunCostMeter'
 import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
+import { downloadBytes } from '@/features/chat/lib/chat-export/download'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import {
   browserActionBriefEnabled,
   browserActionLines,
@@ -352,6 +358,11 @@ export default function AgentRunConsole() {
     if (proofBundle.error != null) return { bundle: null, failed: true, loading: false }
     return { bundle: proofBundle() ?? null, failed: false, loading: proofBundle.loading }
   })
+
+  // The run's privacy tier, read for the support bundle's zero-retention decision. An errored detail is not read,
+  // for the same reason as `proofView`: the decision then rests on the org's posture alone.
+  const runPrivacyTier = (): PrivacyTier | undefined =>
+    runDetail.error != null ? undefined : runDetail()?.privacyTier
 
   // Telemetry merges the durable RunDetail (steps, tokens, status) with the
   // live usage event the chat stream emits (cost, latency, confidence) — the
@@ -1103,6 +1114,7 @@ export default function AgentRunConsole() {
                 failed={proofView().failed}
                 loading={proofView().loading}
                 runId={activeRunId() ?? ''}
+                privacyTier={runPrivacyTier()}
               />
             </Show>
 
@@ -1885,6 +1897,8 @@ function ProofBundlePanel(props: {
   loading: boolean
   /** The run whose bundle this is; its walkthrough screenshots are read under this id. */
   runId: string
+  /** The run's privacy tier, for the support bundle's zero-retention decision. */
+  privacyTier?: PrivacyTier
 }) {
   const i18n = useI18n()
   return (
@@ -2004,6 +2018,104 @@ function ProofBundlePanel(props: {
             </Show>
           </>
         )}
+      </Show>
+
+      <Show when={runSupportBundleEnabled()}>
+        <SupportReference runId={props.runId} bundle={props.bundle} privacyTier={props.privacyTier} />
+      </Show>
+    </div>
+  )
+}
+
+/** Whether this build shows the support reference and support bundle (`VITE_RUN_SUPPORT_BUNDLE`, the strict literal `true`). */
+function runSupportBundleEnabled(): boolean {
+  return import.meta.env.VITE_RUN_SUPPORT_BUNDLE === 'true'
+}
+
+/**
+ * Whether the run keeps no content, as far as the console can tell: its privacy tier is a zero-retention contract, or
+ * this caller is under the org's zero-retention posture now (the posture `ExportConversationAction` reads). Such a
+ * run's support bundle carries ids, statuses and timestamps only.
+ */
+function supportBundleZeroRetention(privacyTier: PrivacyTier | undefined): boolean {
+  return privacyTier === 'zdr_contractual' || !isLocalRetentionAllowed()
+}
+
+/**
+ * The run's support reference (W5-096-b): the run id and the request id of the proof read, on one copyable line for a
+ * support ticket, and the run's support bundle as a file. The reference shows even when the proof bundle did not load,
+ * since the run id is always known; the download needs the bundle it is built from.
+ */
+function SupportReference(props: { runId: string; bundle: ProofBundle | null; privacyTier?: PrivacyTier }) {
+  const i18n = useI18n()
+  const [copied, setCopied] = createSignal(false)
+  const zeroRetention = () => supportBundleZeroRetention(props.privacyTier)
+
+  async function copyReference() {
+    const request = props.bundle?.requestId
+    const text = `Support reference: run ${props.runId}${request ? ` · request ${request}` : ''}`
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  function downloadBundle() {
+    const bundle = props.bundle
+    if (!bundle) return
+    const payload = buildSupportBundle(bundle, {
+      runId: props.runId,
+      now: new Date().toISOString(),
+      zeroRetention: zeroRetention(),
+    })
+    downloadBytes(
+      new TextEncoder().encode(`${JSON.stringify(payload, null, 2)}\n`),
+      supportBundleFileName(props.runId),
+      'application/json',
+    )
+  }
+
+  return (
+    <div class="mt-2">
+      <p class="verevon-run-trust__subhead">{i18n.tr('Støttereferanse', 'Support reference')}</p>
+      <dl class="verevon-run-proof__receipt">
+        <div class="verevon-run-proof__receipt-row">
+          <dt>{i18n.tr('Kjøring', 'Run')}</dt>
+          <dd><code>{props.runId}</code></dd>
+        </div>
+        <div class="verevon-run-proof__receipt-row">
+          <dt>{i18n.tr('Forespørsel', 'Request')}</dt>
+          <dd>
+            <Show when={props.bundle?.requestId} fallback={i18n.tr('Ikke registrert', 'Not recorded')}>
+              {(request) => <code>{request()}</code>}
+            </Show>
+          </dd>
+        </div>
+      </dl>
+      <div class="flex flex-wrap items-center gap-2 mt-2">
+        <Button variant="ghost" size="sm" shape="pill" onClick={() => void copyReference()}>
+          <Show when={copied()} fallback={<Copy class="size-3.5" strokeWidth={1.9} />}>
+            <Check class="size-3.5" strokeWidth={2.2} />
+          </Show>
+          {copied() ? i18n.tr('Kopiert', 'Copied') : i18n.tr('Kopier referanse', 'Copy reference')}
+        </Button>
+        <Show when={props.bundle}>
+          <Button variant="secondary" size="sm" shape="pill" onClick={downloadBundle}>
+            <Download class="size-3.5" strokeWidth={1.9} />
+            {i18n.tr('Last ned støttepakke', 'Download support bundle')}
+          </Button>
+        </Show>
+      </div>
+      <Show when={props.bundle && zeroRetention()}>
+        <p class="verevon-run-proof__stamp">
+          {i18n.tr(
+            'Denne kjøringen lagrer ikke innhold, så støttepakken inneholder bare id-er, statuser og tidspunkter.',
+            'This run keeps no content, so the support bundle holds ids, statuses and timestamps only.',
+          )}
+        </p>
       </Show>
     </div>
   )

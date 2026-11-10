@@ -65,6 +65,7 @@ import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
 import { ComposerTrays } from './ComposerTrays'
+import { ConnectionPill } from './ConnectionPill'
 import { DeckTemplateContext, type DeckTemplateActions } from './artifact-renderers'
 import { researchPassFacts } from './ArtifactProvenance'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
@@ -659,6 +660,7 @@ export default function ChatPage() {
           </Show>
         </div>
       </Show>
+      <ConnectionPill />
       <DashboardComposer
         appearance="chat"
         browseWeb={browseWeb()}

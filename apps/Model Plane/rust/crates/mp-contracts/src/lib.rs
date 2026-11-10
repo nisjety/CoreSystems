@@ -7,6 +7,7 @@ pub mod attachments;
 pub mod autonomy;
 pub mod connector_suggest;
 pub mod context_refs;
+pub mod data_sources;
 pub mod dataplane_posture;
 pub mod deck_manifest;
 pub mod deck_theme;

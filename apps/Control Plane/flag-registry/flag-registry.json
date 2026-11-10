@@ -418,6 +418,19 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_DATA_SOURCE_CATALOGUE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-t3-093 (b) data-source catalogue: the chat prompt names the sources this turn's tools reach, with use-when and cost hints; a ZDR turn lists only ZDR-allowed ones. Off, the prompt is unchanged. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_DATA_SOURCE_CATALOGUE", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY",
       "kind": "switch",
       "owner": "model-plane",

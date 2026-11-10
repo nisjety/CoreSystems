@@ -258,6 +258,7 @@ import type { GoalDraft } from './GoalDialog'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
+import { noteChatStreamLost, noteChatStreamOk } from '../lib/chat-connectivity'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-draft'
@@ -1894,6 +1895,8 @@ export function useChatController() {
       let run: Awaited<ReturnType<typeof getRun>> | undefined
       try {
         run = await getRun(runId, signal)
+        // The service answered, so the connection is back whatever the run's status says (the connection pill, F-t3-078).
+        noteChatStreamOk()
       } catch (error) {
         if (!stillOwned()) return { kind: 'aborted' }
         // A missing or refused run cannot be settled from here; any other
@@ -2142,6 +2145,8 @@ export function useChatController() {
     let transportLost = false
     let replayStarted = false
     let reasoningReplayStarted = false
+    // The first frame of the resumed stream proves the connection is open (the connection pill, F-t3-078): noted once.
+    let connectionOpenNoted = false
     // Snapshotted before the stream opens: `onFrameId` mutates the turn's
     // cursor during replay, so the turn is not a reliable record of what we
     // asked the server to skip.
@@ -2177,6 +2182,11 @@ export function useChatController() {
         // Work feed kept scrolling, because `onUiEvent` alone still fired.
         ...evidence,
         acceptFrame: (id) => {
+          // Every frame passes here, so the first one notes the resumed connection open (once per attempt).
+          if (!connectionOpenNoted) {
+            connectionOpenNoted = true
+            noteChatStreamOk()
+          }
           const sequence = frameSequence(id)
           if (sequence === undefined) return true
           if (appliedThrough !== undefined && sequence <= appliedThrough) return false
@@ -2297,6 +2307,12 @@ export function useChatController() {
     )
 
     if ((transportLost || !settled) && isActiveThread()) {
+      // A lost connection is "reconnecting" to the connection pill (F-t3-078) only while the durable wait below
+      // follows it. A turn settled here without that wait (no run id, a foreign thread) reconnects to nothing.
+      const waitRunId = state.turns.find((candidate) => candidate.id === assistantId)?.runId ?? turn.runId
+      if (transportLost && waitRunId && !isTemporaryThread(threadId) && !isForeignOriginThread(threadId)) {
+        noteChatStreamLost()
+      }
       // No terminal frame reached us: the resume failed, or the stream closed
       // without one (e.g. the buffer was already empty and nothing else
       // arrived). A disconnect is not a cancel, so the run may still be
@@ -4056,6 +4072,8 @@ export function useChatController() {
           },
           onConnected: (connected) => {
             settleDraft?.('accepted')
+            // The gateway opened the stream, so the connection pill (F-t3-078) need not say "reconnecting" any longer.
+            noteChatStreamOk()
             if (stopBeforeConnect) {
               cancelOnceConnected(connected)
               return

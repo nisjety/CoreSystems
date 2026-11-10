@@ -96,6 +96,16 @@ interface ImportMetaEnv {
 	readonly VITE_PLUGIN_LOADER?: string;
 	/** "true" shows the browser walkthrough in the run proof bundle: one filmstrip frame per browser action, from the screenshots the run recorded (F-t3-050, W4-R3-b). Default off. */
 	readonly VITE_RUN_PROOF_WALKTHROUGH?: string;
+	/** "true" shows the run's support reference (run id and request id, copyable) and a download of its support bundle beside the proof bundle (W5-096-b). Default off. */
+	readonly VITE_RUN_SUPPORT_BUNDLE?: string;
+	/** "true" sends a content-free long-task beacon: the build id and one duration bucket, at most once a minute per bucket (F-t3-096). Default off. */
+	readonly VITE_LONG_TASK_BEACON?: string;
+	/** "true" shows the chat connection pill above the composer when the chat is offline or cannot reach its service, after a short hold (F-t3-078). Default off. */
+	readonly VITE_CHAT_CONNECTION_PILL?: string;
+	/** "true" shows an environment pill in the navbar when the gateway reports a non-production environment (F-t3-098). Default off. */
+	readonly VITE_ENV_PILL?: string;
+	/** "true" applies the organisation accent, solved for contrast in OKLCH, as `--org-accent` and `--org-accent-on` (F-t3-098). Default off. */
+	readonly VITE_ORG_ACCENT?: string;
 }
 
 interface ImportMeta {

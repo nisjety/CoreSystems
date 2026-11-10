@@ -5,6 +5,7 @@ import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { shouldEnableSceneMode } from '@/demo/scene-mode'
+import { startLongTaskBeacon } from '@/shared/build/long-task-beacon'
 
 const DashboardPage = lazy(() => import('@/features/dashboard/components/DashboardPage'))
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
@@ -304,5 +305,7 @@ export const Router = createRouter({
 })
 
 export default function App() {
+  // Content-free long-task beacon (F-t3-096). Starts once, and only when VITE_LONG_TASK_BEACON is the literal true.
+  startLongTaskBeacon()
   return <Router>{(props) => <AppShell {...props} />}</Router>
 }

@@ -1,4 +1,5 @@
-import { requestJson } from './http'
+import { gatewayBaseUrl } from './config'
+import { apiErrorFromResponse, requestJson, signalSessionExpiry } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
@@ -850,6 +851,12 @@ export type ProofBundle = {
    * "walkthrough" then says why.
    */
   browserWalkthrough?: ProofBrowserWalkthrough
+  /**
+   * The gateway's `x-request-id` for the read that returned this bundle, set by {@link getRunProofBundle}. A
+   * correlation id for a support reference, not part of the bundle record. Absent when the response echoed no
+   * usable id.
+   */
+  requestId?: string
 }
 
 function num(value: unknown): number | undefined {
@@ -999,6 +1006,46 @@ function normalizeEffectClass(value: unknown): ProofBundle['effectClass'] {
 }
 
 /**
+ * The gateway echoes `x-request-id` on every response and exposes it to the browser. The id is shown and copied, so a
+ * value outside the gateway's own rule (1 to 128 bytes of `[A-Za-z0-9._:-]`) reads as no id at all.
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
+
+function responseRequestId(response: Pick<Response, 'headers'>): string | undefined {
+  const value = response.headers?.get('x-request-id')?.trim() ?? ''
+  return REQUEST_ID_PATTERN.test(value) ? value : undefined
+}
+
+/**
+ * `requestJson`'s GET for one path, also returning the response's request id. It repeats `requestJson`'s headers,
+ * credentials, `{ data }` envelope and typed error, because `requestJson` does not hand the response back.
+ * `applyDevAuth` stays private to http.ts, so the dev-auth header is set here the way `sse.ts` sets it.
+ */
+async function getJsonWithRequestId<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ body: T | null; requestId?: string }> {
+  const headers = new Headers({ Accept: 'application/json' })
+  if (import.meta.env.VITE_ALLOW_DEV_AUTH_BYPASS === 'true') {
+    headers.set('Authorization', 'Bearer dev-bypass')
+  }
+  const response = await fetch(`${gatewayBaseUrl()}${path}`, {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers,
+  })
+  const reply: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const failure = apiErrorFromResponse(reply, response)
+    signalSessionExpiry(failure, path)
+    throw failure
+  }
+  const body = reply && typeof reply === 'object' && 'data' in reply ? (reply as { data: unknown }).data : reply
+  return { body: body as T | null, requestId: responseRequestId(response) }
+}
+
+/**
  * Fetch a run's Verevon Proof Bundle. Read-only; model-gateway scopes it to
  * the caller's verified org.
  *
@@ -1006,17 +1053,22 @@ function normalizeEffectClass(value: unknown): ProofBundle['effectClass'] {
  * bundle that exists but proves little, which comes back populated with the
  * `null` fields and `unavailable` reasons that say so.
  *
+ * The read's `x-request-id` rides on the bundle as `requestId`, for a support reference. A `null` answer carries none,
+ * since there is no bundle to attach it to.
+ *
  * @param runId  The orchestration run id.
  * @param signal Abort signal, for teardown when the console re-pins.
  */
 export async function getRunProofBundle(runId: string, signal?: AbortSignal): Promise<ProofBundle | null> {
-  const payload = await requestJson<{ bundle?: unknown }>(
+  const { body: payload, requestId } = await getJsonWithRequestId<{ bundle?: unknown }>(
     `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/proof-bundle`,
-    { signal },
+    signal,
   )
   // The gateway forwards model-gateway's `{ bundle }` envelope verbatim;
   // tolerate a bare bundle body too, like the rest of the API layer.
   const envelope = record(payload)
   if (!envelope) return null
-  return normalizeBundle('bundle' in envelope ? envelope.bundle : envelope)
+  const bundle = normalizeBundle('bundle' in envelope ? envelope.bundle : envelope)
+  if (!bundle) return null
+  return requestId ? { ...bundle, requestId } : bundle
 }

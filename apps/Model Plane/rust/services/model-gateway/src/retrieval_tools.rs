@@ -27,7 +27,14 @@
 //! Failures return `Err(String)` naming the actual cause. Never an empty success
 //! that reads as "there is no such material" when the truth is "the upstream
 //! could not be asked".
+//!
+//! The same module builds the data-source catalogue (`MODEL_GATEWAY_DATA_SOURCE_CATALOGUE`,
+//! off by default): one short prompt block naming the sources the turn's tools reach, with when
+//! each fits and what a call costs. It is built from the tools the loop actually offers, and a
+//! zero-retention turn lists only the sources marked ZDR-allowed in `mp_contracts::data_sources`.
 
+use mp_contracts::data_sources::DATA_SOURCES;
+use mp_contracts::model_plane::v1::{ChatMessage, ToolDefinition};
 use serde_json::{json, Value};
 
 use crate::{auth::VerifiedDataPlaneBearer as VerifiedBearer, state::AppState};
@@ -311,6 +318,77 @@ fn envelope(kind: &str, query: &str, result_count: usize, results: Value) -> Str
         }
     }
     out.to_string()
+}
+
+/// The switch that turns the data-source catalogue on. Only the literal `true` turns it on. It is read on
+/// every turn, so turning it off needs no restart.
+pub const ENABLED_ENV: &str = "MODEL_GATEWAY_DATA_SOURCE_CATALOGUE";
+
+/// The most characters the catalogue may take. The table is short enough that every source fits, so the bound
+/// holds by construction; it stays so that a longer table cannot grow the prompt without limit.
+pub const MAX_CATALOGUE_CHARS: usize = 1_200;
+
+/// The first line of the catalogue: what the lines below are, and that they are only the sources this turn offers.
+const CATALOGUE_HEADER: &str = "Data sources offered this turn, with when each fits and what a call costs. Pick the one that fits the question; weigh cost when two can answer.";
+
+/// Whether the switch is on, from its raw value.
+#[must_use]
+pub fn parse_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The switch as this process reads it. Read on every turn, so turning it off needs no restart.
+#[must_use]
+pub fn enabled() -> bool {
+    parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// The catalogue for a turn that offers `tools`: the header, then one line per source that one of its tools reaches,
+/// in table order. A zero-retention turn (`zdr`) lists only the sources marked ZDR-allowed. `None` when no source
+/// qualifies, so the prompt is left as it was.
+#[must_use]
+pub fn catalogue_text(tools: &[ToolDefinition], zdr: bool) -> Option<String> {
+    let offered: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    let mut catalogue = CATALOGUE_HEADER.to_owned();
+    let mut listed = 0_usize;
+    for source in DATA_SOURCES {
+        if zdr && !source.zdr_allowed {
+            continue;
+        }
+        if !source.tool_names.iter().any(|name| offered.contains(name)) {
+            continue;
+        }
+        let line = format!(
+            "\n- {} (cost: {}): {}",
+            source.id,
+            source.cost_hint.as_str(),
+            source.use_when
+        );
+        // Stops at the first line that would overflow, so the sources listed are the first that fit, in table order.
+        if catalogue.chars().count() + line.chars().count() > MAX_CATALOGUE_CHARS {
+            break;
+        }
+        catalogue.push_str(&line);
+        listed += 1;
+    }
+    (listed > 0).then_some(catalogue)
+}
+
+/// The catalogue as the system message the tool loop appends to a turn's prompt, after the turn's own messages.
+/// `None` with the switch off, so the prompt is unchanged, and when no source qualifies.
+#[must_use]
+pub(crate) fn data_source_catalogue_notice(
+    tools: &[ToolDefinition],
+    zdr: bool,
+) -> Option<ChatMessage> {
+    if !enabled() {
+        return None;
+    }
+    catalogue_text(tools, zdr).map(|content| ChatMessage {
+        role: "system".to_owned(),
+        content,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

@@ -9105,6 +9105,12 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     if let Some(contract) = source_context.as_ref().and_then(|context| crate::document_contract::CampaignContract::from_messages(&review_messages, context)) {
         messages.push(ChatMessage { role: "system".into(), content: contract.guidance(), ..Default::default() });
     }
+    // The data-source catalogue (MODEL_GATEWAY_DATA_SOURCE_CATALOGUE, F-t3-093 b): one runtime block naming the sources
+    // the tools offered on this turn reach, with use-when and cost hints. Read from the final set, after the connector,
+    // reader, thread and image tools were added, and absent with the switch off, so the prompt is unchanged.
+    if let Some(catalogue) = crate::retrieval_tools::data_source_catalogue_notice(&tools, zdr) {
+        messages.push(catalogue);
+    }
     let mut result_checks = Vec::new();
     let mut count_calls = 0usize;
     // Source-bounded drafting shares one inference/checking allowance across
