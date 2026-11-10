@@ -144,6 +144,16 @@ pub fn browser_agent_policy_enforced() -> bool {
     matches!(std::env::var("BROWSER_AGENT_POLICY_ENFORCED").as_deref(), Ok("true"))
 }
 
+/// The org permission rules switch (build plan W5-074, F-t3-074). Execution-core names a call's
+/// target to capability-core only while this is the literal `true`; off, the request carries none.
+#[must_use]
+pub fn permission_rules_enabled() -> bool {
+    matches!(
+        std::env::var("CAPABILITY_PERMISSION_RULES_ENABLED").as_deref(),
+        Ok("true")
+    )
+}
+
 #[tonic::async_trait]
 pub trait CapabilityPolicy: Send + Sync {
     async fn evaluate(
@@ -175,6 +185,23 @@ pub trait CapabilityPolicy: Send + Sync {
         _user_id: &str,
     ) -> Result<CapabilityEvaluation, Status> {
         self.evaluate_with_evidence(tool_name, run_id, org_id).await
+    }
+
+    /// `evaluate_tool_call` for a call whose input is known, so the call can name the target it acts
+    /// on (F-t3-074). The target is read from `_tool_input` and named on the wire only while the
+    /// permission rules switch is on; `_retention_bound` withholds its value. Policies with no wire
+    /// ignore both.
+    async fn evaluate_tool_call_with_input(
+        &self,
+        tool_name: &str,
+        _tool_input: &str,
+        run_id: &str,
+        org_id: &str,
+        user_id: &str,
+        _retention_bound: bool,
+    ) -> Result<CapabilityEvaluation, Status> {
+        self.evaluate_tool_call(tool_name, run_id, org_id, user_id)
+            .await
     }
 
     /// Resolve the registry bindings of a run's dynamic (`mcp__`) tools with one
@@ -211,6 +238,8 @@ pub struct GrpcCapabilityPolicy {
     model_action_view: Option<ServerResolvedModelActionViewClient>,
     gate: ToolClassGate,
     browser_agent_policy_enforced: bool,
+    /// Whether a call names its target to capability-core (`CAPABILITY_PERMISSION_RULES_ENABLED`).
+    permission_rules: bool,
     bindings: Arc<RunBindings>,
 }
 
@@ -240,6 +269,7 @@ impl GrpcCapabilityPolicy {
             model_action_view: ServerResolvedModelActionViewClient::from_env()?,
             gate: ToolClassGate::from_env(),
             browser_agent_policy_enforced: browser_agent_policy_enforced(),
+            permission_rules: permission_rules_enabled(),
             bindings: Arc::default(),
         })
     }
@@ -254,6 +284,7 @@ impl GrpcCapabilityPolicy {
             model_action_view: None,
             gate: ToolClassGate::Off,
             browser_agent_policy_enforced: false,
+            permission_rules: false,
             bindings: Arc::default(),
         }
     }
@@ -268,7 +299,7 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         org_id: &str,
     ) -> Result<CapabilityDecision, Status> {
         let (binding, response) = self
-            .evaluate_response(tool_name, run_id, org_id, "")
+            .evaluate_response(tool_name, run_id, org_id, "", None)
             .await?;
         self.refuse_dynamic_unless_enforced(&binding)?;
         map_capability_response(&response).map(|evaluation| evaluation.decision)
@@ -290,9 +321,24 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         org_id: &str,
         user_id: &str,
     ) -> Result<CapabilityEvaluation, Status> {
+        // A call made without its input names no target.
+        self.evaluate_tool_call_with_input(tool_name, "", run_id, org_id, user_id, false)
+            .await
+    }
+
+    async fn evaluate_tool_call_with_input(
+        &self,
+        tool_name: &str,
+        tool_input: &str,
+        run_id: &str,
+        org_id: &str,
+        user_id: &str,
+        retention_bound: bool,
+    ) -> Result<CapabilityEvaluation, Status> {
         let strict_browser = self.browser_agent_policy_enforced && tool_name == "browser_agent";
+        let target = self.wire_target(tool_name, tool_input, retention_bound);
         let (binding, response) = self
-            .evaluate_response(tool_name, run_id, org_id, user_id)
+            .evaluate_response(tool_name, run_id, org_id, user_id, target)
             .await?;
         let evaluation = map_capability_response(&response)?;
         let call = EvidenceCall {
@@ -576,6 +622,26 @@ impl GrpcCapabilityPolicy {
         }
     }
 
+    /// The target a call names on the wire (F-t3-074): read from its input, and named only while the
+    /// permission rules switch is on. Its value is withheld on a run that holds no content.
+    fn wire_target(
+        &self,
+        tool_name: &str,
+        tool_input: &str,
+        retention_bound: bool,
+    ) -> Option<(&'static str, String)> {
+        if !self.permission_rules {
+            return None;
+        }
+        derive_target(tool_name, tool_input).map(|(kind, value)| {
+            if retention_bound {
+                (kind, String::new())
+            } else {
+                (kind, value)
+            }
+        })
+    }
+
     /// Bind `tool_name` and ask capability-core for a decision on it. The binding
     /// comes back so the caller can verify the evidence against what was bound.
     async fn evaluate_response(
@@ -584,6 +650,7 @@ impl GrpcCapabilityPolicy {
         run_id: &str,
         org_id: &str,
         user_id: &str,
+        target: Option<(&'static str, String)>,
     ) -> Result<(Binding, EvaluatePolicyResponse), Status> {
         if run_id.trim().is_empty() || org_id.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -601,6 +668,10 @@ impl GrpcCapabilityPolicy {
         // The tool and the user are named only once the gate is on, so with it
         // off the request is byte-for-byte what it was before tool classes.
         let named = self.effective_gate(tool_name) != ToolClassGate::Off;
+        let (target_kind, target_value) = target.map_or_else(
+            || (String::new(), String::new()),
+            |(kind, value)| (kind.to_owned(), value),
+        );
         let mut request = Request::new(EvaluatePolicyRequest {
             capability_id: binding.capability_id.clone(),
             run_id: run_id.to_owned(),
@@ -617,6 +688,8 @@ impl GrpcCapabilityPolicy {
             } else {
                 String::new()
             },
+            target_kind,
+            target_value,
         });
         request.metadata_mut().insert(
             "authorization",
@@ -1702,6 +1775,97 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
 pub fn agent_allowlist_permits(capability_ids: &[String], tool_name: &str) -> bool {
     trusted_capability_id(tool_name)
         .is_some_and(|capability| capability_ids.iter().any(|id| *id == capability))
+}
+
+/// The target a tool call acts on, read from its input by execution-core and never from the model's
+/// text (F-t3-074): the host of a web address (`web_fetch`, `browser.open`), the domain of the first
+/// recipient of a mail send (`execute_provider_action`), or the first token of a command (`shell`, and
+/// `code_interpreter` in `sh`). `None` for every other tool, and for an input that does not read.
+#[must_use]
+pub fn derive_target(tool_name: &str, tool_input: &str) -> Option<(&'static str, String)> {
+    let names_a_target = matches!(
+        tool_name,
+        "web_fetch" | "browser.open" | "execute_provider_action" | "shell" | "code_interpreter"
+    );
+    if !names_a_target {
+        return None;
+    }
+    let input: serde_json::Value = serde_json::from_str(tool_input).ok()?;
+    match tool_name {
+        "web_fetch" | "browser.open" => {
+            url_host(input.get("url")?.as_str()?).map(|host| ("domain", host))
+        }
+        "execute_provider_action" => {
+            mail_recipient_domain(&input).map(|domain| ("recipient", domain))
+        }
+        "shell" => command_prefix(input.get("program")?.as_str()?)
+            .map(|command| ("command_prefix", command)),
+        // A Python program names no command; only the `sh` language runs one.
+        "code_interpreter" => {
+            let language = input.get("language")?.as_str()?;
+            if !language.trim().eq_ignore_ascii_case("sh") {
+                return None;
+            }
+            command_prefix(input.get("code")?.as_str()?).map(|command| ("command_prefix", command))
+        }
+        _ => None,
+    }
+}
+
+/// The host of a web address, lower-case and without a port or a trailing dot. Only `http` and `https`
+/// addresses name a host.
+fn url_host(raw: &str) -> Option<String> {
+    let url = Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = url.host_str()?.trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+/// The domain of the first recipient of a mail send: what follows the recipient's last `@`, never the
+/// address itself. `None` for an operation that is not a mail send, and for a send whose first
+/// recipient does not read as an address.
+fn mail_recipient_domain(input: &serde_json::Value) -> Option<String> {
+    let operation = input.get("operation")?.as_str()?;
+    if !mp_contracts::provider_writes::is_mail_send(operation) {
+        return None;
+    }
+    let to = input.get("body").and_then(|body| body.get("to"));
+    let recipient = mp_contracts::provider_writes::mail_recipients(to)
+        .into_iter()
+        .next()?;
+    let (_, after_at) = recipient.rsplit_once('@')?;
+    let domain: String = after_at
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '-'))
+        .collect();
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    (!domain.is_empty()).then_some(domain)
+}
+
+/// The first token of a command, cut where it stops being a name and at most 64 characters long. A
+/// leading `NAME=value` assignment is skipped, so a value set in front of a command never becomes the
+/// target.
+fn command_prefix(command: &str) -> Option<String> {
+    let token = command
+        .split_whitespace()
+        .find(|word| !is_assignment(word))?;
+    let name: String = token
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(*c, '.' | '_' | '-' | '/' | '+'))
+        .take(64)
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Whether a word is a shell assignment: a name, then `=`, then its value.
+fn is_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let starts_as_name = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_');
+    starts_as_name && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -3014,6 +3178,7 @@ mod tests {
             model_action_view: None,
             gate,
             browser_agent_policy_enforced: false,
+            permission_rules: false,
             bindings: Arc::default(),
         };
         (policy, state)

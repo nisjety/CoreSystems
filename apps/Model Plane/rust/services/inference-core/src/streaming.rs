@@ -142,6 +142,9 @@ mod tests {
             cheap_fallback_forced: false,
             applied_effort: None,
             role: None,
+            mode: Some(crate::provider::intent::VerevonMode::Balance),
+            complexity: Some(crate::provider::intent::Complexity::Simple),
+            reason: "budget_tier_shift",
         };
         let mut wire = bridge_to_grpc(rx, HandlerClock::start(), Some(note));
 

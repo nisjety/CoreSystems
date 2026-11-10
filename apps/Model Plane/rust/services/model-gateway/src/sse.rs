@@ -1244,6 +1244,45 @@ fn with_loop_stop(
     Some(metadata)
 }
 
+/// The metadata key a turn's routing decision is stored under (W5-073-b).
+const ROUTING_DECISION_KEY: &str = "routing_decision";
+
+/// Records in the answer's metadata the routing decision its route note stated (W5-073-b), so a reopened thread
+/// shows the model and reason the live Details popover showed. The entry holds closed tokens only, the same ones
+/// the usage frame states, so it is written on every turn, zero retention included. With no decision the metadata
+/// is returned as it was.
+fn with_routing_decision(
+    metadata: Option<prost_types::Struct>,
+    decision: Option<&serde_json::Value>,
+) -> Option<prost_types::Struct> {
+    use prost_types::value::Kind;
+
+    let Some(decision) = decision.and_then(serde_json::Value::as_object) else {
+        return metadata;
+    };
+    let fields: std::collections::BTreeMap<String, prost_types::Value> = decision
+        .iter()
+        .filter_map(|(key, token)| {
+            token.as_str().map(|token| {
+                (
+                    key.clone(),
+                    prost_types::Value {
+                        kind: Some(Kind::StringValue(token.to_owned())),
+                    },
+                )
+            })
+        })
+        .collect();
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(
+        ROUTING_DECISION_KEY.to_owned(),
+        prost_types::Value {
+            kind: Some(Kind::StructValue(prost_types::Struct { fields })),
+        },
+    );
+    Some(metadata)
+}
+
 #[cfg(test)]
 mod agent_mode_turn_tests {
     use super::*;
@@ -4117,6 +4156,18 @@ pub async fn invoke_stream_sse(
     if !model_connection_id.is_empty() {
         tool_defs.clear();
     }
+    // The image tool (W4-IMG-3) is offered where the composer gate allows it: the switch is on, the turn is persistent,
+    // not conversation-only and not a customer-gateway turn. With the switch off the list is left as it was. The tool
+    // loop reads the org's capability policy before its first round and withdraws the tool if the policy withholds it.
+    let image_offered = features.iter().any(|f| f == "tools")
+        && crate::image_tool::composer_offers(
+            crate::image_tool::enabled(),
+            effective_zdr,
+            data_plane_mode.is_some(),
+            conversation_only,
+            !model_connection_id.is_empty(),
+        );
+    tool_defs = crate::image_tool::tools_for_turn(tool_defs, image_offered);
     // The tools lead an OpenAI prompt, so with the stable order the ones
     // offered on some turns only go last and the rest stay one prefix.
     if cache_options.stable_prompt_order {
@@ -5383,6 +5434,8 @@ pub async fn invoke_stream_sse(
         // so `invoke_resume` can replay the finished answer on reconnect. A
         // deliberate cancel arrives via `cancel_flag` (the cancel registry)
         // and is checked every iteration, so cancel keeps working mid-drain.
+        // Read once per turn, before the relay: the answer's routing decision (W5-073-b) is stated only under its switch.
+        let routing_decision_on = routing_decision_switch();
         let mut failure_code = "inference_stream_ended_without_terminal";
         let mut heartbeat =
             tokio::time::interval(crate::session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);
@@ -5653,6 +5706,13 @@ pub async fn invoke_stream_sse(
                     });
                     // The route note rides the final chunk, so the answer's routing is read with its call (WS27-S7).
                     let answer_routing = crate::tool_loop::route_shift(chunk.route_note.as_ref());
+                    // The same note's decision (W5-073-b), under its switch: the answer's usage frames, its usage
+                    // envelope and its persisted metadata state it, and nothing else does.
+                    let answer_routing_decision = if routing_decision_on {
+                        crate::tool_loop::route_decision(chunk.route_note.as_ref())
+                    } else {
+                        None
+                    };
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // inference-core sets this ONLY when the provider connection
                     // broke before any proper termination signal arrived — a
@@ -6227,7 +6287,7 @@ pub async fn invoke_stream_sse(
                             crate::session_flow::DirectAnswer {
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
-                                metadata: with_loop_stop(
+                                metadata: with_routing_decision(with_loop_stop(
                                     crate::compaction::stamp_generation(
                                         crate::session_flow::with_work_summary(
                                         crate::session_flow::with_head_summary(
@@ -6294,6 +6354,8 @@ pub async fn invoke_stream_sse(
                                         head_summary.as_ref(),
                                     ),
                                     loop_stop.as_ref(),
+                                ),
+                                answer_routing_decision.as_ref(),
                                 ),
                             },
                             &req_id,
@@ -6590,6 +6652,10 @@ pub async fn invoke_stream_sse(
                     ) {
                         usage_envelope.payload["cache_miss_reason"] = reason.into();
                     }
+                    // The route decision rides the envelope under its switch (W5-073-b); cost-core reads its keys by name.
+                    if let Some(decision) = answer_routing_decision.clone() {
+                        usage_envelope.payload["routing_decision"] = decision;
+                    }
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
                         .await
@@ -6713,6 +6779,7 @@ pub async fn invoke_stream_sse(
                                 snapshot: turn,
                                 ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                                 routing: answer_routing,
+                                routing_decision: answer_routing_decision.clone(),
                             },
                         )
                         .await;
@@ -6731,6 +6798,7 @@ pub async fn invoke_stream_sse(
                         calls: turn.calls,
                         unpriced_calls: turn.unpriced_calls,
                         cost_by_category: turn.by_category,
+                        routing_decision: answer_routing_decision.clone(),
                     };
                     emit_and_buffer(
                         &tx,
@@ -9387,6 +9455,12 @@ async fn run_infer_fallback(
     match result {
         Ok(resp) => {
             let resp = resp.into_inner();
+            // The fallback answer's routing decision (W5-073-b), under the same switch as the stream's answer.
+            let answer_routing_decision = if routing_decision_switch() {
+                crate::tool_loop::route_decision(resp.route_note.as_ref())
+            } else {
+                None
+            };
             let model_used = if resp.model_used.is_empty() {
                 model.to_owned()
             } else {
@@ -9577,7 +9651,7 @@ async fn run_infer_fallback(
                     // The fallback path runs no tool loop, so retrieval grounding
                     // is the only evidence it can have — and it runs no
                     // verification pass either, so there is no verdict to record.
-                    metadata: crate::compaction::stamp_generation(
+                    metadata: with_routing_decision(crate::compaction::stamp_generation(
                         crate::session_flow::with_work_summary(
                         crate::session_flow::with_head_summary(
                             crate::session_flow::with_compaction_summary(
@@ -9603,6 +9677,8 @@ async fn run_infer_fallback(
                         fallback_zdr,
                         ),
                         head_summary,
+                    ),
+                    answer_routing_decision.as_ref(),
                     ),
                 },
                 request_id,
@@ -9831,6 +9907,9 @@ async fn run_infer_fallback(
             ) {
                 usage.payload["cache_miss_reason"] = reason.into();
             }
+            if let Some(decision) = answer_routing_decision.clone() {
+                usage.payload["routing_decision"] = decision;
+            }
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
                 .await;
@@ -9873,6 +9952,7 @@ async fn run_infer_fallback(
                         snapshot: turn,
                         ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                         routing: crate::tool_loop::route_shift(resp.route_note.as_ref()),
+                        routing_decision: answer_routing_decision.clone(),
                     },
                 )
                 .await;
@@ -9898,6 +9978,7 @@ async fn run_infer_fallback(
                 calls: turn.calls,
                 unpriced_calls: turn.unpriced_calls,
                 cost_by_category: turn.by_category,
+                routing_decision: answer_routing_decision.clone(),
             };
             // Buffered like the chunks around it, so a resumed fallback turn
             // replays its tokens, latency, confidence and cost basis too.
@@ -10666,6 +10747,9 @@ struct DirectAnswer {
     /// call; zero where it reports none. Counts only.
     cache_read_tokens: u32,
     cache_write_tokens: u32,
+    /// The routing decision the serving call's route note stated (W5-073-b). Closed tokens only, carried to the
+    /// usage frame under its switch and never to any store, since a direct answer persists nothing.
+    routing_decision: Option<serde_json::Value>,
 }
 
 impl DirectAnswer {
@@ -10688,6 +10772,7 @@ impl DirectAnswer {
             output_tokens: u32::try_from(response.output_tokens).unwrap_or(0),
             cache_read_tokens: u32::try_from(response.cache_read_input_tokens).unwrap_or(0),
             cache_write_tokens: u32::try_from(response.cache_creation_input_tokens).unwrap_or(0),
+            routing_decision: crate::tool_loop::route_decision(response.route_note.as_ref()),
         }
     }
 }
@@ -11855,6 +11940,11 @@ fn zdr_answer_stream(
         calls: 1,
         unpriced_calls: u32::from(cost_usd.is_none()),
         cost_by_category,
+        // The route decision the serving call stated, under its switch (W5-073-b). A direct answer stores nothing.
+        routing_decision: answer
+            .routing_decision
+            .clone()
+            .filter(|_| routing_decision_switch()),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -14959,6 +15049,8 @@ fn agentic_run_stream(
             // all.
             served_by: None,
             retention_class,
+            // An agent run's frame states no answer route, so it carries no decision.
+            routing_decision: None,
         };
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
@@ -15115,6 +15207,21 @@ fn usage_progress_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
 /// it through here, so the handler itself reads no environment.
 fn usage_progress_switch() -> bool {
     usage_progress_enabled(&|key| std::env::var(key).ok())
+}
+
+/// Switch for a chat answer's routing decision (W5-073-b): the Verevon mode, complexity and reason its route
+/// note states, carried on the answer's usage frames, its usage envelope and its persisted metadata. Only the
+/// literal `true` enables it, and it is read per turn, so a restart is not needed to turn it off.
+const ROUTING_DECISION_ENV: &str = "MODEL_GATEWAY_ROUTING_DECISION_ENABLED";
+
+fn routing_decision_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(ROUTING_DECISION_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it. The answer paths read it through here, so the
+/// handler itself reads no environment.
+fn routing_decision_switch() -> bool {
+    routing_decision_enabled(&|key| std::env::var(key).ok())
 }
 
 /// The run ceiling's two switches as this process's environment states them (WS27-S6). The turn reads
@@ -15492,6 +15599,7 @@ impl AgentRunUsage {
             snapshot: self.meter.record(&call, &priced),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         }
     }
 
@@ -25614,6 +25722,7 @@ mod execute_turn_tests {
             snapshot,
             ceiling: None,
             routing: Some("tier_shifted"),
+            routing_decision: None,
         };
         assert_eq!(routed.payload("req-route")["routing"], "tier_shifted");
         let unrouted = crate::sse_events::ChatEvent::UsageProgress {
@@ -25621,6 +25730,7 @@ mod execute_turn_tests {
             snapshot,
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert!(unrouted.payload("req-route").get("routing").is_none());
     }

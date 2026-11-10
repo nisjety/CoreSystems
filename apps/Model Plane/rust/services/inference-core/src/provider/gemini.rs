@@ -241,6 +241,7 @@ impl ProviderRouter for GeminiProvider {
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
+                    successor: record.successor,
                 }
             })
             .collect()

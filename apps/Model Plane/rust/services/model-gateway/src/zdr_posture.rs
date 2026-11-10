@@ -839,6 +839,7 @@ pub(crate) mod tests {
             ("http_routes.rs", "ai_realtime"),
             ("http_routes.rs", "ai_video_generate"),
             ("review_run_routes.rs", "review_run_with"),
+            ("side_chat_routes.rs", "side_chat_with"),
             ("assistant_navigation.rs", "start_navigation"),
             ("dataplane.rs", "reject_zdr_durable_mutation"),
             ("dataplane.rs", "retrieve"),
@@ -1005,6 +1006,11 @@ pub(crate) mod tests {
                 "the default chain; refused on a waived turn at the stream entry",
             ),
             (
+                "image_tool.rs",
+                "generate",
+                "the chat turn's default chain; offered only on a persistent turn (composer_offers) and refused on a zero-retention or waived turn before the call (dispatch)",
+            ),
+            (
                 "sse.rs",
                 "vision_stream",
                 "the default chain; refused on a waived turn at the stream entry (a persistent branch only)",
@@ -1084,6 +1090,11 @@ pub(crate) mod tests {
             (
                 "review_run_routes.rs",
                 "review_run_with",
+                "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
+            ),
+            (
+                "side_chat_routes.rs",
+                "side_chat_with",
                 "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
             ),
             (

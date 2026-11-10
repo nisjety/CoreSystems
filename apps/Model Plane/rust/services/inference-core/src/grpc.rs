@@ -104,6 +104,8 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
                 .lifecycle
                 .map(|lifecycle| lifecycle.as_str().to_owned())
                 .unwrap_or_default(),
+            // Set only on a deprecated model whose cited vendor page names a replacement.
+            successor: model.successor.map(str::to_owned).unwrap_or_default(),
             // Set only for a deployment whose zero-retention attestation is in force, the one
             // data-use statement a verified source makes today. Unset is "not stated", never "no".
             data_use,

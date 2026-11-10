@@ -49,6 +49,13 @@ message RunProofBundle {
   // Evidence dimensions this bundle does not claim. Always populated for the
   // cross-plane sections v1 cannot reach.
   repeated UnavailableSection unavailable = 7;
+
+  // The run's browser walkthrough, present only when this bundle assembles it.
+  // Absent when it is omitted; `unavailable` then names the "walkthrough"
+  // section with the reason: the switch is off, the run was zero retention or
+  // waived, or its retention receipt could not be read. A run with no browser
+  // actions carries an empty walkthrough, which is itself a fact.
+  BrowserWalkthrough browser_walkthrough = 8;
 }
 
 // What work this bundle is about.
@@ -112,11 +119,58 @@ message ContinuationOutcome {
 // A dimension of the vision's evidence model that this bundle deliberately
 // does not assert.
 message UnavailableSection {
-  // Stable identifier: "known" | "charged" | "retained".
+  // Stable identifier: "known" | "charged" | "retained" | "walkthrough".
   string section = 1;
 
   // Plain-language reason, shown to the reader. Never blank.
   string reason = 2;
+}
+
+// The run's browser walkthrough: its browser actions in dispatch order, each
+// with the page the action left and the screenshot reference of that page.
+// References only, never bytes: a screenshot is fetched through the existing
+// artifact endpoint by its `screenshot_ref`.
+message BrowserWalkthrough {
+  // One step per browser action, in dispatch order.
+  repeated BrowserWalkthroughStep steps = 1;
+
+  // True when the walkthrough is incomplete: the run had more steps than the
+  // bundle carries, or the event read stopped short. The steps shown are the
+  // earliest ones; nothing past them is claimed.
+  bool truncated = 2;
+}
+
+// One browser action of a walkthrough, joined with the observation recorded
+// after it. The page fields are what the executor reported once the action
+// settled. The URL and title are scrubbed where the executor emits them.
+message BrowserWalkthroughStep {
+  // Per-action id (for example `act_0001`). It is unique within its plan, so
+  // a step is identified by this id together with `plan_id` in its events.
+  string action_id = 1;
+
+  // Action type slug: goto | click | type | extract | observe | scroll | wait.
+  // Empty when only the observation was recorded.
+  string action_type = 2;
+
+  // Page URL after the action settled. Empty when no observation exists yet or
+  // the page could not be read.
+  string page_url = 3;
+
+  // Page title after the action settled. Empty when unavailable.
+  string page_title = 4;
+
+  // Observation status slug: success | failed | timeout | blocked. Empty while
+  // the action has no observation, so an action still in flight never reads as
+  // a result.
+  string status = 5;
+
+  // Screenshot artifact reference id. Never inlined bytes. Empty when no
+  // screenshot was persisted for this step.
+  string screenshot_ref = 6;
+
+  // When the step's page state was observed. The dispatch time when no
+  // observation exists yet.
+  google.protobuf.Timestamp at = 7;
 }
 
 message GetRunProofBundleRequest {

@@ -42,6 +42,7 @@ pub mod navbar;
 pub mod notifications;
 pub mod onboarding;
 pub mod orchestration;
+pub mod org_flags;
 pub mod org_identity;
 pub mod orgs;
 pub mod ownership;

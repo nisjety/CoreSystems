@@ -1,5 +1,5 @@
 import { Show, createEffect, lazy } from 'solid-js'
-import { createRouter, useNavigate } from '@solidjs/router'
+import { createRouter, useNavigate, useParams } from '@solidjs/router'
 import type { JSX } from '@solidjs/web'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
@@ -260,7 +260,13 @@ export const Router = createRouter({
         { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
         ...(FleetRunConsole
-          ? [{ path: '/agents/fleets/:fleetId', component: () => <FleetRunConsole fleetId={window.location.pathname.split('/').pop()!} /> }]
+          ? [{
+              path: '/agents/fleet/:threadId/:runId',
+              component: () => {
+                const params = useParams<{ threadId: string; runId: string }>()
+                return <FleetRunConsole threadId={params.threadId} runId={params.runId} />
+              },
+            }]
           : []),
         ...(AgentBuilderPage
           ? [{ path: '/agents/:agentId/edit', component: AgentBuilderPage }]

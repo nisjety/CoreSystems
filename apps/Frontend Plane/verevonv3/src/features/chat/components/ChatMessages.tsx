@@ -83,6 +83,7 @@ import type {
   AutonomyRung,
   ChatKnowledgeReceipt,
   ChatPlanStep,
+  ChatRoutingDecision,
   ChatSearchProviderId,
   ChatSearchProvenanceEvent,
   ChatSearchRoute,
@@ -96,7 +97,7 @@ import type { SettledFold } from '../lib/settled-fold'
 import type { SettledFoldChoices } from '../lib/settled-fold-choices'
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-suggestions'
-import { readerPolishEnabled } from '../lib/reader-polish'
+import { readerPolishOn } from '../lib/reader-polish'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
@@ -131,6 +132,7 @@ import {
   highlightCode,
 } from './chat-code-highlight'
 import { ChangedFilesCard, chatChangedFilesEnabled } from './ChangedFilesCard'
+import { ChatImageStrip, chatImageStripEnabled, webSearchQueryOf } from './ChatImageStrip'
 import { ChartFenceBlock } from './ChatChart'
 import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
 import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
@@ -902,6 +904,15 @@ export function AssistantMessage(props: {
   // calls the transcript already holds, so nothing is stored or sent.
   const answerChangedFiles = createMemo(() => changedFiles(props.message.toolCalls ?? []))
 
+  // The web-search query whose image strip sits under this answer (F-t3-044, W4-IO-1). Off unless VITE_CHAT_IMAGE_STRIP is
+  // "true". Never for a temporary chat (zero retention) or a Space thread (room content). Not while the answer streams or
+  // waits, and a search that failed or is still running gives no query (`webSearchQueryOf`).
+  const imageStripQuery = createMemo(() => {
+    if (!chatImageStripEnabled() || props.temporaryChat || props.spaceScoped) return undefined
+    if (props.message.streaming || waiting() || errored()) return undefined
+    return webSearchQueryOf(props.message.toolCalls ?? [])
+  })
+
   return (
     // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
     // in the Tab sequence, which still runs answer -> actions -> next message
@@ -909,7 +920,7 @@ export function AssistantMessage(props: {
     <article
       class="verevon-chat-message verevon-chat-message--assistant"
       data-latest={props.isLatest ? '' : undefined}
-      data-turn-id={readerPolishEnabled ? props.message.id : undefined}
+      data-turn-id={readerPolishOn() ? props.message.id : undefined}
       tabindex={-1}
     >
       <div class="verevon-chat-message__avatar">
@@ -972,6 +983,11 @@ export function AssistantMessage(props: {
             />
           </Show>
         </div>
+        {/* W4-IO-1 (F-t3-044): the images from this answer's web search, each linked to its page. Mounted outside the
+            answer's content, so the PDF clone of the answer never carries them. */}
+        <Show when={imageStripQuery()}>
+          {(query) => <ChatImageStrip turnId={props.message.id} query={query()} />}
+        </Show>
         {/* EP-2 S5: a reloaded plan turn shows its persisted plan as a read-only card once a later turn exists. While the
             plan turn is the latest answer the live card in the composer trays owns the plan, so nothing is mounted here. */}
         <Show when={researchPlanTurnEnabled() && !props.isLatest && !props.message.streaming ? props.message.researchPlan : undefined}>
@@ -1393,7 +1409,7 @@ export function UserMessage(props: {
   }
 
   return (
-    <article class="verevon-chat-message verevon-chat-message--user" data-turn-id={readerPolishEnabled ? props.message.id : undefined} tabindex={-1}>
+    <article class="verevon-chat-message verevon-chat-message--user" data-turn-id={readerPolishOn() ? props.message.id : undefined} tabindex={-1}>
       <div class="verevon-chat-user-meta">
         <span>Meg</span>
         <time>{formatRelative(props.message.createdAt, i18n.locale())}</time>
@@ -2129,14 +2145,48 @@ export function ReasoningTrace(props: { text: string; streaming: boolean }) {
   )
 }
 
+/**
+ * The Details popover's Routed line (W5-073-b): the mode, complexity and reason the gateway stated, each as its label and
+ * joined by a middle dot. The gateway states closed tokens; a token this build does not know shows nothing, and a decision
+ * with no known token shows no line at all. The labels are looked up by exact key, never by prototype.
+ */
+function routedLabel(decision: ChatRoutingDecision | undefined, tr: (noText: string, enText: string) => string): string {
+  if (!decision) return ''
+  const modeLabels = new Map<string, string>([
+    ['budget', tr('Budsjett', 'Budget')],
+    ['balance', tr('Balanse', 'Balance')],
+    ['genius', tr('Genius', 'Genius')],
+  ])
+  const complexityLabels = new Map<string, string>([
+    ['simple', tr('Enkel', 'Simple')],
+    ['moderate', tr('Moderat', 'Moderate')],
+    ['complex', tr('Kompleks', 'Complex')],
+  ])
+  const reasonLabels = new Map<string, string>([
+    ['mode_cell', tr('Valgt modus', 'Chosen mode')],
+    ['budget_tier_shift', tr('Budsjett: én klasse billigere', 'Budget: one tier cheaper')],
+    ['budget_cheap_fallback', tr('Budsjett brukt opp: billig modell', 'Budget used up: cheap model')],
+    ['posture_unknown', tr('Budsjettstatus ukjent', 'Budget status unknown')],
+  ])
+  return [
+    modeLabels.get(decision.mode ?? ''),
+    complexityLabels.get(decision.complexity ?? ''),
+    reasonLabels.get(decision.reason ?? ''),
+  ]
+    .filter((label): label is string => label !== undefined)
+    .join(' · ')
+}
+
 export function ReasoningPopover(props: { message: ChatTurn }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const [tab, setTab] = createSignal('general')
   let ref!: HTMLDivElement
   const model = createMemo(() => props.message.modelUsed ?? props.message.model)
+  const routed = createMemo(() => routedLabel(props.message.routingDecision, (noText, enText) => i18n.tr(noText, enText)))
   const hasMetrics = createMemo(() => Boolean(
     model()
+    || routed()
     || props.message.inputTokens != null
     || props.message.outputTokens != null
     || props.message.latencyMs != null
@@ -2231,6 +2281,8 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
               <Match when={true}>
                 <dl>
                   <Show when={model()}><MetricRow label="Modell" value={prettyModel(model() ?? '')} /></Show>
+                  {/* The route beside the model it chose (W5-073-b): absent unless the gateway stated a known token. */}
+                  <Show when={routed()}><MetricRow label={i18n.tr('Ruting', 'Routed')} value={routed()} /></Show>
                   <Show when={props.message.inputTokens != null}><MetricRow label="Input" value={`${props.message.inputTokens} tokens`} /></Show>
                   <Show when={props.message.outputTokens != null}><MetricRow label="Output" value={`${props.message.outputTokens} tokens`} /></Show>
                   <Show when={props.message.latencyMs != null}><MetricRow label="Total tid" value={formatLatency(props.message.latencyMs ?? 0)} /></Show>

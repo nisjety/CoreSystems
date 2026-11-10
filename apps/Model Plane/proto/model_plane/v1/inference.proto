@@ -636,6 +636,23 @@ message RouteNote {
   // "table", "turn_model" or "cheap_fallback". Empty for every call that named
   // no role.
   string role_source = 6;
+
+  // The Verevon auto mode the intent layer resolved the call under: "budget",
+  // "balance" or "genius". Empty when the intent layer resolved no mode, as for
+  // a call that named a pinned model.
+  string verevon_mode = 7;
+
+  // The complexity the intent layer estimated for the call: "simple",
+  // "moderate" or "complex". Empty when the intent layer resolved no mode.
+  string complexity = 8;
+
+  // Why the intent layer chose the model: "mode_cell" (the policy cell the mode
+  // names, at a healthy budget or under a constrained one that changed no
+  // model), "budget_tier_shift" (a constrained budget moved the call one tier
+  // cheaper), "budget_cheap_fallback" (an exhausted budget forced the cheap
+  // fallback) or "posture_unknown" (no budget posture could be read). Empty
+  // when the intent layer resolved no mode.
+  string reason = 9;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -745,6 +762,11 @@ message ModelInfo {
   // (EP-9 C5). Unset when neither an attested deployment nor a cited source states
   // anything, which is "not stated", never "no".
   ProviderDataUse data_use = 12;
+
+  // The model the vendor names as this one's replacement. Set only on a deprecated model
+  // whose cited vendor page names one; empty means no sourced record names a replacement
+  // (F-t3-073). Display only: nothing switches to it, and a thread stays on the model it pinned.
+  string successor = 13;
 }
 
 // ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).

@@ -4782,6 +4782,8 @@ export function useChatController() {
             // Server-stamped or nothing: a usage frame without the stamp
             // leaves the turn without a processing line, never a guessed one.
             turn.servedBy = usage.servedBy
+            // Why the gateway routed the answer where it did (W5-073-b). A frame that states none leaves the turn's own as it was.
+            if (usage.routingDecision) turn.routingDecision = usage.routingDecision
             turn.confidence = usage.confidence
             // The turn's final total: it replaces every running total the progress frames gave.
             turn.meter = applyUsageTotal(turn.meter, usage)
@@ -4793,7 +4795,10 @@ export function useChatController() {
       onUsageProgress: (progress: Parameters<NonNullable<ChatStreamHandlers['onUsageProgress']>>[0]) => {
         setState((s) => {
           const turn = s.turns.find((t) => t.id === assistantId)
-          if (turn) turn.meter = applyUsageProgress(turn.meter, progress)
+          if (!turn) return
+          turn.meter = applyUsageProgress(turn.meter, progress)
+          // The answer's own progress frame may state the route too (W5-073-b); it is the same decision the usage frame states.
+          if (progress.routingDecision) turn.routingDecision = progress.routingDecision
         })
       },
       onTurnTiming: (timing: Parameters<NonNullable<ChatStreamHandlers['onTurnTiming']>>[0]) => {

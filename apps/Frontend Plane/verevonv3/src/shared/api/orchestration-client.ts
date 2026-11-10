@@ -914,6 +914,20 @@ export async function getLineageEdges(
   return normalizeLineageEdges(await getLineage(threadId, signal))
 }
 
+/**
+ * The child runs a parent run started, read from its thread's lineage (EP-2): every edge whose parent is
+ * `parentRunId`, in the order the lineage holds them. Read-only. An edge's `status` is the edge's own
+ * (`attached`/`detached`); the child run's own status is read with the run, not here.
+ */
+export async function listChildRuns(
+  threadId: string,
+  parentRunId: string,
+  signal?: AbortSignal,
+): Promise<LineageEdgeSummary[]> {
+  const edges = normalizeLineageEdges(await getLineage(threadId, signal))
+  return edges.filter((edge) => edge.parentRunId === parentRunId)
+}
+
 // ── Run questions (build plan WS14 S3) ───────────────────────────────────────
 // A question a run put to the person. It is its own store (`run_questions`), never an
 // approval: an answer is information and grants nothing. Dark until a later slice creates

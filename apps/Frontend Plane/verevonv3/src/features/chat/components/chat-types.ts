@@ -13,6 +13,7 @@ import {
   type ChatUsageProgressEvent,
   type ChatVerificationEvent,
   type CitationLocator,
+  type ChatRoutingDecision,
   type EffortLevel,
   type EffortProfile,
   type RecalledMemory,
@@ -446,6 +447,12 @@ export type ChatTurn = {
    * a stale or reconstructed one.
    */
   servedBy?: AnswerServedBy
+  /**
+   * Why the gateway routed the answer to its model (W5-073-b): the Verevon mode, complexity and reason, as closed
+   * tokens. Read from the usage frame while the turn streams and from the stored answer's metadata on a reload; absent
+   * when the gateway stated none, and then the Details popover shows no Routed line.
+   */
+  routingDecision?: ChatRoutingDecision
   /**
    * Where the turn's server time went (`turn_timing`). Absent when the gateway
    * did not report it; the metrics rows that read it are then not shown at all.

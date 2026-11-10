@@ -236,9 +236,30 @@ pub struct Decision {
     pub mode: VerevonMode,
     pub complexity: Complexity,
     pub posture: BudgetPosture,
+    /// True when a constrained posture moved the model one tier cheaper: the same
+    /// policy at a healthy budget would have answered with another model. The
+    /// reason code reads it, so a constrained posture that changed no model is not a move.
+    pub tier_shifted: bool,
     /// The strongest effort level the posture allows, see [`effort_cap`]. The
     /// decision only reports it; applying it is gated by the caller's switch.
     pub effort_cap: Option<Level>,
+}
+
+impl Decision {
+    /// Why the intent layer chose this model, as the closed reason token the route note carries
+    /// (F-t3-073). `budget_cheap_fallback` when an exhausted budget forced the cheap fallback,
+    /// `budget_tier_shift` when a constrained budget moved the call one tier cheaper,
+    /// `posture_unknown` when no posture could be read, and `mode_cell` otherwise: the policy cell
+    /// the mode names, chosen at a healthy budget.
+    #[must_use]
+    pub fn reason(&self) -> &'static str {
+        match self.posture {
+            BudgetPosture::Exhausted => "budget_cheap_fallback",
+            BudgetPosture::Unknown => "posture_unknown",
+            BudgetPosture::Constrained if self.tier_shifted => "budget_tier_shift",
+            BudgetPosture::Constrained | BudgetPosture::Healthy => "mode_cell",
+        }
+    }
 }
 
 /// Resolve a Verevon request to a concrete [`Decision`], or `None` when the
@@ -274,12 +295,16 @@ pub async fn resolve(
         }
         None => BudgetPosture::Unknown,
     };
-    let model = choose(policy, mode, complexity, posture).to_owned();
+    let chosen = choose(policy, mode, complexity, posture);
+    let tier_shifted = posture == BudgetPosture::Constrained
+        && choose(policy, mode, complexity, BudgetPosture::Healthy) != chosen;
+    let model = chosen.to_owned();
     Some(Decision {
         model,
         mode,
         complexity,
         posture,
+        tier_shifted,
         effort_cap: effort_cap(posture),
     })
 }

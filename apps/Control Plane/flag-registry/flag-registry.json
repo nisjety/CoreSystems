@@ -93,6 +93,18 @@
       ]
     },
     {
+      "name": "CAPABILITY_PERMISSION_RULES_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-074 org permission rules: execution-core names a call's target (a web host, a mail recipient's domain, a command's first token) to capability-core. Only the literal true turns it on, and off the request carries no target.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "execution-core", "env": "CAPABILITY_PERMISSION_RULES_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "CONTROL_PLANE_ENFORCEMENT",
       "kind": "choice",
       "owner": "frontend-plane",
@@ -442,6 +454,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_IMAGE_TOOL",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-IMG-3 generate_image as a typed chat tool: one image per call, four per reply, served by strict provider choice and priced per image. Never offered on a ZDR or waived turn. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_IMAGE_TOOL", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_MCP_PROBE",
       "kind": "switch",
       "owner": "model-plane",
@@ -462,6 +485,40 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_NAMED_AGENT_THREADS", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_REVIEW_RUN_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-t3-086 review as a run: a read-only reviewer over one text, answered on the inline path and stored nowhere. Off, the route is a 404. Only the literal true, in any case, turns it on.",
+      "codePath": "apps/Model Plane/rust/services/model-gateway/src/review_run.rs"
+    },
+    {
+      "name": "MODEL_GATEWAY_ROUTING_DECISION_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W5-073-b routing decision: the answer's verevon mode, complexity and reason on its usage frames, usage envelope and message metadata, and the Details popover's Routed line. Closed tokens only. Needs INFERENCE_ROUTE_NOTE on inference-core to state a note. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_ROUTING_DECISION_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_SIDE_CHAT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-069 side chat: a read-only question about one thread's transcript, answered and never stored (POST /v1/threads/:id/side-chat). Off, the route is a 404. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_SIDE_CHAT_ENABLED", "default": "false" }
       ]
     },
     {
@@ -576,6 +633,17 @@
       ]
     },
     {
+      "name": "SESSION_PROOF_WALKTHROUGH_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-050: GetRunProofBundle carries the run's browser walkthrough as screenshot references, never bytes. Off, or for a ZDR or waived run or an unreadable receipt, the section is omitted. Only the literal true enables it.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_PROOF_WALKTHROUGH_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "SESSION_THREAD_IMPORT_FOREIGN_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -621,6 +689,59 @@
       "declarations": [
         { "service": "inference-core", "env": "VERTEX_GEMINI_ENABLED", "default": "false" }
       ]
+    },
+    {
+      "name": "VITE_AGENT_RESULT_FEEDBACK",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": true,
+      "purpose": "Thumbs and reason chips on a durable run's result, an agent run or a scheduled run, rated by run id. Off, the control renders nothing. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ResultFeedback.tsx"
+    },
+    {
+      "name": "VITE_CHAT_CHANGED_FILES",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": true,
+      "purpose": "F-t3-076 changed-files card under each answer. Off, no answer shows a card. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChangedFilesCard.tsx"
+    },
+    {
+      "name": "VITE_CHAT_DOUBLE_ESCAPE_STOP",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-t3-077 double-Escape stop in chat. Off, a single Escape keeps its blur. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts"
+    },
+    {
+      "name": "VITE_CHAT_READER_POLISH",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": true,
+      "purpose": "F-t3-098 reader polish: the answer text size, a dyslexia-friendly font and transcript spacing. Off, nothing is written and the transcript renders as before. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/lib/reader-polish.ts"
+    },
+    {
+      "name": "VITE_SHELL_TOASTS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-t3-078 shell toasts: short notices that outlive the panel that raised them. Presentation only. Off, showing a toast does nothing. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/shared/ui/toast/toast-store.ts"
     },
     {
       "name": "WATCH_SWEEPER_ENABLED",

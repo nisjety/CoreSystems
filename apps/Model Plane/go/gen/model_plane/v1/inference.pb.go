@@ -1607,7 +1607,21 @@ type RouteNote struct {
 	// Which step of the `verevon-role` resolution chose the model (EP-13 S4):
 	// "table", "turn_model" or "cheap_fallback". Empty for every call that named
 	// no role.
-	RoleSource    string `protobuf:"bytes,6,opt,name=role_source,json=roleSource,proto3" json:"role_source,omitempty"`
+	RoleSource string `protobuf:"bytes,6,opt,name=role_source,json=roleSource,proto3" json:"role_source,omitempty"`
+	// The Verevon auto mode the intent layer resolved the call under: "budget",
+	// "balance" or "genius". Empty when the intent layer resolved no mode, as for
+	// a call that named a pinned model.
+	VerevonMode string `protobuf:"bytes,7,opt,name=verevon_mode,json=verevonMode,proto3" json:"verevon_mode,omitempty"`
+	// The complexity the intent layer estimated for the call: "simple",
+	// "moderate" or "complex". Empty when the intent layer resolved no mode.
+	Complexity string `protobuf:"bytes,8,opt,name=complexity,proto3" json:"complexity,omitempty"`
+	// Why the intent layer chose the model: "mode_cell" (the policy cell the mode
+	// names, at a healthy budget or under a constrained one that changed no
+	// model), "budget_tier_shift" (a constrained budget moved the call one tier
+	// cheaper), "budget_cheap_fallback" (an exhausted budget forced the cheap
+	// fallback) or "posture_unknown" (no budget posture could be read). Empty
+	// when the intent layer resolved no mode.
+	Reason        string `protobuf:"bytes,9,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1680,6 +1694,27 @@ func (x *RouteNote) GetRole() string {
 func (x *RouteNote) GetRoleSource() string {
 	if x != nil {
 		return x.RoleSource
+	}
+	return ""
+}
+
+func (x *RouteNote) GetVerevonMode() string {
+	if x != nil {
+		return x.VerevonMode
+	}
+	return ""
+}
+
+func (x *RouteNote) GetComplexity() string {
+	if x != nil {
+		return x.Complexity
+	}
+	return ""
+}
+
+func (x *RouteNote) GetReason() string {
+	if x != nil {
+		return x.Reason
 	}
 	return ""
 }
@@ -1960,7 +1995,11 @@ type ModelInfo struct {
 	// What the provider states about how it handles the request data sent to this model
 	// (EP-9 C5). Unset when neither an attested deployment nor a cited source states
 	// anything, which is "not stated", never "no".
-	DataUse       *ProviderDataUse `protobuf:"bytes,12,opt,name=data_use,json=dataUse,proto3" json:"data_use,omitempty"`
+	DataUse *ProviderDataUse `protobuf:"bytes,12,opt,name=data_use,json=dataUse,proto3" json:"data_use,omitempty"`
+	// The model the vendor names as this one's replacement. Set only on a deprecated model
+	// whose cited vendor page names one; empty means no sourced record names a replacement
+	// (F-t3-073). Display only: nothing switches to it, and a thread stays on the model it pinned.
+	Successor     string `protobuf:"bytes,13,opt,name=successor,proto3" json:"successor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2077,6 +2116,13 @@ func (x *ModelInfo) GetDataUse() *ProviderDataUse {
 		return x.DataUse
 	}
 	return nil
+}
+
+func (x *ModelInfo) GetSuccessor() string {
+	if x != nil {
+		return x.Successor
+	}
+	return ""
 }
 
 // ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).
@@ -6544,7 +6590,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"upstreamMs\x1a=\n" +
 	"\x0fUpstreamMsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xe5\x01\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xc0\x02\n" +
 	"\tRouteNote\x12%\n" +
 	"\x0ebudget_posture\x18\x01 \x01(\tR\rbudgetPosture\x12!\n" +
 	"\ftier_shifted\x18\x02 \x01(\bR\vtierShifted\x122\n" +
@@ -6552,7 +6598,12 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x0eapplied_effort\x18\x04 \x01(\tR\rappliedEffort\x12\x12\n" +
 	"\x04role\x18\x05 \x01(\tR\x04role\x12\x1f\n" +
 	"\vrole_source\x18\x06 \x01(\tR\n" +
-	"roleSource\"\xc7\x01\n" +
+	"roleSource\x12!\n" +
+	"\fverevon_mode\x18\a \x01(\tR\vverevonMode\x12\x1e\n" +
+	"\n" +
+	"complexity\x18\b \x01(\tR\n" +
+	"complexity\x12\x16\n" +
+	"\x06reason\x18\t \x01(\tR\x06reason\"\xc7\x01\n" +
 	"\x16CreateEmbeddingRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6571,7 +6622,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_used\x18\x04 \x01(\tR\fproviderUsed\"K\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bmodality\x18\x01 \x01(\tR\bmodality\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xca\x03\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xe8\x03\n" +
 	"\tModelInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
@@ -6585,7 +6636,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x11max_output_tokens\x18\n" +
 	" \x01(\rR\x0fmaxOutputTokens\x12\x1c\n" +
 	"\tlifecycle\x18\v \x01(\tR\tlifecycle\x12:\n" +
-	"\bdata_use\x18\f \x01(\v2\x1f.model_plane.v1.ProviderDataUseR\adataUse\"\xf2\x01\n" +
+	"\bdata_use\x18\f \x01(\v2\x1f.model_plane.v1.ProviderDataUseR\adataUse\x12\x1c\n" +
+	"\tsuccessor\x18\r \x01(\tR\tsuccessor\"\xf2\x01\n" +
 	"\x0fProviderDataUse\x12-\n" +
 	"\x10trains_on_inputs\x18\x01 \x01(\bH\x00R\x0etrainsOnInputs\x88\x01\x01\x12*\n" +
 	"\x0eretention_days\x18\x02 \x01(\x05H\x01R\rretentionDays\x88\x01\x01\x12&\n" +

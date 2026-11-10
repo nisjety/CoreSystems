@@ -6,6 +6,7 @@ import { listAvailableSkills, MAX_PICKED_SKILLS, type Skill } from '@/shared/api
 import { Paperclip, WandSparkles } from '@/shared/icons'
 import { ATTACHMENT_ACCEPT, ATTACHMENT_MAX_IMAGES, isImageAttachment, type AttachmentPolicyContext, visionAsPartsEnabled } from '@/features/chat/lib/attachment-policy'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
+import { chatLimitNoticesEnabled, limitNotice } from '@/features/chat/lib/limit-notices'
 import { getAttachmentPolicy, modelSupportsVision, type ModelInfo } from '@/shared/api/chat-client'
 import {
   formatChipSize,
@@ -238,6 +239,11 @@ export interface SpaceRoomComposerProps {
 export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const i18n = useI18n()
   const orgId = getSession().activeOrg?.id?.trim() ?? ''
+  // F-t3-078: under VITE_CHAT_LIMIT_NOTICES the spend refusal is worded for this reader's role. The room carries no spend
+  // figures, so none are passed; a member is pointed at an administrator, and only an owner or admin gets the ceiling link.
+  const spendLimit = () => (chatLimitNoticesEnabled()
+    ? limitNotice('budget_exceeded', getSession().activeOrg?.role, {}, i18n)
+    : undefined)
   const [selectedModel, setSelectedModel] = createSignal<AiModelSelection>(readAiModelSelection(orgId))
   // One catalogue request for the picker and for a send that has to wait for
   // it, as in the main composer: a catalogue model's tier rides every turn.
@@ -1363,10 +1369,12 @@ ${managers.map((m) => `@${m.label}`).join(' ')} ${request}`
               }
             >
               <p class="verevon-space-projection-error verevon-space-room-exchange__budget" role="alert">
-                {current().errorMessage}{' '}
-                <a href="/settings/quotas" link>
-                  {i18n.tr('Åpne Forbrukstak', 'Open Spend ceiling')}
-                </a>
+                {spendLimit()?.message ?? current().errorMessage}{' '}
+                <Show when={spendLimit()?.action !== 'contact_admin'}>
+                  <a href="/settings/quotas" link>
+                    {i18n.tr('Åpne Forbrukstak', 'Open Spend ceiling')}
+                  </a>
+                </Show>
               </p>
             </Show>
             {/* A stop is neither an error nor a finished answer. Whether the

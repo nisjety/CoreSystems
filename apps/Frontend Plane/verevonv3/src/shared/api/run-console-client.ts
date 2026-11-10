@@ -806,6 +806,35 @@ export type ProofRunSummary = {
   createdAt?: string
 }
 
+/**
+ * One browser action of a run's walkthrough, joined with the observation recorded after it (F-t3-050).
+ * A reference only: the screenshot is read through the existing artifact path by `screenshotRef`.
+ */
+export type ProofBrowserWalkthroughStep = {
+  /** Per-action id, unique within its plan (for example `act_0001`). */
+  actionId: string
+  /** Action type slug (goto, click, type, extract, observe, scroll, wait). Absent when only the observation was recorded. */
+  actionType?: string
+  /** Page URL after the action settled, scrubbed where the executor emits it. */
+  pageUrl?: string
+  pageTitle?: string
+  /** Observation status (success, failed, timeout, blocked). Absent while the action has no observation yet. */
+  status?: string
+  /** Screenshot artifact reference id, never bytes. Absent when no screenshot was persisted for the step. */
+  screenshotRef?: string
+  /** When the page state was observed, or the dispatch time when no observation exists yet. */
+  at?: string
+}
+
+/**
+ * A run's browser walkthrough: its browser actions in dispatch order. A run with no browser actions carries
+ * an empty walkthrough. When `truncated`, the steps are the earliest ones and nothing past them is claimed.
+ */
+export type ProofBrowserWalkthrough = {
+  steps: ProofBrowserWalkthroughStep[]
+  truncated: boolean
+}
+
 export type ProofBundle = {
   bundleVersion?: number
   runId?: string
@@ -816,6 +845,11 @@ export type ProofBundle = {
   run: ProofRunSummary | null
   approvals: ProofApproval[]
   unavailable: ProofUnavailableSection[]
+  /**
+   * The run's browser walkthrough. Absent when the bundle omits it; its `unavailable` entry for
+   * "walkthrough" then says why.
+   */
+  browserWalkthrough?: ProofBrowserWalkthrough
 }
 
 function num(value: unknown): number | undefined {
@@ -902,6 +936,38 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
 
+/** A step without an action id cannot be told apart from its neighbours, so it is dropped rather than guessed at. */
+function normalizeWalkthroughStep(raw: unknown): ProofBrowserWalkthroughStep | null {
+  const value = record(raw)
+  if (!value) return null
+  const actionId = str(value.action_id) ?? str(value.actionId)
+  if (!actionId) return null
+  return {
+    actionId,
+    actionType: str(value.action_type) ?? str(value.actionType),
+    pageUrl: str(value.page_url) ?? str(value.pageUrl),
+    pageTitle: str(value.page_title) ?? str(value.pageTitle),
+    status: str(value.status),
+    screenshotRef: str(value.screenshot_ref) ?? str(value.screenshotRef),
+    at: normalizeOptionalIsoTimestamp(str(value.at)),
+  }
+}
+
+/**
+ * Malformed steps are dropped. Only an explicit `false` claims the walkthrough is complete; anything else
+ * reads as incomplete.
+ */
+function normalizeBrowserWalkthrough(raw: unknown): ProofBrowserWalkthrough | null {
+  const value = record(raw)
+  if (!value) return null
+  return {
+    steps: list(value.steps)
+      .map(normalizeWalkthroughStep)
+      .filter((item): item is ProofBrowserWalkthroughStep => item !== null),
+    truncated: value.truncated !== false,
+  }
+}
+
 function normalizeBundle(raw: unknown): ProofBundle | null {
   const value = record(raw)
   if (!value) return null
@@ -918,6 +984,7 @@ function normalizeBundle(raw: unknown): ProofBundle | null {
     unavailable: list(value.unavailable)
       .map(normalizeUnavailable)
       .filter((item): item is ProofUnavailableSection => item !== null),
+    browserWalkthrough: normalizeBrowserWalkthrough(value.browser_walkthrough ?? value.browserWalkthrough) ?? undefined,
   }
 }
 

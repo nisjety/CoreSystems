@@ -72,6 +72,12 @@ type Server struct {
 	// SetRetention. Off, none of the routes is mounted.
 	retentionOn bool
 	retention   retentionService
+
+	// orgFlagsOn mounts the organisation flag routes (W5-079-b, ORG_FLAGS_ENABLED, only
+	// "true" turns it on); orgFlags is set with the service. Off, none of the routes is
+	// mounted.
+	orgFlagsOn bool
+	orgFlags   orgFlagService
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -105,6 +111,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		s.agentPolicy = orgService
 		s.callerRoles = orgService
 		s.webPolicy = orgService
+		s.orgFlags = orgService
 	}
 	if siemDestinationsEnabled(os.Getenv) {
 		s.siemEnabled = true
@@ -155,6 +162,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	// (ValidateOrgKeysConfig).
 	s.keysOn = orgkeys.Enabled(os.Getenv)
 	s.retentionOn = retention.Enabled(os.Getenv)
+	s.orgFlagsOn = orgFlagsEnabled(os.Getenv)
 	s.setupRoutes()
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
@@ -250,6 +258,15 @@ func (s *Server) setupRoutes() {
 	s.router.GET("/orgs/:id/web-policy", s.getWebPolicy)
 	s.router.PUT("/orgs/:id/web-policy", guard, s.putWebPolicy)
 	s.router.GET("/orgs/:id/web-policy/history", s.listWebPolicyHistory)
+
+	// Organisation flag values (W5-079-b): the organisation's value for each
+	// org-overridable presentation flag. Every path answers 404 until ORG_FLAGS_ENABLED
+	// is "true". Any active member reads them (org:read:self). An owner or admin writes
+	// them (org:settings:write:self), and the handler re-checks the role against the
+	// membership table. The guard is the second layer the other mutations use.
+	flagsGate := s.requireOrgFlagsEnabled()
+	s.router.GET("/orgs/:id/flags", flagsGate, s.getOrgFlags)
+	s.router.PUT("/orgs/:id/flags/:name", flagsGate, guard, s.putOrgFlag)
 
 	// SIEM destination config (WS06-S7): owner/admin CRUD. Every path answers 404
 	// until ORG_SIEM_DESTINATIONS_ENABLED is on. The handlers check the caller's
@@ -347,6 +364,10 @@ func (s *Server) setupRoutes() {
 	// (WS7.H, read by WS7.I). Own scope org:web-policy:read:any, held by auth-core
 	// alone; no-store.
 	internal.GET("/orgs/:orgId/web-policy", s.getWebPolicyInternal)
+	// One organisation's flag values for a backend reader (W5-079-b). Own scope
+	// org:flags:read:any, granted to no credential in code; no-store. Off, the path
+	// answers 404 through the same gate as the member routes.
+	internal.GET("/orgs/:orgId/flags", flagsGate, s.getOrgFlagsInternal)
 	// The exporter's read of every enabled SIEM destination, secret unsealed
 	// (WS06-S7). Own scope org:siem:read:any, held by audit-core only; no-store.
 	// Registered even while the feature is off so the path cannot fall through to

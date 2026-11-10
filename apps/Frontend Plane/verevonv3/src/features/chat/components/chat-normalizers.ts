@@ -1,5 +1,12 @@
 import { ATTACHMENT_MAX_TOTAL_BYTES } from '@/features/chat/lib/attachment-policy'
 import {
+  chatLimitNoticesEnabled,
+  isLimitCode,
+  type LimitAction,
+  type LimitCode,
+  limitNotice,
+} from '@/features/chat/lib/limit-notices'
+import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
@@ -35,6 +42,7 @@ import {
   readClientValue,
   writeClientValue,
 } from '@/shared/session/client-storage'
+import { getSession } from '@/shared/session/session-store'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
 import { en as enStrings } from '@/shared/i18n/en'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
@@ -93,6 +101,8 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     retrievalScope: msg.retrievalScope,
     contextRefs: msg.contextRefs,
     researchPlan: msg.researchPlan,
+    // The route the stored answer was served on (W5-073-b), when the server kept one; no key for a turn that kept none.
+    ...(msg.routingDecision ? { routingDecision: msg.routingDecision } : {}),
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -468,6 +478,48 @@ function attachmentRefusalMessage(code: string, tr: Translate): string {
 }
 
 /**
+ * The reader's control for a limit notice. A wait or a retry is a control. `contact_admin` and `open_billing` name a
+ * person or a page in the words, and a stream has no billing control to offer, so neither is a button.
+ */
+function limitStreamAction(action: LimitAction): StreamFailureAction {
+  if (action === 'wait' || action === 'retry') return action
+  return 'none'
+}
+
+/**
+ * A limit refusal under VITE_CHAT_LIMIT_NOTICES (F-t3-078), worded by `limitNotice` for the reader's role. The server's
+ * own text is never shown: a `budget_exceeded` message repeats the organisation's spend and cap. Nothing was saved, so
+ * what streamed is not the answer. Only a rate limit offers a retry; when the server gives a Retry-After, that is a wait.
+ */
+function limitStreamPresentation(
+  code: LimitCode,
+  details: StreamFailureDetails,
+  now: number,
+  tr: (noText: string, enText: string) => string,
+): StreamFailurePresentation {
+  const delay = details.retryAfterMs
+  const retryAfterSec = delay !== undefined && Number.isFinite(delay) && delay > 0
+    ? Math.max(1, Math.ceil(delay / 1000))
+    : undefined
+  const notice = limitNotice(code, getSession().activeOrg?.role, { retryAfterSec }, { tr })
+  const action = limitStreamAction(notice.action)
+  if (code !== 'rate_limited') {
+    return { message: notice.message, unsaved: true, unavailable: false, action }
+  }
+  // The stream reports `rate_limited` only from the ChatGPT subscription route, which never answers with another
+  // model, so the reader is told that as well.
+  const retryAt = notice.retryAfterSec === undefined ? undefined : instantAfter(notice.retryAfterSec * 1000, now)
+  return {
+    message: `${notice.message} ${tr('Ingen annen modell ble brukt.', 'No other model was used.')}`,
+    unsaved: true,
+    unavailable: true,
+    serviceTitle: subscriptionServiceTitle(tr),
+    action,
+    ...(retryAt !== undefined ? { retryAt } : {}),
+  }
+}
+
+/**
  * Presentation for a server-reported stream failure, by its code.
  *
  * Only the codes that change what the reader must be told are named; every
@@ -507,6 +559,8 @@ function attachmentRefusalMessage(code: string, tr: Translate): string {
  * offers none. `prompt_too_long`,
  * `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
+ * With VITE_CHAT_LIMIT_NOTICES on, `budget_exceeded`, `quota_exceeded`, `run_ceiling_reached` and `rate_limited` are
+ * worded for the reader's role by `limitNotice` instead, and the server's text is not shown for them.
  */
 export function streamFailurePresentation(
   code: string | undefined,
@@ -520,6 +574,7 @@ export function streamFailurePresentation(
   if (isModelEntitlementCode(code)) return modelEntitlementStreamPresentation(code, tr)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
+  if (isLimitCode(code) && chatLimitNoticesEnabled()) return limitStreamPresentation(code, details, now, tr)
   switch (code) {
     case 'subscription_usage_limit':
       return usageLimitPresentation(tr, details, now)
@@ -1106,6 +1161,8 @@ export function mergeServerTurnsWithCachedMetadata(
       // the message metadata; the messages read may carry the chips too, and wins when it does.
       contextRefs: serverTurn.contextRefs ?? cachedTurn.contextRefs,
       researchPlan: serverTurn.researchPlan ?? cachedTurn.researchPlan,
+      // The route is stated by the usage frame while the turn streams and by the stored metadata after a reload; either keeps it.
+      routingDecision: serverTurn.routingDecision ?? cachedTurn.routingDecision,
       // Stream-only too: the server's message never carries the suggestion card.
       connectorSuggestion: serverTurn.connectorSuggestion ?? restoredConnectorSuggestion(cachedTurn.connectorSuggestion),
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,

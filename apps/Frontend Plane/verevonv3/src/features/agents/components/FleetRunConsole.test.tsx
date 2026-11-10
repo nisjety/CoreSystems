@@ -41,7 +41,7 @@ describe('FleetRunConsole', () => {
   it('renders N members with distinct live views and budget bar', async () => {
     stubFleetFetch()
 
-    render(() => <FleetRunConsole fleetId="fleet_abc" />)
+    render(() => <FleetRunConsole threadId="thread_abc" runId="run_parent" />)
 
     // Fleet header
     expect(await screen.findByText(/fleet_abc/)).toBeTruthy()
@@ -60,7 +60,7 @@ describe('FleetRunConsole', () => {
 
     render(() => (
       <I18nProvider>
-        <FleetRunConsole fleetId="fleet_abc" />
+        <FleetRunConsole threadId="thread_abc" runId="run_parent" />
       </I18nProvider>
     ))
 
@@ -75,7 +75,7 @@ describe('FleetRunConsole', () => {
 
     render(() => (
       <I18nProvider>
-        <FleetRunConsole fleetId="fleet_abc" />
+        <FleetRunConsole threadId="thread_abc" runId="run_parent" />
       </I18nProvider>
     ))
 

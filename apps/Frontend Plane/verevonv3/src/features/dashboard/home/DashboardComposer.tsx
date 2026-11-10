@@ -139,6 +139,7 @@ import {
 	listChatThreads,
 	listModels,
 	modelEffortLevels,
+	modelReplacement,
 	modelSupportsAgentic,
 	modelSupportsVision,
 	saveChatThreadSnapshot,
@@ -3567,6 +3568,13 @@ export function DashboardComposer(props: {
 															</span>
 															<span>
 																{model.name}
+																<Show when={modelReplacement(models() ?? [], model)}>
+																	{(replacement) => (
+																		<span class="dashboard-composer-model-successor">
+																			{i18n.tr(`Erstattes av ${replacement().name}`, `Replaced by ${replacement().name}`)}
+																		</span>
+																	)}
+																</Show>
 																<Show when={formatContextWindow(model.contextWindowTokens)}>
 																	{(windowLabel) => (
 																		<span class="dashboard-composer-model-context">

@@ -23,7 +23,7 @@ import {
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
-import { parseChatHistoryAction, threadExportInput, threadImportInput } from '@/shared/actions/chat-history'
+import { parseChatHistoryAction, threadExportInput, threadImportInput, threadSideChatAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
@@ -828,6 +828,23 @@ export type ChatAttachmentEvent = {
  */
 export type ChatCostBasis = 'metered' | 'subscription'
 
+/**
+ * Why the gateway routed an answer to the model it did (W5-073-b): the Verevon mode, the estimated complexity and the
+ * reason, each a closed token, and the role for a side task. A token this build does not know is shown as nothing, so a
+ * newer gateway never prints a raw code. Carried on the usage frames and the answer's stored metadata, only where the
+ * gateway's routing-decision switch is on.
+ */
+export type ChatRoutingDecision = {
+  /** The Verevon mode the call ran under: `budget`, `balance` or `genius`. */
+  mode?: string
+  /** The estimated complexity: `simple`, `moderate` or `complex`. */
+  complexity?: string
+  /** Why the model was chosen: `mode_cell`, `budget_tier_shift`, `budget_cheap_fallback` or `posture_unknown`. */
+  reason?: string
+  /** The role-table purpose of a side task, such as `title`; absent for the answer itself. */
+  role?: string
+}
+
 export type ChatUsageEvent = {
   inputTokens?: number
   outputTokens?: number
@@ -850,6 +867,8 @@ export type ChatUsageEvent = {
    * fills the gap from a model name.
    */
   servedBy?: AnswerServedBy
+  /** Why the gateway routed the answer where it did (W5-073-b). Absent unless the gateway's routing-decision switch is on. */
+  routingDecision?: ChatRoutingDecision
 }
 
 export type ChatCostByCategory = {
@@ -895,6 +914,8 @@ export type ChatUsageProgressEvent = {
   warning?: 'run_ceiling_80' | 'run_ceiling_reached'
   /** How the budget moved this call's route (WS27-S7), stated only on a call it moved. */
   routing?: 'tier_shifted' | 'cheap_fallback'
+  /** The answer's routing decision (W5-073-b), stated only on the answer's own progress frame. */
+  routingDecision?: ChatRoutingDecision
 }
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
@@ -946,6 +967,7 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
     fraction: num(payload.fraction),
     warning: runCeilingWarningValue(payload.warning),
     routing: routingValue(payload.routing),
+    ...routingDecisionField(payload.routing_decision),
   }
 }
 
@@ -953,6 +975,21 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
 function servedByField(payload: Record<string, unknown>): { servedBy?: AnswerServedBy } {
   const servedBy = normalizeAnswerServedBy(payload)
   return servedBy ? { servedBy } : {}
+}
+
+/**
+ * The `routingDecision` key of a usage frame, or of a stored answer's metadata, read by its closed keys and nothing else
+ * (W5-073-b). A decision that names none of them is no decision, so the key is left out rather than set empty.
+ */
+function routingDecisionField(value: unknown): { routingDecision?: ChatRoutingDecision } {
+  const record = objectValue(value)
+  if (!record) return {}
+  const decision: ChatRoutingDecision = {}
+  for (const key of ['mode', 'complexity', 'reason', 'role'] as const) {
+    const token = str(record[key])
+    if (token) decision[key] = token
+  }
+  return Object.keys(decision).length > 0 ? { routingDecision: decision } : {}
 }
 
 export type TurnTimingOutcome = 'completed' | 'failed' | 'cancelled' | 'timeout'
@@ -1408,6 +1445,8 @@ export type ChatMessage = {
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /** The plan an assistant plan turn ended with (EP-2 S5), from `metadata.research_plan`: sub-queries and questions only. */
   researchPlan?: ChatResearchPlanEvent
+  /** Why the gateway routed this answer where it did (W5-073-b), from `metadata.routing_decision`. Absent for a turn recorded without one. */
+  routingDecision?: ChatRoutingDecision
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -1700,6 +1739,12 @@ export type ModelInfo = {
   maxOutputTokens?: number
   /** Vendor lifecycle stage (`lifecycle`). `undefined` when the catalogue names none. */
   lifecycle?: ModelLifecycle
+  /**
+   * The model the vendor names as this one's replacement (`successor` on `/v1/models`), set on
+   * a deprecated model only. The picker names it; nothing switches to it. `undefined` when the
+   * catalogue names none.
+   */
+  successor?: string
   /**
    * The catalogue's list price for a chat model (`price` on `/v1/models`). Present only when
    * the gateway's list-price switch is on and the catalogue names a price.
@@ -2574,6 +2619,7 @@ function dispatchAgUiEvent(
             unpricedCalls: num(value.unpriced_calls),
             costByCategory: costByCategoryValue(value.cost_by_category),
             ...servedByField(value),
+            ...routingDecisionField(value.routing_decision),
           })
           break
         case 'usage_progress':
@@ -2847,6 +2893,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         unpricedCalls: num(usage.unpriced_calls),
         costByCategory: costByCategoryValue(usage.cost_by_category),
         ...servedByField(payload),
+        ...routingDecisionField(usage.routing_decision),
       })
       break
     }
@@ -4056,6 +4103,58 @@ async function postChatBranchMove(
 }
 
 /**
+ * One answer to a side question (F-t3-069). `costUsd` is null on a zero-retention turn, which is not priced.
+ */
+export type SideChatAnswer = {
+  answer: string
+  modelUsed: string
+  usage: {
+    inputTokens: number
+    outputTokens: number
+    costUsd: number | null
+  }
+}
+
+/**
+ * Ask one read-only question about the open conversation (F-t3-069). Model Gateway answers from a snapshot of the
+ * thread's active path and keeps nothing, so the answer exists only where the caller holds it. Resolves to `null`
+ * while the gateway's side-chat switch is off (404 `side_chat_disabled`). Other refusals reject with the server's
+ * typed `ApiError`, such as `scope_not_available_in_space` for a Space thread and `delegated_auth_unavailable` while
+ * the model's credentials are unavailable. The question is checked against the action contract before it is sent.
+ */
+export async function askSideChat(threadId: string, question: string): Promise<SideChatAnswer | null> {
+  const request = threadSideChatAction.parse({ type: 'thread.side_chat', threadId, question })
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(
+      `/api/v1/chat/threads/${encodeURIComponent(request.threadId)}/side-chat`,
+      { method: 'POST', body: JSON.stringify({ question: request.question }) },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404 && error.code === 'side_chat_disabled') return null
+    throw error
+  }
+  return normalizeSideChatAnswer(raw)
+}
+
+/** The gateway's answer, read defensively: an answer with no text is a failed answer, not an empty one. */
+function normalizeSideChatAnswer(raw: unknown): SideChatAnswer {
+  const record = objectValue(raw)
+  const answer = str(record?.answer)?.trim()
+  if (!answer) throw new ApiError('The side chat did not return an answer.', 502, 'side_chat_no_answer')
+  const usage = objectValue(record?.usage)
+  return {
+    answer,
+    modelUsed: str(record?.model_used) ?? '',
+    usage: {
+      inputTokens: frameCount(usage?.input_tokens),
+      outputTokens: frameCount(usage?.output_tokens),
+      costUsd: num(usage?.cost_usd) ?? null,
+    },
+  }
+}
+
+/**
  * A revision the person wrote in the Output panel (EP-3 S4), as the edit and restore routes return it.
  * `editorKind` is `user` for an edit and `restore` for a restore; `restoredFromVersion` names the copied version.
  */
@@ -4651,6 +4750,8 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       ...contextRefsField(objectValue(item.metadata)?.context_refs),
       // The plan an assistant plan turn ended with (EP-2 S5), read by name like the chips above.
       ...researchPlanField(objectValue(item.metadata)?.research_plan ?? item.research_plan),
+      // The route the answer was served on (W5-073-b), read by name like the plan above; absent on a turn recorded before it.
+      ...routingDecisionField(objectValue(item.metadata)?.routing_decision ?? item.routing_decision),
       // Turn metadata the backend flattens onto the message. Present only for
       // assistant turns recorded since the score became durable, so a missing
       // field means "not recorded" — never a score of zero.
@@ -5195,6 +5296,7 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         contextWindowTokens: normalizeTokenCount(item.context_window_tokens),
         maxOutputTokens: normalizeTokenCount(item.max_output_tokens),
         lifecycle: normalizeLifecycle(item.lifecycle),
+        successor: str(item.successor) || undefined,
         price: normalizeModelPrice(item.price),
         dataUse: normalizeModelDataUse(item.data_use),
       }
@@ -5371,6 +5473,20 @@ export function isChatModel(model: ModelInfo): boolean {
   if (model.modality) return CHAT_MODALITIES.has(model.modality)
   const haystack = `${model.id} ${model.name}`
   return !NON_CHAT_NAME_PATTERNS.some((re) => re.test(haystack))
+}
+
+/**
+ * The model a deprecated catalogue entry names as its replacement, with the name the catalogue
+ * gives it (its id when the catalogue does not list it). `undefined` for any other entry, and for
+ * a deprecated entry whose catalogue names none. Display only: nothing switches to the replacement.
+ */
+export function modelReplacement(
+  catalogue: readonly ModelInfo[],
+  model: ModelInfo,
+): { id: string; name: string } | undefined {
+  const id = model.successor
+  if (model.lifecycle !== 'deprecated' || !id) return undefined
+  return { id, name: catalogue.find((entry) => entry.id === id)?.name ?? id }
 }
 
 /** True for models a user should select deliberately (opus/sonnet/gpt-5.x …). */

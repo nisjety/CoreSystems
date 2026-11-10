@@ -65,6 +65,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/undo-rewind",
             post(json_handlers::undo_rewind_thread),
         )
+        // A side question about this conversation (F-t3-069): one read-only answer from Model Gateway, which keeps
+        // nothing. 404 `side_chat_disabled` from Model Gateway while its switch is off.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/side-chat",
+            post(json_handlers::ask_side_chat),
+        )
         // Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
         .route(
             "/api/v1/chat/threads/{thread_id}/artifacts",

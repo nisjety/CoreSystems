@@ -438,6 +438,8 @@ pub(crate) fn tool_artifact_events(
         "code_interpreter" => code_interpreter_events(outcome, office),
         // The manifest as a `deck` artifact, then the built pptx through the arm above (EP-5 S2).
         "deck" => crate::deck_tool::deck_events(outcome, office),
+        // The generated image as an `image` artifact, and the summary the model reads in its place (W4-IMG-3).
+        "generate_image" => crate::image_tool::image_events(outcome),
         _ => (Vec::new(), None),
     }
 }
@@ -3848,6 +3850,24 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // One generated image per call, served by inference-core's strict provider choice (W4-IMG-3). Refused on a
+        // zero-retention or waived turn, and on a run that holds no image budget (`image_tool::hold_turn`). With the
+        // switch off the name is an unknown tool, as it was before the tool existed.
+        "generate_image" if crate::image_tool::enabled() => {
+            crate::image_tool::dispatch(
+                &crate::image_tool::ImageCall {
+                    state,
+                    run_id,
+                    org_id,
+                    user_id,
+                    inference_bearer,
+                    zdr,
+                    retention_mode: data_plane_mode.is_some(),
+                },
+                call,
+            )
+            .await
+        }
         // The canvas tools do no I/O: they validate, then hand the content back
         // for the loop to turn into an `artifact` event. Keeping them in
         // `dispatch_tool` (rather than special-casing them in the loop) means
@@ -5926,9 +5946,13 @@ fn writes_document(tool: &str) -> bool {
 
 /// Whether a call may be cut off at a source-bound phase's deadline: only a
 /// read. A document write finishes in place, and a browser run or sandbox job
-/// has its own lifecycle, which no longer waiting for it would not end.
+/// has its own lifecycle, which no longer waiting for it would not end. An image
+/// the provider is making is billed whether or not the turn still waits for it,
+/// so it finishes too (W4-IMG-3).
 fn stops_at_validation_deadline(tool: &str) -> bool {
-    !writes_document(tool) && !matches!(tool, "browser_agent" | "code_interpreter" | "deck")
+    !writes_document(tool)
+        && !matches!(tool, "browser_agent" | "code_interpreter" | "deck")
+        && !crate::image_tool::is_billed(tool)
 }
 
 /// What the model is told about a read cut off at that deadline.
@@ -5974,8 +5998,10 @@ where
         }
         let result = attempt().await;
         let error = result.error.as_deref().unwrap_or_default();
-        let transient =
-            result.error.is_some() && crate::tool_retry::is_transient_tool_failure(error);
+        // A billed call is never replayed: a second attempt at an image the provider already made bills it twice.
+        let transient = !crate::image_tool::is_billed(tool)
+            && result.error.is_some()
+            && crate::tool_retry::is_transient_tool_failure(error);
         if number >= crate::tool_retry::MAX_TOOL_ATTEMPTS || !transient {
             return result;
         }
@@ -6873,6 +6899,28 @@ pub(crate) fn route_shift(
     } else {
         None
     }
+}
+
+/// The routing decision a call's route note states (W5-073-b): the Verevon mode, the complexity and the
+/// reason the intent layer gave, and the role and its source for a `verevon-role` call. Closed tokens only,
+/// read from the note's own fields, so it carries no content on any turn. An empty field is left out, and a
+/// note that states none of them (a pinned model, or an unbudgeted call) yields no decision at all.
+pub(crate) fn route_decision(
+    note: Option<&mp_contracts::model_plane::v1::RouteNote>,
+) -> Option<Value> {
+    let note = note?;
+    let decision: serde_json::Map<String, Value> = [
+        ("mode", note.verevon_mode.as_str()),
+        ("complexity", note.complexity.as_str()),
+        ("reason", note.reason.as_str()),
+        ("role", note.role.as_str()),
+        ("role_source", note.role_source.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, token)| !token.is_empty())
+    .map(|(key, token)| (key.to_owned(), Value::String(token.to_owned())))
+    .collect();
+    (!decision.is_empty()).then_some(Value::Object(decision))
 }
 
 /// Records one provider call the tool phase made and streams the turn's running total after it, when the
@@ -8938,6 +8986,18 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         data_plane_mode.is_some(),
     );
     let tools = crate::thread_reference_tools::tools_for_turn(tools, thread_refs_offered);
+    // The image tool (W4-IMG-3) was offered by the chat composer on a persistent turn. The org's capability policy has the
+    // last word, read once per turn with the person's own capability bearer, and the run's image budget is held only for a
+    // tool that is admitted. A subscription turn is never admitted: an image is metered API spend, which a subscription
+    // turn does not carry. A turn the composer did not offer it reads nothing and holds nothing.
+    let image_admitted = crate::image_tool::enabled()
+        && crate::image_tool::offers(&tools)
+        && !zdr
+        && data_plane_mode.is_none()
+        && subscription_connection_id.trim().is_empty()
+        && crate::image_tool::policy_admits(state, capability_bearer).await;
+    let _image_turn = crate::image_tool::hold_turn(run_id, image_admitted);
+    let tools = crate::image_tool::tools_for_turn(tools, image_admitted);
     let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
@@ -10261,6 +10321,9 @@ mod tests {
             applied_effort: String::new(),
             role: String::new(),
             role_source: String::new(),
+            verevon_mode: String::new(),
+            complexity: String::new(),
+            reason: String::new(),
         };
         assert_eq!(route_shift(None), None);
         assert_eq!(route_shift(Some(&note(false, false))), None);

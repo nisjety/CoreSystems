@@ -5,8 +5,10 @@ import { z } from 'zod'
 // here before it sends anything. The archive pair and `thread.search` are wired;
 // `thread.export` is declared for the export surface (EP-12 S11); the other actions
 // are declared so the later history slices extend this union instead of inventing
-// parallel names. `thread.search` and `thread.export` only read; every other action
-// here changes server state, so none of them is a local presentation toggle.
+// parallel names. `thread.search`, `thread.export` and `thread.side_chat` only read.
+// `thread.spin_off` creates nothing on the server: the browser opens a draft, and nothing
+// is sent until the person sends it. Every other action here changes server state, so
+// none of them is a local presentation toggle.
 const threadId = z.string().trim().min(1).max(200)
 const messageId = z.string().trim().min(1).max(200)
 
@@ -39,6 +41,21 @@ export const threadArchiveAction = z.object({ type: z.literal('thread.archive'),
 export const threadStarAction = z.object({ type: z.literal('thread.star'), threadId, starred: z.boolean() })
 export const threadMarkUnreadAction = z.object({ type: z.literal('thread.mark_unread'), threadId })
 
+// A side question (F-t3-069) only reads: Model Gateway answers from a snapshot of the thread and keeps nothing.
+export const threadSideChatAction = z.object({
+  type: z.literal('thread.side_chat'),
+  threadId,
+  question: z.string().trim().min(1).max(2000),
+})
+
+// A spin-off (F-t3-069) creates nothing server-side. The browser opens a new draft chat with this text in its
+// composer, and the chat exists on the server only once the person sends it.
+export const threadSpinOffAction = z.object({
+  type: z.literal('thread.spin_off'),
+  threadId,
+  draft: z.string().trim().min(1).max(4000),
+})
+
 export const chatHistoryActionSchema = z.discriminatedUnion('type', [
   threadArchiveAction,
   z.object({ type: z.literal('thread.unarchive'), threadId }),
@@ -56,6 +73,8 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
   // An undo returns the leaf to the turn a rewind left. It moves nothing the rewind did not already move, so it
   // needs no confirmation of its own.
   z.object({ type: z.literal('thread.undo_rewind'), threadId, messageId }),
+  threadSideChatAction,
+  threadSpinOffAction,
 ])
 
 // The registry's input for the same export: the three fields and nothing else. The owner is the

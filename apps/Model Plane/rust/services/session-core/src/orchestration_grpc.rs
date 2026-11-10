@@ -1627,15 +1627,87 @@ fn retention_reason(provenance: &store::RunProvenanceRow) -> String {
     }
 }
 
+/// The switch of the browser walkthrough in a run's proof bundle (F-t3-050). Default off; only
+/// the literal `true` turns it on.
+const PROOF_WALKTHROUGH_ENV: &str = "SESSION_PROOF_WALKTHROUGH_ENABLED";
+
+/// Whether a run's proof bundle may carry the browser walkthrough. Read on each call, as the
+/// other orchestration switches are.
+fn proof_walkthrough_enabled() -> bool {
+    proof_walkthrough_switch_from(std::env::var(PROOF_WALKTHROUGH_ENV).ok().as_deref())
+}
+
+/// The strict reading of the switch: the literal `true`, with surrounding space ignored.
+fn proof_walkthrough_switch_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "true")
+}
+
+/// Why a run's proof bundle omits its browser walkthrough, or `None` when it may carry one. The
+/// switch is read first. The walkthrough is assembled only for a persistent run, read from the
+/// run's own receipt: a zero-retention or waived run never carries one, and a receipt this plane
+/// cannot read claims nothing.
+fn proof_walkthrough_omission(
+    enabled: bool,
+    provenance: &store::RunProvenanceRow,
+) -> Option<String> {
+    if !enabled {
+        return Some(
+            "The browser walkthrough is not included: it is not enabled on this deployment."
+                .to_string(),
+        );
+    }
+    match retention_receipt::RunRetention::from_storage(
+        &provenance.retention_class,
+        provenance.waiver_ack_id.clone(),
+        provenance.waiver_connection_id.clone(),
+    ) {
+        Ok(retention) if retention.class == retention_receipt::RetentionClass::Persistent => None,
+        Ok(retention) => Some(format!(
+            "Retention at run start was {}, so the run's browser walkthrough is not included.",
+            retention.class.as_str()
+        )),
+        Err(_) => Some(
+            "The run's retention receipt could not be read, so nothing is claimed for its browser \
+             walkthrough."
+                .to_string(),
+        ),
+    }
+}
+
+/// The walkthrough steps on the wire. References only: a step names its screenshot by
+/// `screenshot_ref` and never carries bytes.
+fn browser_walkthrough_proto(section: store::BrowserWalkthroughSteps) -> proto::BrowserWalkthrough {
+    proto::BrowserWalkthrough {
+        steps: section
+            .steps
+            .into_iter()
+            .map(|step| proto::BrowserWalkthroughStep {
+                action_id: step.action_id,
+                action_type: step.action_type,
+                page_url: step.page_url,
+                page_title: step.page_title,
+                status: step.status,
+                screenshot_ref: step.screenshot_ref,
+                at: Some(ts(step.at)),
+            })
+            .collect(),
+        truncated: section.truncated,
+    }
+}
+
 /// Build a run's proof bundle from already-fetched, already-tenant-scoped
 /// rows. Pure so the evidence-shaping rules — especially the ones about never
 /// inventing a stage that did not happen — are unit-testable without Postgres.
+///
+/// `walkthrough` is the browser walkthrough section, or the reason it is omitted. An omitted
+/// section is named in `unavailable`, like every other dimension this bundle does not claim.
 fn build_run_proof_bundle(
     run_id: &str,
     org_id: &str,
     provenance: &store::RunProvenanceRow,
     approvals: &[store::ApprovalRow],
     evidence: &[store::ContinuationEvidenceRow],
+    walkthrough: Result<proto::BrowserWalkthrough, String>,
 ) -> proto::RunProofBundle {
     let approvals = approvals
         .iter()
@@ -1661,6 +1733,18 @@ fn build_run_proof_bundle(
         })
         .collect();
 
+    let mut unavailable = unavailable_proof_sections(provenance);
+    let browser_walkthrough = match walkthrough {
+        Ok(section) => Some(section),
+        Err(reason) => {
+            unavailable.push(proto::UnavailableSection {
+                section: "walkthrough".to_string(),
+                reason,
+            });
+            None
+        }
+    };
+
     proto::RunProofBundle {
         bundle_version: 1,
         run_id: run_id.to_string(),
@@ -1673,7 +1757,8 @@ fn build_run_proof_bundle(
             created_at: Some(ts(provenance.created_at)),
         }),
         approvals,
-        unavailable: unavailable_proof_sections(provenance),
+        browser_walkthrough,
+        unavailable,
     }
 }
 
@@ -3569,12 +3654,32 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
 
+            // The walkthrough is read only when the switch is on and the run's own receipt is
+            // persistent. Otherwise the bundle names the section it leaves out, and the store is
+            // not read at all.
+            let omission = proof_walkthrough_omission(proof_walkthrough_enabled(), &provenance);
+            let walkthrough = match omission {
+                Some(reason) => Err(reason),
+                None => {
+                    let steps = store::list_browser_walkthrough_for_run(
+                        &self.pool,
+                        &req.run_id,
+                        &req.org_id,
+                        store::BROWSER_WALKTHROUGH_STEP_CAP,
+                    )
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                    Ok(browser_walkthrough_proto(steps))
+                }
+            };
+
             let bundle = build_run_proof_bundle(
                 &req.run_id,
                 &req.org_id,
                 &provenance,
                 &approvals,
                 &evidence,
+                walkthrough,
             );
             Ok(Response::new(proto::GetRunProofBundleResponse {
                 bundle: Some(bundle),
@@ -7733,12 +7838,19 @@ mod tests {
     #[test]
     fn proof_bundle_retained_section_cites_the_run_receipt() {
         let retained_reason = |provenance: &store::RunProvenanceRow| {
-            build_run_proof_bundle("run_1", "org-1", provenance, &[], &[])
-                .unavailable
-                .into_iter()
-                .find(|section| section.section == "retained")
-                .expect("retained section is always declared")
-                .reason
+            build_run_proof_bundle(
+                "run_1",
+                "org-1",
+                provenance,
+                &[],
+                &[],
+                Ok(proto::BrowserWalkthrough::default()),
+            )
+            .unavailable
+            .into_iter()
+            .find(|section| section.section == "retained")
+            .expect("retained section is always declared")
+            .reason
         };
 
         let mut waived = test_provenance();
@@ -7807,7 +7919,14 @@ mod tests {
 
     #[test]
     fn proof_bundle_always_declares_the_sections_it_cannot_prove() {
-        let bundle = build_run_proof_bundle("run_1", "org-1", &test_provenance(), &[], &[]);
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[],
+            &[],
+            Ok(proto::BrowserWalkthrough::default()),
+        );
 
         assert_eq!(bundle.bundle_version, 1);
         assert_eq!(bundle.run_id, "run_1");
@@ -7838,6 +7957,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let proof = &bundle.approvals[0];
@@ -7858,6 +7978,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[test_evidence("appr_1")],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let execution = bundle.approvals[0]
@@ -7889,6 +8010,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[evidence],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let outcome = bundle.approvals[0]
@@ -7926,6 +8048,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[evidence],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let outcome = bundle.approvals[0]
@@ -7960,6 +8083,7 @@ mod tests {
             &[test_approval("appr_1"), test_approval("appr_2")],
             // Evidence belongs to appr_2 only.
             &[test_evidence("appr_2")],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         assert!(

@@ -52,6 +52,8 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_SETTLED_FOLD?: string;
 	/** "true" shows the reader's outline and dyslexia-friendly font, and applies the stored text size (F-t3-098). Default off. */
 	readonly VITE_CHAT_READER_POLISH?: string;
+	/** "true" offers a read-only side question about the open conversation, in a drawer that can be spun off into a new draft chat (F-t3-069). Default off. */
+	readonly VITE_CHAT_SIDE_CHAT?: string;
 	/** "true" shows thumbs and reasons on agent run answers and scheduled results (F-t3-078). Default off. */
 	readonly VITE_AGENT_RESULT_FEEDBACK?: string;
 	readonly VITE_QUOTA_READOUT?: string;
@@ -78,8 +80,12 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_IMAGE_TOOL?: string;
 	/** "true" mounts the changed-files card under each answer: the files the run saved to its Space workspace (F-t3-076). Default off. */
 	readonly VITE_CHAT_CHANGED_FILES?: string;
+	/** "true" shows the image results of a settled web-search answer under the answer, each linked to its page (F-t3-044, W4-IO-1). Default off. */
+	readonly VITE_CHAT_IMAGE_STRIP?: string;
 	/** "true" mounts the shell toast stack and lets `showToast` raise notices from any route (F-t3-078). Default off. */
 	readonly VITE_SHELL_TOASTS?: string;
+	/** "true" words a budget, quota, run-ceiling or rate refusal by the reader's role, so a member never sees the organisation's spend (F-t3-078). Default off. */
+	readonly VITE_CHAT_LIMIT_NOTICES?: string;
 	/** "true" lets two bare Escape presses within 600 ms stop the streaming chat answer (F-t3-077). Default off. */
 	readonly VITE_CHAT_DOUBLE_ESCAPE_STOP?: string;
 	/** "true" mounts the catalogue overlay editor (hide, order, aliases) on the router-policy page (F-t3-065). Default off. */
@@ -88,6 +94,8 @@ interface ImportMetaEnv {
 	readonly VITE_THREAD_IMPORT?: string;
 	/** "true" shows the plugin supply-chain controls in settings: source pin, manifest digest, catalogue approval, kill state and the install consent dialog (F-t3-059, W4-PL-4). Default off. */
 	readonly VITE_PLUGIN_LOADER?: string;
+	/** "true" shows the browser walkthrough in the run proof bundle: one filmstrip frame per browser action, from the screenshots the run recorded (F-t3-050, W4-R3-b). Default off. */
+	readonly VITE_RUN_PROOF_WALKTHROUGH?: string;
 }
 
 interface ImportMeta {

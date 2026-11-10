@@ -8,6 +8,7 @@ import {
   groupChatModels,
   isExpensiveModel,
   listModels,
+  modelReplacement,
   selectionIsStale,
   verevonModeById,
   VEREVON_MODES,
@@ -262,7 +263,7 @@ export function AiModelPicker(props: {
                       onClick={() => chooseCatalogModel(model)}
                       class={{ 'dashboard-composer-model-menu__item--active': selected().model === model.id && selected().provider === model.provider }}
                     >
-                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={formatContextWindow(model.contextWindowTokens)}>{(windowLabel) => <span class="dashboard-composer-model-context">{windowLabel()}</span>}</Show><Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
+                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={modelReplacement(models() ?? [], model)}>{(replacement) => <span class="dashboard-composer-model-successor">{i18n.tr(`Erstattes av ${replacement().name}`, `Replaced by ${replacement().name}`)}</span>}</Show><Show when={formatContextWindow(model.contextWindowTokens)}>{(windowLabel) => <span class="dashboard-composer-model-context">{windowLabel()}</span>}</Show><Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
                       <span class="dashboard-composer-model-menu__right">
                         <Show when={model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Tilkoblet', 'Connected')}</span>

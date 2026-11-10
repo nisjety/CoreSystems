@@ -31,7 +31,7 @@ use mp_contracts::model_plane::v1::{
     AcquireLeaseRequest, DeleteThreadWorkspaceRequest, GetThreadWorkspaceRequest,
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
     Approval, ApprovalCause, ApprovalDecisionSource, ApprovalKind, ApprovalProof, ApprovalScope,
-    ApprovalState, BatchTranslateTextRequest,
+    ApprovalState, BatchTranslateTextRequest, BrowserWalkthrough,
     CancelRunRequest, ListRunQuestionsRequest, QuestionAnswerItem, QuestionState, RunQuestion,
     ContinuationExecution, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
@@ -373,6 +373,8 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .merge(crate::thread_goal_routes::router())
         // One read-only review of a text, as a run (F-t3-086); 404 `review_run_disabled` while its switch is off.
         .merge(crate::review_run_routes::router())
+        // A read-only question about one thread's transcript (F-t3-069); 404 `side_chat_disabled` while its switch is off.
+        .merge(crate::side_chat_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
         .merge(crate::thread_export_routes::router())
         // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
@@ -10812,10 +10814,32 @@ fn proof_bundle_value(bundle: &RunProofBundle) -> Value {
             "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         })),
         "approvals": bundle.approvals.iter().map(proof_approval_value).collect::<Vec<_>>(),
+        "browser_walkthrough": bundle
+            .browser_walkthrough
+            .as_ref()
+            .map_or(Value::Null, browser_walkthrough_value),
         "unavailable": bundle.unavailable.iter().map(|section| json!({
             "section": section.section,
             "reason": section.reason,
         })).collect::<Vec<_>>(),
+    })
+}
+
+/// Serialize a run's browser walkthrough. References only: a step names its screenshot by
+/// `screenshot_ref` and never carries bytes. A page field stays `null` when the executor recorded
+/// none, so an unread page is never mistaken for an empty one.
+fn browser_walkthrough_value(section: &BrowserWalkthrough) -> Value {
+    json!({
+        "steps": section.steps.iter().map(|step| json!({
+            "action_id": step.action_id,
+            "action_type": empty_to_null(&step.action_type),
+            "page_url": empty_to_null(&step.page_url),
+            "page_title": empty_to_null(&step.page_title),
+            "status": empty_to_null(&step.status),
+            "screenshot_ref": empty_to_null(&step.screenshot_ref),
+            "at": step.at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        })).collect::<Vec<_>>(),
+        "truncated": section.truncated,
     })
 }
 
@@ -13495,6 +13519,10 @@ struct ModelDescriptor {
     /// `ga`, `preview` or `deprecated`. Left out when no sourced row names the model.
     #[serde(skip_serializing_if = "String::is_empty")]
     lifecycle: String,
+    /// The model the vendor names as this one's replacement, on a deprecated model only. Left
+    /// out when no sourced record names one, so an unknown model serves the JSON it served before.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    successor: String,
     /// The catalogue's list price for a chat model, behind
     /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
     /// with the switch off serves the same JSON as before.
@@ -13636,6 +13664,7 @@ async fn list_models(
                 context_window_tokens: known_tokens(m.context_window_tokens),
                 max_output_tokens: known_tokens(m.max_output_tokens),
                 lifecycle: m.lifecycle,
+                successor: m.successor,
                 price,
                 data_use: m.data_use.map(|data_use| DataUseDescriptor {
                     trains_on_inputs: data_use.trains_on_inputs,
@@ -18735,6 +18764,7 @@ mod run_owner_publish_tests {
             context_window_tokens: None,
             max_output_tokens: None,
             lifecycle: String::new(),
+            successor: String::new(),
             price: None,
             data_use: None,
         }

@@ -183,6 +183,17 @@ message EvaluatePolicyRequest {
   // decision. An `mcp__` name resolves only from the registry and is denied when
   // the registry does not hold it. Empty means a capability-level evaluation.
   string tool_name = 7;
+
+  // The target the call acts on, derived by execution-core from the tool input and never from the
+  // model's free text claim: "domain" (the host of a web address), "recipient" (the domain of a mail
+  // recipient, never the full address) or "command_prefix" (the first token of a command). Empty when
+  // the call names no target, when the permission rules switch is off, and for a capability-level
+  // evaluation.
+  string target_kind = 8;
+
+  // The value of target_kind: a lower-case host or domain, or a command's first token of at most 64
+  // characters. Empty on a zero-retention or waived run, which sends target_kind alone.
+  string target_value = 9;
 }
 
 message EvaluatePolicyResponse {

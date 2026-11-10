@@ -112,10 +112,11 @@ import {
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
 import { createSettledFoldChoices } from '../lib/settled-fold-choices'
 import { chapterEntries, turnSelector } from '../lib/chapter-toc'
-import { createReaderAppearance, readerPolishEnabled, readerSpacingFor } from '../lib/reader-polish'
+import { createReaderAppearance, readerPolishOn, readerSpacingFor } from '../lib/reader-polish'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
 import { ReaderTools } from './ReaderTools'
+import { SideChatPanel, sideChatEnabled } from './SideChatPanel'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -275,7 +276,7 @@ export default function ChatPage() {
   // F-t3-098, behind `VITE_CHAT_READER_POLISH`. The text size, the dyslexia-friendly font and the spacing the workspace
   // carries, and the outline of the answers. With the switch off the attributes are empty and no outline is built.
   const readerAppearance = createReaderAppearance()
-  const chapters = createMemo(() => (readerPolishEnabled ? chapterEntries(state.turns) : []))
+  const chapters = createMemo(() => (readerPolishOn() ? chapterEntries(state.turns) : []))
   const projectName = () => {
     if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
     const context = projectContext()
@@ -526,6 +527,14 @@ export default function ChatPage() {
   // The omnibox's "Ask Verevon" row: the typed text becomes the message and the composer takes focus.
   const askVerevonFromBrowser = (text: string) => {
     setInput(text)
+    focusComposer()
+  }
+  // The side chat's "Spin off as new chat" (F-t3-069): the new-chat path the Ctrl+Shift+O shortcut takes, with the draft in the
+  // composer. Nothing is sent, so the chat exists on the server only once the person sends it.
+  const spinOffSideChat = (draft: string) => {
+    startNewChat()
+    setActiveTab('chat')
+    setInput(draft)
     focusComposer()
   }
 
@@ -1545,12 +1554,19 @@ export default function ChatPage() {
           <Show when={transcriptDensityEnabled}>
             <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
           </Show>
-          <Show when={readerPolishEnabled}>
+          <Show when={readerPolishOn()}>
             <ReaderTools
               chapters={chapters()}
               dyslexiaFont={readerAppearance.dyslexiaFont()}
               onDyslexiaFont={readerAppearance.setDyslexiaFont}
               onJump={jumpToChapter}
+            />
+          </Show>
+          <Show when={sideChatEnabled}>
+            <SideChatPanel
+              threadId={state.threadId ?? null}
+              hidden={temporaryChat() || isActiveThreadTemporary() || spaceScoped()}
+              onSpinOff={spinOffSideChat}
             />
           </Show>
         </Show>

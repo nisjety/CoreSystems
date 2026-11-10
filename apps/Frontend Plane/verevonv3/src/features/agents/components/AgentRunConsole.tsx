@@ -106,6 +106,10 @@ import {
   withBrowserObserved,
   type BrowserActionFacts,
 } from '@/features/browser/replay/browser-action-brief'
+import {
+  BrowserWalkthroughStrip,
+  runProofWalkthroughEnabled,
+} from '@/features/browser/replay/BrowserWalkthroughStrip'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 import {
@@ -1098,6 +1102,7 @@ export default function AgentRunConsole() {
                 bundle={proofView().bundle}
                 failed={proofView().failed}
                 loading={proofView().loading}
+                runId={activeRunId() ?? ''}
               />
             </Show>
 
@@ -1864,6 +1869,7 @@ function unavailableSectionLabel(i18n: ReturnType<typeof useI18n>, section?: str
     case 'known': return i18n.tr('Hva kjøringen visste', 'What the run knew')
     case 'charged': return i18n.tr('Hva det kostet', 'What it cost')
     case 'retained': return i18n.tr('Hvilken lagring som gjaldt', 'What retention applied')
+    case 'walkthrough': return i18n.tr('Nettleserforløpet', 'The browser walkthrough')
     default: return section ?? i18n.tr('Udokumentert dimensjon', 'Undocumented dimension')
   }
 }
@@ -1873,7 +1879,13 @@ function shortFingerprint(value: string): string {
   return value.length > 16 ? `${value.slice(0, 16)}…` : value
 }
 
-function ProofBundlePanel(props: { bundle: ProofBundle | null; failed: boolean; loading: boolean }) {
+function ProofBundlePanel(props: {
+  bundle: ProofBundle | null
+  failed: boolean
+  loading: boolean
+  /** The run whose bundle this is; its walkthrough screenshots are read under this id. */
+  runId: string
+}) {
   const i18n = useI18n()
   return (
     <div class="verevon-run-panel verevon-run-proof">
@@ -1939,6 +1951,17 @@ function ProofBundlePanel(props: { bundle: ProofBundle | null; failed: boolean; 
                   {(approval) => <ProofApprovalCard approval={approval} />}
                 </For>
               </div>
+            </Show>
+
+            {/* The browser walkthrough (F-t3-050, W4-R3-b): mounted only behind its switch and only when the bundle
+                carries the section. When it is omitted, the "walkthrough" entry in the list below says why. */}
+            <Show when={runProofWalkthroughEnabled() ? bundle().browserWalkthrough : undefined}>
+              {(walkthrough) => (
+                <>
+                  <p class="verevon-run-trust__subhead">{i18n.tr('Nettleserforløp', 'Browser walkthrough')}</p>
+                  <BrowserWalkthroughStrip runId={props.runId} walkthrough={walkthrough()} />
+                </>
+              )}
             </Show>
 
             {/* Always rendered, never collapsed: the dimensions this bundle

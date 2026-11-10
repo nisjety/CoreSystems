@@ -14,6 +14,7 @@ use crate::{
         history::{bad_request, thread_messages_url, ThreadMessagesPageQuery},
         shared,
     },
+    envelope::error,
     middleware::AuthenticatedUser,
 };
 
@@ -364,6 +365,109 @@ fn branch_move_body(body: &BranchThreadBody, mode: BranchMove) -> Result<Value, 
         payload["exact"] = json!(true);
     }
     Ok(payload)
+}
+
+/// The body of a side question: one question and nothing else, so a client cannot choose a model, a posture or
+/// another thread.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SideChatBody {
+    question: String,
+}
+
+/// The most characters one side question may carry. Model Gateway refuses a longer one the same way.
+const SIDE_CHAT_QUESTION_MAX_CHARS: usize = 2_000;
+
+/// A side question about one conversation (F-t3-069): one read-only answer from Model Gateway, which reads the
+/// thread's active path and stores nothing. The answer goes back to the caller alone.
+///
+/// The organisation's zero-retention posture is raised onto the request, as a chat turn's is, and the caller's
+/// `x-zdr` header is honoured the same way. The session and inference credentials are minted from the caller's
+/// own session.
+pub(super) async fn ask_side_chat(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<SideChatBody>,
+) -> Response {
+    no_store(side_chat_reply(&state, &user, &headers, &thread_id, &body.question).await)
+}
+
+async fn side_chat_reply(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    question: &str,
+) -> Response {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    let question = question.trim();
+    if question.is_empty() || question.chars().count() > SIDE_CHAT_QUESTION_MAX_CHARS {
+        return bad_request("The side chat question must be 1 to 2000 characters.");
+    }
+    let mut outbound_body = json!({
+        "question": question,
+        "zdr": shared::zdr_flag(headers),
+    });
+    shared::apply_org_zdr_posture(state, user, &mut outbound_body).await;
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let inference_token = match shared::required_inference_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let url = format!(
+        "{}/v1/threads/{}/side-chat",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let (status, Json(payload)) = shared::proxy_model_json_with_delegations(
+        state,
+        Method::POST,
+        &url,
+        Some(outbound_body),
+        token.as_deref(),
+        None,
+        None,
+        Some(&inference_token),
+        None,
+        None,
+        Some(&session_token),
+        None,
+        None,
+        user,
+    )
+    .await;
+    // A refused delegated credential is not the browser's session, so it is answered as unavailable, not as a 401
+    // that would sign the person out. `assistant_navigation` follows the same rule.
+    let (status, payload) = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error(
+                "delegated_auth_unavailable",
+                "Side chat authentication is temporarily unavailable",
+            ),
+        )
+    } else {
+        (status, payload)
+    };
+    (status, Json(payload)).into_response()
+}
+
+/// Marks an answer that must not be kept: the question and the answer are the person's own conversation text.
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 pub(super) async fn get_thread_messages(

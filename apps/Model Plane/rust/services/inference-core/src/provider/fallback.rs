@@ -144,6 +144,15 @@ pub struct RouteNote {
     pub applied_effort: Option<effort::Level>,
     /// The role table's decision, for a `verevon-role` call (EP-13 S4). `None` for every other call.
     pub role: Option<role::RoleDecision>,
+    /// The Verevon mode the intent layer resolved the call under. `None` when it resolved no mode,
+    /// as for a call that named a pinned model.
+    pub mode: Option<intent::VerevonMode>,
+    /// The complexity the intent layer estimated for the call, alongside `mode`. `None` when it
+    /// resolved no mode.
+    pub complexity: Option<intent::Complexity>,
+    /// Why the intent layer chose the model (see [`intent::Decision::reason`]). Empty when it
+    /// resolved no mode.
+    pub reason: &'static str,
 }
 
 impl RouteNote {
@@ -156,6 +165,9 @@ impl RouteNote {
             cheap_fallback_forced: false,
             applied_effort: None,
             role: None,
+            mode: None,
+            complexity: None,
+            reason: "",
         }
     }
 }
@@ -193,6 +205,9 @@ fn budget_route_note(
         cheap_fallback_forced: decision.posture == intent::BudgetPosture::Exhausted,
         applied_effort,
         role: None,
+        mode: Some(decision.mode),
+        complexity: Some(decision.complexity),
+        reason: decision.reason(),
     }
 }
 
@@ -218,6 +233,13 @@ impl From<RouteNote> for mp_contracts::model_plane::v1::RouteNote {
             role_source: note
                 .role
                 .map_or_else(String::new, |decision| decision.source.as_str().to_owned()),
+            verevon_mode: note
+                .mode
+                .map_or_else(String::new, |mode| mode.as_str().to_owned()),
+            complexity: note
+                .complexity
+                .map_or_else(String::new, |complexity| complexity.as_str().to_owned()),
+            reason: note.reason.to_owned(),
         }
     }
 }
@@ -3060,6 +3082,7 @@ mod resolution_tests {
             mode: intent::VerevonMode::Balance,
             complexity: intent::Complexity::Simple,
             posture: intent::BudgetPosture::Constrained,
+            tier_shifted: true,
             effort_cap: None,
         };
         let note = budget_route_note(&policy, &decision, None);
@@ -3080,6 +3103,7 @@ mod resolution_tests {
             mode: intent::VerevonMode::Budget,
             complexity: intent::Complexity::Simple,
             posture: intent::BudgetPosture::Constrained,
+            tier_shifted: false,
             effort_cap: None,
         };
         assert!(!budget_route_note(&policy, &floor, None).tier_shifted);
@@ -3093,6 +3117,7 @@ mod resolution_tests {
             mode: intent::VerevonMode::Genius,
             complexity: intent::Complexity::Complex,
             posture: intent::BudgetPosture::Exhausted,
+            tier_shifted: false,
             effort_cap: Some(effort::Level::Low),
         };
         let note = budget_route_note(&policy, &decision, Some(effort::Level::Low));
@@ -3109,6 +3134,9 @@ mod resolution_tests {
             cheap_fallback_forced: false,
             applied_effort: None,
             role: None,
+            mode: Some(intent::VerevonMode::Balance),
+            complexity: Some(intent::Complexity::Simple),
+            reason: "budget_tier_shift",
         };
         // A call that is not a role call keeps its note exactly as the budget left it.
         assert_eq!(attach_role(Some(budget), None), Some(budget));

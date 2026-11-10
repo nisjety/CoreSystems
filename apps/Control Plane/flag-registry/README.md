@@ -43,6 +43,16 @@ their posture in the owning service's matrix.
 7. A choice has unique `values` and a default among them. A text flag takes no values.
    Only switches take `onDefaultReason`, `driftReason`, `codeDefault` or `devOnly`.
 8. `unregistered` is a sorted list of convention names with no entry yet.
+9. `stage` is `dark`, `beta` or `ga`. An entry that leaves it out is `dark`. The stage is
+   data: the registry does not roll anything out.
+10. `agentAccess` is `none` or `read`. An entry that leaves it out gets `none`, so no
+    model-facing tool may read the value.
+11. `killSwitch` applies only to switches. A kill switch defaults to the safe value, which
+    for a switch is off, and it is never `orgOverridable`. A switch that is on by default
+    says why in `onDefaultReason` and does not carry `killSwitch`.
+12. `orgOverridable` applies only to switches and choices owned by `frontend-plane` or
+    `model-plane`. A per-org value may narrow the flag or enable it, but only within the
+    build or environment ceiling. It never goes past that ceiling.
 
 ## Compose ratchet
 
@@ -76,8 +86,14 @@ release process. The registry records the change; it does not make it.
 - Literal compose values such as `MP_COMPAT_MODE: v1_only`, which are not interpolated.
 - User and org settings (user-core `AISettings`, org entitlements). They need a typed
   value store before they can be registered.
-- Compose files of the Data, Ingestion and Application planes, and frontend
-  build-time `VITE_*` flags.
+- Compose files of the Data, Ingestion and Application planes. Frontend build-time
+  `VITE_*` flags are registered only when an entry names the file that reads them
+  (`source: code`, owner `frontend-plane`). No ratchet checks the frontend build or
+  finds `VITE_*` names that are not registered.
+- Per-org values for `orgOverridable` flags. The org-core store (W5-079-b) will hold
+  them. Until then an org has no value of its own.
+- `stage`, `killSwitch` and `agentAccess` are declared, not enforced. No service, BFF
+  or SPA reads them yet.
 - Typed reads are not wired into any service.
 
 ## Commands

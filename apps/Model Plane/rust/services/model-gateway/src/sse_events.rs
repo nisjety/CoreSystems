@@ -421,6 +421,10 @@ pub enum ChatEvent {
         /// The cost split by what was billed, present exactly when `cost_usd` is a
         /// metered total.
         cost_by_category: Option<crate::pricing::CategoryCost>,
+        /// The answer's routing decision (W5-073-b, `tool_loop::route_decision`): the Verevon mode, complexity
+        /// and reason its route note states. Closed tokens only. `None` keeps the frame's shape, and the key is
+        /// set only while `MODEL_GATEWAY_ROUTING_DECISION_ENABLED` is on.
+        routing_decision: Option<serde_json::Value>,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -571,6 +575,9 @@ pub enum ChatEvent {
         /// How the budget moved this call's route (WS27-S7): `tier_shifted` or `cheap_fallback`, only when
         /// inference-core's route note says the posture moved it. `None` keeps the frame's earlier shape.
         routing: Option<&'static str>,
+        /// The answer's routing decision (W5-073-b), on the answer's own progress frame only. Closed tokens
+        /// only. `None` keeps the frame's shape, as `routing` does.
+        routing_decision: Option<serde_json::Value>,
     },
     // ---- end usage progress (WS27) ----
     // ---- lifecycle (WS15) ----
@@ -982,6 +989,7 @@ impl ChatEvent {
                 calls,
                 unpriced_calls,
                 cost_by_category,
+                routing_decision,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -1022,6 +1030,10 @@ impl ChatEvent {
                     if let Some(reason) = class.reason() {
                         usage["retention_reason"] = json!(reason);
                     }
+                }
+                // Stated only where the answer's route note states a decision, so a frame without one keeps its shape.
+                if let Some(decision) = routing_decision {
+                    usage["routing_decision"] = decision.clone();
                 }
                 usage
             }
@@ -1140,6 +1152,7 @@ impl ChatEvent {
                 snapshot,
                 ceiling,
                 routing,
+                routing_decision,
             } => {
                 let mut payload = json!({
                     "calls": snapshot.calls,
@@ -1178,6 +1191,10 @@ impl ChatEvent {
                 // Stated only on a call the budget moved, so an unmoved frame keeps its shape.
                 if let Some(routing) = routing {
                     payload["routing"] = json!(routing);
+                }
+                // Stated only where the answer's route note states a decision, so an unstated frame keeps its shape.
+                if let Some(decision) = routing_decision {
+                    payload["routing_decision"] = decision.clone();
                 }
                 payload
             }
@@ -1937,6 +1954,8 @@ impl RichEventSink {
                 snapshot,
                 ceiling,
                 routing,
+                // A tool round or overhead call carries no answer decision; only the answer's own frame does.
+                routing_decision: None,
             })
             .await;
         }
@@ -2373,6 +2392,7 @@ mod tests {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .should_emit(&no_features));
         assert!(ChatEvent::Stopped {
@@ -2535,6 +2555,7 @@ mod tests {
             confidence: Some(0.9),
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .should_emit(&feats));
         let progress = ChatEvent::UsageProgress {
@@ -2542,6 +2563,7 @@ mod tests {
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert!(progress.should_emit(&feats));
         // Not opted in:
@@ -2621,6 +2643,7 @@ mod tests {
             snapshot: running_total(calls),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         }
         .payload("req-1")
         .as_object()
@@ -2695,6 +2718,7 @@ mod tests {
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert_eq!(event.family(), Some("usage"));
         assert_eq!(event.name(), "usage_progress");
@@ -2807,6 +2831,7 @@ mod tests {
                 warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
             }),
             routing: None,
+            routing_decision: None,
         }
         .payload("req-1");
         assert_eq!(carried["ceiling_usd"], json!(0.05));
@@ -2889,6 +2914,7 @@ mod tests {
             confidence: Some(0.77),
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         };
         assert_eq!(usage.name(), "usage");
         let p = usage.payload("req-1");
@@ -2903,6 +2929,7 @@ mod tests {
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert_eq!(progress.name(), "usage_progress");
 
@@ -3130,6 +3157,7 @@ mod tests {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-2");
         assert_eq!(subscription["cost_usd"], 0.0);
@@ -3149,6 +3177,7 @@ mod tests {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-3");
         let mut keys: Vec<&str> = unestablished
@@ -3187,6 +3216,7 @@ mod tests {
             confidence: None,
             served_by,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-served")
     }
@@ -3210,6 +3240,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-1")
     };
@@ -3346,6 +3377,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: Some(RetentionClass::Zdr),
+            routing_decision: None,
         }
         .payload("req-zdr");
         assert_eq!(zdr["retention_class"], "zdr");
@@ -3376,6 +3408,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             retention_class: Some(RetentionClass::ZdrWaived {
                 reason: "connection_not_zdr_capable",
             }),
+            routing_decision: None,
         }
         .payload("req-waived");
         assert_eq!(waived["retention_class"], "zdr_waived");
@@ -3402,6 +3435,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: Some(RetentionClass::Zdr),
+            routing_decision: None,
         }
         .payload("req-zdr");
         assert_eq!(zdr["retention_class"], "zdr");
@@ -3432,6 +3466,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         };
         assert_eq!(event.name(), "turn_timing");
         assert_eq!(event.family(), usage.family());
@@ -3807,6 +3842,7 @@ mod payload_contract {
                 cache_write_usd: 0.0,
                 output_usd: 0.0005,
             }),
+            routing_decision: None,
         }
     }
 
@@ -3850,6 +3886,7 @@ mod payload_contract {
             },
             ceiling,
             routing,
+            routing_decision: None,
         }
     }
 

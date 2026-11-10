@@ -104,6 +104,12 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// POST /internal/orgs/:orgId/retention/check and nothing else (EP-9 C1). Held by
 	// session-core alone, whose sweeper drops every held thread.
 	"org:retention-policy:read:any": {},
+	// Read-only access to one organisation's flag values, through
+	// GET /internal/orgs/:orgId/flags and nothing else (W5-079-b). Presentation only.
+	// It is granted to no credential in code, so the route answers 403 until a
+	// deployment grants it to the one reader that needs it. Deliberately not
+	// org:read:any, which returns the whole organization record.
+	"org:flags:read:any": {},
 }
 
 type serviceCredential struct {
@@ -476,6 +482,12 @@ func organizationProxyScopes(method string, rest []string) []string {
 		return []string{"org:settings:write:self"}
 	case len(rest) == 3 && method == http.MethodGet && rest[1] == "web-policy" && rest[2] == "history":
 		return []string{"org:read:self"}
+	// The organisation flag values (W5-079-b): any active member reads them, and an
+	// owner or admin writes them, both on behalf of a signed user only (:self).
+	case len(rest) == 2 && method == http.MethodGet && rest[1] == "flags":
+		return []string{"org:read:self"}
+	case len(rest) == 3 && method == http.MethodPut && rest[1] == "flags":
+		return []string{"org:settings:write:self"}
 	// SIEM destinations are administered on behalf of a signed owner or admin
 	// only (:self); no :any holder reaches them through this path.
 	case len(rest) == 2 && rest[1] == "siem-destinations" && (method == http.MethodGet || method == http.MethodPost):
@@ -558,6 +570,9 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:browser-site:read:any"}
 	case len(rest) == 2 && rest[1] == "web-policy" && method == http.MethodGet:
 		return []string{"org:web-policy:read:any"}
+	// The organisation flag values for a backend reader (W5-079-b).
+	case len(rest) == 2 && rest[1] == "flags" && method == http.MethodGet:
+		return []string{"org:flags:read:any"}
 	case len(rest) == 3 && rest[1] == "retention" && rest[2] == "check" && method == http.MethodPost:
 		return []string{"org:retention-policy:read:any"}
 	// Key custody (WS17.E2). The admin and destroy scopes are deliberately not in

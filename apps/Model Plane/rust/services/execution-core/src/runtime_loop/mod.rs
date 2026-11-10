@@ -1018,8 +1018,17 @@ async fn execute_step_inner(
     };
     let gate_enforced = gate_mode == crate::space_gate::GateMode::Enforce;
     let mut deferred_ask: Option<CauseCode> = None;
+    // The call names its target to the policy, read from its input; a zero-retention or waived run
+    // sends the target's kind without its value (F-t3-074).
     match capability_policy
-        .evaluate_tool_call(tool_name, run_id, org_id, user_id)
+        .evaluate_tool_call_with_input(
+            tool_name,
+            tool_input,
+            run_id,
+            org_id,
+            user_id,
+            zdr || waived,
+        )
         .await
     {
         Ok(evaluation)

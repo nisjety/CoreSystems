@@ -815,17 +815,10 @@ fn restore_tool_names(names: &ToolWireNames, calls: &mut [super::ToolCall]) {
     }
 }
 
-/// The retired Claude ids and the current model that answers for each. Matched
-/// exactly, ignoring case and surrounding whitespace: a date-stamped or unknown id
-/// is not guessed at, since a guess would send a thread to a model its owner did
-/// not pick.
+/// The current model a retired Claude id is answered by. The model record holds the
+/// table and its exact matching, so a date-stamped or unknown id is not guessed at.
 fn successor_of_retired_model(model: &str) -> Option<&'static str> {
-    match model.trim().to_ascii_lowercase().as_str() {
-        "claude-opus-4-20250514" => Some(CLAUDE_OPUS_5_5),
-        "claude-sonnet-4-20250514" => Some(CLAUDE_SONNET_5_5),
-        "claude-3-5-haiku-20241022" => Some(CLAUDE_HAIKU_5_5),
-        _ => None,
-    }
+    model_record::retired_successor(Family::Anthropic, model)
 }
 
 /// The request as the current model serves it, when it names a retired id. `None`
@@ -1530,6 +1523,7 @@ impl ProviderRouter for AnthropicProvider {
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
+                    successor: record.successor,
                 }
             })
             .collect()

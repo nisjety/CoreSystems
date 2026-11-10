@@ -1273,6 +1273,7 @@ impl ProviderRouter for OpenAiProvider {
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
+                    successor: record.successor,
                 }
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {

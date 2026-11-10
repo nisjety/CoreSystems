@@ -526,6 +526,9 @@ pub struct ModelInfo {
     pub max_output_tokens: u32,
     /// The vendor lifecycle stage. `None` when no sourced row names the model.
     pub lifecycle: Option<model_record::Lifecycle>,
+    /// The model the vendor names as this one's replacement. `None` unless a sourced row for
+    /// a deprecated model names one. Display only: nothing switches to it.
+    pub successor: Option<&'static str>,
 }
 
 /// Introspectable feature flags for a provider.

@@ -3150,6 +3150,157 @@ pub async fn list_continuation_evidence_for_run(
 }
 
 // ---------------------------------------------------------------------------
+// Browser walkthrough (proof bundle, F-t3-050)
+// ---------------------------------------------------------------------------
+
+/// The most walkthrough steps one proof bundle carries. A run with more browser
+/// actions than this shows its earliest steps and sets `truncated`.
+pub const BROWSER_WALKTHROUGH_STEP_CAP: usize = 200;
+
+/// One browser event row as `persist_browser_event` wrote it to the event log.
+/// Only the two walkthrough event types are selected into this shape.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BrowserEventRow {
+    pub event_type: String,
+    pub payload: JsonValue,
+    pub ts: DateTime<Utc>,
+}
+
+/// One browser action of a walkthrough, joined with the observation recorded
+/// after it. Only what the event log already holds: the page facts the executor
+/// reported (URL and title scrubbed at emission) and references, never DOM or page text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserWalkthroughStepRow {
+    pub action_id: String,
+    pub action_type: String,
+    pub page_url: String,
+    pub page_title: String,
+    pub status: String,
+    pub screenshot_ref: String,
+    pub at: DateTime<Utc>,
+}
+
+/// A run's walkthrough steps in order, and whether the read or the step cap
+/// stopped it short of the run's whole browser history.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BrowserWalkthroughSteps {
+    pub steps: Vec<BrowserWalkthroughStepRow>,
+    pub truncated: bool,
+}
+
+/// List one run's browser walkthrough, tenant-scoped. The rows are the
+/// `BROWSER_ACTION_DISPATCHED` and `BROWSER_OBSERVATION_RECEIVED` events that
+/// `persist_browser_event` wrote, read in time order and joined into steps.
+///
+/// `limit` is the most steps returned. The read fetches at most two rows per
+/// step, plus one row to learn whether the run has more, so a long browser
+/// history costs a bounded read.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn list_browser_walkthrough_for_run(
+    pool: &Pool,
+    run_id: &str,
+    org_id: &str,
+    limit: usize,
+) -> Result<BrowserWalkthroughSteps> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    let row_bound = limit.saturating_mul(2);
+    let fetch = i64::try_from(row_bound.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut rows = sqlx::query_as::<_, BrowserEventRow>(
+        "SELECT event_type, payload, ts FROM events \
+         WHERE run_id = $1 AND org_id = $2 \
+           AND event_type IN ('BROWSER_ACTION_DISPATCHED', 'BROWSER_OBSERVATION_RECEIVED') \
+         ORDER BY ts ASC, id ASC LIMIT $3",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .bind(fetch)
+    .fetch_all(pool)
+    .await?;
+    let read_truncated = rows.len() > row_bound;
+    rows.truncate(row_bound);
+    Ok(join_browser_walkthrough(&rows, limit, read_truncated))
+}
+
+/// Join walkthrough rows into steps, one per browser action, in the order each
+/// action first appears. An action is keyed by its plan and its action id, since
+/// action ids restart within each plan. The dispatch row gives the action type.
+/// The latest observation row gives the page facts, the status and the screenshot
+/// reference, and its time becomes the step's time. An action with no observation
+/// yet keeps those fields empty and is timed by its dispatch. Rows without an
+/// action id are not a step and are skipped.
+///
+/// `read_truncated` says the read stopped short; `step_cap` bounds the steps.
+#[must_use]
+pub fn join_browser_walkthrough(
+    rows: &[BrowserEventRow],
+    step_cap: usize,
+    read_truncated: bool,
+) -> BrowserWalkthroughSteps {
+    let mut steps: Vec<BrowserWalkthroughStepRow> = Vec::new();
+    let mut position: std::collections::HashMap<(&str, &str), usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let action_id = row.payload.get("action_id").and_then(JsonValue::as_str);
+        let Some(action_id) = action_id.filter(|id| !id.trim().is_empty()) else {
+            continue;
+        };
+        let plan_id = row
+            .payload
+            .get("plan_id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        let index = *position.entry((plan_id, action_id)).or_insert_with(|| {
+            steps.push(BrowserWalkthroughStepRow {
+                action_id: action_id.to_owned(),
+                action_type: String::new(),
+                page_url: String::new(),
+                page_title: String::new(),
+                status: String::new(),
+                screenshot_ref: String::new(),
+                at: row.ts,
+            });
+            steps.len() - 1
+        });
+        let step = &mut steps[index];
+        match row.event_type.as_str() {
+            "BROWSER_ACTION_DISPATCHED" => {
+                if step.action_type.is_empty() {
+                    step.action_type = payload_text(&row.payload, "action_type");
+                }
+            }
+            "BROWSER_OBSERVATION_RECEIVED" => {
+                step.page_url = payload_text(&row.payload, "page_url");
+                step.page_title = payload_text(&row.payload, "page_title");
+                step.status = payload_text(&row.payload, "status");
+                step.screenshot_ref = payload_text(&row.payload, "screenshot_ref");
+                step.at = row.ts;
+            }
+            _ => {}
+        }
+    }
+    let over_cap = steps.len() > step_cap;
+    steps.truncate(step_cap);
+    BrowserWalkthroughSteps {
+        steps,
+        truncated: read_truncated || over_cap,
+    }
+}
+
+/// The string at `key` of a walkthrough payload, or empty when it is absent or not text.
+fn payload_text(payload: &JsonValue, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+// ---------------------------------------------------------------------------
 // Verification metrics (verevon-vision.md §2.1 / §7, roadmap P1 item 5)
 // ---------------------------------------------------------------------------
 

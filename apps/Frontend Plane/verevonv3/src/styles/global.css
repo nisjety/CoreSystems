@@ -50647,6 +50647,8 @@ so it
 .dashboard-composer-model-data-use { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
 /* EP-13-S2: record v2 in the composer picker: the context window under a name, the preview chip, and the folded older models */
 .dashboard-composer-model-context { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
+/* F-t3-073: the replacement a deprecated model names, under its name in the composer picker */
+.dashboard-composer-model-successor { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
 .dashboard-composer-model-badge--preview { background: transparent; border: 1px solid var(--verevon-border); color: var(--verevon-text-muted); }
 .dashboard-composer-model-group--folded { display: block; }
 .dashboard-composer-model-group--folded > summary { cursor: pointer; list-style: none; }

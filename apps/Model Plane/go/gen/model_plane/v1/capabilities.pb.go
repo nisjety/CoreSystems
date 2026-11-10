@@ -450,7 +450,16 @@ type EvaluatePolicyRequest struct {
 	// instead of the capability's ceiling, and the name is bound into the signed
 	// decision. An `mcp__` name resolves only from the registry and is denied when
 	// the registry does not hold it. Empty means a capability-level evaluation.
-	ToolName      string `protobuf:"bytes,7,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	ToolName string `protobuf:"bytes,7,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	// The target the call acts on, derived by execution-core from the tool input and never from the
+	// model's free text claim: "domain" (the host of a web address), "recipient" (the domain of a mail
+	// recipient, never the full address) or "command_prefix" (the first token of a command). Empty when
+	// the call names no target, when the permission rules switch is off, and for a capability-level
+	// evaluation.
+	TargetKind string `protobuf:"bytes,8,opt,name=target_kind,json=targetKind,proto3" json:"target_kind,omitempty"`
+	// The value of target_kind: a lower-case host or domain, or a command's first token of at most 64
+	// characters. Empty on a zero-retention or waived run, which sends target_kind alone.
+	TargetValue   string `protobuf:"bytes,9,opt,name=target_value,json=targetValue,proto3" json:"target_value,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -530,6 +539,20 @@ func (x *EvaluatePolicyRequest) GetUserId() string {
 func (x *EvaluatePolicyRequest) GetToolName() string {
 	if x != nil {
 		return x.ToolName
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyRequest) GetTargetKind() string {
+	if x != nil {
+		return x.TargetKind
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyRequest) GetTargetValue() string {
+	if x != nil {
+		return x.TargetValue
 	}
 	return ""
 }
@@ -1795,7 +1818,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\fprivacy_tier\x18\x10 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
 	"\tresidency\x18\x11 \x01(\tR\tresidency\x12*\n" +
 	"\x11side_effect_class\x18\x12 \x01(\tR\x0fsideEffectClass\x12%\n" +
-	"\x0eapproval_floor\x18\x13 \x01(\tR\rapprovalFloor\"\xd1\x01\n" +
+	"\x0eapproval_floor\x18\x13 \x01(\tR\rapprovalFloor\"\x95\x02\n" +
 	"\x15EvaluatePolicyRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +
@@ -1803,7 +1826,10 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\x06org_id\x18\x04 \x01(\tR\x05orgId\x12\x14\n" +
 	"\x05scope\x18\x05 \x01(\tR\x05scope\x12\x17\n" +
 	"\auser_id\x18\x06 \x01(\tR\x06userId\x12\x1b\n" +
-	"\ttool_name\x18\a \x01(\tR\btoolName\"\x89\x03\n" +
+	"\ttool_name\x18\a \x01(\tR\btoolName\x12\x1f\n" +
+	"\vtarget_kind\x18\b \x01(\tR\n" +
+	"targetKind\x12!\n" +
+	"\ftarget_value\x18\t \x01(\tR\vtargetValue\"\x89\x03\n" +
 	"\x16EvaluatePolicyResponse\x12\x1a\n" +
 	"\bdecision\x18\x01 \x01(\tR\bdecision\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12%\n" +
