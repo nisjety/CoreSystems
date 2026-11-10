@@ -1807,7 +1807,8 @@ describe('action registry', () => {
     // +1 after EP-6-S8 registered agents.preview, the builder's draft preview.
     // +1 after W3-EP-7-S6-c registered chat.goal_away_start, the keep-working-while-away start.
     // +1 after W4-CC-2 registered mcp.probe_server, the MCP add flow's probe of a server before it is saved.
-    expect(ids).toHaveLength(328)
+    // +3 after W5-077-c registered chat.thread.archive, chat.thread.star and chat.thread.mark_unread, the palette's thread flags.
+    expect(ids).toHaveLength(331)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

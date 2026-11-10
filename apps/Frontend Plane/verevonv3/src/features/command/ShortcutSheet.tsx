@@ -9,13 +9,16 @@ function isApplePlatform(): boolean {
   return typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent || '')
 }
 
-/** `mod+k` -> `Cmd K` / `Ctrl K`; `alt+3` -> `Alt 3`. */
+/** `mod+k` -> `Cmd K` / `Ctrl K`; `alt+3` -> `Alt 3`; `mod+shift+arrowup` -> `Ctrl Shift ↑`. */
 export function formatHotkey(spec: string, apple = isApplePlatform()): string {
   return spec
     .split('+')
     .map((part) => {
       if (part === 'mod') return apple ? 'Cmd' : 'Ctrl'
       if (part === 'alt') return apple ? 'Option' : 'Alt'
+      if (part === 'shift') return 'Shift'
+      if (part === 'arrowup') return '↑'
+      if (part === 'arrowdown') return '↓'
       return part.length === 1 ? part.toUpperCase() : part
     })
     .join(' ')

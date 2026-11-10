@@ -9,6 +9,7 @@
  *   - Printable single-key bindings (`/`, `?`) fire only outside editable targets.
  *   - `Alt+1..9` matches `event.code` (`Digit1`..), so it works on any layout and
  *     on macOS where Option rewrites `event.key` (decision D-7).
+ *   - A command marked `handledByPage` is fired by its page's own listener, never here.
  * `Esc` is not handled here: each overlay closes itself.
  */
 
@@ -68,7 +69,8 @@ export function resolveHotkey(
   if (event.isComposing || event.defaultPrevented) return null
   const typing = isEditableTarget(target)
   for (const command of commands) {
-    if (!command.hotkey) continue
+    // A key the page's own listener fires is listed, not fired here (CommandDescriptor.handledByPage).
+    if (!command.hotkey || command.handledByPage) continue
     if (typing && isSingleKeyBinding(command.hotkey)) continue
     if (matchesHotkey(event, command.hotkey)) return command
   }

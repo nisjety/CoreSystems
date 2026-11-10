@@ -9443,10 +9443,12 @@ impl SessionCore for SessionService {
 
     // G7 closed learning loop: persist a skill body into agent_skills. The
     // capability-core learning loop calls this with origin="background_review";
-    // a human skill editor uses origin="user". Provenance is enforced in the
-    // DB: a background_review upsert never overwrites a user-authored skill
-    // (the `WHERE` guard on the conflict), surfaced as `skipped_protected`
-    // rather than an error so the loop yields gracefully to the human.
+    // a human skill editor uses origin="user"; a skill a person taught the agent
+    // (W5-081) is filed with origin="teach", a proposal like background_review.
+    // Provenance is enforced in the DB: a background_review upsert never
+    // overwrites a user-authored skill (the `WHERE` guard on the conflict),
+    // surfaced as `skipped_protected` rather than an error so the loop yields
+    // gracefully to the human.
     /// Flip one skill's injection switch without touching anything else.
     ///
     /// `upsert_agent_skill` is keyed by (org_id, name) and rewrites the whole
@@ -9567,22 +9569,32 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("org_id and name are required"));
             }
             caller.authorize_org(&req.org_id)?;
+            // The values mirror `learning.Origin` in capability-core's internal/learning and the
+            // origin CHECK of migration 0116: a new origin is added to all three.
             let origin = match req.origin.as_str() {
                 "" | "background_review" => "background_review",
+                "teach" => "teach",
                 "user" => "user",
                 other => {
                     return Err(Status::invalid_argument(format!("invalid origin: {other}")));
                 }
             };
-            // A learned skill is a disabled proposal owned by one user, whatever
-            // the caller asked for; a human write is accepted as it always was.
-            let (scope, owner, review_state, enabled) = if origin == "background_review" {
+            // A taught skill is durable skill text, so a zero-retention or waived credential never
+            // writes one: the refusal `record_run_context` gives, before anything is read or written.
+            if origin == "teach" && (caller.zdr() || caller.zdr_waiver().is_some()) {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            // A learned or taught skill is a disabled proposal owned by one user, whatever the
+            // caller asked for; a human write is accepted as it always was.
+            let learned = matches!(origin, "background_review" | "teach");
+            let (scope, owner, review_state, enabled) = if learned {
                 let owner = req.owner_user_id.trim();
                 if owner.is_empty() {
                     return Ok(Response::new(skill_write_skipped("owner_required")));
                 }
-                // A user credential may only write for itself; a service
-                // (the learning review) names the owner of the run it reviewed.
+                // A user credential may only write for itself; a service (the learning review,
+                // or the teach route) names the owner of the run the proposal came from.
                 if caller.user_id().is_some() {
                     caller.authorize_user(owner)?;
                 }
@@ -9636,7 +9648,7 @@ impl SessionCore for SessionService {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-            if origin == "background_review" {
+            if learned {
                 // Under the owner's row lock, so a pause that commits first is
                 // seen here and one that waits lands after this write. The
                 // announcement of the run was gated too; this is the gate where
@@ -9652,7 +9664,7 @@ impl SessionCore for SessionService {
             // The content policy. A learned skill's text is refused under enforce and a
             // person's is only counted. A refusal writes nothing: no row is inserted and a
             // stored proposal keeps the text it had.
-            let policy_origin = if origin == "background_review" {
+            let policy_origin = if learned {
                 crate::write_policy::Origin::BackgroundReview
             } else {
                 crate::write_policy::Origin::User
@@ -9678,12 +9690,12 @@ impl SessionCore for SessionService {
             // The conflict key is (org, kind, scope, scope_id, owner, name), the
             // unique index of migration 0109; this RPC writes only kind 'skill' with
             // an empty scope_id (the column defaults), so a template or preset of the
-            // same name is never overwritten by a skill write. A learned skill
-            // refreshes only a proposal it wrote itself and never touches
+            // same name is never overwritten by a skill write. A learned or taught skill
+            // refreshes only a proposal of its own origin (the bound `$10`) and never touches
             // enabled, scope, owner or review_state; a human write keeps setting
             // `enabled` but cannot switch on a proposal nobody accepted.
             // None ⟺ the conflict guard rejected the write.
-            let row: Option<(String, bool)> = if origin == "background_review" {
+            let row: Option<(String, bool)> = if learned {
                 sqlx::query_as(
                     "INSERT INTO agent_skills
                         (id, org_id, name, description, content, trigger_keywords,
@@ -9701,7 +9713,7 @@ impl SessionCore for SessionService {
                          source_thread_id = EXCLUDED.source_thread_id,
                          proposal_reason = EXCLUDED.proposal_reason,
                          updated_at = now()
-                     WHERE agent_skills.origin = 'background_review'
+                     WHERE agent_skills.origin = $10
                        AND agent_skills.review_state = 'proposed'
                      RETURNING id, (xmax = 0) AS created",
                 )
@@ -20679,7 +20691,7 @@ mod tests {
     fn upsert_agent_skill_conflict_arm_never_touches_state_columns() {
         let source = include_str!("grpc.rs");
         let guard = source
-            .find("WHERE agent_skills.origin = 'background_review'")
+            .find("WHERE agent_skills.origin = $10")
             .expect("the learned conflict guard");
         let set = source[..guard]
             .rfind("DO UPDATE SET")

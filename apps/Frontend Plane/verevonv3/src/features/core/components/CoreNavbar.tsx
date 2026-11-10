@@ -20,6 +20,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'so
 import type { JSX } from '@solidjs/web'
 import { CoreNavbarPanel, type CoreNavbarPanelKind } from '@/features/core/components/CoreNavbarPanels'
 import {
+  readActiveChatThreadId,
   readChatThreadHistory,
   selectChatThread,
   type ChatThreadHistoryItem,
@@ -126,6 +127,8 @@ export function CoreNavbar(props: {
   const [paletteQuery, setPaletteQuery] = createSignal<string | undefined>(undefined)
   const commandContext = (): CommandContext => ({
     spaceRef: spaceRefFromPathname(location.pathname),
+    // W5-077-c: the thread the chat page has open, so the palette can offer its thread flags. Only on /chat.
+    chatThreadId: props.activeRoute === '/chat' ? readActiveChatThreadId() : null,
     offline: offline(),
     navigate: (href) => navigate(href),
     openPalette: (query) => {

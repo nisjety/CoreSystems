@@ -1124,15 +1124,15 @@ message UpsertAgentSkillRequest {
   repeated string trigger_file_patterns = 6;
   repeated string tool_restrictions = 7;
   bool enabled = 8;
-  // Provenance: "user" or "background_review". A background_review upsert
+  // Provenance: "user", "background_review" or "teach". A background_review upsert
   // must never overwrite a user-authored skill (enforced server-side).
   string origin = 9;
-  // Ownership and review (WS07 S7). For origin "background_review" session-core
-  // ignores `scope`, `owner_user_id`, `review_state` and `enabled` and writes a
-  // disabled, user-scoped, "proposed" row owned by the caller's `owner_user_id`
-  // (required: a learned skill without an owner is refused). For origin "user"
-  // an empty `scope` is "org" and `review_state` is ignored (a human write is
-  // "accepted").
+  // Ownership and review (WS07 S7). For origin "background_review" or "teach"
+  // session-core ignores `scope`, `owner_user_id`, `review_state` and `enabled` and
+  // writes a disabled, user-scoped, "proposed" row owned by the caller's
+  // `owner_user_id` (required: a learned or taught skill without an owner is
+  // refused). For origin "user" an empty `scope` is "org" and `review_state` is
+  // ignored (a human write is "accepted").
   string scope = 10;
   string owner_user_id = 11;
   // Review state of the skill. Ignored for a human write, which is accepted.
@@ -1202,7 +1202,7 @@ message AgentSkill {
   repeated string trigger_file_patterns = 6;
   repeated string tool_restrictions = 7;
   bool enabled = 8;
-  // Provenance: "user" or "background_review".
+  // Provenance: "user", "background_review" or "teach".
   string origin = 9;
   // Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
   // explicit-share shape. "org" (default) or "user"; owner_user_id and

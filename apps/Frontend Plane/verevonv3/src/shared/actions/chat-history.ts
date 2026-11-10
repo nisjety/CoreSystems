@@ -18,12 +18,18 @@ const threadExportFields = {
   profile: z.enum(['full', 'redacted']),
 }
 
+// The three members the command palette runs (W5-077-c) are named, so the palette's inputs reuse them
+// instead of restating the fields. The union below is unchanged.
+export const threadArchiveAction = z.object({ type: z.literal('thread.archive'), threadId })
+export const threadStarAction = z.object({ type: z.literal('thread.star'), threadId, starred: z.boolean() })
+export const threadMarkUnreadAction = z.object({ type: z.literal('thread.mark_unread'), threadId })
+
 export const chatHistoryActionSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('thread.archive'), threadId }),
+  threadArchiveAction,
   z.object({ type: z.literal('thread.unarchive'), threadId }),
   z.object({ type: z.literal('thread.fork'), threadId, fromMessageId: messageId, title: z.string().trim().max(96).optional() }),
-  z.object({ type: z.literal('thread.star'), threadId, starred: z.boolean() }),
-  z.object({ type: z.literal('thread.mark_unread'), threadId }),
+  threadStarAction,
+  threadMarkUnreadAction,
   z.object({ type: z.literal('thread.mark_read'), threadId }),
   z.object({ type: z.literal('thread.search'), query: z.string().trim().min(1).max(200), threadId: threadId.optional() }),
   z.object({ type: z.literal('thread.export'), ...threadExportFields }),

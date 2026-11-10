@@ -1,6 +1,7 @@
 import { useNavigate } from '@solidjs/router'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
+import { ChatLibraryContractError, chatLibraryDocumentIdSchema, parseChatLibraryOperation } from '@/shared/actions/chat-library'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   getComposerCapabilities,
@@ -45,13 +46,25 @@ export function ChatLibraryPanel() {
   const [limit, setLimit] = createSignal(PAGE_SIZE)
   const [openId, setOpenId] = createSignal<string | null>(null)
   const [sharingId, setSharingId] = createSignal<string | null>(null)
+  // Set when an open or a share is refused by its contract. Nothing was sent, and the person is told why.
+  const [refused, setRefused] = createSignal(false)
 
   const [enabled] = createResource(async () => (await getComposerCapabilities()).artifactPromote)
+  // Each read passes its contract before it is sent. A refusal rejects the resource with a ChatLibraryContractError.
   const [page] = createResource(
     () => (enabled() === true ? { kind: kind(), limit: limit() } : undefined),
-    (query) => listChatLibrary(query),
+    async (query) => {
+      const list = parseChatLibraryOperation('library.list', { kind: query.kind, limit: query.limit, offset: 0 })
+      return listChatLibrary({ kind: list.kind, limit: list.limit, offset: list.offset })
+    },
   )
-  const [text] = createResource(openId, (id) => readChatLibraryText(id))
+  const [text] = createResource(openId, async (id) => {
+    const read = parseChatLibraryOperation('library.read_text', { documentId: id })
+    return readChatLibraryText(read.documentId)
+  })
+
+  const refusedText = () =>
+    i18n.tr('Forespørselen ble ikke sendt, fordi den ikke er gyldig.', 'The request was not sent because it is not valid.')
 
   const chooseKind = (next: ChatLibraryKind) => {
     setKind(next)
@@ -65,8 +78,28 @@ export function ChatLibraryPanel() {
 
   const openThread = (threadId: string | undefined) => {
     if (!threadId) return
-    selectChatThread(threadId)
+    let target: string
+    try {
+      target = parseChatLibraryOperation('library.open_origin', { threadId }).threadId
+    } catch {
+      setRefused(true)
+      return
+    }
+    setRefused(false)
+    selectChatThread(target)
     navigate('/chat')
+  }
+
+  // The share dialog opens only for a document id the contract accepts. The grants themselves are
+  // checked by the library.share input in the registry; the dialog submits its own grant.
+  const startSharing = (documentId: string) => {
+    const target = chatLibraryDocumentIdSchema.safeParse(documentId)
+    if (!target.success) {
+      setRefused(true)
+      return
+    }
+    setRefused(false)
+    setSharingId(target.data)
   }
 
   const kindLabel = (item: ChatLibraryItem) =>
@@ -105,11 +138,18 @@ export function ChatLibraryPanel() {
             {i18n.tr('Lastet opp', 'Uploaded')}
           </button>
         </div>
+        <Show when={refused()}>
+          <p role="alert">{refusedText()}</p>
+        </Show>
         <Show when={!page.loading} fallback={<p role="status">{i18n.tr('Laster filer…', 'Loading files…')}</p>}>
           <Show
             when={!page.error}
             fallback={
-              <p role="alert">{i18n.tr('Kunne ikke hente filer akkurat nå.', 'Files could not be loaded right now.')}</p>
+              <p role="alert">
+                {page.error instanceof ChatLibraryContractError
+                  ? refusedText()
+                  : i18n.tr('Kunne ikke hente filer akkurat nå.', 'Files could not be loaded right now.')}
+              </p>
             }
           >
             <Show
@@ -157,7 +197,7 @@ export function ChatLibraryPanel() {
                           </button>
                         </Show>
                         <Show when={item.ownerId === userId() && isGateOpen()}>
-                          <button type="button" onClick={() => setSharingId(item.documentId)}>
+                          <button type="button" onClick={() => startSharing(item.documentId)}>
                             {i18n.tr('Del', 'Share')}
                           </button>
                         </Show>
@@ -167,7 +207,18 @@ export function ChatLibraryPanel() {
                           when={!text.loading}
                           fallback={<p role="status">{i18n.tr('Laster tekst…', 'Loading text…')}</p>}
                         >
-                          <pre class="chat-library__text">{text() ?? ''}</pre>
+                          <Show
+                            when={!text.error}
+                            fallback={
+                              <p role="alert">
+                                {text.error instanceof ChatLibraryContractError
+                                  ? refusedText()
+                                  : i18n.tr('Teksten kunne ikke hentes akkurat nå.', 'The text could not be loaded right now.')}
+                              </p>
+                            }
+                          >
+                            <pre class="chat-library__text">{text() ?? ''}</pre>
+                          </Show>
                         </Show>
                       </Show>
                     </li>

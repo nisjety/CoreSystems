@@ -72,6 +72,12 @@ interface ImportMetaEnv {
 	readonly VITE_WIDGET_SELECTION?: string;
 	/** "true" draws a generated image's tool call as an image card: the model and provider that made it, and any typed refusal (W4-IMG-4). Default off. */
 	readonly VITE_CHAT_IMAGE_TOOL?: string;
+	/** "true" mounts the changed-files card under each answer: the files the run saved to its Space workspace (F-t3-076). Default off. */
+	readonly VITE_CHAT_CHANGED_FILES?: string;
+	/** "true" mounts the shell toast stack and lets `showToast` raise notices from any route (F-t3-078). Default off. */
+	readonly VITE_SHELL_TOASTS?: string;
+	/** "true" lets two bare Escape presses within 600 ms stop the streaming chat answer (F-t3-077). Default off. */
+	readonly VITE_CHAT_DOUBLE_ESCAPE_STOP?: string;
 }
 
 interface ImportMeta {

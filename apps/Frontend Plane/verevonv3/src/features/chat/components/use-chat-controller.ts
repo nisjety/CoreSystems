@@ -678,6 +678,15 @@ export function useChatController() {
       .find((turn) => turn.role === 'assistant')
     return isWorkSurfaceTurn(latestAssistant) ? latestAssistant?.runId ?? null : null
   })
+  /**
+   * The durable run of the answer that is streaming now, Ask turns included. `liveRunId` names a Work run only,
+   * so an ordinary answer has none there. Null unless an answer is still arriving and its run id has come in.
+   */
+  const streamingRunId = (): string | null => {
+    if (state.status !== 'streaming') return null
+    const latestAssistant = [...state.turns].reverse().find((turn) => turn.role === 'assistant')
+    return latestAssistant?.status === 'waiting' ? latestAssistant.runId ?? null : null
+  }
   let serverSnapshotTimer: number | undefined
   let pendingServerSnapshot: {
     preview?: string
@@ -4543,6 +4552,17 @@ export function useChatController() {
     }
   }
 
+  /**
+   * The keyboard stop (F-t3-077, double Escape). Stops the run the caller names, and only while that run is still
+   * the one streaming, so a press made for an earlier run cannot cancel a later one. It is handleStop, so the run
+   * goes through cancelRun, and a refused cancel is recorded as it is for the Stop button. False when nothing stops.
+   */
+  const stopLiveRun = (expectedRunId: string): boolean => {
+    if (!expectedRunId || isForeignOriginThread(state.threadId) || streamingRunId() !== expectedRunId) return false
+    handleStop()
+    return true
+  }
+
   // One place, reactive, so no terminal path can forget it: the moment the
   // machine is free, anything a run ended too early to receive goes out as an
   // ordinary turn. Placed after `sendContent` so the effect's first run cannot
@@ -5775,6 +5795,9 @@ export function useChatController() {
     giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
+    // F-t3-077: the double-Escape stop. The page reads the streaming run at the press and stops that run only.
+    streamingRunId,
+    stopLiveRun,
     copyTurn,
     submitTurnFeedback,
     feedbackNotice,

@@ -51,6 +51,7 @@ pub mod space_timeline;
 pub mod telemetry_labels;
 pub mod tool_arguments;
 pub mod tool_class;
+pub mod user_content;
 pub mod user_question;
 pub mod write_preview;
 pub mod zdr_refusal;

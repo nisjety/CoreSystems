@@ -15,6 +15,7 @@
 //! `review_run_routes`, which answers 404 while the switch is off.
 
 use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest};
+use mp_contracts::user_content::UserContent;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
@@ -144,22 +145,25 @@ impl InputError {
 }
 
 /// A review request, checked. The material is kept byte for byte: the card hashes it, and every
-/// quote is checked against its lines.
+/// quote is checked against its lines. The brief and the material are [`UserContent`], so they
+/// print as their size only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewInput {
     pub target: ReviewTarget,
     pub label: String,
-    pub brief: String,
-    pub material: String,
+    pub brief: UserContent,
+    pub material: UserContent,
     pub locale: &'static str,
 }
 
 /// Check a request. Label and brief are single lines; anything over its limit is refused, not cut.
+/// The brief and the material are read in process through `expose_for_model`, and nothing here
+/// logs them.
 pub fn validate(
     target: &str,
     label: &str,
-    brief: &str,
-    material: &str,
+    brief: &UserContent,
+    material: &UserContent,
     locale: &str,
 ) -> Result<ReviewInput, InputError> {
     let target = ReviewTarget::parse(target.trim()).ok_or(InputError::UnknownTarget)?;
@@ -167,21 +171,22 @@ pub fn validate(
     if label.chars().count() > MAX_LABEL_CHARS {
         return Err(InputError::LabelTooLong);
     }
-    let brief = single_line(brief);
+    let brief = single_line(brief.expose_for_model());
     if brief.chars().count() > MAX_BRIEF_CHARS {
         return Err(InputError::BriefTooLong);
     }
-    if material.trim().is_empty() {
+    let text = material.expose_for_model();
+    if text.trim().is_empty() {
         return Err(InputError::MaterialMissing);
     }
-    if material.len() > MAX_MATERIAL_BYTES || material.lines().count() > MAX_MATERIAL_LINES {
+    if material.len() > MAX_MATERIAL_BYTES || text.lines().count() > MAX_MATERIAL_LINES {
         return Err(InputError::MaterialTooLarge);
     }
     Ok(ReviewInput {
         target,
         label,
-        brief,
-        material: material.to_owned(),
+        brief: UserContent::from(brief),
+        material: material.clone(),
         locale: if locale.trim() == "en" { "en" } else { "nb" },
     })
 }
@@ -262,7 +267,7 @@ pub fn review_user_message(input: &ReviewInput, nonce: &str) -> String {
     let brief = if input.brief.is_empty() {
         "(none)"
     } else {
-        input.brief.as_str()
+        input.brief.expose_for_model()
     };
     let mut message = format!(
         "Kind of material: {}.\nWrite title, body and suggestion in {language}.\n\
@@ -274,7 +279,7 @@ pub fn review_user_message(input: &ReviewInput, nonce: &str) -> String {
         "<<DATA {nonce}>>\nLabel: {label}\nBrief: {brief}\n<<END DATA {nonce}>>\n"
     );
     let _ = writeln!(message, "<<MATERIAL {nonce}>>");
-    for (index, line) in input.material.lines().enumerate() {
+    for (index, line) in input.material.expose_for_model().lines().enumerate() {
         let _ = writeln!(message, "L{}: {line}", index + 1);
     }
     let _ = writeln!(
@@ -561,8 +566,8 @@ pub fn card_json(
         "sourceChecks": checks,
         "limitReached": parse.limit_reached,
         "reviewed": {
-            "contentHash": content_hash(&input.material),
-            "lines": input.material.lines().count(),
+            "contentHash": content_hash(input.material.expose_for_model()),
+            "lines": input.material.expose_for_model().lines().count(),
             "bytes": input.material.len(),
         },
         "modelUsed": model_used,
@@ -689,8 +694,12 @@ mod tests {
 
     const RUN: &str = "01RUNTESTRUNTESTRUNTESTRU";
 
+    fn text(value: &str) -> UserContent {
+        UserContent::from(value.to_owned())
+    }
+
     fn input(target: &str, material: &str) -> ReviewInput {
-        validate(target, "", "", material, "nb").expect("a valid review input")
+        validate(target, "", &text(""), &text(material), "nb").expect("a valid review input")
     }
 
     fn lines_of(material: &str) -> Vec<&str> {
@@ -754,33 +763,33 @@ mod tests {
     #[test]
     fn validation_refuses_what_the_gateway_cannot_review() {
         assert_eq!(
-            validate("file", "", "", "x", "nb"),
+            validate("file", "", &text(""), &text("x"), "nb"),
             Err(InputError::UnknownTarget)
         );
         assert_eq!(
-            validate("attachment", "", "", "  \n\t ", "nb"),
+            validate("attachment", "", &text(""), &text("  \n\t "), "nb"),
             Err(InputError::MaterialMissing)
         );
         let too_many_bytes = "a".repeat(MAX_MATERIAL_BYTES + 1);
         assert_eq!(
-            validate("attachment", "", "", &too_many_bytes, "nb"),
+            validate("attachment", "", &text(""), &text(&too_many_bytes), "nb"),
             Err(InputError::MaterialTooLarge)
         );
         let too_many_lines = "x\n".repeat(MAX_MATERIAL_LINES + 1);
         assert_eq!(
-            validate("attachment", "", "", &too_many_lines, "nb"),
+            validate("attachment", "", &text(""), &text(&too_many_lines), "nb"),
             Err(InputError::MaterialTooLarge)
         );
         let at_the_line_limit = "x\n".repeat(MAX_MATERIAL_LINES);
-        assert!(validate("attachment", "", "", &at_the_line_limit, "nb").is_ok());
+        assert!(validate("attachment", "", &text(""), &text(&at_the_line_limit), "nb").is_ok());
         let long_label = "l".repeat(MAX_LABEL_CHARS + 1);
         assert_eq!(
-            validate("attachment", &long_label, "", "x", "nb"),
+            validate("attachment", &long_label, &text(""), &text("x"), "nb"),
             Err(InputError::LabelTooLong)
         );
         let long_brief = "b".repeat(MAX_BRIEF_CHARS + 1);
         assert_eq!(
-            validate("attachment", "", &long_brief, "x", "nb"),
+            validate("attachment", "", &text(&long_brief), &text("x"), "nb"),
             Err(InputError::BriefTooLong)
         );
     }
@@ -790,15 +799,16 @@ mod tests {
         let checked = validate(
             "artifact_revision",
             "Tilbud\n  v3",
-            "Sjekk\ntall",
-            "x",
+            &text("Sjekk\ntall"),
+            &text("x"),
             "en",
         )
         .expect("valid");
         assert_eq!(checked.label, "Tilbud v3");
-        assert_eq!(checked.brief, "Sjekk tall");
+        assert_eq!(checked.brief.expose_for_model(), "Sjekk tall");
         assert_eq!(checked.locale, "en");
-        let default = validate("artifact_revision", "", "", "x", "fr").expect("valid");
+        let default =
+            validate("artifact_revision", "", &text(""), &text("x"), "fr").expect("valid");
         assert_eq!(default.locale, "nb");
     }
 
@@ -873,7 +883,7 @@ mod tests {
         assert!(review_user_message(&checked, RUN).contains("natural Norwegian Bokmål"));
         checked.locale = "en";
         checked.label = "Offer".to_owned();
-        checked.brief = "Check the price".to_owned();
+        checked.brief = text("Check the price");
         let message = review_user_message(&checked, RUN);
         assert!(message.contains("Write title, body and suggestion in English."));
         assert!(message.contains("Label: Offer\nBrief: Check the price"));

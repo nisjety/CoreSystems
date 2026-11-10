@@ -40,6 +40,8 @@ import { getDeletionStatus } from '@/shared/api/org-deletion-client'
 import { useI18n } from '@/shared/i18n'
 import { getSession, type SessionState } from '@/shared/session/session-store'
 import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
+import { ToastHost } from '@/shared/ui/toast/ToastHost'
+import { shellToastsEnabled } from '@/shared/ui/toast/toast-store'
 
 /** Extra height the fixed org-deletion banner (Flow C) occupies below the
  * navbar — added to `--dashboard-navbar-height` so `.core-main`'s top
@@ -502,6 +504,9 @@ export function CoreShell(props: { children?: JSX.Element }) {
           </RegionBoundary>
         </Show>
         <FeedbackWidget />
+        <Show when={shellToastsEnabled()}>
+          <ToastHost />
+        </Show>
         <AnnouncerRegions />
       </div>
       </AssistantNavigationContext>

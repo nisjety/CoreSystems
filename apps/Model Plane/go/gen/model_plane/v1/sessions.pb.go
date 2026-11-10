@@ -3951,15 +3951,15 @@ type UpsertAgentSkillRequest struct {
 	TriggerFilePatterns []string               `protobuf:"bytes,6,rep,name=trigger_file_patterns,json=triggerFilePatterns,proto3" json:"trigger_file_patterns,omitempty"`
 	ToolRestrictions    []string               `protobuf:"bytes,7,rep,name=tool_restrictions,json=toolRestrictions,proto3" json:"tool_restrictions,omitempty"`
 	Enabled             bool                   `protobuf:"varint,8,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	// Provenance: "user" or "background_review". A background_review upsert
+	// Provenance: "user", "background_review" or "teach". A background_review upsert
 	// must never overwrite a user-authored skill (enforced server-side).
 	Origin string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
-	// Ownership and review (WS07 S7). For origin "background_review" session-core
-	// ignores `scope`, `owner_user_id`, `review_state` and `enabled` and writes a
-	// disabled, user-scoped, "proposed" row owned by the caller's `owner_user_id`
-	// (required: a learned skill without an owner is refused). For origin "user"
-	// an empty `scope` is "org" and `review_state` is ignored (a human write is
-	// "accepted").
+	// Ownership and review (WS07 S7). For origin "background_review" or "teach"
+	// session-core ignores `scope`, `owner_user_id`, `review_state` and `enabled` and
+	// writes a disabled, user-scoped, "proposed" row owned by the caller's
+	// `owner_user_id` (required: a learned or taught skill without an owner is
+	// refused). For origin "user" an empty `scope` is "org" and `review_state` is
+	// ignored (a human write is "accepted").
 	Scope       string `protobuf:"bytes,10,opt,name=scope,proto3" json:"scope,omitempty"`
 	OwnerUserId string `protobuf:"bytes,11,opt,name=owner_user_id,json=ownerUserId,proto3" json:"owner_user_id,omitempty"`
 	// Review state of the skill. Ignored for a human write, which is accepted.
@@ -4301,7 +4301,7 @@ type AgentSkill struct {
 	TriggerFilePatterns []string               `protobuf:"bytes,6,rep,name=trigger_file_patterns,json=triggerFilePatterns,proto3" json:"trigger_file_patterns,omitempty"`
 	ToolRestrictions    []string               `protobuf:"bytes,7,rep,name=tool_restrictions,json=toolRestrictions,proto3" json:"tool_restrictions,omitempty"`
 	Enabled             bool                   `protobuf:"varint,8,opt,name=enabled,proto3" json:"enabled,omitempty"`
-	// Provenance: "user" or "background_review".
+	// Provenance: "user", "background_review" or "teach".
 	Origin string `protobuf:"bytes,9,opt,name=origin,proto3" json:"origin,omitempty"`
 	// Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
 	// explicit-share shape. "org" (default) or "user"; owner_user_id and

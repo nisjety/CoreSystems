@@ -23,6 +23,8 @@ export type CommandKind = 'navigate' | 'ui' | 'action'
 export interface CommandContext {
   /** The room in scope (`/spaces/:ref`), or null outside a room. */
   readonly spaceRef: string | null
+  /** The active server thread on `/chat` (`readActiveChatThreadId`), or null elsewhere. Presentation input, never authority. */
+  readonly chatThreadId: string | null
   /** True on isolated local surfaces where global chrome stays inert. */
   readonly offline: boolean
   readonly navigate: (href: string) => void
@@ -43,6 +45,12 @@ export interface CommandDescriptor {
   readonly run: (ctx: CommandContext) => void | Promise<void>
   /** The shared action this command executes, when `kind === 'action'`. */
   readonly actionId?: ActionId
+  /**
+   * A page's own keydown listener fires this command's key (the chat page's use-chat-shortcuts).
+   * The hotkey layer still lists the binding on the shortcut sheet but never fires it, so one press
+   * runs the command once. The palette and the sheet run or show it as usual.
+   */
+  readonly handledByPage?: boolean
 }
 
 const registered = new Map<string, CommandDescriptor>()

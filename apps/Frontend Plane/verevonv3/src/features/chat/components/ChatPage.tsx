@@ -79,7 +79,9 @@ import {
   shouldShowDateDivider,
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
-import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
+import { useChatShortcuts, type UseChatShortcutsOptions } from '@/features/chat/lib/use-chat-shortcuts'
+import { registerChatCommands } from '@/features/command/chat-commands'
+import { commandPaletteEnabled } from '@/features/command/command-registry'
 import { dockedNodesFor, selectDockedTrays } from '../lib/composer-trays'
 import { deriveStreamActivity, streamActivityLabel } from '@/features/chat/lib/stream-activity'
 import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
@@ -143,6 +145,9 @@ export default function ChatPage() {
     giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
+    // F-t3-077: the double-Escape stop reads the streaming run at the press and stops only that run.
+    streamingRunId,
+    stopLiveRun,
     copyTurn,
     submitTurnFeedback,
     feedbackNotice,
@@ -281,6 +286,22 @@ export default function ChatPage() {
     doMode: planMode(),
   })
   const [projectNotice, setProjectNotice] = createSignal('')
+  // The double-Escape stop (F-t3-077) confirms itself on the composer's notice line for a moment. The timer clears
+  // the line only while it still shows that confirmation, so a newer notice is never wiped.
+  const STOPPING_NOTICE_MS = 1500
+  let stoppingNoticeTimer: ReturnType<typeof setTimeout> | undefined
+  const showStoppingNotice = () => {
+    const text = i18n.tr('Stopper…', 'Stopping…')
+    setProjectNotice(text)
+    if (stoppingNoticeTimer !== undefined) clearTimeout(stoppingNoticeTimer)
+    stoppingNoticeTimer = setTimeout(() => {
+      stoppingNoticeTimer = undefined
+      if (projectNotice() === text) setProjectNotice('')
+    }, STOPPING_NOTICE_MS)
+  }
+  onCleanup(() => {
+    if (stoppingNoticeTimer !== undefined) clearTimeout(stoppingNoticeTimer)
+  })
   // The first-send ask for a shared room. The send waits on the answer, and a cancel
   // is a refused send: the composer clears its draft only after a send it saw succeed.
   const [audienceAsk, setAudienceAsk] = createSignal<{
@@ -508,7 +529,8 @@ export default function ChatPage() {
     focusComposer()
   }
 
-  useChatShortcuts({
+  // One set of callbacks for the keydown hook and the command palette (chat-commands), so both run the same action.
+  const chatShortcutActions: UseChatShortcutsOptions = {
     startNewChat,
     // The hook acts on these only while the dock is on; here they also need a live run to show.
     toggleBrowserDock: () => {
@@ -517,7 +539,26 @@ export default function ChatPage() {
     cycleBrowserDock: () => {
       if (liveRunId()) setBrowserDockPosition(nextBrowserDockPosition(browserDock().position))
     },
-  })
+    // The double-Escape stop (F-t3-077). The run is read at the press, and stopLiveRun stops it only while it is still
+    // the streaming answer, so a press cannot stop a newer run. Nothing streaming means nothing stops, and false
+    // hands the Escape back to the ordinary blur.
+    stopRun: () => {
+      const runId = streamingRunId()
+      if (!runId || !stopLiveRun(runId)) return false
+      showStoppingNotice()
+      return true
+    },
+  }
+  useChatShortcuts(chatShortcutActions)
+
+  // Registered while the page is mounted, so its shortcuts appear in the palette and the shortcut sheet only there.
+  createEffect(
+    () => undefined,
+    () => {
+      if (!commandPaletteEnabled()) return undefined
+      return registerChatCommands(chatShortcutActions)
+    },
+  )
 
   // Knowledge import is an explicit, durable action — separate from sending a
   // chat turn. The composer keeps object URLs alive for the current turn; we

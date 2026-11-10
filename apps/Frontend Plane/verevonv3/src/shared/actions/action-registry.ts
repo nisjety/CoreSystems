@@ -1,7 +1,13 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 import { spaceActions } from '@/shared/actions/domains/spaces'
-import { threadExportInput } from '@/shared/actions/chat-history'
+import { threadArchiveAction, threadExportInput, threadMarkUnreadAction, threadStarAction } from '@/shared/actions/chat-history'
+import {
+  chatLibraryListInput,
+  chatLibraryOpenOriginInput,
+  chatLibraryReadTextInput,
+  chatLibraryShareInput,
+} from '@/shared/actions/chat-library'
 import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
 
 const sourceInput = z.object({
@@ -2142,6 +2148,16 @@ const chatSaveThreadSnapshotInput = z.object({
 const threadExportOutput = z.object({
   contentType: z.string().min(1),
   filename: z.string().min(1),
+})
+
+// The library's answers (F-t3-080): one page of document metadata, never text, and one document's text when it is read.
+const chatLibraryListOutput = z.object({
+  documents: z.array(z.record(z.string(), z.unknown())),
+  total: z.number().int().nonnegative(),
+})
+
+const chatLibraryReadTextOutput = z.object({
+  content: z.string(),
 })
 
 const chatUploadDocumentInput = z.object({
@@ -4932,6 +4948,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.thread.archive',
+    label: 'Archive chat thread',
+    description: 'Hide one of the caller\'s own chat threads from the ordinary list. It stays in the archive and can be restored. Owner only; never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadArchiveAction.omit({ type: true }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.thread.star',
+    label: 'Star chat thread',
+    description: 'Star or unstar one of the caller\'s own chat threads. A star is the person\'s own mark, so it is never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadStarAction.omit({ type: true }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.thread.mark_unread',
+    label: 'Mark chat thread unread',
+    description: 'Mark one of the caller\'s own chat threads unread, so it returns to the attention list. Owner only; never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadMarkUnreadAction.omit({ type: true }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'thread.export',
     label: 'Export chat thread',
     description: 'Download one of the caller\'s own chat conversations as a file, JSON (verevon.thread-export.v1) or Markdown, in full or redacted; redacted leaves out tool payloads, connector data and attachment names. Owner only, and read only: nothing is changed or stored. Refused under zero data retention, for a thread with a run kept outside retention, and for a Space conversation; the route answers 404 while the export is off. Never model-executable: a model does not take a copy of a person\'s conversation off the platform.',
@@ -4984,6 +5033,50 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatSaveArtifactToKnowledgeInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'library.list',
+    label: 'List chat library',
+    description: "List the person's saved chat files, generated artifact copies, uploaded text, or both, newest first, one page at a time. Read only: nothing is changed. The viewer's own predicate applies (their own files, files shared with them, and org-visible files), Space room files are left out, and a page carries metadata, never text. Off until the gateway's artifact promote switch is on. Never model-executable: a model does not browse the person's saved files.",
+    ownerPlane: 'data',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryListInput,
+    outputSchema: chatLibraryListOutput,
+  },
+  {
+    id: 'library.read_text',
+    label: 'Read a chat library file',
+    description: "Read the text of one saved chat file by its document id, through the knowledge document route. Read only: nothing is changed or stored, and only a file the viewer may read is returned. Never model-executable: a model does not take the text of the person's saved files.",
+    ownerPlane: 'data',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryReadTextInput,
+    outputSchema: chatLibraryReadTextOutput,
+  },
+  {
+    id: 'library.open_origin',
+    label: 'Open the chat a library file came from',
+    description: "Open the chat thread a saved copy was made in. Navigation only, in the browser: it selects that chat thread and goes to the chat page. Nothing is read from the server or changed, and the thread opens under the person's own access. Never model-executable.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryOpenOriginInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'library.share',
+    label: 'Share a chat library file',
+    description: "Writes resource grants (an effect): gives org members or groups viewer or editor access to one of the person's own saved chat files. Grant only: there is no public link, and a key the contract does not name is refused. Owner only, and refused under zero data retention. Never model-executable: a model does not decide who may read the person's files.",
+    ownerPlane: 'data',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryShareInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -4,6 +4,12 @@ import type { ChangedFile } from '../lib/changed-files'
 import './ChangedFilesCard.css'
 
 /**
+ * `VITE_CHAT_CHANGED_FILES=true` mounts the changed-files card under each answer (F-t3-076). Unset, or any value but
+ * `true` (the default), no answer shows a card. Exact string, as the other chat switches.
+ */
+export const chatChangedFilesEnabled = () => import.meta.env.VITE_CHAT_CHANGED_FILES === 'true'
+
+/**
  * The changed-files card (F-t3-076): the files a run saved to its workspace, and whether each was new or edited. It
  * reads and changes nothing. There is no accept or promote control, because nothing moves an overlay into the Space
  * yet (DEC-24), so the note says the change belongs to this run alone. It renders nothing for an empty list.

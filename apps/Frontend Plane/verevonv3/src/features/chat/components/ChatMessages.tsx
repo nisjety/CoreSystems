@@ -129,6 +129,7 @@ import {
   MAX_HIGHLIGHT_CHARS,
   highlightCode,
 } from './chat-code-highlight'
+import { ChangedFilesCard, chatChangedFilesEnabled } from './ChangedFilesCard'
 import { ChartFenceBlock } from './ChatChart'
 import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
 import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
@@ -156,6 +157,7 @@ import {
   type ParsedMarkdown,
 } from './chat-media-markdown'
 import { answerExportSize, EXPORT_BUTTON_MIN_CHARS, exportChatAnswer, type ExportFormat } from '../lib/chat-export'
+import { changedFiles } from '../lib/changed-files'
 import {
   type AgentTaskStep,
   type ChatKnowledgeGrounding,
@@ -895,6 +897,10 @@ export function AssistantMessage(props: {
       && (answerExportSize(props.message.content) >= EXPORT_BUTTON_MIN_CHARS || exportDocument() !== null),
   )
 
+  // The files this answer's run saved to its workspace, for the changed-files card (F-t3-076). Read from the tool
+  // calls the transcript already holds, so nothing is stored or sent.
+  const answerChangedFiles = createMemo(() => changedFiles(props.message.toolCalls ?? []))
+
   return (
     // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
     // in the Tab sequence, which still runs answer -> actions -> next message
@@ -951,6 +957,10 @@ export function AssistantMessage(props: {
                 onSelectFollowUp={props.onSelectFollowUp}
                 runId={props.message.runId}
               />
+            </Show>
+            {/* F-t3-076: the files this run saved to its workspace. Not in a temporary chat or while the answer streams. */}
+            <Show when={chatChangedFilesEnabled() && !props.temporaryChat && !props.message.streaming}>
+              <ChangedFilesCard files={answerChangedFiles()} />
             </Show>
           </InlineWidgetSurface>
           <Show when={stepStripEnabled && props.message.streaming}>
