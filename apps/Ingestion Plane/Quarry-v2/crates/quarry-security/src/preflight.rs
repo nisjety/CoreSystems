@@ -393,6 +393,12 @@ impl SecurityEngine for DefaultEngine {
     fn allow_private_hosts(&self) -> bool {
         self.allow_private_hosts
     }
+
+    /// This engine's blocklist as a browser reputation source (E3.8.7). The clone
+    /// shares the lists with `self`, so a hot reload shows through it.
+    fn host_reputation(&self) -> Option<Arc<dyn HostReputation>> {
+        Some(Arc::new(self.clone()))
+    }
 }
 
 #[cfg(test)]

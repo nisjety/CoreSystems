@@ -338,6 +338,17 @@ pub fn batch_idempotency_enabled() -> bool {
     flag_on(std::env::var(BATCH_IDEMPOTENCY_FLAG).ok().as_deref())
 }
 
+/// W3-E3.7.2w: the batch's parallel-pages switch. On, a batch body's `max_parallel` is read,
+/// clamped to the edge ceiling and stamped into the job's params for the orchestrator (see
+/// `routes::batch_handoff`). Off (the default), the key is ignored and nothing is stamped.
+pub const BATCH_PARALLEL_FLAG: &str = "QUARRY_EDGE__BATCH_PARALLEL";
+
+/// Whether `QUARRY_EDGE__BATCH_PARALLEL` is on in this process (default off). Read per call, like
+/// [`batch_idempotency_enabled`].
+pub fn batch_parallel_enabled() -> bool {
+    flag_on(std::env::var(BATCH_PARALLEL_FLAG).ok().as_deref())
+}
+
 fn flag_on(value: Option<&str>) -> bool {
     value
         .map(|v| {

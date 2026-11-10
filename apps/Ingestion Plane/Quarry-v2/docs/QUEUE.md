@@ -17,7 +17,7 @@ Migrations live at `crates/quarry-runtime/migrations/0001_request_queue.sql`.
 | Table                        | Purpose                                                |
 | ---------------------------- | ------------------------------------------------------ |
 | `quarry_request_queues`      | One row per logical queue (per crawl, batch, etc.)     |
-| `quarry_queue_items`         | The URLs themselves; lifecycle `queued ↔ in_flight → acked\|failed` |
+| `quarry_queue_items`         | The URLs themselves; lifecycle `queued ↔ in_flight → acked\|failed`, plus `seen` rows written by `mark_seen` (no URL, never popped) |
 | `quarry_run_checkpoints`     | `FrontierCheckpoint` snapshots (JSONB) for crash recovery |
 | `quarry_retry_events`        | Append-only audit log of every retry decision           |
 

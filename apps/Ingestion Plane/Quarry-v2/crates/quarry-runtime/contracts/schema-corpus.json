@@ -1,0 +1,506 @@
+{
+  "cases": [
+    {
+      "issues": [],
+      "name": "valid_simple_object",
+      "schema": {
+        "properties": {
+          "age": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "age"
+        ],
+        "type": "object"
+      },
+      "value": {
+        "age": 30,
+        "name": "Alice"
+      }
+    },
+    {
+      "issues": [
+        {
+          "code": "missing_required",
+          "path": "$.age"
+        }
+      ],
+      "name": "missing_required_key",
+      "schema": {
+        "required": [
+          "name",
+          "age"
+        ],
+        "type": "object"
+      },
+      "value": {
+        "name": "Alice"
+      }
+    },
+    {
+      "issues": [
+        {
+          "code": "type_mismatch",
+          "path": "$.user.age"
+        }
+      ],
+      "name": "type_mismatch_nested",
+      "schema": {
+        "properties": {
+          "user": {
+            "properties": {
+              "age": {
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "value": {
+        "user": {
+          "age": "thirty"
+        }
+      }
+    },
+    {
+      "issues": [],
+      "name": "integer_accepted_where_number_expected",
+      "schema": {
+        "type": "number"
+      },
+      "value": 42
+    },
+    {
+      "issues": [],
+      "name": "float_accepted_where_number_expected",
+      "schema": {
+        "type": "number"
+      },
+      "value": 3.5
+    },
+    {
+      "issues": [
+        {
+          "code": "type_mismatch",
+          "path": "$"
+        }
+      ],
+      "name": "float_rejected_where_integer_expected",
+      "schema": {
+        "type": "integer"
+      },
+      "value": 3.5
+    },
+    {
+      "issues": [],
+      "name": "nullable_string_accepts_string",
+      "schema": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "value": "hi"
+    },
+    {
+      "issues": [],
+      "name": "nullable_string_accepts_null",
+      "schema": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "value": null
+    },
+    {
+      "issues": [
+        {
+          "code": "type_mismatch",
+          "path": "$"
+        }
+      ],
+      "name": "nullable_string_rejects_integer",
+      "schema": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "value": 42
+    },
+    {
+      "issues": [],
+      "name": "enum_accepts_member",
+      "schema": {
+        "enum": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "value": "a"
+    },
+    {
+      "issues": [
+        {
+          "code": "enum_mismatch",
+          "path": "$"
+        }
+      ],
+      "name": "enum_rejects_other",
+      "schema": {
+        "enum": [
+          "a",
+          "b",
+          "c"
+        ]
+      },
+      "value": "d"
+    },
+    {
+      "issues": [
+        {
+          "code": "enum_mismatch",
+          "path": "$"
+        }
+      ],
+      "name": "enum_matches_exactly_not_by_coercion",
+      "schema": {
+        "enum": [
+          1,
+          2
+        ]
+      },
+      "value": "1"
+    },
+    {
+      "issues": [
+        {
+          "code": "type_mismatch",
+          "path": "$[2]"
+        }
+      ],
+      "name": "array_items_validated_per_element",
+      "schema": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "value": [
+        "a",
+        "b",
+        42
+      ]
+    },
+    {
+      "issues": [
+        {
+          "code": "length_out_of_range",
+          "path": "$"
+        }
+      ],
+      "name": "min_items_too_few",
+      "schema": {
+        "maxItems": 3,
+        "minItems": 2,
+        "type": "array"
+      },
+      "value": [
+        1
+      ]
+    },
+    {
+      "issues": [
+        {
+          "code": "length_out_of_range",
+          "path": "$"
+        }
+      ],
+      "name": "max_items_too_many",
+      "schema": {
+        "maxItems": 3,
+        "minItems": 2,
+        "type": "array"
+      },
+      "value": [
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "issues": [],
+      "name": "items_within_bounds",
+      "schema": {
+        "maxItems": 3,
+        "minItems": 2,
+        "type": "array"
+      },
+      "value": [
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "issues": [
+        {
+          "code": "length_out_of_range",
+          "path": "$"
+        }
+      ],
+      "name": "string_too_short",
+      "schema": {
+        "maxLength": 5,
+        "minLength": 2,
+        "type": "string"
+      },
+      "value": "a"
+    },
+    {
+      "issues": [
+        {
+          "code": "length_out_of_range",
+          "path": "$"
+        }
+      ],
+      "name": "string_too_long",
+      "schema": {
+        "maxLength": 5,
+        "minLength": 2,
+        "type": "string"
+      },
+      "value": "abcdef"
+    },
+    {
+      "issues": [],
+      "name": "string_length_counts_chars_not_bytes",
+      "schema": {
+        "maxLength": 3,
+        "type": "string"
+      },
+      "value": "æøå"
+    },
+    {
+      "issues": [
+        {
+          "code": "number_out_of_range",
+          "path": "$"
+        }
+      ],
+      "name": "number_below_minimum",
+      "schema": {
+        "maximum": 100.0,
+        "minimum": 0.0,
+        "type": "number"
+      },
+      "value": -1
+    },
+    {
+      "issues": [
+        {
+          "code": "number_out_of_range",
+          "path": "$"
+        }
+      ],
+      "name": "number_above_maximum",
+      "schema": {
+        "maximum": 100.0,
+        "minimum": 0.0,
+        "type": "number"
+      },
+      "value": 101
+    },
+    {
+      "issues": [],
+      "name": "number_on_the_bounds",
+      "schema": {
+        "maximum": 100.0,
+        "minimum": 0.0,
+        "type": "number"
+      },
+      "value": 100
+    },
+    {
+      "issues": [
+        {
+          "code": "additional_property",
+          "path": "$"
+        }
+      ],
+      "name": "additional_property_false_rejects_unknown_key",
+      "schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "value": {
+        "extra": 1,
+        "name": "Alice"
+      }
+    },
+    {
+      "issues": [],
+      "name": "additional_property_default_is_permissive",
+      "schema": {
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "value": {
+        "extra": 1,
+        "name": "Alice"
+      }
+    },
+    {
+      "issues": [
+        {
+          "code": "missing_required",
+          "path": "$.users[1].email"
+        }
+      ],
+      "name": "deep_nested_required_reports_full_path",
+      "schema": {
+        "properties": {
+          "users": {
+            "items": {
+              "required": [
+                "email"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "value": {
+        "users": [
+          {
+            "email": "a@b"
+          },
+          {}
+        ]
+      }
+    },
+    {
+      "issues": [],
+      "name": "empty_schema_accepts_anything",
+      "schema": {},
+      "value": 42
+    },
+    {
+      "issues": [],
+      "name": "boolean_true_schema_is_permissive",
+      "schema": true,
+      "value": 42
+    },
+    {
+      "issues": [],
+      "name": "boolean_false_schema_is_permissive",
+      "schema": false,
+      "value": 42
+    },
+    {
+      "issues": [
+        {
+          "code": "missing_required",
+          "path": "$.b"
+        },
+        {
+          "code": "type_mismatch",
+          "path": "$.a"
+        }
+      ],
+      "name": "several_issues_are_all_reported",
+      "schema": {
+        "properties": {
+          "a": {
+            "type": "integer"
+          },
+          "b": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "a",
+          "b"
+        ],
+        "type": "object"
+      },
+      "value": {
+        "a": "not-int"
+      }
+    },
+    {
+      "issues": [
+        {
+          "code": "type_mismatch",
+          "path": "$"
+        }
+      ],
+      "name": "type_mismatch_stops_further_checks",
+      "schema": {
+        "required": [
+          "a"
+        ],
+        "type": "object"
+      },
+      "value": [
+        1
+      ]
+    },
+    {
+      "issues": [],
+      "name": "unknown_keywords_are_ignored",
+      "schema": {
+        "format": "email",
+        "pattern": "^x$",
+        "type": "string"
+      },
+      "value": "anything"
+    },
+    {
+      "issues": [],
+      "name": "required_is_checked_on_objects_only",
+      "schema": {
+        "required": [
+          "a"
+        ]
+      },
+      "value": "text"
+    },
+    {
+      "issues": [],
+      "name": "properties_only_check_present_keys",
+      "schema": {
+        "properties": {
+          "a": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "value": {}
+    }
+  ],
+  "origin": "Quarry golden corpus for the structured-extract schema validator (quarry-core json_schema). Each issue is what the validator reports, mapped to a path and a code by quarry-runtime ai_scrape::schema_issue. Regenerate with QUARRY_UPDATE_GOLDEN=1 cargo test -p quarry-runtime schema_corpus. Cases that use const, anyOf or oneOf are not here: the validator has none of them.",
+  "version": 1
+}

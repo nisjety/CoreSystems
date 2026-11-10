@@ -1133,6 +1133,10 @@ func crawlJobDurableFrontier(
 	if workflow.GetVersion(ctx, canonicalFrontierVersion, workflow.DefaultVersion, 1) >= 1 {
 		canonical = canonicalFrontierEnabled(ctx)
 	}
+	// E3.7.6 (B): a page the edge fetched through a redirect marks the URL it landed on as seen,
+	// only with the canonical flag on and under canonicalRedirectSeenVersion. A history recorded
+	// before the marker runs the page loop it recorded, with no seen call.
+	markRedirects := canonical && workflow.GetVersion(ctx, canonicalRedirectSeenVersion, workflow.DefaultVersion, 1) >= 1
 	for _, seed := range in.Seeds {
 		if strings.TrimSpace(seed) == "" {
 			continue
@@ -1243,6 +1247,9 @@ func crawlJobDurableFrontier(
 		}).Get(ctx, nil); err != nil {
 			return err
 		}
+		if markRedirects {
+			markRedirectTargetSeen(ctx, a, queueName, in.OrgID, in.RunID, item.URL, res.FinalURL)
+		}
 		ctrl.progress.Visited = pagesVisited
 		ctrl.progress.Failed = pagesFailed
 		ctrl.progress.Blocked = pagesBlocked
@@ -1308,6 +1315,9 @@ func durableFrontierRequestID(runID, url string) string {
 const (
 	// canonicalFrontierVersion is the GetVersion id of the canonical frontier.
 	canonicalFrontierVersion = "crawl-canonical-frontier-v1"
+	// canonicalRedirectSeenVersion is the GetVersion id of the redirect seen-marking (E3.7.6 B):
+	// a page the edge fetched through a redirect marks the URL it landed on as seen in its queue.
+	canonicalRedirectSeenVersion = "crawl-canonical-redirect-seen-v1"
 	// canonicalFrontierFlag is the operator switch, default off. On, a crawl URL the Go
 	// mirror of the canonical helper covers is enqueued in its canonical form under the id
 	// of that form, so the spellings of one page (fragment, host case, default port, dot
@@ -1350,6 +1360,21 @@ func frontierTarget(runID, raw string, canonical bool) (string, string) {
 		}
 	}
 	return durableFrontierRequestID(runID, raw), raw
+}
+
+// markRedirectTargetSeen records the URL a page was redirected to as seen in its queue (E3.7.6),
+// with the requested URL's id, so a later link to either one is not fetched again. A page that
+// was not redirected sends nothing. It runs after the page's ack and never fails the page: a
+// failure is logged and the crawl goes on. Only request ids travel, never a URL.
+func markRedirectTargetSeen(ctx workflow.Context, a *activities.Activities, queue, orgID, runID, requested, final string) {
+	if strings.TrimSpace(final) == "" || final == requested {
+		return
+	}
+	if err := workflow.ExecuteActivity(ctx, a.FrontierMarkSeen, activities.FrontierMarkSeenInput{
+		Queue: queue, OrgID: orgID, RequestIDs: activities.FrontierSeenRequestIDs(runID, requested, final),
+	}).Get(ctx, nil); err != nil {
+		workflow.GetLogger(ctx).Warn("redirect target not marked seen; the crawl continues", "error", err)
+	}
 }
 
 func frontierPayloadDepth(payload map[string]any) uint32 {

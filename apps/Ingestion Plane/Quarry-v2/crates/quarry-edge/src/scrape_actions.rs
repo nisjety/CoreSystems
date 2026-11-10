@@ -276,6 +276,8 @@ pub fn safe_mode_runner(mut runner: PageRunner, actions: bool) -> PageRunner {
         runner.page_renderer = None;
         runner.source_registrar = None;
         runner.title_enricher = None;
+        // Q3-E3.6-7: a changed page's document is not sent to the OCR lane either.
+        runner.document_lanes = None;
     }
     runner
 }
@@ -603,6 +605,7 @@ mod tests {
             title_enricher: None,
             doc_routing: quarry_runtime::DocRouting::Off,
             robots: None,
+            document_lanes: None,
         }
     }
 
@@ -655,6 +658,10 @@ mod tests {
                         .expect("model plane client"),
                 ),
             )));
+            runner.document_lanes = Some(Arc::new(
+                quarry_runtime::mp_client::ModelPlaneClient::new("http://127.0.0.1:9")
+                    .expect("model plane client"),
+            ));
             runner
         };
 
@@ -664,6 +671,7 @@ mod tests {
         assert!(kept.local_index.is_some(), "local_index stays without actions");
         assert!(kept.source_registrar.is_some(), "source_registrar stays without actions");
         assert!(kept.title_enricher.is_some(), "title_enricher stays without actions");
+        assert!(kept.document_lanes.is_some(), "document_lanes stays without actions");
 
         // A request with actions loses them all, whatever it carried.
         let PageRunner {
@@ -687,7 +695,9 @@ mod tests {
             title_enricher,
             doc_routing: _,
             robots: _,
+            document_lanes,
         } = safe_mode_runner(filled(), true);
+        assert!(document_lanes.is_none(), "document_lanes is cleared by safe mode");
         assert!(ingest.is_none(), "ingest is cleared by safe mode");
         assert!(local_index.is_none(), "local_index is cleared by safe mode");
         assert!(page_renderer.is_none(), "page_renderer is cleared by safe mode");

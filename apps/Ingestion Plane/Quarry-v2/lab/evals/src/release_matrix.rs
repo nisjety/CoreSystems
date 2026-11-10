@@ -24,6 +24,7 @@
 //! Cost (E3.9.6): the score file also has a `cost` section, priced from the WS6.C usage
 //! meters in `<RELEASE_MATRIX_DIR>/usage_meters.json` (`{"metrics": {"<metric>": <quantity>}}`)
 //! with unit prices from `usage_prices.json` (`usd_micros_per_unit`). Both files are optional.
+//! `quarry-eval` writes the meter file at the end of each fixture run (see `main.rs`).
 //! With `QUARRY_EVAL_SPEND_CAP_USD` set (USD), a `spend_cap` gate fails when the estimate is
 //! over the cap, and it fails closed when spend cannot be measured or priced. Unset, the cap is
 //! not checked and the gates are unchanged.
@@ -373,7 +374,7 @@ const DEFAULT_USD_MICROS_PER_UNIT: [(&str, f64); 2] = [
 ];
 
 /// Cost section of `release_score.json`. `status` is `measured` only when every metered quantity
-/// has a price. `not_measured`: there is no usage snapshot. `unreadable`: the snapshot or the price
+/// has a price. `not_measured`: there is no usage snapshot, or it holds no metric. `unreadable`: the snapshot or the price
 /// table failed to read. `unpriced`: a metered quantity has no price, so the estimate is partial.
 #[derive(Debug, Serialize, PartialEq)]
 struct CostScore {
@@ -537,10 +538,14 @@ fn build_cost(
         }
     };
 
+    // An empty snapshot means no meter was recorded in the eval process (quarry-eval writes
+    // `{"metrics":{}}` when nothing ran through a metered path), not a measured zero. It stays
+    // `not_measured`, so a spend cap keeps failing closed until a real meter source exists
+    // (D-E3967-8).
     if !errors.is_empty() {
         score.status = "unreadable";
         score.input_error = Some(errors.join("; "));
-    } else if let Some(snapshot) = snapshot {
+    } else if let Some(snapshot) = snapshot.filter(|s| !s.metrics.is_empty()) {
         let (metric_costs, unpriced) = price_metrics(&snapshot, &price_map);
         score.estimated_usd = Some(metric_costs.iter().filter_map(|m| m.usd).sum::<f64>());
         score.status = if unpriced.is_empty() {

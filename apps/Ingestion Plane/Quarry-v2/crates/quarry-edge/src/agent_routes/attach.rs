@@ -335,6 +335,8 @@ async fn attach_run_inner(
         }
         None => BrowserEgressPolicy::from_allowed_domains(&allowed_domains).with_public_assets(),
     };
+    // E3.8.7: the attachment's tab carries the host reputation hook when the mode is on.
+    let egress = crate::agent_policy_gate::attach_reputation(&state, egress);
     let (tab_id, tabs, borrowed, opened_by) = if let Some(target) = &body.attach_tab {
         let changed = || driver_err(&request_id, QuarryError::new(ErrorCode::Conflict, "browser_continue_tab_changed"));
         let tabs = state.agent_driver.list_tabs(&entry.session).await

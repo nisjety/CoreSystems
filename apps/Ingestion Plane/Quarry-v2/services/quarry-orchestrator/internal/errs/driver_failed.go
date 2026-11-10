@@ -60,3 +60,19 @@ func DriverFailedReasonOf(body []byte) (reason string, ok bool) {
 	}
 	return reason, true
 }
+
+// Fetch deadline reasons of TIMEOUT (E3.8.2). This mirrors quarry-runtime's
+// fallback_driver fetch_deadline_reason: the same two strings. Change both or
+// neither. The edge sets one only while QUARRY_EDGE__FETCH_DEADLINE is on, and
+// both carry TIMEOUT's own retryable flag (true).
+//
+// tier_stalled: one tier did not answer within its share while budget was left
+// for the tiers after it. fetch_deadline_exceeded: the whole deadline is spent.
+const (
+	TimeoutTierStalled           = "tier_stalled"
+	TimeoutFetchDeadlineExceeded = "fetch_deadline_exceeded"
+)
+
+// TimeoutReasons is the closed list of the fetch deadline reasons, in
+// documentation order (ERROR_REASONS.md, "504 TIMEOUT from the fetch deadline").
+var TimeoutReasons = []string{TimeoutTierStalled, TimeoutFetchDeadlineExceeded}

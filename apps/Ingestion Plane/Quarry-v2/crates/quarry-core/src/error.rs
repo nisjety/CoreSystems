@@ -390,6 +390,51 @@ pub mod driver_failed_reason {
     pub fn retryable(reason: &str) -> bool {
         canonical(reason).is_some_and(|known| known == DNS || known == CONNECT)
     }
+
+    /// Lower-case fragments a resolver failure carries in its error text: the
+    /// system resolvers' messages (glibc, Windows, macOS) and the lookup
+    /// function's own failure text.
+    const RESOLVER_TEXT: [&str; 6] = [
+        "dns error",
+        "failed to lookup address information",
+        "name or service not known",
+        "no such host is known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+    ];
+
+    /// Lower-case fragments a TLS handshake or certificate failure carries.
+    const TLS_TEXT: [&str; 3] = ["certificate", "handshake", "fatal alert"];
+
+    /// The sub-code a transport failure names, read from the text of its error
+    /// chain (E3.8.1; the static, HTTP/3 and TLS-profile drivers use it). The
+    /// messages are the text of each error below the top one: the top error's
+    /// own text can carry the URL, so it is never read. `connect` is whether the
+    /// failure is a connect error; `resolver_failed` is whether the HTTP client
+    /// reports it as a resolver failure. A resolver failure on a connect error
+    /// is `dns`. A handshake or certificate failure anywhere in the chain is
+    /// `tls`. Any other connect error is `connect`. Anything else names no
+    /// sub-code. The messages are matched, never returned.
+    pub fn from_transport_chain<'a>(
+        messages: impl IntoIterator<Item = &'a str>,
+        connect: bool,
+        resolver_failed: bool,
+    ) -> Option<&'static str> {
+        let lowered: Vec<String> = messages.into_iter().map(str::to_ascii_lowercase).collect();
+        if connect && (resolver_failed || mentions_any(&lowered, &RESOLVER_TEXT)) {
+            return Some(DNS);
+        }
+        if mentions_any(&lowered, &TLS_TEXT) {
+            return Some(TLS);
+        }
+        connect.then_some(CONNECT)
+    }
+
+    fn mentions_any(messages: &[String], fragments: &[&str]) -> bool {
+        messages
+            .iter()
+            .any(|message| fragments.iter().any(|fragment| message.contains(*fragment)))
+    }
 }
 
 #[cfg(test)]

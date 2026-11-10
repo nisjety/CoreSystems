@@ -94,3 +94,45 @@ pub async fn get_scrape(
     );
     response
 }
+
+/// Q3-E3.8.8w: the driver a `no_egress: true` scrape runs through, or the typed refusal that
+/// ends the request before any fetch. It is the scrape's only driver: no robots or sitemap
+/// discovery, no redirect follow and no proxy, because the driver reads the organization's
+/// stored capture from the Data Plane and opens no socket to the page's host.
+///
+/// - A ZDR run is refused `403` with `details.reason = no_egress_zdr_refused`: stored artifacts
+///   are durable content, and ADR topic 4 refuses URL-keyed reads for ZDR runs. Checked first,
+///   so a ZDR caller learns nothing about whether the mode is wired.
+/// - A deployment where the mode is on but the driver could not be built (no Data Plane URL, no
+///   cross-plane token provider) answers `503` `runtime_not_ready`, never a live fetch.
+///
+/// A miss in the store is the driver's typed `NOT_FOUND` `no_egress_miss`, with no URL in it.
+pub fn no_egress_driver(
+    state: &crate::state::AppState,
+    zdr_active: bool,
+) -> Result<std::sync::Arc<dyn quarry_runtime::Driver>, QuarryError> {
+    if zdr_active {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "no_egress: stored artifacts are not read under ZDR",
+        )
+        .with_details(serde_json::json!({
+            "reason": quarry_runtime::fetch::no_egress_reason::ZDR_REFUSED,
+            "no_egress": true,
+        })));
+    }
+    match state.no_egress.as_ref() {
+        Some(driver) => {
+            let driver: std::sync::Arc<dyn quarry_runtime::Driver> = driver.clone();
+            Ok(driver)
+        }
+        None => Err(QuarryError::new(
+            ErrorCode::RuntimeNotReady,
+            "no_egress is not available on this deployment",
+        )
+        .with_details(serde_json::json!({
+            "reason": "no_egress_unavailable",
+            "no_egress": true,
+        }))),
+    }
+}

@@ -109,7 +109,9 @@ fn with_transport_attempts(
 ) -> QuarryError {
     let fallback_code = fallback_err.code;
     let fallback_message = fallback_err.message.clone();
-    fallback_err.with_details(json!({
+    // A fetch sub-code the fallback chain settled (E3.8.1) stays, beside the attempts.
+    let sub_code = fallback_err.driver_failed_reason();
+    let mut details = json!({
         "fallback_attempts": [
             {
                 "transport": primary_name,
@@ -130,7 +132,11 @@ fn with_transport_attempts(
                 ),
             },
         ],
-    }))
+    });
+    if let Some(sub_code) = sub_code {
+        details["reason"] = json!(sub_code);
+    }
+    fallback_err.with_details(details)
 }
 
 #[cfg(test)]

@@ -62,7 +62,11 @@ const KEYS: [(&str, &str); 8] = [
 ];
 
 /// Keys that exist on `/v1/scrape` (or are Firecrawl options) and cannot apply per page.
-const UNSUPPORTED_KEYS: [&str; 14] = [
+const UNSUPPORTED_KEYS: [&str; 16] = [
+    // Q3-E3.8.8w: a stored-capture read is a per-request mode; dropped here, a crawl page
+    // would be fetched live while the caller asked for no egress.
+    "no_egress",
+    "noEgress",
     "actions",
     "actions_on_error",
     "actionsOnError",

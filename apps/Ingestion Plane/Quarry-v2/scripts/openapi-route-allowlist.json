@@ -1,7 +1,7 @@
 {
   "_comment": "Routes the edge registers that neither docs/openapi.yaml nor docs/openapi-internal.yaml describes, each with the reason. A new route must be documented in one of those files or added here with a reason; an entry that becomes documented or stops existing must be removed (scripts/tests/openapi-route-coverage.test.mjs).",
-  "route_registrations": 121,
-  "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist. OPENAPI-INTERNAL (decision 3.13): the eight /v1/internal/* routes are documented in docs/openapi-internal.yaml and left this list; the count is unchanged. W5-S4 (F-t2-068): POST /v1/profiles/:id/clear-data is documented in docs/openapi.yaml and re-pinned from 120 to 121.",
+  "route_registrations": 130,
+  "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist. OPENAPI-INTERNAL (decision 3.13): the eight /v1/internal/* routes are documented in docs/openapi-internal.yaml and left this list; the count is unchanged. W5-S4 (F-t2-068): POST /v1/profiles/:id/clear-data is documented in docs/openapi.yaml and re-pinned from 120 to 121. Q3-E3.7.6-B-edge: POST /v1/internal/queues/{queue_name}/seen is documented in docs/openapi-internal.yaml. The scan counted 129 registrations at HEAD against the 121 pin; the pin is set to the count with this route, 130 (ROUTE_BASELINE_UPDATE=1 writes the same number).",
   "routes": [
     {
       "path": "/graphql",

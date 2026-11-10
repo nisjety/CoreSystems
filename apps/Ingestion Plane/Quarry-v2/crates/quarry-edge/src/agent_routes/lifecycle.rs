@@ -663,7 +663,9 @@ pub async fn start_run(
     // context with the proxy's default, unconstrained policy.
     // D2-019: the same resolved boundary is stored on the run's context below, so every
     // later action installs it again instead of one rebuilt from the grant's allow list.
-    let run_egress = super::human_browse::open_web_egress(
+    // E3.8.7: the host reputation hook rides on this same boundary when the mode is on.
+    let run_egress = super::human_browse::run_egress(
+        &state,
         &nav_policy,
         crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
     );

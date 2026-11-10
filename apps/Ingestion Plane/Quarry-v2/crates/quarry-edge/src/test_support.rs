@@ -127,6 +127,8 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         model_plane_url: None,
         model_plane_token: None,
         page_title_enricher: None,
+        document_lanes: None,
+        no_egress: None,
         service_token_provider: None,
         otp_source: None,
         answer_pipeline: None,

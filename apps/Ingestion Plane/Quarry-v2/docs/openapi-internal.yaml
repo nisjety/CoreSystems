@@ -616,6 +616,60 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/queues/{queue_name}/seen:
+    post:
+      operationId: internalQueueSeen
+      summary: Record request ids as seen in a durable queue (orchestrator → edge)
+      description: >-
+        Only a build with the postgres-queue feature registers this route; other builds answer 404.
+        Records the ids as seen, so a later enqueue of one of them is refused and it is never popped.
+        The orchestrator sends the final URL of a redirect here (E3.7.6). Only the ids are stored, never
+        a URL or page text. Blank ids are skipped, and an id the queue already holds is left as it is.
+        At most 500 ids per call. Authentication as for enqueue.
+      tags:
+      - internal
+      security:
+      - runtimeToken: []
+      parameters:
+      - $ref: '#/components/parameters/QueueName'
+      - $ref: '#/components/parameters/QueueSignature'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalQueueSeenRequest'
+      responses:
+        '200':
+          description: How many ids the queue newly recorded as seen, in an envelope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalQueueSeenAckEnvelope'
+        '400':
+          description: BAD_REQUEST when org_id or the queue name is invalid, or there are more than 500 request ids.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the runtime token or the queue binding is wrong.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when QUARRY_EDGE__RUNTIME_AUTH_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '503':
+          description: RUNTIME_NOT_READY when the queue binding (internal secret) or the durable frontier is not configured.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
   /v1/internal/jobs/claim:
     post:
       operationId: controlInternalJobsClaim
@@ -1370,6 +1424,12 @@ components:
           type: array
           items:
             type: string
+        final_url:
+          type: string
+          description: >-
+            E3.7.6. The page's post-redirect URL, present only when the fetch was redirected (it differs
+            from the URL requested). The orchestrator records it as seen, so a later link to it is not
+            fetched twice. Absent for a page that was not redirected.
         content_type:
           type: string
           description: MIME from the upstream Content-Type header, best effort.
@@ -1830,6 +1890,41 @@ components:
       properties:
         data:
           $ref: '#/components/schemas/InternalQueueBatchAck'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalQueueSeenRequest:
+      type: object
+      required:
+      - org_id
+      - request_ids
+      properties:
+        org_id:
+          type: string
+        request_ids:
+          type: array
+          maxItems: 500
+          description: The request ids to record as seen. Blank ids are skipped.
+          items:
+            type: string
+    InternalQueueSeenAck:
+      type: object
+      required:
+      - accepted
+      properties:
+        accepted:
+          type: integer
+          minimum: 0
+          description: How many ids the queue newly recorded as seen. An id it already holds is not counted.
+    InternalQueueSeenAckEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          $ref: '#/components/schemas/InternalQueueSeenAck'
         meta:
           $ref: '#/components/schemas/InternalMeta'
         error:

@@ -128,6 +128,7 @@ fn runner_for(
         title_enricher: None,
         doc_routing: DocRouting::Off,
         robots: None,
+        document_lanes: None,
     };
     (runner, rx)
 }

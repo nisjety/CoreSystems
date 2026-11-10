@@ -185,6 +185,8 @@ impl ScrapeSettings {
             ai_formats_enabled: ai_formats::enabled(),
             max_age_enabled: self.max_age_enabled,
             per_page_emulation_enabled: self.per_page_emulation_enabled,
+            // Q3-E3.8.8w: `QUARRY_EDGE__NO_EGRESS`, default off, read once by the runtime's reader.
+            no_egress_enabled: quarry_runtime::fetch::no_egress_enabled(),
             ..ScrapeLimits::default()
         }
     }

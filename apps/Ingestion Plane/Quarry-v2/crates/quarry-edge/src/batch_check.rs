@@ -21,7 +21,10 @@ use std::sync::OnceLock;
 use quarry_core::crawl_denial::CrawlDenialReason;
 use quarry_security::{heur, Decision};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use url::Url;
+
+use crate::crawl_request::RequestField;
 
 /// The environment name of the batch cap.
 pub const ENV_CRAWL_BATCH_MAX_URLS: &str = "QUARRY_EDGE__CRAWL_BATCH_MAX_URLS";
@@ -129,6 +132,70 @@ fn refuse(url: &str, reason: &CrawlDenialReason) -> BatchRejection {
         url: url.to_string(),
         code: reason.code().to_string(),
         message: reason.message(),
+    }
+}
+
+/// W3-E3.7.2w: the `max_parallel` a batch body asks for, read under its snake_case name or its
+/// `maxParallel` spelling (the codebase's dual spelling). `Ok(None)` when neither is sent, or the
+/// sent value is null. A whole number of at least 1 is `Some`; a number above `u32::MAX` is kept at
+/// `u32::MAX`, and the edge's ceiling clamps it. Sending both spellings, or a value that is not a
+/// whole number of at least 1, is a field error that names the spelling the caller sent and never
+/// echoes the value.
+pub fn parse_max_parallel(
+    snake: Option<&Value>,
+    camel: Option<&Value>,
+) -> Result<Option<u32>, Vec<RequestField>> {
+    let sent: Vec<(&str, &Value)> = [("max_parallel", snake), ("maxParallel", camel)]
+        .into_iter()
+        .filter_map(|(path, value)| {
+            value
+                .filter(|value| !value.is_null())
+                .map(|value| (path, value))
+        })
+        .collect();
+    match sent.as_slice() {
+        [] => Ok(None),
+        [(path, value)] => read_max_parallel(path, value).map(Some),
+        _ => Err(vec![field_error(
+            "max_parallel",
+            "invalid_option",
+            "send one spelling of `max_parallel`, not max_parallel and maxParallel",
+        )]),
+    }
+}
+
+/// One spelling of `max_parallel`: a whole number from 1 upwards.
+fn read_max_parallel(path: &str, value: &Value) -> Result<u32, Vec<RequestField>> {
+    if let Some(number) = value.as_u64() {
+        return match number {
+            0 => Err(vec![field_error(
+                path,
+                "out_of_range",
+                "must be at least 1; omit the field for the default",
+            )]),
+            _ => Ok(u32::try_from(number).unwrap_or(u32::MAX)),
+        };
+    }
+    if value.is_i64() {
+        return Err(vec![field_error(
+            path,
+            "out_of_range",
+            "must be at least 1; omit the field for the default",
+        )]);
+    }
+    Err(vec![field_error(
+        path,
+        "invalid_type",
+        "must be a whole number of at least 1",
+    )])
+}
+
+/// One field error. `path` is the spelling the caller sent.
+fn field_error(path: &str, code: &'static str, message: &str) -> RequestField {
+    RequestField {
+        path: path.to_owned(),
+        code,
+        message: message.to_owned(),
     }
 }
 

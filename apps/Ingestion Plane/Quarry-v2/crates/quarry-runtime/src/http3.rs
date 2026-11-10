@@ -40,7 +40,8 @@ use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 
 use crate::driver::{Driver, FetchHints};
-use crate::fetch::FetchResponse;
+use crate::fallback_driver::fetch_sub_codes_enabled;
+use crate::fetch::{classify_transport_error, FetchResponse};
 
 /// HTTP/3 driver backed by reqwest 0.13 + h3 + h3-quinn + quinn.
 #[derive(Debug)]
@@ -87,6 +88,13 @@ impl Http3Driver {
             req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
         }
         let resp = req.send().await.map_err(|e| {
+            // E3.8.1: a failure that names a class is DRIVER_FAILED with that reason, when the
+            // sub-codes are on. Its message carries the class only, never the URL.
+            if !e.is_timeout() && fetch_sub_codes_enabled() {
+                if let Some(class) = classify_transport_error(&e) {
+                    return QuarryError::driver_failed(class, format!("http3 fetch: {class}"));
+                }
+            }
             let code = if e.is_timeout() {
                 ErrorCode::Timeout
             } else if e.is_connect() {

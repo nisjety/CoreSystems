@@ -85,7 +85,7 @@ A body refused by its content kind (`QUARRY_EDGE__DOC_ROUTING`, `docs/RUNBOOKS.m
 
 Only with `QUARRY_EDGE__FETCH_SUB_CODES` on (`1`, `true` or `on`; default off). With the flag off a fetch failure carries no waterfall reason, as before. The code stays `DRIVER_FAILED` (502), and `retryable` is the reason's own flag, not the code's (false). `details.fallback_attempts` lists each tier that was tried with its error. A typed reason a tier already gave (`action_failed`, `session_reaped`, ...) is kept with its own flag.
 
-The waterfall names the chain's reason: the sub-code every tried tier failed with, when they all agree on one, else `all_drivers_failed`. A tier that answered with a status or a body the chain moved on from, a tier that was not registered, and two tiers that disagree all give `all_drivers_failed`. A tier names its own `dns`, `tls` or `connect` only where its driver can tell them apart. Until the static and TLS tiers do, every chain reports `all_drivers_failed`.
+The waterfall names the chain's reason: the sub-code every tried tier failed with, when they all agree on one, else `all_drivers_failed`. A tier that answered with a status or a body the chain moved on from, a tier that was not registered, and two tiers that disagree all give `all_drivers_failed`. A tier names its own `dns`, `tls` or `connect` only where its driver can tell them apart. The static, HTTP/3 and TLS-profile tiers name their own; a browser tier does not, so a chain that reaches a browser tier and fails there reports `all_drivers_failed`.
 
 | reason | retryable | meaning | what a caller does |
 |---|---|---|---|
@@ -93,6 +93,17 @@ The waterfall names the chain's reason: the sub-code every tried tier failed wit
 | `tls` | false | the TLS handshake or the certificate check failed on every tier tried | the site's TLS setup is the cause; repeating the same call will not help |
 | `connect` | true | no TCP connection could be made (refused, reset, unreachable) on every tier tried | retry shortly |
 | `all_drivers_failed` | false | every tier in the chain was tried and none served the page, and they did not agree on one cause | read `details.fallback_attempts` for each tier's error, then choose another source or wait |
+
+## 504 `TIMEOUT` from the fetch deadline (E3.8.2)
+
+Only with `QUARRY_EDGE__FETCH_DEADLINE` on (`1`, `true` or `on`; default off). With the flag off no tier is held to a share of a deadline, and no fetch carries these reasons. The deadline is the run's fetch policy `timeout_s` (30 s by default; `0` means none; a value above 600 is taken as 600). Each tier gets a share of what is left, time a tier does not use goes to the tiers after it, a browser tier counts as two plain tiers, and no share is under 250 ms while budget is left. Every scrape run carries the default fetch policy today, so its deadline is 30 s whatever `timeout_ms` the request sets; that `timeout_ms` bound is separate and answers 504 with `details.op` `scrape`.
+
+The error is `TIMEOUT` (504, `retryable` true). `details.reason` is one of the two values below, and `details.fallback_attempts` lists each tier with its error, a stalled tier included. The message names the tier and the times, never the URL.
+
+| reason | other fields | meaning | what a caller does |
+|---|---|---|---|
+| `tier_stalled` | `driver` (`Static`, `Tls` or `Browser`), `slice_ms`, `deadline_ms` | a tier did not answer within its share while budget was left for the tiers after it. The chain went on to them, so this is the chain's own error only when no later tier answered and nothing else replaced it; otherwise the stall is one of its `fallback_attempts` | retry: a later call gets a new budget |
+| `fetch_deadline_exceeded` | `deadline_ms`; `driver` and `slice_ms` too when a tier stalled | the whole deadline is spent: a tier stalled on all that was left, or no budget was left for the next tier, which was not tried | retry: a later call gets a new budget |
 
 ## 429 `RATE_LIMITED` from the browser driver (driver caps, WS3.F)
 

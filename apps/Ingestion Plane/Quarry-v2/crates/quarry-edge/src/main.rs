@@ -253,6 +253,13 @@ async fn run() -> anyhow::Result<()> {
     let batch_cap = quarry_edge::batch_check::check_boot()
         .map_err(|e| anyhow::anyhow!("crawl batch cap: {e}"))?;
     tracing::info!(max_urls = batch_cap, "crawl batch cap: boot");
+    // W3-E3.7.2w: an unparsable QUARRY_EDGE__BATCH_MAX_PARALLEL fails boot.
+    let batch_parallel_ceiling = limits::check_batch_max_parallel_boot()
+        .map_err(|e| anyhow::anyhow!("batch parallel ceiling: {e}"))?;
+    tracing::info!(
+        max_parallel = batch_parallel_ceiling,
+        "batch parallel ceiling: boot"
+    );
     // WS10.S3: the agent event replay ring bounds (env-only; an unparsable value aborts boot).
     let trace_ring = trace_config::TraceConfig::from_env()
         .map_err(|e| anyhow::anyhow!("trace: {e}"))?
@@ -1908,6 +1915,31 @@ async fn run() -> anyhow::Result<()> {
             }
         };
 
+    // Q3-E3.6-7: the Model Plane document lanes (OCR for scanned PDF pages). The client is
+    // built whenever a Model Plane URL is configured, with the lanes' own switches
+    // (QUARRY_EDGE__OCR, QUARRY_EDGE__PII_MODEL; both default off): with a switch off the
+    // lane refuses before anything is sent. Same client builder, so the same Auth Core token
+    // minting / dev bypass as the other Model Plane consumers; a ZDR run never reaches it.
+    let document_lanes: Option<Arc<quarry_runtime::mp_client::ModelPlaneClient>> =
+        match cfg.model_plane_url.as_deref().filter(|s| !s.is_empty()) {
+            Some(mp_url) => match build_model_client(mp_url) {
+                Ok(client) => {
+                    let lanes = quarry_runtime::mp_client::DocumentLaneSettings::from_env();
+                    tracing::info!(
+                        ocr = lanes.ocr,
+                        pii_model = lanes.pii_model,
+                        "Model Plane document lanes wired (each lane is off unless its switch is on)"
+                    );
+                    Some(Arc::new(client.with_document_lanes(lanes)))
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "document lanes disabled: model plane client init failed");
+                    None
+                }
+            },
+            None => None,
+        };
+
     // WS4.J: the ZDR run tombstone emitter. Off unless QUARRY_EDGE__ZDR_TOMBSTONE is on
     // AND control and the signer are configured; counsel review gates turning it on.
     let tombstones: Option<std::sync::Arc<zdr_tombstone::TombstoneEmitter>> = if cfg.zdr_tombstone {
@@ -1936,6 +1968,11 @@ async fn run() -> anyhow::Result<()> {
     }
     // Q3-E3.1-h2: dark unless QUARRY_EDGE__FILL_OTP and QUARRY_EDGE__INTEGRATION_CORE_URL are set.
     let otp_source = build_otp_source(&cfg, cross_plane_tokens.as_ref());
+    // Q3-E3.8.8w: the no_egress scrape driver. Dark unless QUARRY_EDGE__NO_EGRESS is on (read by
+    // `quarry_runtime::fetch::no_egress_enabled`, not an edge config field) AND a Data Plane URL
+    // and the cross-plane token provider exist. It reads the org's stored page captures through
+    // the Data Plane artifacts route only; a ZDR run is refused before it is reached.
+    let no_egress = build_no_egress_driver(&cfg, cross_plane_tokens.as_ref());
     let app_state = state::AppState {
         readiness: state::ReadinessState {
             durable: durable_ready,
@@ -1975,6 +2012,8 @@ async fn run() -> anyhow::Result<()> {
             .then(|| cfg.model_plane_token.clone())
             .flatten(),
         page_title_enricher,
+        document_lanes,
+        no_egress,
         service_token_provider: cross_plane_tokens.clone(),
         otp_source,
         answer_pipeline,
@@ -2276,6 +2315,70 @@ fn build_otp_source(
         }
         Err(error) => {
             tracing::warn!(error = %error, "one-time-code source init failed; fill_otp_ref stays refused");
+            None
+        }
+    }
+}
+
+/// Q3-E3.8.8w: the driver a `no_egress` scrape runs through. `None` unless
+/// `QUARRY_EDGE__NO_EGRESS` is on (`NoEgressDriver::from_env`, default off) AND a Data Plane URL
+/// is configured (the one the ingest client uses: the dedicated ingest URL, else
+/// `DATA_PLANE_URL`) AND the cross-plane token provider exists. The reader mints its
+/// `artifacts-read` bearer per org from that provider, so there is no development bypass key
+/// here. The Data Plane `POST /v1/artifacts/lookup` route is Data Plane owned and unconfirmed;
+/// the reader's path constant is the assumption. Nothing here logs the URL of a page.
+fn build_no_egress_driver(
+    cfg: &config::EdgeConfig,
+    tokens: Option<&quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+) -> Option<Arc<quarry_runtime::fetch::NoEgressDriver>> {
+    if !quarry_runtime::fetch::no_egress_enabled() {
+        return None;
+    }
+    let url = cfg
+        .data_plane_ingest_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            cfg.data_plane_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+    let Some(url) = url else {
+        tracing::warn!(
+            "QUARRY_EDGE__NO_EGRESS is on but no Data Plane URL is configured (DATA_PLANE_URL); no_egress scrapes stay unavailable"
+        );
+        return None;
+    };
+    let Some(tokens) = tokens else {
+        tracing::warn!(
+            "QUARRY_EDGE__NO_EGRESS is on but no cross-plane token provider exists (QUARRY_EDGE__QUARRY_SERVICE_API_KEY unset); no_egress scrapes stay unavailable"
+        );
+        return None;
+    };
+    let route = format!(
+        "{}{}",
+        url.trim_end_matches('/'),
+        quarry_runtime::data_plane_http::ARTIFACT_LOOKUP_PATH
+    );
+    let reader = quarry_runtime::data_plane_http::DataPlaneHttp::new(
+        route,
+        std::time::Duration::from_secs(15),
+    )
+    .map(|http| http.with_token_provider(tokens.clone()))
+    .map(quarry_runtime::data_plane_http::DataPlaneArtifactReader::new)
+    .and_then(|reader| reader.with_manifest_token_request());
+    match reader {
+        Ok(reader) => {
+            let driver = quarry_runtime::fetch::NoEgressDriver::from_env(Arc::new(reader));
+            if driver.is_some() {
+                tracing::info!("no_egress scrapes on: stored artifacts are read from the Data Plane");
+            }
+            driver.map(Arc::new)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "no_egress reader init failed; no_egress scrapes stay unavailable");
             None
         }
     }

@@ -39,7 +39,7 @@ hyper = { version = "1", features = ["full"] }
 # them, sites advertising `Accept-Encoding: br,zstd,deflate` get a
 # wreq-shaped body but a garbled reqwest-shaped one. `hickory-dns` wires
 # the cached resolver from the `hickory-resolver` crate below.
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "gzip", "brotli", "deflate", "zstd", "stream", "json", "query", "form", "cookies", "hickory-dns", "socks"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "gzip", "brotli", "deflate", "zstd", "stream", "json", "query", "form", "cookies", "hickory-dns", "socks"] }
 # HTTP client (TLS/JA3/JA4 impersonation; rquest upstream package name).
 # Exact-pin until wreq leaves RC; wreq currently declares rust-version 1.85.
 wreq = { version = "=6.0.0-rc.28", default-features = false, features = ["webpki-roots", "gzip", "brotli", "deflate", "zstd", "cookies"] }

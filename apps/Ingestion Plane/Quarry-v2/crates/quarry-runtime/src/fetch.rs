@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
-use quarry_core::error::{ErrorCode, QuarryError};
+use quarry_core::error::{driver_failed_reason, ErrorCode, QuarryError};
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use serde_json::json;
@@ -16,6 +16,7 @@ use crate::dns_guard::{resolve_public_url, PinnedDnsResolver};
 use crate::driver::{Driver, FetchHints};
 use crate::egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 use crate::escalation::{escalation_allowed, EscalationMode, EscalationTrigger};
+use crate::fallback_driver::fetch_sub_codes_enabled;
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
 
 /// Stable public discovery identity; robots parsing must use this same token.
@@ -416,7 +417,7 @@ impl StaticDriver {
                         );
                         continue;
                     }
-                    return Err(err.with_details(json!({ "egress_attempts": attempts })));
+                    return Err(with_egress_attempts(err, attempts));
                 }
             }
         }
@@ -449,16 +450,7 @@ impl StaticDriver {
                 req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
             }
         }
-        let resp = req.send().await.map_err(|e| {
-            let code = if e.is_timeout() {
-                ErrorCode::Timeout
-            } else if e.is_connect() {
-                ErrorCode::UpstreamBlocked
-            } else {
-                ErrorCode::DriverFailed
-            };
-            QuarryError::new(code, format!("static fetch: {}", e.without_url()))
-        })?;
+        let resp = req.send().await.map_err(static_send_error)?;
         let status = resp.status().as_u16();
         // Redirect targets have not passed Quarry's URL preflight or DNS guard,
         // so they never go through reqwest's implicit redirect engine (the
@@ -553,16 +545,7 @@ impl StaticDriver {
                 req = req.header(reqwest::header::IF_MODIFIED_SINCE, lm);
             }
         }
-        let resp = req.send().await.map_err(|e| {
-            let code = if e.is_timeout() {
-                ErrorCode::Timeout
-            } else if e.is_connect() {
-                ErrorCode::UpstreamBlocked
-            } else {
-                ErrorCode::DriverFailed
-            };
-            QuarryError::new(code, format!("static fetch: {}", e.without_url()))
-        })?;
+        let resp = req.send().await.map_err(static_send_error)?;
         let status = resp.status().as_u16();
         // Redirect targets have not passed Quarry's URL preflight or DNS guard.
         // Do not hand them to reqwest's implicit redirect engine: the target
@@ -666,6 +649,57 @@ async fn read_capped(
             ));
         }
         body.extend_from_slice(&chunk);
+    }
+}
+
+/// What a failed static send leaves the driver with (E3.8.1). A timeout keeps `TIMEOUT`. With
+/// `QUARRY_EDGE__FETCH_SUB_CODES` on, a failure that names a class is `DRIVER_FAILED` with that
+/// reason and its own retryable flag. Otherwise, or when it names none, it is the code it always
+/// was: `UPSTREAM_BLOCKED` for a connect error, `DRIVER_FAILED` for the rest. Neither message
+/// carries the URL.
+fn static_send_error(error: reqwest::Error) -> QuarryError {
+    if !error.is_timeout() && fetch_sub_codes_enabled() {
+        if let Some(class) = classify_transport_error(&error) {
+            return QuarryError::driver_failed(class, format!("static fetch: {class}"));
+        }
+    }
+    let code = if error.is_timeout() {
+        ErrorCode::Timeout
+    } else if error.is_connect() {
+        ErrorCode::UpstreamBlocked
+    } else {
+        ErrorCode::DriverFailed
+    };
+    QuarryError::new(code, format!("static fetch: {}", error.without_url()))
+}
+
+/// The fetch sub-code a failed static send names (E3.8.1): `dns`, `tls` or `connect`. It is read
+/// from the text of the error chain below the top error, whose own text carries the URL. Pure: it
+/// reads no flag. `None` when the failure names no class. The HTTP/3 send uses it too.
+pub(crate) fn classify_transport_error(error: &reqwest::Error) -> Option<&'static str> {
+    let mut messages = Vec::new();
+    let mut source = std::error::Error::source(error);
+    while let Some(inner) = source {
+        messages.push(inner.to_string());
+        source = inner.source();
+    }
+    driver_failed_reason::from_transport_chain(
+        messages.iter().map(String::as_str),
+        error.is_connect(),
+        error.is_dns(),
+    )
+}
+
+/// The error with the egress attempts added to its details. A reason the error already carries
+/// (a fetch sub-code, E3.8.1) stays: the attempts are one more key.
+fn with_egress_attempts(mut error: QuarryError, attempts: Vec<serde_json::Value>) -> QuarryError {
+    let listed = json!(attempts);
+    match error.details.as_mut().and_then(serde_json::Value::as_object_mut) {
+        Some(object) => {
+            object.insert("egress_attempts".to_owned(), listed);
+            error
+        }
+        None => error.with_details(json!({ "egress_attempts": listed })),
     }
 }
 
@@ -1002,6 +1036,11 @@ impl NoEgressDriver {
 impl Driver for NoEgressDriver {
     fn kind(&self) -> DriverKind {
         DriverKind::Static
+    }
+
+    /// The stored read never touches the page's host, so the run resolves no DNS for it.
+    fn reaches_network(&self) -> bool {
+        false
     }
 
     /// A bare fetch names no org, so it is refused: no_egress never reads without one.

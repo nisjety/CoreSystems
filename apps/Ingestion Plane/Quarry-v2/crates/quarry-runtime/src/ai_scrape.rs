@@ -1120,4 +1120,144 @@ mod tests {
         .clamped();
         assert_eq!((config.max_input_chars, config.concurrency), (80_000, 4));
     }
+
+    // -- the schema corpus: contracts/schema-corpus.json ----------------------------------
+
+    /// Quarry's golden corpus for the structured-extract validator. Model Plane will copy it
+    /// byte for byte, so its bytes are the contract (the sync script pins them).
+    const SCHEMA_CORPUS: &str = include_str!("../contracts/schema-corpus.json");
+    const SCHEMA_CORPUS_FILE: &str = "schema-corpus.json";
+
+    fn schema_corpus_file(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("contracts")
+            .join(name)
+    }
+
+    /// The issues the validator reports for one case, in the corpus shape. These are the two
+    /// steps `evaluate_json` takes after parsing (`json_schema::validate`, then `schema_issue`).
+    /// `evaluate_json` itself takes only object text, and the corpus has scalar and array roots.
+    fn schema_corpus_issues(schema: &Value, value: &Value) -> Value {
+        Value::Array(
+            json_schema::validate(value, schema)
+                .iter()
+                .map(schema_issue)
+                .map(|issue| json!({"code": issue.code, "path": issue.path}))
+                .collect(),
+        )
+    }
+
+    /// The corpus bytes: keys sorted at every depth, 2-space indent, LF, one trailing newline.
+    fn schema_corpus_text(value: &Value) -> String {
+        fn sorted(value: &Value) -> Value {
+            match value {
+                Value::Object(map) => Value::Object(
+                    map.iter()
+                        .map(|(key, item)| (key.clone(), sorted(item)))
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                        .into_iter()
+                        .collect(),
+                ),
+                Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+                other => other.clone(),
+            }
+        }
+        serde_json::to_string_pretty(&sorted(value)).unwrap() + "\n"
+    }
+
+    #[test]
+    fn schema_corpus_issues_are_what_the_validator_reports() {
+        let corpus: Value = serde_json::from_str(SCHEMA_CORPUS).expect("schema-corpus.json parses");
+        let cases = corpus["cases"]
+            .as_array()
+            .expect("schema-corpus.json has a cases array");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let name = case["name"].as_str().expect("every case is named");
+            assert_eq!(
+                case["issues"],
+                schema_corpus_issues(&case["schema"], &case["value"]),
+                "{name}: the validator reports other issues (QUARRY_UPDATE_GOLDEN=1 regenerates)"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_corpus_covers_each_code_and_a_passing_case() {
+        let corpus: Value = serde_json::from_str(SCHEMA_CORPUS).expect("schema-corpus.json parses");
+        let mut codes: Vec<&str> = Vec::new();
+        let mut passing = 0;
+        for case in corpus["cases"].as_array().expect("cases") {
+            let issues = case["issues"].as_array().expect("issues");
+            passing += usize::from(issues.is_empty());
+            codes.extend(
+                issues
+                    .iter()
+                    .map(|issue| issue["code"].as_str().expect("code")),
+            );
+        }
+        for code in [
+            "missing_required",
+            "type_mismatch",
+            "enum_mismatch",
+            "length_out_of_range",
+            "number_out_of_range",
+            "additional_property",
+        ] {
+            assert!(codes.contains(&code), "no corpus case expects {code}");
+        }
+        assert!(passing > 0, "the corpus needs a case that passes");
+        // The validator builds no InvalidSchema today, so no case can expect it. Its mapping is
+        // pinned here so that the list of codes stays whole.
+        let mapped = schema_issue(&ValidationIssue::InvalidSchema {
+            path: "$".into(),
+            reason: "not an object".into(),
+        });
+        assert_eq!(
+            (mapped.path.as_str(), mapped.code.as_str()),
+            ("$", "invalid_schema")
+        );
+        // The corpus holds only keywords that Quarry's validator reads.
+        for keyword in ["\"const\"", "\"anyOf\"", "\"oneOf\""] {
+            assert!(
+                !SCHEMA_CORPUS.contains(keyword),
+                "{keyword} is not a Quarry validator keyword"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_corpus_file_is_the_canonical_regeneration() {
+        use sha2::{Digest, Sha256};
+        let mut corpus: Value =
+            serde_json::from_str(SCHEMA_CORPUS).expect("schema-corpus.json parses");
+        for case in corpus["cases"].as_array_mut().expect("cases") {
+            let issues = schema_corpus_issues(&case["schema"], &case["value"]);
+            case["issues"] = issues;
+        }
+        let text = schema_corpus_text(&corpus);
+        let sha = format!(
+            "{:x}  {}\n",
+            Sha256::digest(text.as_bytes()),
+            SCHEMA_CORPUS_FILE
+        );
+        let sha_path = schema_corpus_file("schema-corpus.json.sha256");
+        if std::env::var("QUARRY_UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(schema_corpus_file(SCHEMA_CORPUS_FILE), &text).unwrap();
+            std::fs::write(&sha_path, &sha).unwrap();
+            return;
+        }
+        assert_eq!(
+            SCHEMA_CORPUS,
+            text.as_str(),
+            "schema-corpus.json is not its canonical bytes: regenerate with QUARRY_UPDATE_GOLDEN=1"
+        );
+        let pin = std::fs::read_to_string(&sha_path).unwrap_or_else(|_| {
+            panic!(
+                "{} is missing: regenerate with QUARRY_UPDATE_GOLDEN=1",
+                sha_path.display()
+            )
+        });
+        assert_eq!(pin, sha, "the sha256 pin drifted from schema-corpus.json");
+    }
 }

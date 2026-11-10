@@ -1119,8 +1119,82 @@ pub fn clamp_batch_urls(
     })
 }
 
-/// The `limits` block of a handoff acknowledgement. A crawl carries
-/// `max_pages` and `max_depth`; a batch carries `urls`.
+// ---------------------------------------------------------------------------
+// W3-E3.7.2w: the parallel pages of a batch
+// ---------------------------------------------------------------------------
+//
+// A batch runs its URLs one page at a time unless the orchestrator is told how many to run at once.
+// With `QUARRY_EDGE__BATCH_PARALLEL` on, the edge states that number on the job as
+// `params.max_parallel` (`routes::batch_handoff`): what the request asked for, clamped to the edge
+// ceiling below, and reported back as `limits.max_parallel` so a clamp is never silent. The
+// orchestrator caps it again by its own flag (`QUARRY_BATCH_PARALLEL`, hard maximum 16).
+
+/// The environment name of the edge's ceiling on a batch's parallel pages.
+pub const ENV_BATCH_MAX_PARALLEL: &str = "QUARRY_EDGE__BATCH_MAX_PARALLEL";
+/// The ceiling when the variable is absent or blank.
+pub const DEFAULT_BATCH_MAX_PARALLEL: u32 = 4;
+/// The largest value the ceiling may take.
+pub const HARD_BATCH_MAX_PARALLEL: u32 = 16;
+/// The parallel pages a batch asks for when its request does not say, before the ceiling.
+pub const DEFAULT_BATCH_PARALLEL: u32 = 4;
+
+/// Parse the ceiling. Absent or blank is the default; anything that is not a whole number from 1 to
+/// [`HARD_BATCH_MAX_PARALLEL`] is an error that names the variable and never echoes the value.
+pub fn parse_batch_max_parallel(raw: Option<&str>) -> Result<u32, String> {
+    let Some(value) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_BATCH_MAX_PARALLEL);
+    };
+    match value.parse::<u32>() {
+        Ok(n) if (1..=HARD_BATCH_MAX_PARALLEL).contains(&n) => Ok(n),
+        _ => Err(format!(
+            "{ENV_BATCH_MAX_PARALLEL} must be a whole number from 1 to {HARD_BATCH_MAX_PARALLEL}"
+        )),
+    }
+}
+
+/// Validate the ceiling from the process environment (used by boot).
+pub fn check_batch_max_parallel_boot() -> Result<u32, String> {
+    parse_batch_max_parallel(std::env::var(ENV_BATCH_MAX_PARALLEL).ok().as_deref())
+}
+
+/// The ceiling the process runs with, read once. Boot validates the environment first, so a value
+/// that reaches here was valid at start-up.
+pub fn batch_max_parallel() -> u32 {
+    static CEILING: OnceLock<u32> = OnceLock::new();
+    *CEILING.get_or_init(|| check_batch_max_parallel_boot().unwrap_or(DEFAULT_BATCH_MAX_PARALLEL))
+}
+
+/// The parallel pages one batch runs with. `requested` is what the request sent, `None` when it
+/// said nothing. Silent takes [`DEFAULT_BATCH_PARALLEL`] clamped to the `ceiling` (`default`); a
+/// value above the ceiling is clamped to it (`hard`); anything else is used as asked. The result is
+/// at least 1, because a stamped `0` would read as "no organization cap" to the orchestrator.
+/// `remaining` is never set: no allowance counts pages in flight.
+///
+/// There is no organization term. [`OrgLimits`] has no figure that bounds one batch's fan-out:
+/// `caps.crawl_jobs` bounds the organization's jobs in flight, `caps.job_backlog` its waiting jobs,
+/// and `caps.render_permits` its browser permits. A plan key for batch pages would add that term.
+pub fn resolve_batch_parallel(requested: Option<u32>, ceiling: u32) -> Bound {
+    let ceiling = ceiling.max(1);
+    let (wanted, mut clamped_by) = match requested {
+        None => (DEFAULT_BATCH_PARALLEL, vec![ClampedBy::Default]),
+        Some(value) => (value.max(1), Vec::new()),
+    };
+    let effective = if wanted > ceiling {
+        clamped_by.push(ClampedBy::Hard);
+        ceiling
+    } else {
+        wanted
+    };
+    Bound {
+        requested,
+        effective,
+        remaining: None,
+        clamped_by,
+    }
+}
+
+/// The `limits` block of a handoff acknowledgement. A crawl carries `max_pages` and `max_depth`; a
+/// batch carries `urls`, and with `QUARRY_EDGE__BATCH_PARALLEL` on also `max_parallel`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandoffLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1129,6 +1203,9 @@ pub struct HandoffLimits {
     pub max_depth: Option<Bound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub urls: Option<UrlsBound>,
+    /// W3-E3.7.2w: the pages of the batch that run at a time. Absent unless the switch is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<Bound>,
 }
 
 impl From<CrawlLimitsAck> for HandoffLimits {
@@ -1137,6 +1214,7 @@ impl From<CrawlLimitsAck> for HandoffLimits {
             max_pages: Some(ack.max_pages),
             max_depth: Some(ack.max_depth),
             urls: None,
+            max_parallel: None,
         }
     }
 }
@@ -1147,6 +1225,7 @@ impl From<UrlsBound> for HandoffLimits {
             max_pages: None,
             max_depth: None,
             urls: Some(urls),
+            max_parallel: None,
         }
     }
 }

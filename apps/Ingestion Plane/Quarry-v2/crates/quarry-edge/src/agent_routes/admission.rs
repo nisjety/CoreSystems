@@ -712,7 +712,8 @@ pub(super) async fn admit_origin_extension_with(
 
     // Widen the boundary. An open-web run already reaches every public host that is not denied,
     // and an unconstrained allow list needs no widening; both keep their boundary.
-    let egress = super::human_browse::open_web_egress(
+    let egress = super::human_browse::run_egress(
+        state,
         &entry.nav_policy,
         extended_egress_policy(
             state,

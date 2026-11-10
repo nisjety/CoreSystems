@@ -15,6 +15,7 @@ use quarry_tls::{TlsClientConfig, TlsDnsPin, WreqTlsClient};
 use url::Url;
 
 use crate::driver::{Driver, FetchHints};
+use crate::fallback_driver::fetch_sub_codes_enabled;
 use crate::fetch::FetchResponse;
 
 /// A [`Driver`] that fetches pages using browser-like TLS and HTTP/2 emulation.
@@ -40,7 +41,8 @@ impl TlsProfileDriver {
             Some(user_agent) => base_config.with_user_agent_override(user_agent),
             None => base_config,
         };
-        let client = WreqTlsClient::new(config)?;
+        // E3.8.1: the client names a failed send's transport sub-code when the flag is on.
+        let client = WreqTlsClient::new(config)?.with_fetch_sub_codes(fetch_sub_codes_enabled());
         Ok(Self { client })
     }
 

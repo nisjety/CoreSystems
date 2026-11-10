@@ -765,6 +765,7 @@ pub const ROWS: &[Row] = &[
             "/v1/internal/queues/{queue_name}/enqueue_batch",
             "/v1/internal/queues/{queue_name}/pop",
             "/v1/internal/queues/{queue_name}/ack",
+            "/v1/internal/queues/{queue_name}/seen",
         ],
         treatment: Treatment::Inert {
             reason: "the worker queue behind crawl and batch, which refuse ZDR at the public edge",

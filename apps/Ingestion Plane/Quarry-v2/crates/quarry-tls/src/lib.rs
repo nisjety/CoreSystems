@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 mod redirect_policy;
 pub use redirect_policy::QuarryRedirectPolicy;
 
-use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
+use quarry_core::error::{driver_failed_reason, ErrorCode, QuarryError, QuarryResult};
 use quarry_security::heur::resolve_guard;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -251,6 +251,8 @@ pub struct WreqTlsClient {
     profile: TlsProfile,
     config: TlsClientConfig,
     client: Client,
+    /// Whether a failed send names its transport sub-code (E3.8.1). Off by default.
+    fetch_sub_codes: bool,
 }
 
 impl WreqTlsClient {
@@ -279,6 +281,7 @@ impl WreqTlsClient {
             profile: config.profile,
             config,
             client,
+            fetch_sub_codes: false,
         })
     }
 
@@ -287,8 +290,17 @@ impl WreqTlsClient {
         self.profile
     }
 
+    /// Names the transport sub-code (`dns`, `tls` or `connect`) of a failed send, instead of the
+    /// bare upstream code (E3.8.1). The caller passes the flag it read at construction. Off, the
+    /// error is as it was.
+    #[must_use]
+    pub fn with_fetch_sub_codes(mut self, enabled: bool) -> Self {
+        self.fetch_sub_codes = enabled;
+        self
+    }
+
     pub async fn fetch(&self, url: &Url) -> QuarryResult<TlsFetchResponse> {
-        fetch_with_client(&self.client, url).await
+        fetch_with_client(&self.client, url, self.fetch_sub_codes).await
     }
 
     /// Fetch with a connection-level DNS pin while preserving the request URL's
@@ -305,7 +317,7 @@ impl WreqTlsClient {
             ));
         }
         let client = build_client(&self.config, Some(pin))?;
-        fetch_with_client(&client, url).await
+        fetch_with_client(&client, url, self.fetch_sub_codes).await
     }
 }
 
@@ -328,13 +340,17 @@ fn build_client(config: &TlsClientConfig, pin: Option<&TlsDnsPin>) -> QuarryResu
         .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("wreq client: {e}")))
 }
 
-async fn fetch_with_client(client: &Client, url: &Url) -> QuarryResult<TlsFetchResponse> {
+async fn fetch_with_client(
+    client: &Client,
+    url: &Url,
+    fetch_sub_codes: bool,
+) -> QuarryResult<TlsFetchResponse> {
     let started = Instant::now();
     let resp = client
         .get(url.as_str())
         .send()
         .await
-        .map_err(|e| map_wreq_error("tls fetch", e))?;
+        .map_err(|e| map_wreq_send_error(e, fetch_sub_codes))?;
 
     let status = resp.status().as_u16();
     let final_url = match Url::parse(&resp.uri().to_string()) {
@@ -533,6 +549,35 @@ fn map_wreq_error(context: &str, err: wreq::Error) -> QuarryError {
     };
     tracing::debug!(context, error_kind = kind, "wreq request failed");
     QuarryError::new(code, format!("{context}: {kind}"))
+}
+
+/// The error of a failed send (E3.8.1). With the sub-codes on, a transport failure that names a
+/// class is `DRIVER_FAILED` with that reason. A timeout and every other failure keep the mapping
+/// of [`map_wreq_error`].
+fn map_wreq_send_error(err: wreq::Error, fetch_sub_codes: bool) -> QuarryError {
+    if fetch_sub_codes && !err.is_timeout() {
+        if let Some(class) = classify_wreq_error(&err) {
+            return QuarryError::driver_failed(class, format!("tls fetch: {class}"));
+        }
+    }
+    map_wreq_error("tls fetch", err)
+}
+
+/// The sub-code a failed wreq send names (E3.8.1), read from the text of the error chain below the
+/// top error, whose own text carries the URL. wreq does not type its resolver failures, so DNS is
+/// read from the text alone. `None` when the failure names no class.
+fn classify_wreq_error(err: &wreq::Error) -> Option<&'static str> {
+    let mut messages = Vec::new();
+    let mut source = std::error::Error::source(err);
+    while let Some(inner) = source {
+        messages.push(inner.to_string());
+        source = inner.source();
+    }
+    driver_failed_reason::from_transport_chain(
+        messages.iter().map(String::as_str),
+        err.is_connect(),
+        false,
+    )
 }
 
 #[cfg(test)]

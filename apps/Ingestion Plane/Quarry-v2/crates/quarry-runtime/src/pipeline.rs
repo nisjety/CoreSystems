@@ -485,6 +485,16 @@ pub(crate) enum PiiRedactionFailure {
     /// The run carries a capture (screenshot, PDF, action output) that text
     /// redaction cannot reach.
     CaptureNotRedactable,
+    /// Q3-E3.6-7: the run asked for the PII model tier (the switch is on, the
+    /// run redacts and is not ZDR) and the tier did not produce a usable
+    /// answer: no verified org, the lane was switched off mid-flight, the hop
+    /// failed, or the answer was not the whole text. The deterministic-only
+    /// text is never kept in its place.
+    ModelTierUnavailable,
+    /// Q3-E3.6-7: the text needs more Model Plane calls than
+    /// [`PII_MODEL_MAX_CALLS_PER_PAGE`] allows, so the model tier cannot cover
+    /// all of it.
+    ModelTierTooLarge,
 }
 
 impl PiiRedactionFailure {
@@ -495,9 +505,16 @@ impl PiiRedactionFailure {
             Self::ResidualPii => "residual_pii",
             Self::ReencodeFailed => "reencode_failed",
             Self::CaptureNotRedactable => "capture_not_redactable",
+            Self::ModelTierUnavailable => "model_tier_unavailable",
+            Self::ModelTierTooLarge => "model_tier_too_large",
         }
     }
 }
+
+/// Q3-E3.6-7: the most Model Plane calls (of
+/// [`crate::mp_client::MAX_PII_MODEL_TEXTS`] chunks each) the PII model tier
+/// makes for one page. A text that needs more fails the page closed.
+const PII_MODEL_MAX_CALLS_PER_PAGE: usize = 8;
 
 /// The typed per-page failure. Not retryable (the same page fails the same
 /// way), and nothing of the page in it: the field name and the cause only.
@@ -627,6 +644,91 @@ fn redact_page_text(page: PageText) -> QuarryResult<PageText> {
     })
 }
 
+/// Q3-E3.6-7: `text` cut into contiguous pieces of at most
+/// [`crate::mp_client::MAX_PII_MODEL_TEXT_CHARS`] characters, so that the
+/// pieces joined again are exactly `text`. A piece ends after a newline when it
+/// can, else after whitespace, else at the character limit.
+fn split_for_pii_model(text: &str) -> Vec<&str> {
+    let max = crate::mp_client::MAX_PII_MODEL_TEXT_CHARS;
+    let mut chunks = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some((hard, _)) = rest.char_indices().nth(max) else {
+            chunks.push(rest);
+            break;
+        };
+        let window = &rest[..hard];
+        let break_after = |pred: fn(char) -> bool| {
+            window
+                .char_indices()
+                .rev()
+                .find(|&(_, c)| pred(c))
+                .map(|(i, c)| i + c.len_utf8())
+        };
+        let cut = break_after(|c| c == '\n')
+            .or_else(|| break_after(char::is_whitespace))
+            .filter(|&i| i > 0)
+            .unwrap_or(hard);
+        let (piece, tail) = rest.split_at(cut);
+        chunks.push(piece);
+        rest = tail;
+    }
+    chunks
+}
+
+/// Q3-E3.6-7: `text` (already through the deterministic stage) with the PII
+/// model tier applied to every piece that carries something. Pieces of only
+/// whitespace are kept as they are and not sent. The result is scanned by the
+/// deterministic stage again, so the model's answer can never put back
+/// something the scanner knows. Any call that does not come back with the whole
+/// answer fails the text; `calls_left` is shared by every field of the page.
+async fn redact_text_with_pii_model(
+    client: &crate::mp_client::ModelPlaneClient,
+    org_id: &str,
+    zdr: ZdrMode,
+    text: String,
+    language: Option<&str>,
+    calls_left: &mut usize,
+) -> Result<String, PiiRedactionFailure> {
+    let chunks = split_for_pii_model(&text);
+    let sendable: Vec<usize> = chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, chunk)| !chunk.trim().is_empty())
+        .map(|(index, _)| index)
+        .collect();
+    if sendable.is_empty() {
+        return Ok(text);
+    }
+    let mut replaced: Vec<Option<String>> = vec![None; chunks.len()];
+    for batch in sendable.chunks(crate::mp_client::MAX_PII_MODEL_TEXTS) {
+        if *calls_left == 0 {
+            return Err(PiiRedactionFailure::ModelTierTooLarge);
+        }
+        *calls_left -= 1;
+        let texts: Vec<String> = batch.iter().map(|&index| chunks[index].to_owned()).collect();
+        let result = client
+            .pii_model_for_org(org_id, zdr, &texts, language)
+            .await
+            .map_err(|error| {
+                tracing::warn!(cause = error.label(), "the PII model tier did not answer; the page fails closed");
+                PiiRedactionFailure::ModelTierUnavailable
+            })?;
+        if result.redacted.len() != batch.len() {
+            return Err(PiiRedactionFailure::ModelTierUnavailable);
+        }
+        for (&index, redacted) in batch.iter().zip(result.redacted) {
+            replaced[index] = Some(redacted);
+        }
+    }
+    let joined: String = chunks
+        .iter()
+        .zip(replaced)
+        .map(|(chunk, redacted)| redacted.unwrap_or_else(|| (*chunk).to_owned()))
+        .collect();
+    redact_text_fail_closed(&joined)
+}
+
 /// E3.6-4b: the store a run writes its artifacts through. A redacting run gets
 /// [`PiiEnforcingStore`], so none of its writes can keep text the scanner has not
 /// cleared, whatever the org settings say. Any other run gets its store as it is.
@@ -728,6 +830,13 @@ pub struct PageRunner {
     /// a fetch; `Enforce` refuses a disallowed or unreachable URL with a 403
     /// `SECURITY_BLOCKED` `details.denial` and applies `Crawl-delay`.
     pub robots: Option<RobotsEnforcement>,
+    /// Q3-E3.6-7: the Model Plane client whose document lanes (OCR) this run may
+    /// use. `None` (every ad-hoc scrape, every test harness) uses none. With
+    /// `Some`, a PDF with no text layer goes to the OCR lane only when the
+    /// client's `QUARRY_EDGE__OCR` switch is on, the run has a verified org
+    /// and the run is not under ZDR. Edge wires it from
+    /// `QUARRY_EDGE__MODEL_PLANE_URL`; see [`PageRunner::with_document_lanes`].
+    pub document_lanes: Option<Arc<crate::mp_client::ModelPlaneClient>>,
 }
 
 /// The challenge settings the scrape path runs under (`QUARRY_CHALLENGE_*`),
@@ -912,7 +1021,103 @@ impl LocalIndexWriteback {
     }
 }
 
+/// Q3-E3.6-7: what the OCR lane did for a PDF with no text layer.
+#[derive(Debug, PartialEq, Eq)]
+enum OcrOutcome {
+    /// The lane was not asked (no client, the switch is off, not a text-less
+    /// PDF). Nothing was sent and the document is as the parser left it.
+    NotAttempted,
+    /// The lane read `pages` pages. `of` is how many pages the PDF has (more
+    /// than `pages` when the lane's page limit cut the request).
+    Read { text: String, pages: usize, of: usize },
+    /// The lane was asked and did not produce text. The label is closed (see
+    /// [`crate::mp_client::DocumentLaneError::label`]), never provider text.
+    Unavailable(&'static str),
+}
+
 impl PageRunner {
+    /// Q3-E3.6-7: use `client`'s document lanes (OCR) for scanned PDF pages.
+    /// The client's own switch (`QUARRY_EDGE__OCR`, default off) still decides
+    /// whether the lane runs.
+    pub fn with_document_lanes(mut self, client: Arc<crate::mp_client::ModelPlaneClient>) -> Self {
+        self.document_lanes = Some(client);
+        self
+    }
+
+    /// Q3-E3.6-7: OCR for a PDF whose parse produced no text. Runs only when
+    /// this runner holds a client with the OCR switch on. Under ZDR, or with no
+    /// verified org, the lane is not called and the answer is `Unavailable`
+    /// (nothing of the document leaves the process). The page numbers come
+    /// from the parser's own page count (the sandboxed parse), capped at the
+    /// lane's page limit; the text comes back for the normal redaction stage.
+    async fn ocr_textless_pdf(&self, pdf: &[u8]) -> OcrOutcome {
+        use crate::mp_client::{DocumentLaneError, OcrPagesRequest, MAX_OCR_PAGES_PER_CALL};
+
+        let Some(client) = self.document_lanes.as_ref().filter(|c| c.document_lanes().ocr) else {
+            return OcrOutcome::NotAttempted;
+        };
+        if self.zdr.is_active() {
+            return OcrOutcome::Unavailable(DocumentLaneError::ZdrRefused(crate::mp_client::DocumentLane::Ocr).label());
+        }
+        let Some(org_id) = self.org_id.as_deref().map(str::trim).filter(|org| !org.is_empty()) else {
+            return OcrOutcome::Unavailable("no_org");
+        };
+        let total = match crate::content_route::pdf_page_summary(pdf.to_vec()).await {
+            Ok(Some(summary)) if summary.pages > 0 => summary.pages as usize,
+            Ok(_) => return OcrOutcome::Unavailable("no_page_facts"),
+            Err(_) => return OcrOutcome::Unavailable("page_facts_failed"),
+        };
+        let asked = total.min(MAX_OCR_PAGES_PER_CALL);
+        let pages: Vec<u32> = (1..=asked as u32).collect();
+        let request = match OcrPagesRequest::for_scanned_pages(pdf, &pages, None) {
+            Ok(request) => request,
+            Err(error) => return OcrOutcome::Unavailable(error.label()),
+        };
+        match client.ocr_pages_for_org(org_id, self.zdr, &request).await {
+            Ok(result) => OcrOutcome::Read {
+                text: result.text,
+                pages: asked,
+                of: total,
+            },
+            Err(error) => OcrOutcome::Unavailable(error.label()),
+        }
+    }
+
+    /// Q3-E3.6-7: whether this run asks for the PII model tier. It does when
+    /// the run redacts (`redacting`), is not ZDR (the tier never sees a ZDR
+    /// run's text), and this runner holds a document-lane client whose
+    /// `QUARRY_EDGE__PII_MODEL` switch is on (default off).
+    fn wants_pii_model_tier(&self, redacting: bool) -> bool {
+        redacting
+            && !self.zdr.is_active()
+            && self
+                .document_lanes
+                .as_ref()
+                .is_some_and(|client| client.document_lanes().pii_model)
+    }
+
+    /// Q3-E3.6-7: the page's markdown, already through the deterministic
+    /// redaction stage, through the PII model tier. Only called when
+    /// [`Self::wants_pii_model_tier`] is true. Any failure (no verified org,
+    /// the lane gone, a hop error, an unusable answer, a text past the call
+    /// cap) is a typed failure for the page: the deterministic-only text is
+    /// never kept in its place and the input is never passed through.
+    async fn pii_model_tier_markdown(
+        &self,
+        markdown: String,
+        language: Option<&str>,
+    ) -> Result<String, PiiRedactionFailure> {
+        let Some(client) = self.document_lanes.as_ref() else {
+            return Err(PiiRedactionFailure::ModelTierUnavailable);
+        };
+        let Some(org_id) = self.org_id.as_deref().map(str::trim).filter(|org| !org.is_empty()) else {
+            return Err(PiiRedactionFailure::ModelTierUnavailable);
+        };
+        let language = language.map(str::trim).filter(|value| !value.is_empty());
+        let mut calls_left = PII_MODEL_MAX_CALLS_PER_PAGE;
+        redact_text_with_pii_model(client, org_id, self.zdr, markdown, language, &mut calls_left).await
+    }
+
     /// The corpus write-back hook for this run, carrying this run's ZDR
     /// posture. Built per call rather than stored so it can never drift out
     /// of sync with `self.zdr`.
@@ -1347,7 +1552,9 @@ impl PageRunner {
         // fetch receives this exact address set through FetchHints and pins its
         // transport resolver to it, so the connection cannot perform a second
         // hostname lookup after this public-address check.
-        let resolved_target = if !self.security.allow_private_hosts() {
+        // Q3-E3.8.8w: a driver that reads a stored capture (no_egress) opens no connection to
+        // the host, so there is nothing to pin and no lookup to make.
+        let resolved_target = if !self.security.allow_private_hosts() && self.driver.reaches_network() {
             Some(crate::dns_guard::resolve_public_url(requested_url).await?)
         } else {
             None
@@ -1706,6 +1913,52 @@ impl PageRunner {
                 cleaned.markdown
             }
         };
+        // Q3-E3.6-7: a PDF whose parse produced no text (a scan) may go to the
+        // OCR lane. The lane is dark (`QUARRY_EDGE__OCR`), refused under ZDR and
+        // without a verified org, and its text is the document's markdown from
+        // here on: the redaction stage below runs on it like on parsed text, so
+        // nothing of it is kept, emitted or returned unredacted. The outcome
+        // becomes warnings (page counts and closed labels only) in the inline
+        // parts.
+        let mut ocr_warnings: Vec<quarry_core::scrape::ScrapeWarning> = Vec::new();
+        let md = if is_doc
+            && md.trim().is_empty()
+            && detected.is_some_and(|found| found.kind == quarry_transform::sniff::ContentKind::Pdf)
+        {
+            match self.ocr_textless_pdf(&resp.body).await {
+                OcrOutcome::NotAttempted => md,
+                OcrOutcome::Read { text, pages, of } => {
+                    let (text, truncated) =
+                        quarry_core::scrape::truncate_on_char_boundary(&text, crate::content_route::MAX_DOC_TEXT_BYTES);
+                    ocr_warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "ocr_applied",
+                        format!("{pages} scanned pages were read with OCR"),
+                    ));
+                    if of > pages {
+                        ocr_warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                            "document_ocr_partial",
+                            format!("only the first {pages} of {of} pages were read with OCR"),
+                        ));
+                    }
+                    if truncated {
+                        ocr_warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                            "document_text_truncated",
+                            "the document's text was cut at the parser's output cap",
+                        ));
+                    }
+                    text
+                }
+                OcrOutcome::Unavailable(label) => {
+                    ocr_warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "document_ocr_unavailable",
+                        format!("OCR could not be applied ({label})"),
+                    ));
+                    md
+                }
+            }
+        } else {
+            md
+        };
         let link_list = if is_doc {
             Vec::new()
         } else {
@@ -1781,7 +2034,18 @@ impl PageRunner {
         // used. A capture (screenshot, PDF, action output) cannot be redacted, so
         // a redacting run that carries one fails the same way. The wall check
         // above reads the raw text and keeps nothing of it.
+        //
+        // Q3-E3.6-7: the optional PII model tier. When the run redacts, is not
+        // ZDR, and `QUARRY_EDGE__PII_MODEL` is on (default off) on the document
+        // lane client, the markdown, already through the deterministic stage
+        // above, goes to the Model Plane in chunks and the returned text
+        // replaces it. The page is then failed with the same typed
+        // `pii_redaction_failed` on any unusable answer. The HTML forms of the
+        // page cannot be chunked as text, so with the tier asked they are not
+        // kept (no source artifact) and not returned inline (`html`,
+        // `raw_html`): only the model-tier text is.
         let redacting = pii_redaction_settings().applies(redact_requested, self.org_id.as_deref());
+        let pii_model_tier = self.wants_pii_model_tier(redacting);
         let (md, body_text, cleaned_html, link_list, mut meta) = if redacting {
             if let Some(field) = unredactable_capture(resp.captures.as_deref()) {
                 return Err(pii_redaction_error(
@@ -1789,13 +2053,19 @@ impl PageRunner {
                     field,
                 ));
             }
-            let page = redact_page_text(PageText {
+            let mut page = redact_page_text(PageText {
                 markdown: md,
                 body_text,
                 cleaned_html,
                 links: link_list,
                 metadata: meta,
             })?;
+            if pii_model_tier {
+                page.markdown = self
+                    .pii_model_tier_markdown(page.markdown, page.metadata.lang.as_deref())
+                    .await
+                    .map_err(|failure| pii_redaction_error(failure, "markdown"))?;
+            }
             (
                 page.markdown,
                 page.body_text,
@@ -1935,10 +2205,12 @@ impl PageRunner {
         let (html_fmt, md_fmt) = if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
             // E3.6-4a: a redacting run keeps the redacted text of a page as its
             // source, and no source at all for a document (its bytes cannot be
-            // redacted; its redacted text is the markdown artifact).
+            // redacted; its redacted text is the markdown artifact). Q3-E3.6-7:
+            // the same when the PII model tier was asked, since the page's HTML
+            // only went through the deterministic stage.
             let source_bytes = if !redacting {
                 Some(resp.body.clone())
-            } else if is_doc {
+            } else if is_doc || pii_model_tier {
                 None
             } else {
                 Some(body_text.as_bytes().to_vec())
@@ -2243,6 +2515,20 @@ impl PageRunner {
                         "html and rawHtml are not available for a PDF or DOCX; use markdown",
                     ));
                 }
+            } else if pii_model_tier {
+                // Q3-E3.6-7: the HTML forms only went through the deterministic
+                // stage, and the PII model tier was asked for this page.
+                for (wanted, field) in [(inline_request.html, "html"), (inline_request.raw_html, "raw_html")] {
+                    if wanted {
+                        parts.omitted.push(field.to_owned());
+                    }
+                }
+                if inline_request.html || inline_request.raw_html {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "format_unavailable_with_pii_model",
+                        "html and rawHtml are not available while the PII model tier is applied; use markdown",
+                    ));
+                }
             } else {
                 if inline_request.html {
                     // The HTML the markdown was made from: after exclusion,
@@ -2291,6 +2577,7 @@ impl PageRunner {
                     ));
                 }
             }
+            parts.warnings.append(&mut ocr_warnings);
             parts
         };
         // An empty document is not worth ingesting.
@@ -2698,6 +2985,7 @@ mod page_extracted_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: None,
+            document_lanes: None,
         }
     }
 
@@ -2842,6 +3130,7 @@ mod local_index_writeback_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: None,
+            document_lanes: None,
         }
     }
 
@@ -3083,6 +3372,7 @@ mod content_routing_tests {
             title_enricher: None,
             doc_routing: mode,
             robots: None,
+            document_lanes: None,
         };
         (runner, rx)
     }
@@ -4021,6 +4311,7 @@ mod scrape_challenge_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: None,
+            document_lanes: None,
         };
         (runner, rx, artifacts)
     }
@@ -4414,6 +4705,7 @@ mod capture_pipeline_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: None,
+            document_lanes: None,
         }
     }
 
@@ -4831,6 +5123,7 @@ mod final_url_recheck_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: None,
+            document_lanes: None,
         }
     }
 
@@ -5038,6 +5331,7 @@ mod robots_gate_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: mode.map(|mode| RobotsEnforcement::new(gate.clone(), mode)),
+            document_lanes: None,
         };
         Harness {
             runner,
@@ -5497,6 +5791,7 @@ mod pii_redaction_tests {
             title_enricher: None,
             doc_routing: DocRouting::Off,
             robots: None,
+            document_lanes: None,
         }
     }
 

@@ -116,6 +116,10 @@ impl SecurityEngine for PolicySecurityEngine {
     fn recheck_final_url(&self) -> bool {
         self.recheck_final_url
     }
+
+    fn host_reputation(&self) -> Option<std::sync::Arc<dyn quarry_security::preflight::HostReputation>> {
+        self.inner.host_reputation()
+    }
 }
 
 #[cfg(test)]

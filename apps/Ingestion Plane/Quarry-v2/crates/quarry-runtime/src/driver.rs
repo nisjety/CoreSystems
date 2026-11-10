@@ -192,6 +192,14 @@ pub trait Driver: Send + Sync {
     fn scrape_capabilities(&self) -> ScrapeCapabilities {
         ScrapeCapabilities::default()
     }
+    /// Whether this driver opens a connection to the page's own host (Q3-E3.8.8w). Every
+    /// driver does except the no_egress driver, which reads a stored capture from the Data
+    /// Plane. A run whose driver does not reach the network resolves no DNS for the page's
+    /// host either (see `PageRunner`). Default: `true`; a wrapper driver keeps the default,
+    /// so a wrapped no_egress driver is never built.
+    fn reaches_network(&self) -> bool {
+        true
+    }
 }
 
 /// Select driver by url + hints. Simple rule for scaffold:

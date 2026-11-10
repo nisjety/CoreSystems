@@ -101,7 +101,20 @@ pub trait RequestQueue: Send + Sync {
     async fn fail_permanently(&self, request_id: &str, reason: &str) -> QuarryResult<()>;
 
     async fn stats(&self) -> QuarryResult<QueueStats>;
+
+    /// Record request ids as seen (E3.7.6: the final URL of a redirect, which the crawl has
+    /// already fetched). A later `enqueue` of one of them returns `false`, and nothing is
+    /// queued for it, so it is never popped. Blank ids are skipped, and an id the queue
+    /// already holds is left as it is. Returns how many ids were newly recorded. The default
+    /// records nothing and returns 0: a queue with no seen set.
+    async fn mark_seen(&self, _request_ids: &[String]) -> QuarryResult<usize> {
+        Ok(0)
+    }
 }
+
+/// Most request ids one in-memory queue remembers as seen (`mark_seen`). A mark that would
+/// take the set past this is refused whole, as an enqueue past the queue's cap is.
+const SEEN_CAP_PER_QUEUE: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct InMemoryRequestQueue {
@@ -119,6 +132,9 @@ struct QueueState {
     by_priority: BTreeMap<Priority, VecDeque<QueuedRequest>>,
     /// Active request_ids, queued or in-flight (used for dedup).
     known: HashSet<String>,
+    /// Request ids recorded by `mark_seen`, at most `SEEN_CAP_PER_QUEUE`. `enqueue` refuses
+    /// one of them, and it is never queued, so it is never popped.
+    seen: HashSet<String>,
     /// Currently-popped requests pending ack, with their checkout time.
     in_flight: HashMap<String, (QueuedRequest, Instant)>,
     /// Counters for observability.
@@ -133,6 +149,7 @@ impl InMemoryRequestQueue {
             inner: Arc::new(RwLock::new(QueueState {
                 by_priority: BTreeMap::new(),
                 known: HashSet::new(),
+                seen: HashSet::new(),
                 in_flight: HashMap::new(),
                 total_enqueued: 0,
                 total_acked: 0,
@@ -175,11 +192,12 @@ impl RequestQueue for InMemoryRequestQueue {
         let mut s = self.inner.write().await;
 
         // Check size cap BEFORE the dedup check so a flood of duplicate
-        // request_ids can't bypass the cap.
+        // request_ids can't bypass the cap. A seen id is not a new item, so it
+        // passes the cap and is refused by the dedup check below.
         if let Some(cap) = self.max_size {
             let total: usize =
                 s.by_priority.values().map(|q| q.len()).sum::<usize>() + s.in_flight.len();
-            if total >= cap && !s.known.contains(&request_id) {
+            if total >= cap && !s.known.contains(&request_id) && !s.seen.contains(&request_id) {
                 return Err(QuarryError::new(
                     ErrorCode::RateLimited,
                     format!("request queue full (cap={cap}, current={total}); enqueue rejected"),
@@ -187,7 +205,8 @@ impl RequestQueue for InMemoryRequestQueue {
             }
         }
 
-        if !s.known.insert(request_id.clone()) {
+        // A seen id was already crawled: refuse it and never queue it.
+        if s.seen.contains(&request_id) || !s.known.insert(request_id.clone()) {
             return Ok(false);
         }
         let req = QueuedRequest {
@@ -275,6 +294,30 @@ impl RequestQueue for InMemoryRequestQueue {
             total_acked: s.total_acked,
             total_requeued: s.total_requeued,
         })
+    }
+
+    async fn mark_seen(&self, request_ids: &[String]) -> QuarryResult<usize> {
+        let mut s = self.inner.write().await;
+        // An id already queued or in flight is left as it is, and an id already
+        // seen is not counted again. Blank ids are skipped, as the edge route does.
+        let fresh: HashSet<&str> = request_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .filter(|id| !s.seen.contains(*id) && !s.known.contains(*id))
+            .collect();
+        if s.seen.len() + fresh.len() > SEEN_CAP_PER_QUEUE {
+            return Err(QuarryError::new(
+                ErrorCode::RateLimited,
+                format!(
+                    "seen set full (cap={SEEN_CAP_PER_QUEUE}, current={}); mark_seen rejected",
+                    s.seen.len()
+                ),
+            ));
+        }
+        let recorded = fresh.len();
+        s.seen.extend(fresh.into_iter().map(str::to_owned));
+        Ok(recorded)
     }
 }
 

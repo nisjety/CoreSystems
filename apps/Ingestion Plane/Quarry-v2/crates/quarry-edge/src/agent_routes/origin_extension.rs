@@ -111,7 +111,8 @@ pub async fn apply_origin_extension(
 /// The run's own egress boundary, with no extension: the one it started under (its allow list
 /// narrowed by the web policy, the open-web policy and the deny list).
 fn base_run_egress(state: &AppState, handle: &RunHandle, entry: &RunEntry) -> BrowserEgressPolicy {
-    super::human_browse::open_web_egress(
+    super::human_browse::run_egress(
+        state,
         &entry.nav_policy,
         crate::agent_policy_gate::live_egress_policy(
             state,
@@ -130,7 +131,8 @@ fn current_run_egress(
     entry: &RunEntry,
 ) -> BrowserEgressPolicy {
     match entry.origin_extension.as_ref() {
-        Some(extension) => super::human_browse::open_web_egress(
+        Some(extension) => super::human_browse::run_egress(
+            state,
             &entry.nav_policy,
             crate::agent_policy_gate::extended_egress_policy(
                 state,
@@ -154,11 +156,15 @@ pub(super) fn tab_egress_policy(
     if entry.origin_extension.is_some() {
         return current_run_egress(state, handle, entry);
     }
-    crate::agent_policy_gate::live_egress_policy(
+    // E3.8.7: a new tab carries the host reputation hook too (nothing when the mode is off).
+    crate::agent_policy_gate::attach_reputation(
         state,
-        &handle.live,
-        entry.zdr.is_active(),
-        &entry.constraints.allowed_domains,
+        crate::agent_policy_gate::live_egress_policy(
+            state,
+            &handle.live,
+            entry.zdr.is_active(),
+            &entry.constraints.allowed_domains,
+        ),
     )
 }
 
@@ -254,10 +260,11 @@ async fn drop_origin_extension(
             .swap_tab_egress_policy(
                 &entry.session,
                 &tab_id,
-                Some(
+                Some(crate::agent_policy_gate::attach_reputation(
+                    state,
                     BrowserEgressPolicy::from_allowed_domains(&allowed_domains)
                         .with_public_assets(),
-                ),
+                )),
             )
             .await?;
     }

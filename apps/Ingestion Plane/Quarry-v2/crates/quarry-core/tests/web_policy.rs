@@ -729,6 +729,74 @@ fn catalogue_json_matches_the_checked_in_file_and_its_pin() {
     assert_eq!(read(&pin_path), pin, "the sha256 pin drifted from the golden");
 }
 
+// ── the RequestAsk golden ───────────────────────────────────────────────────
+
+/// `contracts/request-ask.v1.json`, parsed. Each case has the ask as written (`ask`)
+/// and the wire form it must round-trip to (`json`).
+fn request_ask_golden() -> serde_json::Value {
+    let path = crate_dir().join("contracts/request-ask.v1.json");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("{} is missing", path.display()));
+    serde_json::from_str(&text).expect("request-ask.v1.json is JSON")
+}
+
+#[test]
+fn request_ask_golden_matches_its_pin() {
+    let golden_path = crate_dir().join("contracts/request-ask.v1.json");
+    let pin_path = crate_dir().join("contracts/request-ask.v1.json.sha256");
+    let bytes = std::fs::read(&golden_path)
+        .unwrap_or_else(|_| panic!("{} is missing", golden_path.display()));
+    let pin = format!("{:x}  request-ask.v1.json\n", Sha256::digest(&bytes));
+    let read_pin = std::fs::read_to_string(&pin_path)
+        .unwrap_or_else(|_| panic!("{} is missing", pin_path.display()));
+    assert_eq!(
+        read_pin, pin,
+        "the sha256 pin drifted from request-ask.v1.json"
+    );
+}
+
+#[test]
+fn request_ask_golden_round_trips_byte_for_byte() {
+    let golden = request_ask_golden();
+    assert_eq!(golden["schema"], "quarry.web_policy.RequestAsk");
+    assert_eq!(golden["version"], 1);
+    let cases = golden["cases"].as_array().expect("cases is an array");
+    assert!(!cases.is_empty(), "the golden has no cases");
+    for case in cases {
+        let name = case["name"].as_str().expect("every case is named");
+        let ask: RequestAsk = serde_json::from_value(case["ask"].clone())
+            .unwrap_or_else(|error| panic!("{name}: ask does not parse: {error}"));
+        let wire: RequestAsk = serde_json::from_value(case["json"].clone())
+            .unwrap_or_else(|error| panic!("{name}: json does not parse: {error}"));
+        assert_eq!(ask, wire, "{name}: the ask and its json are different asks");
+        // Both sides are written from a serde_json::Value, so each is one canonical text.
+        let written = serde_json::to_value(&wire).expect("a RequestAsk serialises");
+        assert_eq!(
+            serde_json::to_string(&written).expect("serialises"),
+            serde_json::to_string(&case["json"]).expect("serialises"),
+            "{name}: RequestAsk does not re-serialise to the golden"
+        );
+    }
+}
+
+#[test]
+fn request_ask_golden_refuses_the_keys_it_lists() {
+    let golden = request_ask_golden();
+    let refused = golden["refused_keys"]
+        .as_array()
+        .expect("refused_keys is an array");
+    assert!(!refused.is_empty(), "the golden refuses no key");
+    for key in refused {
+        let key = key.as_str().expect("a refused key is a string");
+        let mut probe = serde_json::Map::new();
+        probe.insert(key.to_owned(), json!("x"));
+        assert!(
+            serde_json::from_value::<RequestAsk>(serde_json::Value::Object(probe)).is_err(),
+            "RequestAsk accepts {key}, which the golden lists as refused"
+        );
+    }
+}
+
 #[test]
 fn every_key_has_a_site_or_is_reserved() {
     for spec in CATALOGUE {

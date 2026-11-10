@@ -246,6 +246,10 @@ type RunPageResult struct {
 	// TextFP is the page's normalised text fingerprint (W3-E3.5-4). Fingerprint stays the
 	// raw-byte hash. Empty from an edge that predates the field.
 	TextFP string `json:"text_fp,omitempty"`
+	// FinalURL is the post-redirect URL of the page (E3.7.6), set by the edge only when the fetch
+	// was redirected: it differs from the URL the page was requested at. Empty for a page that was
+	// not redirected, and from an edge that predates the field. The crawl marks it seen.
+	FinalURL string `json:"final_url,omitempty"`
 }
 
 // RunPage executes a single page via Quarry Runtime.

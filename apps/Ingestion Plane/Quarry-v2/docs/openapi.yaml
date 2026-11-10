@@ -416,7 +416,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Envelope_HandoffAck'
         '400':
-          description: "WS14.S5. Every URL of the batch was refused by the static check, so no URL can be crawled. Body is BAD_REQUEST with details.rejected (url, code, message). Nothing is created. A batch with at least one crawlable URL is a 200 with HandoffAck.rejected."
+          description: "WS14.S5. Every URL of the batch was refused by the static check, so no URL can be crawled. Body is BAD_REQUEST with details.rejected (url, code, message). Nothing is created. A batch with at least one crawlable URL is a 200 with HandoffAck.rejected. W3-E3.7.2w, with QUARRY_EDGE__BATCH_PARALLEL on: a `max_parallel` (or `maxParallel`) that is not a whole number of at least 1, or both spellings together, is a BAD_REQUEST with details.fields[] (path, code, message); nothing is created."
           content:
             application/json:
               schema:
@@ -9193,6 +9193,29 @@ components:
             for any other value. A redacted request never reads or writes the
             page or result cache. Refused on /v1/scrape/stream
             (unsupported_in_stream).
+        no_egress:
+          type: boolean
+          default: false
+          description: >-
+            Q3-E3.8.8w. true: the page is served from the organization's stored capture in
+            the Data Plane, read through its API only, and no connection is opened to the
+            page's host. That means no robots.txt or sitemap discovery, no redirect follow,
+            no proxy and no DNS lookup of the host. Absent and false are the same request.
+            Alias noEgress. Off unless QUARRY_EDGE__NO_EGRESS is on (default off), the edge
+            has a Data Plane URL and the cross-plane token provider. A page with no stored
+            capture is 404 NOT_FOUND with details.reason no_egress_miss, and the URL is in
+            neither the message nor the details. 400 feature_disabled (path no_egress)
+            while the switch is off; 400 not_supported_with_no_egress with a screenshot or
+            pdf format (path formats), with actions (path actions), with locale, timezone
+            or location (path no_egress) or with ingest (path ingest); 400 invalid_type
+            for a value that is not a boolean; 503 RUNTIME_NOT_READY (details.reason
+            no_egress_unavailable) when the switch is on but the Data Plane reader could
+            not be built. Under zero data retention it is 403 FORBIDDEN with
+            details.reason no_egress_zdr_refused, before anything is read. A no_egress
+            request never reads or writes the page or result cache, takes no per-host
+            slot, and indexes, titles or ingests nothing. Its effective_options carry
+            no_egress true. Refused on /v1/scrape/stream (unsupported_in_stream) and on
+            crawl and batch scrape_options (unsupported_option).
         locale:
           type: string
           maxLength: 35
@@ -9415,6 +9438,19 @@ components:
           description: >-
             CW-1. A batch page has no per-page scrape options, so it cannot be redacted: `on`
             (or `redactPii: on`) is a 400 `unsupported_option`. `off` is the default.
+        max_parallel:
+          type: integer
+          minimum: 1
+          description: >-
+            W3-E3.7.2w. How many of the batch's pages run at a time. Read only with
+            QUARRY_EDGE__BATCH_PARALLEL on; off, the key is ignored. Absent takes 4, clamped to the edge
+            ceiling (QUARRY_EDGE__BATCH_MAX_PARALLEL, default 4, at most 16). A larger value is clamped to
+            the ceiling and reported in limits.max_parallel. Sending both max_parallel and maxParallel is
+            a 400.
+        maxParallel:
+          type: integer
+          minimum: 1
+          description: Alias of max_parallel (W3-E3.7.2w).
         webhook:
           $ref: '#/components/schemas/JobWebhook'
     JobWebhook:
@@ -9760,7 +9796,10 @@ components:
             smaller, and empty when it was used as asked). A batch carries `urls`: how
             many URLs were asked for, accepted (the first ones, in order) and dropped.
             Counts only; never a URL. `remaining` is present only for a configured
-            allowance (WS6.D-s).
+            allowance (WS6.D-s). With QUARRY_EDGE__BATCH_PARALLEL on (W3-E3.7.2w), a batch also carries
+            `max_parallel`, the pages it runs at a time, in the same shape as a crawl bound: `requested`
+            is what the request sent (null when silent), `effective` is what runs, and `clamped_by` is
+            `default` when the request was silent and `hard` when it was above the edge ceiling.
           properties:
             max_pages:
               $ref: '#/components/schemas/CrawlBound'
@@ -9768,6 +9807,8 @@ components:
               $ref: '#/components/schemas/CrawlBound'
             urls:
               $ref: '#/components/schemas/BatchUrlsBound'
+            max_parallel:
+              $ref: '#/components/schemas/CrawlBound'
     CrawlBound:
       type: object
       required:
@@ -9868,7 +9909,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported. `page_emulation` (E4.4-a) carries the locale, timezone and location the page emulated, and is absent when the request asked for none.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported. `page_emulation` (E4.4-a) carries the locale, timezone and location the page emulated, and is absent when the request asked for none. `no_egress` (true, Q3-E3.8.8w) is present only on a page served from a stored capture.
           warnings:
             type: array
             items:
@@ -9879,7 +9920,7 @@ components:
               properties:
                 code:
                   type: string
-                  description: e.g. unknown_field, document_has_no_text_layer, document_text_truncated, format_unavailable_for_documents
+                  description: e.g. unknown_field, document_has_no_text_layer, document_text_truncated, format_unavailable_for_documents. A PDF scrape with no text layer, on a deployment with the OCR lane switched on (QUARRY_EDGE__OCR, off by default; never under zero data retention), carries `ocr_applied` (the message names a page count only) when the pages were read, `document_ocr_partial` when the PDF has more pages than one OCR call carries (20), and `document_ocr_unavailable` (the message names a closed reason such as zdr_refused, lane_not_granted, timeout or unusable_answer) when OCR was asked for and produced no text.
                 message:
                   type: string
                 field:

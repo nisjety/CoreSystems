@@ -528,6 +528,11 @@ pub struct ScrapeOptions {
     pub timezone: Option<String>,
     /// E4.4-a: the geolocation the page reports, as sent.
     pub location: Option<Location>,
+    /// Q3-E3.8.8w: `true` serves the page from the organization's stored capture in the Data
+    /// Plane and opens no connection to the page's host. Absent and `false` are the same request.
+    /// Accepted only while `ScrapeLimits::no_egress_enabled`; refused under zero data retention
+    /// by the edge, and never with a capture, an action or a page emulation.
+    pub no_egress: Option<bool>,
 }
 
 /// The longest `max_age` a request may ask for: 30 days, in milliseconds.
@@ -536,7 +541,7 @@ pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
 /// Request keys the options own: each field in snake_case and its camelCase
 /// alias. A body key that is neither one of these nor a key of the request
 /// itself is unknown. A unit test pins this against a fully populated value.
-const OPTION_KEYS: [(&str, &str); 15] = [
+const OPTION_KEYS: [(&str, &str); 16] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -552,6 +557,7 @@ const OPTION_KEYS: [(&str, &str); 15] = [
     ("locale", "locale"),
     ("timezone", "timezone"),
     ("location", "location"),
+    ("no_egress", "noEgress"),
 ];
 
 /// Keys a body may carry that are never a scrape option and never lenient: they
@@ -692,6 +698,7 @@ impl ScrapeOptions {
                     Ok(location) => options.location = Some(location),
                     Err(mut found) => errors.append(&mut found),
                 },
+                "no_egress" => read_bool(snake, value, &mut options.no_egress, &mut errors),
                 _ => {}
             }
         }
@@ -890,6 +897,41 @@ impl ScrapeOptions {
             }
         }
         let page_emulation = self.page_emulation_checked(limits, &mut errors);
+        // Q3-E3.8.8w: `no_egress` serves a stored capture and opens no connection to the page.
+        // Off by default: a request for it is `feature_disabled`, never a 200 that silently
+        // fetches the live page. A stored capture has no live page to screenshot, act on or
+        // emulate, so none of those is served with it. `no_egress: false` is the plain request.
+        let no_egress = self.no_egress.unwrap_or(false);
+        if no_egress {
+            if !limits.no_egress_enabled {
+                errors.push(FieldError::new(
+                    "no_egress",
+                    "feature_disabled",
+                    "no_egress is not enabled on this endpoint",
+                ));
+            }
+            if wants_capture {
+                errors.push(FieldError::new(
+                    "formats",
+                    "not_supported_with_no_egress",
+                    "screenshot and pdf need the live page, so they are not served with no_egress",
+                ));
+            }
+            if self.actions.is_some() {
+                errors.push(FieldError::new(
+                    "actions",
+                    "not_supported_with_no_egress",
+                    "actions need the live page, so they are not served with no_egress",
+                ));
+            }
+            if self.locale.is_some() || self.timezone.is_some() || self.location.is_some() {
+                errors.push(FieldError::new(
+                    "no_egress",
+                    "not_supported_with_no_egress",
+                    "locale, timezone and location need the live page, so they are not served with no_egress",
+                ));
+            }
+        }
         // Captures: at most one screenshot and one PDF among the formats.
         let mut capture = CapturePlan::default();
         for format in &formats {
@@ -985,6 +1027,7 @@ impl ScrapeOptions {
             max_age_ms,
             redact_pii,
             page_emulation,
+            no_egress,
         })
     }
 
@@ -1303,6 +1346,9 @@ pub struct ScrapeLimits {
     /// `locale`, `timezone` and `location` are accepted only when this is set. Off by default:
     /// a request for one is `feature_disabled`. E4.4-a sets it from `QUARRY_EDGE__PER_PAGE_LOCALE`.
     pub per_page_emulation_enabled: bool,
+    /// `no_egress` is accepted only when this is set. Off by default: a request for it is
+    /// `feature_disabled` at `no_egress`. Q3-E3.8.8w sets it from `QUARRY_EDGE__NO_EGRESS`.
+    pub no_egress_enabled: bool,
 }
 
 impl Default for ScrapeLimits {
@@ -1322,6 +1368,7 @@ impl Default for ScrapeLimits {
             ai_formats_enabled: false,
             max_age_enabled: false,
             per_page_emulation_enabled: false,
+            no_egress_enabled: false,
         }
     }
 }
@@ -1358,6 +1405,10 @@ pub struct ResolvedScrapeOptions {
     /// request asked for none. A page that emulates is another page, so it is part of
     /// [`Self::canonical_options_key`] and of [`Self::is_default`].
     pub page_emulation: Option<PageEmulation>,
+    /// Q3-E3.8.8w: `true` when the page is served from the organization's stored capture and
+    /// no connection is opened to its host. A stored capture is not the live page, so it
+    /// neither reads nor writes a cache (see [`Self::is_default`]) and keys apart.
+    pub no_egress: bool,
 }
 
 impl ResolvedScrapeOptions {
@@ -1388,6 +1439,7 @@ impl ResolvedScrapeOptions {
             && self.actions.is_none()
             && self.redact_pii == PiiRedaction::Off
             && self.page_emulation.is_none()
+            && !self.no_egress
     }
 
     /// Whether the page cache may serve or store this request. Only a default
@@ -1408,6 +1460,7 @@ impl ResolvedScrapeOptions {
             && self.actions.is_none()
             && self.ai_specs().is_empty()
             && self.redact_pii == PiiRedaction::Off
+            && !self.no_egress
     }
 
     /// A stable key for the options that change the result, independent of the
@@ -1464,6 +1517,11 @@ impl ResolvedScrapeOptions {
         if let Some(emulation) = &self.page_emulation {
             canonical["page_emulation"] =
                 serde_json::to_value(emulation).unwrap_or(serde_json::Value::Null);
+        }
+        // Q3-E3.8.8w: a stored capture is another result than the live page. Absent for the
+        // default request, so the key of every existing request is unchanged.
+        if self.no_egress {
+            canonical["no_egress"] = serde_json::json!(true);
         }
         blake3::hash(canonical.to_string().as_bytes())
             .to_hex()
@@ -1523,6 +1581,10 @@ pub struct EffectiveScrapeOptions {
     /// asked for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_emulation: Option<PageEmulation>,
+    /// Q3-E3.8.8w: `true` when the page was served from the organization's stored capture and
+    /// no connection was opened to its host. Absent for the default request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_egress: bool,
 }
 
 impl EffectiveScrapeOptions {
@@ -1564,6 +1626,7 @@ impl EffectiveScrapeOptions {
             cache_age_ms: None,
             redact_pii: resolved.redact_pii,
             page_emulation: resolved.page_emulation.clone(),
+            no_egress: resolved.no_egress,
         }
     }
 }
@@ -1779,6 +1842,7 @@ mod tests {
                 longitude: 2.0,
                 accuracy: Some(3.0),
             }),
+            no_egress: Some(true),
         };
         let value = serde_json::to_value(&full).unwrap();
         let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
@@ -1800,7 +1864,8 @@ mod tests {
         assert!(names.contains(&"maxAge") && names.contains(&"max_age"));
         assert!(names.contains(&"redactPii") && names.contains(&"redact_pii"));
         assert!(names.contains(&"locale") && names.contains(&"timezone") && names.contains(&"location"));
-        assert_eq!(OPTION_KEYS.len(), 15);
+        assert!(names.contains(&"noEgress") && names.contains(&"no_egress"));
+        assert_eq!(OPTION_KEYS.len(), 16);
     }
 
     // ---- E4.4-a: locale, timezone and location

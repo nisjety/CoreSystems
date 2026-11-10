@@ -699,6 +699,30 @@ pub enum DocumentLaneError {
     },
 }
 
+impl DocumentLaneError {
+    /// A closed label for a warning or a log line: never provider text, never
+    /// the error's own message. The set is fixed.
+    pub fn label(&self) -> &'static str {
+        match self {
+            DocumentLaneError::Disabled(_) => "lane_disabled",
+            DocumentLaneError::ZdrRefused(_) => "zdr_refused",
+            DocumentLaneError::InvalidInput { .. } => "invalid_input",
+            DocumentLaneError::Hop { hop, .. } => match hop {
+                ModelHopError::LaneNotGranted => "lane_not_granted",
+                ModelHopError::Unauthorized | ModelHopError::RouteDenied => "not_authorized",
+                ModelHopError::ZdrRefused => "zdr_refused",
+                ModelHopError::RateLimited { .. } => "rate_limited",
+                ModelHopError::Timeout => "timeout",
+                ModelHopError::Rejected
+                | ModelHopError::Upstream { .. }
+                | ModelHopError::Transport
+                | ModelHopError::Decode => "hop_failed",
+            },
+            DocumentLaneError::Unusable { .. } => "unusable_answer",
+        }
+    }
+}
+
 /// The body of `POST /v1/ai/documents/layout` for the scanned pages of one
 /// PDF. Built only through [`OcrPagesRequest::for_scanned_pages`].
 #[derive(Clone, Serialize)]

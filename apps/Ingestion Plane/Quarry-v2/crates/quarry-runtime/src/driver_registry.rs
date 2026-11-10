@@ -1,7 +1,8 @@
 //! DriverRegistry — holds all available drivers keyed by DriverKind.
 //!
 //! Construct at startup, share via Arc across request handlers.
-//! Per-request: call `build_driver(plan)` to get a FallbackDriver
+//! Per-request: call `build_driver_with_policy(plan, policy)` (or
+//! `build_driver(plan)` for the default policy) to get a FallbackDriver
 //! that tries the plan's primary then its fallback chain.
 
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use quarry_core::output::DriverKind;
 use crate::driver::Driver;
 use crate::driver_plan::DriverPlan;
 use crate::fallback_driver::FallbackDriver;
+use crate::policy::FetchPolicy;
 
 #[derive(Clone)]
 pub struct DriverRegistry {
@@ -31,7 +33,23 @@ impl DriverRegistry {
         self.drivers.insert(driver.kind(), driver);
     }
 
+    /// Builds the driver for a request that carries no fetch policy of its own: the
+    /// default policy, so the chain's deadline is its `timeout_s` while
+    /// `QUARRY_EDGE__FETCH_DEADLINE` is on. See [`Self::build_driver_with_policy`].
     pub fn build_driver(&self, plan: &DriverPlan) -> Arc<dyn Driver> {
+        self.build_driver_with_policy(plan, &FetchPolicy::default())
+    }
+
+    /// Builds the driver for a request under its fetch policy (E3.8.2): while
+    /// `QUARRY_EDGE__FETCH_DEADLINE` is on, the chain's deadline is the policy's
+    /// `timeout_s` (zero means none). While the flag is off the policy changes
+    /// nothing. A registry holding one driver returns that driver as it is, with
+    /// no chain and so no deadline.
+    pub fn build_driver_with_policy(
+        &self,
+        plan: &DriverPlan,
+        policy: &FetchPolicy,
+    ) -> Arc<dyn Driver> {
         if self.drivers.len() <= 1 {
             if let Some(d) = self
                 .drivers
@@ -41,7 +59,8 @@ impl DriverRegistry {
                 return d.clone();
             }
         }
-        Arc::new(FallbackDriver::from_plan(plan, self.drivers.clone()))
+        let fallback = FallbackDriver::from_plan(plan, self.drivers.clone());
+        Arc::new(fallback.with_fetch_policy(policy))
     }
 
     pub fn default_driver(&self) -> Option<Arc<dyn Driver>> {

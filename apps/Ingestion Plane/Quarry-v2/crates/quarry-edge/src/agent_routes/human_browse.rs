@@ -10,6 +10,7 @@ use quarry_runtime::GrantValidation;
 
 use super::StepInitiator;
 use crate::run_limits::HumanReceiptMode;
+use crate::state::AppState;
 
 /// The grant kind a person's open-web browsing run carries.
 pub(super) const GRANT_KIND_HUMAN_BROWSE: &str = "human_browse";
@@ -132,6 +133,18 @@ pub(super) fn open_web_egress(
         }
         _ => web_egress,
     }
+}
+
+/// The egress boundary a run is configured with: [`open_web_egress`], then the host reputation
+/// hook when `QUARRY_EDGE__REPUTATION_MODE` is on (E3.8.7). The hook is attached last because
+/// `open_web_egress` may replace an unconstrained policy with the open-web one, which would drop
+/// a hook attached earlier. With the mode `Off` this is `open_web_egress` exactly.
+pub(super) fn run_egress(
+    state: &AppState,
+    run: &RunNavPolicy,
+    web_egress: BrowserEgressPolicy,
+) -> BrowserEgressPolicy {
+    crate::agent_policy_gate::attach_reputation(state, open_web_egress(run, web_egress))
 }
 
 /// Whether a step counts against the run's step budget. The budget subject is the run's

@@ -1,0 +1,123 @@
+{
+  "schema": "quarry.web_policy.RequestAsk",
+  "version": 1,
+  "provenance": "Quarry authored. The wire shape of quarry_core::web_policy::RequestAsk, pinned by crates/quarry-core/tests/web_policy.rs (request_ask_golden_*).",
+  "note": "Every field of RequestAsk round-trips through this file. robots_max and proxy_max can only lower a ceiling. An empty disable or deny_domains list, and an absent robots_max, proxy_max or allow_domains, is omitted on the wire. A present allow_domains is written even when empty, because an empty list allows nothing.",
+  "cases": [
+    {
+      "name": "empty",
+      "ask": {},
+      "json": {}
+    },
+    {
+      "name": "plan_mode",
+      "ask": {
+        "disable": [
+          "browser.act.input",
+          "browser.act.interact",
+          "browser.act.upload",
+          "browser.act.download"
+        ]
+      },
+      "json": {
+        "disable": [
+          "browser.act.input",
+          "browser.act.interact",
+          "browser.act.upload",
+          "browser.act.download"
+        ]
+      }
+    },
+    {
+      "name": "hosts",
+      "ask": {
+        "deny_domains": ["ads.example.net"],
+        "allow_domains": ["example.com", "docs.example.com"]
+      },
+      "json": {
+        "deny_domains": ["ads.example.net"],
+        "allow_domains": ["example.com", "docs.example.com"]
+      }
+    },
+    {
+      "name": "allow_nothing",
+      "ask": {
+        "allow_domains": []
+      },
+      "json": {
+        "allow_domains": []
+      }
+    },
+    {
+      "name": "empty_lists_omitted",
+      "ask": {
+        "disable": [],
+        "deny_domains": []
+      },
+      "json": {}
+    },
+    {
+      "name": "robots_max_strict",
+      "ask": {
+        "robots_max": "strict"
+      },
+      "json": {
+        "robots_max": "strict"
+      }
+    },
+    {
+      "name": "robots_max_respect",
+      "ask": {
+        "robots_max": "respect"
+      },
+      "json": {
+        "robots_max": "respect"
+      }
+    },
+    {
+      "name": "robots_max_ignore",
+      "ask": {
+        "robots_max": "ignore"
+      },
+      "json": {
+        "robots_max": "ignore"
+      }
+    },
+    {
+      "name": "proxy_max_none",
+      "ask": {
+        "proxy_max": "none"
+      },
+      "json": {
+        "proxy_max": "none"
+      }
+    },
+    {
+      "name": "proxy_max_pool",
+      "ask": {
+        "proxy_max": "pool"
+      },
+      "json": {
+        "proxy_max": "pool"
+      }
+    },
+    {
+      "name": "every_field",
+      "ask": {
+        "disable": ["browser.act.upload"],
+        "robots_max": "respect",
+        "proxy_max": "pool",
+        "deny_domains": ["ads.example.net"],
+        "allow_domains": ["example.com"]
+      },
+      "json": {
+        "disable": ["browser.act.upload"],
+        "robots_max": "respect",
+        "proxy_max": "pool",
+        "deny_domains": ["ads.example.net"],
+        "allow_domains": ["example.com"]
+      }
+    }
+  ],
+  "refused_keys": ["mode", "enable", "modes"]
+}

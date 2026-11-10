@@ -206,6 +206,23 @@ pub async fn parse_document_info_with(
     }
 }
 
+/// The page facts of a PDF (Q3-E3.6-7: the OCR lane asks how many pages a
+/// text-less PDF has). Same backend, permit and deadline as [`parse_document`]
+/// (a child process under limits where that is available), and no queue
+/// timeout: a busy parser waits, then times out, as a parse does. `None` when
+/// the page classification itself could not be read.
+pub async fn pdf_page_summary(body: Vec<u8>) -> QuarryResult<Option<PdfPageSummary>> {
+    parse_document_info_with(
+        parse_backend(),
+        ContentKind::Pdf,
+        body,
+        DOC_PARSE_TIMEOUT,
+        DOC_PARSE_TIMEOUT,
+    )
+    .await
+    .map(|info| info.pdf)
+}
+
 /// Text and, for a PDF, the page classification. A classification that cannot be
 /// read leaves the summary out; it never fails a parse that produced text.
 fn extract_info(

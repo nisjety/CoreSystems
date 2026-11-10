@@ -494,14 +494,23 @@ struct SnapshotWire {
 
 /// What a request asks for on top of its policy. It can only tighten: it names
 /// capabilities to disable, ceilings to lower and hosts to deny or allow. It
-/// has no field that could state a mode other than disabled.
+/// has no field that could state a mode other than disabled. The wire form
+/// omits empty `disable` and `deny_domains` lists and absent options, so the
+/// empty ask is `{}` (the golden is `contracts/request-ask.v1.json`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct RequestAsk {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub disable: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub robots_max: Option<RobotsMax>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_max: Option<ProxyMax>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deny_domains: Vec<String>,
+    /// `None` is no allow list and is not written. `Some(vec![])` allows nothing
+    /// and is written.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_domains: Option<Vec<String>>,
 }
 

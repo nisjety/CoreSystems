@@ -61,9 +61,9 @@ func (a *Activities) FrontierEnqueueBatch(ctx context.Context, in FrontierEnqueu
 // quarry_transform::canonical_url is the authority for a canonical URL. The functions
 // below mirror its conservative folding for the plain ASCII subset and fail closed on
 // anything else, so a URL the mirror refuses keeps the request id it has today.
-// Nothing calls them yet: the enqueue sites (workflows.go durableFrontierRequestID and
-// the URL they enqueue, crawl_scope.go) and the edge's seen route are the wiring. They
-// switch together behind the canonical-frontier flag (see the E3.7.6 status file).
+// The enqueue sites (workflows.go frontierTarget, crawl_scope.go enqueueChildrenBatch) and
+// the redirect seen call (workflows.go markRedirectTargetSeen) use them behind the
+// canonical-frontier flag (see the E3.7.6 status file).
 
 // frontierCanonicalMaxBytes mirrors quarry_transform::canonical_url::MAX_INPUT_BYTES.
 const frontierCanonicalMaxBytes = 8 * 1024
@@ -317,8 +317,9 @@ type FrontierMarkSeenInput struct {
 
 // FrontierMarkSeen records request ids as seen in one queue, so a later enqueue of the
 // same id is refused. Blank ids are skipped. It sends at most 500 ids per call and returns
-// how many the queue recorded. Nothing calls it yet: it needs the edge route
-// POST /v1/internal/queues/{queue}/seen, which is not built.
+// how many the queue recorded. The crawl page loop calls it for a page the edge fetched
+// through a redirect (workflows.go markRedirectTargetSeen); the edge route is
+// POST /v1/internal/queues/{queue}/seen.
 func (a *Activities) FrontierMarkSeen(ctx context.Context, in FrontierMarkSeenInput) (uint32, error) {
 	const op = "activities.FrontierMarkSeen"
 	ids := make([]string, 0, len(in.RequestIDs))

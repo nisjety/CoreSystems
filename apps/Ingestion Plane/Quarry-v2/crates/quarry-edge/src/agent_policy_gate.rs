@@ -17,7 +17,9 @@
 //! grant gate 4 revalidates, with the step caller's own claim beside it ([`gate_policy_for_step`],
 //! [`GrantSnapshot`]). They tighten the run's decision, never loosen it.
 
-use quarry_browser::BrowserEgressPolicy;
+use std::sync::Arc;
+
+use quarry_browser::{BrowserEgressPolicy, HostReputation, ReputationMode};
 use quarry_core::contracts::AgentAction;
 use quarry_core::web_policy::{
     resolve, CapKey, EgressNarrowing, Mode, OrgInput, PolicyDenial, PolicyInputs, PolicyLayer,
@@ -207,6 +209,76 @@ pub fn live_egress_policy(
         Some(decision) => egress_policy(decision, allowed_domains),
         None => BrowserEgressPolicy::from_allowed_domains(allowed_domains)
             .with_denied_domains(&egress_denied(state, live, zdr)),
+    }
+}
+
+/// The deployment's browser URL reputation mode (E3.8.7), read once from
+/// `QUARRY_EDGE__REPUTATION_MODE`. Unset or unreadable is `Off`, and `Off` is a kill switch:
+/// no org setting turns the hook on.
+fn deployment_reputation_mode() -> ReputationMode {
+    static MODE: std::sync::OnceLock<ReputationMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(ReputationMode::from_env)
+}
+
+/// The strictness order of the modes: `Off` < `Warn` < `Block`.
+fn reputation_rank(mode: ReputationMode) -> u8 {
+    match mode {
+        ReputationMode::Off => 0,
+        ReputationMode::Warn => 1,
+        ReputationMode::Block => 2,
+    }
+}
+
+/// The reputation mode one org runs under: the stricter of the deployment mode and the org's
+/// cap. The cap is tighten-only, so it can raise `Warn` to `Block` but never lower the
+/// deployment mode, and a deployment that is `Off` stays `Off` whatever the org says. This is
+/// deliberately not `ReputationMode::for_org`, which lets an org setting win.
+pub fn effective_reputation_mode(
+    deployment: ReputationMode,
+    org_cap: Option<ReputationMode>,
+) -> ReputationMode {
+    if deployment == ReputationMode::Off {
+        return ReputationMode::Off;
+    }
+    match org_cap {
+        Some(cap) if reputation_rank(cap) > reputation_rank(deployment) => cap,
+        _ => deployment,
+    }
+}
+
+/// The org's reputation cap from the web-policy claim (key `browser.reputation`, tighten-only,
+/// E3.8.7). The web-policy catalogue has no such key yet, so no org can set one and the
+/// deployment mode applies alone. When the key exists this is the one place that reads it.
+fn org_reputation_cap() -> Option<ReputationMode> {
+    None
+}
+
+/// The host reputation source and mode a run's egress boundary is built with, or `None` when
+/// the mode is `Off` (nothing is attached, no overhead) or the engine offers no source.
+/// `org_cap` is the org's tighten-only cap, if any. The source is the shared security engine's
+/// blocklist, so a hot reload reaches every live run. A ZDR run behaves the same: verdicts are
+/// not persisted.
+pub fn reputation_for(
+    state: &AppState,
+    org_cap: Option<ReputationMode>,
+) -> Option<(Arc<dyn HostReputation>, ReputationMode)> {
+    let mode = effective_reputation_mode(deployment_reputation_mode(), org_cap);
+    if mode == ReputationMode::Off {
+        return None;
+    }
+    let source = state.security.host_reputation()?;
+    Some((source, mode))
+}
+
+/// Attach the host reputation hook to a run's egress boundary when the mode is on (E3.8.7). The
+/// hook is consulted by the browser boundary after the grant and before the DNS guard, for
+/// every navigation, redirect hop, click, frame and sub-resource. With the mode `Off` the
+/// policy is returned unchanged. There is no second enforcement path: the D7 preflight stays
+/// the scrape path's check and this is the browser path's.
+pub fn attach_reputation(state: &AppState, policy: BrowserEgressPolicy) -> BrowserEgressPolicy {
+    match reputation_for(state, org_reputation_cap()) {
+        Some((source, mode)) => policy.with_reputation(source, mode),
+        None => policy,
     }
 }
 

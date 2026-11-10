@@ -305,6 +305,70 @@ pub async fn ack(
     )))
 }
 
+/// E3.7.6: the most request ids one `seen` call takes. The orchestrator sends at most this many
+/// per call.
+#[cfg(feature = "postgres-queue")]
+pub const SEEN_BATCH_MAX: usize = 500;
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Deserialize)]
+pub struct QueueSeen {
+    pub org_id: String,
+    /// The request ids to record as seen. Blank ids are skipped.
+    pub request_ids: Vec<String>,
+}
+
+#[cfg(feature = "postgres-queue")]
+#[derive(Debug, Serialize)]
+pub struct QueueSeenAck {
+    /// How many ids the queue newly recorded as seen. An id it already holds is not counted.
+    pub accepted: u32,
+}
+
+/// Refuse a `seen` call that names more request ids than one call takes.
+#[cfg(feature = "postgres-queue")]
+pub fn validate_seen(request_ids: &[String]) -> Result<(), QuarryError> {
+    if request_ids.len() > SEEN_BATCH_MAX {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            format!("seen takes at most {SEEN_BATCH_MAX} request ids"),
+        ));
+    }
+    Ok(())
+}
+
+/// E3.7.6: record request ids as seen in the bound queue, so a later enqueue of one of them is
+/// refused and it is never popped. The route stores ids only, never a URL or page text.
+#[cfg(feature = "postgres-queue")]
+pub async fn seen(
+    State(state): State<AppState>,
+    Path(queue_name): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<QueueSeen>,
+) -> Result<Json<Envelope<QueueSeenAck>>, ApiErr> {
+    let request_id = crate::request_id::current();
+    auth_and_scope(&state, &headers, &body.org_id, &queue_name)
+        .map_err(|e| error(&request_id, e))?;
+    validate_seen(&body.request_ids).map_err(|e| error(&request_id, e))?;
+    let ids: Vec<String> = body
+        .request_ids
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    if ids.is_empty() {
+        return Ok(Json(Envelope::ok(request_id, QueueSeenAck { accepted: 0 })));
+    }
+    let queue = bind(&state, &body.org_id, &queue_name)
+        .await
+        .map_err(|e| error(&request_id, e))?;
+    let recorded = queue
+        .mark_seen(&ids)
+        .await
+        .map_err(|e| error(&request_id, e))?;
+    let accepted = u32::try_from(recorded).unwrap_or(u32::MAX);
+    Ok(Json(Envelope::ok(request_id, QueueSeenAck { accepted })))
+}
+
 #[cfg(feature = "postgres-queue")]
 pub fn internal_router() -> Router<AppState> {
     Router::new()
@@ -312,6 +376,7 @@ pub fn internal_router() -> Router<AppState> {
         .route("/v1/internal/queues/:queue_name/enqueue_batch", post(enqueue_batch))
         .route("/v1/internal/queues/:queue_name/pop", post(pop))
         .route("/v1/internal/queues/:queue_name/ack", put(ack).post(ack))
+        .route("/v1/internal/queues/:queue_name/seen", post(seen))
 }
 
 #[cfg(not(feature = "postgres-queue"))]

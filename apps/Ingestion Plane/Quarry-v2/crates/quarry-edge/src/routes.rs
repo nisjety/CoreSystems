@@ -36,13 +36,15 @@ use axum::response::Sse;
 /// first, then use the planned driver if the QUIC path is unavailable.
 /// Browser plans always go through the registry — h3 has no rendering
 /// primitive and there's no point routing a browser fetch through QUIC
-/// for the navigation HTML.
+/// for the navigation HTML. E3.8.2: `fetch` is the request's fetch policy, which sets the
+/// chain's deadline while `QUARRY_EDGE__FETCH_DEADLINE` is on.
 fn pick_driver(
     state: &AppState,
     plan: &quarry_runtime::DriverPlan,
     prefer_http3: bool,
+    fetch: &quarry_runtime::FetchPolicy,
 ) -> Arc<dyn quarry_runtime::Driver> {
-    let planned = state.drivers.build_driver(plan);
+    let planned = state.drivers.build_driver_with_policy(plan, fetch);
     if prefer_http3 && plan.driver != quarry_core::output::DriverKind::Browser {
         if let Some(h3) = state.http3.as_ref() {
             return Arc::new(quarry_runtime::TransportFallbackDriver::prefer_http3(
@@ -603,6 +605,13 @@ pub struct ScrapeRequest {
     pub timezone: Option<serde_json::Value>,
     #[serde(default)]
     pub location: Option<serde_json::Value>,
+    /// Q3-E3.8.8w: the raw `no_egress` (and its camelCase spelling). Read only by the stream
+    /// route, which serves no stored-capture mode and refuses `true`; on `/v1/scrape` the
+    /// contract parse checks the value.
+    #[serde(default)]
+    pub no_egress: Option<serde_json::Value>,
+    #[serde(default, rename = "noEgress")]
+    pub no_egress_camel: Option<serde_json::Value>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -720,6 +729,15 @@ fn stream_requests_redaction(req: &ScrapeRequest) -> bool {
         .any(|value| !value.is_null() && value.as_str() != Some("off"))
 }
 
+/// Q3-E3.8.8w: whether a stream request asks for `no_egress`. Any value other than an absent key,
+/// `null` or `false` counts, so a malformed value is refused rather than read as off.
+fn stream_requests_no_egress(req: &ScrapeRequest) -> bool {
+    [req.no_egress.as_ref(), req.no_egress_camel.as_ref()]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_null() && value.as_bool() != Some(false))
+}
+
 /// E4.4-a: whether a stream request asks for a locale, timezone or location while the switch is on.
 /// The stream serves no emulation. Off, those keys are unknown and the stream ignores them, as before.
 fn stream_requests_page_emulation(req: &ScrapeRequest, enabled: bool) -> bool {
@@ -794,6 +812,34 @@ async fn scrape_with(
             ));
         }
     }
+    // Q3-E3.8.8w: `no_egress` serves the organization's stored capture and nothing else. It is
+    // decided here, before the cache, the web policy or any fetch: a ZDR run is refused, a
+    // deployment without the reader answers 503, and the driver it returns is the only one
+    // this request ever uses. Storing the stored page again (`ingest`) is refused, not ignored.
+    let no_egress_driver: Option<Arc<dyn quarry_runtime::Driver>> = if resolved.no_egress {
+        if req.ingest.unwrap_or(false) {
+            return Err(contract_error(
+                &request_id,
+                vec![quarry_core::scrape::FieldError::new(
+                    "ingest",
+                    "not_supported_with_no_egress",
+                    "ingest cannot be combined with no_egress",
+                )],
+            ));
+        }
+        let driver = crate::scrape_routes::no_egress_driver(&state, zdr.is_active()).map_err(
+            |error| {
+                (
+                    StatusCode::from_u16(error.code.http_status())
+                        .unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+                    Json(Envelope::<()>::err(&request_id, error)).into_response(),
+                )
+            },
+        )?;
+        Some(driver)
+    } else {
+        None
+    };
     // INNH-1: AI formats (json, summary, question, highlights). The flag is already
     // on when any is present (the resolve above refused them otherwise). Who may ask
     // and whether a model can be reached are decided here, before the page is
@@ -1042,7 +1088,14 @@ async fn scrape_with(
         ));
     }
 
-    let driver = pick_driver(&state, &plan, req.prefer_http3);
+    // The request's run policy: its fetch policy sets the chain's deadline (E3.8.2), and the
+    // runner stamps the policy's fingerprint into the output. One value serves both.
+    let run_policy = quarry_runtime::RunPolicy::from(decision.policy());
+    // Q3-E3.8.8w: a `no_egress` request has the stored-capture driver and no other: no plan,
+    // no HTTP/3, no proxy pool and no retry (a repeated stored read answers the same).
+    let driver = no_egress_driver
+        .clone()
+        .unwrap_or_else(|| pick_driver(&state, &plan, req.prefer_http3, &run_policy.fetch));
     // E3.8.3: the fetch retries under the scrape config, except in two cases. A browser
     // render runs for seconds, and a repeat is not a transport retry. A configured proxy
     // pool (`QUARRY_PROXY_POOL`) rotates identities inside the driver chain, and a chain
@@ -1051,6 +1104,7 @@ async fn scrape_with(
     let driver = match scrape_retry_config() {
         Some(config)
             if plan.driver != quarry_core::output::DriverKind::Browser
+                && no_egress_driver.is_none()
                 && state.proxy_pool_name.is_empty() =>
         {
             let until = tokio::time::Instant::now()
@@ -1085,8 +1139,10 @@ async fn scrape_with(
         privacy: privacy.clone(),
         cancel_token: None,
         local_index: if redact_pii { None } else { state.local_index.clone() },
-        policy: quarry_runtime::RunPolicy::from(decision.policy()),
-        scheduler: state.scheduler.clone(),
+        policy: run_policy,
+        // Q3-E3.8.8w: the per-host politeness slots pace requests to a host; a stored read
+        // sends none, so a no_egress run takes none.
+        scheduler: if resolved.no_egress { None } else { state.scheduler.clone() },
         autoscale: Some(quarry_runtime::global_autoscale()),
         render: {
             let mut render = req
@@ -1113,8 +1169,14 @@ async fn scrape_with(
         title_enricher: if redact_pii { None } else { state.page_title_enricher.clone() },
         doc_routing,
         robots: None,
+        document_lanes: state.document_lanes.clone(),
     };
-    let runner = crate::scrape_actions::safe_mode_runner(runner, resolved.actions.is_some());
+    // Q3-E3.8.8w: a stored capture is not a fresh observation of its URL, so a no_egress run
+    // indexes, titles, re-renders, registers or ingests nothing either (same hops as actions).
+    let runner = crate::scrape_actions::safe_mode_runner(
+        runner,
+        resolved.actions.is_some() || resolved.no_egress,
+    );
 
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
@@ -1674,6 +1736,12 @@ pub struct BatchRequest {
     /// `QUARRY_EDGE__JOB_WEBHOOK` is off.
     #[serde(default)]
     pub webhook: Option<serde_json::Value>,
+    /// W3-E3.7.2w: the pages of this batch that run at a time. Read only with
+    /// `QUARRY_EDGE__BATCH_PARALLEL` on (see [`crate::batch_check::parse_max_parallel`]).
+    #[serde(default)]
+    pub max_parallel: Option<serde_json::Value>,
+    #[serde(default, rename = "maxParallel")]
+    pub max_parallel_camel: Option<serde_json::Value>,
 }
 
 /// CW-1: a batch page runs without per-page scrape options, so it cannot be redacted.
@@ -1742,6 +1810,36 @@ async fn batch_handoff(
             ));
         }
     };
+    // W3-E3.7.2w (`QUARRY_EDGE__BATCH_PARALLEL`, default off): the parallel pages the caller asks
+    // for, checked with the other body fields and clamped to the edge ceiling. Off, the key is
+    // ignored as it always was: nothing is read, stamped or reported.
+    let parallel = if crate::handoff::batch_parallel_enabled() {
+        let requested = match crate::batch_check::parse_max_parallel(
+            req.max_parallel.as_ref(),
+            req.max_parallel_camel.as_ref(),
+        ) {
+            Ok(requested) => requested,
+            Err(fields) => {
+                let err = QuarryError::new(
+                    ErrorCode::BadRequest,
+                    "the batch request has invalid fields",
+                )
+                .with_details(serde_json::json!({
+                    "fields": crate::crawl_request::fields_json(&fields),
+                }));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(Envelope::<()>::err(&request_id, err)),
+                ));
+            }
+        };
+        Some(crate::limits::resolve_batch_parallel(
+            requested,
+            crate::limits::batch_max_parallel(),
+        ))
+    } else {
+        None
+    };
     refuse_while_draining(&request_id)?;
     // WS14.S5: every URL is checked statically before anything is created (no network work).
     // When none can be crawled the batch is a 400 with `details.rejected`; otherwise the
@@ -1805,6 +1903,15 @@ async fn batch_handoff(
         params.insert(
             crate::crawl_request::JOB_WEBHOOK_KEY.to_owned(),
             hook.params_value(),
+        );
+    }
+    // W3-E3.7.2w: the parallel pages the edge applied, stamped only with the flag on. The
+    // orchestrator reads `params.max_parallel` as the cap on how many pages of this batch run at
+    // a time, and never raises the flag's own concurrency with it.
+    if let (Some(bound), Some(params)) = (parallel.as_ref(), batch_params.as_object_mut()) {
+        params.insert(
+            "max_parallel".to_owned(),
+            serde_json::json!(bound.effective),
         );
     }
     // WS7.G 6b: the policy this batch was admitted under rides with the job to every page.
@@ -1888,7 +1995,11 @@ async fn batch_handoff(
     }
     match ack {
         Ok(mut v) => {
-            v.limits = Some(urls_bound.into());
+            v.limits = Some(crate::limits::HandoffLimits {
+                urls: Some(urls_bound),
+                max_parallel: parallel,
+                ..Default::default()
+            });
             v.rejected = rejected;
             Ok(Json(Envelope::ok(request_id, v)))
         }
@@ -1988,6 +2099,12 @@ pub struct InternalRunPageResult {
     pub status: u16,
     pub fingerprint: String,
     pub links: Vec<String>,
+    /// E3.7.6: the page's post-redirect URL (`out.url.final_url`), set only when the fetch was
+    /// redirected: it differs from the URL the page was requested at. The orchestrator records it
+    /// as seen so a later link to it is not fetched twice. Absent for a page that was not
+    /// redirected, so the response is unchanged for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_url: Option<String>,
     /// MIME from the upstream Content-Type header (best-effort).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
@@ -2062,6 +2179,7 @@ impl InternalRunPageResult {
             status: out.status,
             fingerprint: out.fingerprint.clone(),
             links: out.formats.links.iter().map(|l| l.href.clone()).collect(),
+            final_url: redirected_final_url(&out.url.requested, &out.url.final_url),
             content_type: out.metadata.content_type.clone(),
             title: out.metadata.title.clone(),
             branding: out.branding.clone(),
@@ -2094,6 +2212,12 @@ impl InternalRunPageResult {
             text_fp: out.text_fp.clone(),
         }
     }
+}
+
+/// E3.7.6: the post-redirect URL, when the fetch was redirected. `None` when it ended at the
+/// requested URL (or came back empty), so a page that was not redirected serialises as before.
+fn redirected_final_url(requested: &str, final_url: &str) -> Option<String> {
+    (!final_url.is_empty() && requested != final_url).then(|| final_url.to_owned())
 }
 
 /// WS14.S2: the `crawl` object, checked and compiled before anything is fetched.
@@ -2498,7 +2622,8 @@ async fn internal_run_page(
         .map_err(|error| crate::web_policy_edge::envelope_error(&request_id, error))?;
 
     let plan = plan_from_signals(req.signals.unwrap_or_default());
-    let driver = pick_driver(&state, &plan, req.prefer_http3);
+    let run_policy = quarry_runtime::RunPolicy::from(decision.policy());
+    let driver = pick_driver(&state, &plan, req.prefer_http3, &run_policy.fetch);
 
     let ingest_client = if req.ingest.unwrap_or(false) {
         state.ingest.clone()
@@ -2522,7 +2647,7 @@ async fn internal_run_page(
         } else {
             state.local_index.clone()
         },
-        policy: quarry_runtime::RunPolicy::from(decision.policy()),
+        policy: run_policy,
         scheduler: state.scheduler.clone(),
         autoscale: Some(quarry_runtime::global_autoscale()),
         render: req
@@ -2560,6 +2685,7 @@ async fn internal_run_page(
             ),
             _ => None,
         },
+        document_lanes: state.document_lanes.clone(),
     };
 
     let run_id: RunKind = match req.run_id.as_deref() {
@@ -2760,6 +2886,17 @@ async fn scrape_stream(
             yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
             return;
         }
+        // Q3-E3.8.8w: the stream reads no stored capture. A `no_egress: true` here would
+        // otherwise be dropped and the live page fetched, so it is refused, whatever the switch.
+        if stream_requests_no_egress(&req) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "no_egress is not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
         // E4.4-a: the stream sets no locale, timezone or location. Refused, not dropped, while
         // the switch is on; off, the keys are unknown and ignored, as they always were.
         if stream_requests_page_emulation(
@@ -2808,7 +2945,8 @@ async fn scrape_stream(
             }
         }
         let plan = plan_from_signals(req.signals.clone().unwrap_or_default());
-        let driver = pick_driver(&state, &plan, req.prefer_http3);
+        let run_policy = quarry_runtime::RunPolicy::from(decision.policy());
+        let driver = pick_driver(&state, &plan, req.prefer_http3, &run_policy.fetch);
 
         let ingest_client = if req.ingest.unwrap_or(false) {
             state.ingest.clone()
@@ -2828,7 +2966,7 @@ async fn scrape_stream(
             privacy: privacy.clone(),
             cancel_token: None,
             local_index: state.local_index.clone(),
-            policy: quarry_runtime::RunPolicy::from(decision.policy()),
+            policy: run_policy,
             scheduler: state.scheduler.clone(),
             autoscale: Some(quarry_runtime::global_autoscale()),
             render: req.render.clone().map(RenderHints::from).unwrap_or_default(),
@@ -2839,6 +2977,7 @@ async fn scrape_stream(
             title_enricher: state.page_title_enricher.clone(),
             doc_routing: quarry_runtime::DocRouting::cached(),
             robots: None,
+            document_lanes: state.document_lanes.clone(),
         };
         let run_id = RunKind::new();
         let mut rx = state.event_sink.subscribe(&run_id);
@@ -3117,6 +3256,8 @@ mod tests {
             model_plane_url: None,
             model_plane_token: None,
             page_title_enricher: None,
+            document_lanes: None,
+            no_egress: None,
             service_token_provider: None,
             otp_source: None,
             answer_pipeline: None,
@@ -3259,7 +3400,7 @@ mod tests {
         let plan = quarry_runtime::DriverPlan::static_fetch("test");
         let url: Url = "https://example.com".parse().unwrap();
 
-        let driver = pick_driver(&state, &plan, true);
+        let driver = pick_driver(&state, &plan, true, &quarry_runtime::FetchPolicy::default());
         let resp = driver.fetch(&url).await.unwrap();
 
         assert_eq!(resp.body, b"planned");

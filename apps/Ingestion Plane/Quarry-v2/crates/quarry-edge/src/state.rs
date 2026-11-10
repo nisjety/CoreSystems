@@ -94,6 +94,18 @@ pub struct AppState {
     /// Holds the fingerprint-keyed title cache, so it must be process-wide,
     /// not per-request.
     pub page_title_enricher: Option<Arc<quarry_runtime::page_extract::PageTitleEnricher>>,
+    /// Q3-E3.6-7: the Model Plane client whose document lanes (OCR for scanned PDF
+    /// pages) every `PageRunner` this edge builds may use. `Some` only when
+    /// `QUARRY_EDGE__MODEL_PLANE_URL` is set and the client could be built; the OCR
+    /// lane itself still needs `QUARRY_EDGE__OCR` on (default off) and is refused
+    /// under ZDR before anything is sent.
+    pub document_lanes: Option<Arc<quarry_runtime::mp_client::ModelPlaneClient>>,
+    /// Q3-E3.8.8w: the driver a `no_egress: true` scrape runs through, and its only driver: it
+    /// reads the org's stored page capture from the Data Plane artifacts route and opens no
+    /// socket to the page's host. `Some` only when `QUARRY_EDGE__NO_EGRESS` is on (default off),
+    /// a Data Plane URL is configured and the cross-plane token provider exists; `None` makes a
+    /// `no_egress` request a 400 `feature_disabled`.
+    pub no_egress: Option<Arc<quarry_runtime::fetch::NoEgressDriver>>,
     /// Production Auth Core token minter. Routes use the verified JWT org to
     /// obtain bounded Model/Data Plane service tokens.
     pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,

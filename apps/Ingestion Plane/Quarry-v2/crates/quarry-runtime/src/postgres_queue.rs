@@ -393,7 +393,7 @@ impl RequestQueue for PostgresRequestQueue {
             "SELECT \
                  COUNT(*) FILTER (WHERE status = 'queued')    AS queued, \
                  COUNT(*) FILTER (WHERE status = 'in_flight') AS in_flight, \
-                 COUNT(*)                                       AS total_enqueued, \
+                 COUNT(*) FILTER (WHERE status <> 'seen')     AS total_enqueued, \
                  COUNT(*) FILTER (WHERE status = 'acked')     AS total_acked, \
                  0::BIGINT                                      AS total_requeued \
              FROM quarry_queue_items \
@@ -412,6 +412,42 @@ impl RequestQueue for PostgresRequestQueue {
             total_acked: total_acked.max(0) as u64,
             total_requeued: total_requeued.max(0) as u64,
         })
+    }
+
+    async fn mark_seen(&self, request_ids: &[String]) -> QuarryResult<usize> {
+        // A seen row is a queue item in state `seen`: it has no URL (the column
+        // is written empty), it is never popped (pop reads `queued` only), and
+        // the (org_id, request_id) key makes a later enqueue refuse the id. An
+        // id that already has a row in any state is left as it is and not
+        // counted. One transaction, so a failure part way records nothing.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| db_err("mark_seen:begin", e))?;
+        let mut recorded = 0usize;
+        for request_id in request_ids.iter().filter(|id| !id.trim().is_empty()) {
+            let inserted: Option<(String,)> = sqlx::query_as(
+                "INSERT INTO quarry_queue_items \
+                 (request_id, queue_id, org_id, url, status) \
+                 VALUES ($1, $2, $3, '', 'seen') \
+                 ON CONFLICT (org_id, request_id) DO NOTHING \
+                 RETURNING request_id",
+            )
+            .bind(request_id)
+            .bind(self.queue_id)
+            .bind(&self.org_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| db_err("mark_seen", e))?;
+            if inserted.is_some() {
+                recorded += 1;
+            }
+        }
+        tx.commit()
+            .await
+            .map_err(|e| db_err("mark_seen:commit", e))?;
+        Ok(recorded)
     }
 }
 

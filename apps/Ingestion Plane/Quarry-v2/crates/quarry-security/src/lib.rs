@@ -58,4 +58,10 @@ pub trait SecurityEngine: Send + Sync {
     fn recheck_final_url(&self) -> bool {
         false
     }
+    /// The host reputation source behind this engine, for the browser egress boundary
+    /// (E3.8.7). Default `None`: an engine with no host lists offers no source, so a run
+    /// under it attaches no reputation hook.
+    fn host_reputation(&self) -> Option<std::sync::Arc<dyn preflight::HostReputation>> {
+        None
+    }
 }
