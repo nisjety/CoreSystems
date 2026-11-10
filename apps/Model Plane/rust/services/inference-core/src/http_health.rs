@@ -155,7 +155,11 @@ async fn put_policy(
     if let Err(response) = authorize_policy_admin(&state.auth, &headers).await {
         return response;
     }
-    if let Some(response) = role_table_refusal(&policy, &state.chain.list_models("chat", "")) {
+    let catalogue = state.chain.list_models("chat", "");
+    if let Some(response) = role_table_refusal(&policy, &catalogue) {
+        return response;
+    }
+    if let Some(response) = catalogue_overlay_refusal(&policy, &catalogue) {
         return response;
     }
     let Some(client) = state.client.clone() else {
@@ -332,6 +336,26 @@ fn role_table_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) -> Option
                 "error": {
                     "code": "invalid_role_table",
                     "message": "the role table does not fit the chat catalogue",
+                    "details": { "issues": errors },
+                }
+            })),
+        )
+            .into_response(),
+    )
+}
+
+/// The refusal for a catalogue overlay the chat catalogue does not support (F-t3-065), or `None` when the overlay is
+/// valid. The overlay is platform-wide, so a bad alias would reach every org's listing and every pinned request. It is
+/// refused here, on every write whether or not `INFERENCE_CATALOGUE_OVERLAY` is on, rather than skipped at every use.
+fn catalogue_overlay_refusal(policy: &RoutingPolicy, catalogue: &[ModelInfo]) -> Option<Response> {
+    let errors = policy.catalogue_overlay.validate(catalogue).err()?;
+    Some(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "invalid_catalogue_overlay",
+                    "message": "the catalogue overlay is not valid against the chat catalogue",
                     "details": { "issues": errors },
                 }
             })),

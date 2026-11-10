@@ -74,6 +74,31 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/plugins/{plugin_id}",
             post(update_plugin).delete(delete_plugin),
         )
+        // W4-PL-3: the org's approved plugin catalogue and its approvals, a plugin's install report, install and
+        // uninstall, and the kill list. Pass-through: this router only requires a session. capability-core decides
+        // every admin, ZDR and platform check, and mounts these routes only while PLUGIN_LOADER_ENABLED is on.
+        .route("/api/v1/plugin-catalog", get(list_plugin_catalog))
+        .route(
+            "/api/v1/plugin-catalog/{plugin_id}/approve",
+            post(approve_plugin_catalog),
+        )
+        .route(
+            "/api/v1/plugin-catalog/{plugin_id}/unapprove",
+            post(unapprove_plugin_catalog),
+        )
+        .route(
+            "/api/v1/plugins/{plugin_id}/components",
+            get(plugin_components),
+        )
+        .route("/api/v1/plugins/{plugin_id}/install", post(install_plugin))
+        .route(
+            "/api/v1/plugins/{plugin_id}/uninstall",
+            post(uninstall_plugin),
+        )
+        .route(
+            "/api/v1/plugin-kill-list",
+            post(create_plugin_kill).delete(delete_plugin_kill),
+        )
         .route("/api/v1/cron", get(list_cron).post(create_cron))
         .route(
             "/api/v1/cron/{cron_id}",
@@ -784,6 +809,139 @@ async fn delete_plugin(
     )
     .await
     .into_response()
+}
+
+/// Proxies one plugin catalogue, install or kill-list request to model-gateway, which forwards it to
+/// capability-core (W4-PL-3). The caller's model and capability tokens go with it, and the body, when there is
+/// one, goes through unchanged: capability-core reads it strictly and takes the org from the verified token.
+async fn proxy_plugin_request(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Json<Value>) {
+    let token = shared::model_token(state, user, headers).await;
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let url = format!("{}/v1/{}", state.model_gateway_url, path);
+    shared::proxy_model_json_with_capability(
+        state,
+        method,
+        &url,
+        body,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await
+}
+
+/// The org's approved plugin catalogue (W4-PL-3). Open to members; capability-core lists the org's approved,
+/// pinned and not killed packages.
+async fn list_plugin_catalog(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    proxy_plugin_request(&state, &user, &headers, Method::GET, "plugin-catalog", None).await
+}
+
+/// Lists one of the org's packages in the catalogue (W4-PL-3). capability-core checks the org admin role.
+async fn approve_plugin_catalog(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!("plugin-catalog/{}/approve", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// Takes one of the org's packages out of the catalogue (W4-PL-3). capability-core checks the org admin role.
+async fn unapprove_plugin_catalog(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!(
+        "plugin-catalog/{}/unapprove",
+        urlencoding::encode(&plugin_id)
+    );
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// A plugin's install report: every component, its digest and whether an install would refuse it (W4-PL-3).
+/// capability-core answers only an org admin acting as a person.
+async fn plugin_components(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!("plugins/{}/components", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::GET, &path, None).await
+}
+
+/// Installs a plugin with the digests the admin consented to (W4-PL-3). capability-core checks the admin role.
+async fn install_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let path = format!("plugins/{}/install", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, Some(body)).await
+}
+
+/// Uninstalls a plugin (W4-PL-3). capability-core checks the admin role.
+async fn uninstall_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!("plugins/{}/uninstall", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// Adds a kill-list entry (W4-PL-3). The org is never taken from the body: capability-core derives it from the
+/// verified token, and a global entry needs a platform service principal.
+async fn create_plugin_kill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    proxy_plugin_request(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        "plugin-kill-list",
+        Some(body),
+    )
+    .await
+}
+
+/// Removes a kill-list entry (W4-PL-3). Only the digest and the scope are forwarded, as the query.
+async fn delete_plugin_kill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let kept: HashMap<String, String> = params
+        .into_iter()
+        .filter(|(key, _)| key == "digest" || key == "scope")
+        .collect();
+    let path = format!("plugin-kill-list{}", build_query(&kept));
+    proxy_plugin_request(&state, &user, &headers, Method::DELETE, &path, None).await
 }
 
 /// List the org's cron schedules (open to members).

@@ -413,6 +413,8 @@ export type ChatTurn = {
   provider?: string
   /** Opaque Integration Core connection id paired with a subscription route. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of the customer gateway this turn is served on (W4-BYO-6). Kept so a retry stays on it. */
+  modelConnectionId?: string
   requestId?: string
   /**
    * Highest SSE frame `id:` seen for this turn, sent as `Last-Event-ID` on
@@ -781,6 +783,8 @@ export type SendOptions = {
   provider?: string
   /** Opaque Integration Core connection id; never a ChatGPT token. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of a customer gateway (W4-BYO-6). Text-only, never zero retention. */
+  modelConnectionId?: string
   /** Reasoning effort from the composer's response-mode selector. */
   effort?: EffortProfile | EffortLevel
   /**

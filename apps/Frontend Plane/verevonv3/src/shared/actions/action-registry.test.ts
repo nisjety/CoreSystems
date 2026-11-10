@@ -1808,7 +1808,8 @@ describe('action registry', () => {
     // +1 after W3-EP-7-S6-c registered chat.goal_away_start, the keep-working-while-away start.
     // +1 after W4-CC-2 registered mcp.probe_server, the MCP add flow's probe of a server before it is saved.
     // +3 after W5-077-c registered chat.thread.archive, chat.thread.star and chat.thread.mark_unread, the palette's thread flags.
-    expect(ids).toHaveLength(331)
+    // +5 after W4-PL-4 registered plugins.list_catalog, plugins.install, plugins.uninstall, plugins.approve_catalog and plugins.kill_digest.
+    expect(ids).toHaveLength(336)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

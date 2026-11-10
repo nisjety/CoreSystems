@@ -193,6 +193,17 @@
       ]
     },
     {
+      "name": "EXECUTION_PROCESS_OUTPUT_SPILL",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-P6 process_read spill: writes a background process's output beyond one page into a workspace file under .tmp, never uploaded. Only the literal true turns it on. Refused on zero-retention or waived runs. Read once at start.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_PROCESS_OUTPUT_SPILL", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_PROCESS_TTY_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -227,6 +238,28 @@
       ]
     },
     {
+      "name": "INFERENCE_BYO_GATEWAY_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-065 phase 2: a call that names a customer-gateway model connection is served by that gateway alone, through Integration Core, and never by a platform provider. Only the literal true enables it; off, such a call is refused as not implemented. The gateway is never zero data retention and is billed to the customer.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_BYO_GATEWAY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "INFERENCE_CATALOGUE_OVERLAY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-065 phase 1: the platform catalogue overlay in the routing policy (hide, order and model-id aliases). It applies to the model listing and to pinned requests, and changes nothing about how a model is served. Only the literal true enables it; off, a stored overlay is ignored.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_CATALOGUE_OVERLAY", "default": "false" }
+      ]
+    },
+    {
       "name": "INFERENCE_GEMINI_EFFORT_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -246,6 +279,17 @@
       "purpose": "Master switch for the logprobs request parameter on every provider. 0, false, no or off turns it off.",
       "onDefaultReason": "On by default. No compose line sets it, so only the process environment can opt out.",
       "codePath": "apps/Model Plane/rust/services/inference-core/src/provider/logprobs.rs"
+    },
+    {
+      "name": "INFERENCE_ORG_OVERLAY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-BYO-3: the per-organisation overlay (hide, order and role candidates; narrow-only, no aliases, nothing that adds a model). inference-core reads it from session-core (cached 120 s, 1000 orgs) and applies it to the model listing after the platform overlay and to the verevon-role resolver ahead of the platform role table; entitlement and the ZDR, privacy and residency floors still apply. Only the literal true enables it; off, a stored overlay is ignored. Needs SESSION_ORG_ROUTING_OVERLAY on session-core.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_ORG_OVERLAY", "default": "false" }
+      ]
     },
     {
       "name": "LEARNING_REVIEW_ENABLED",
@@ -328,6 +372,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_BYO_GATEWAY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-BYO-6 customer gateway on a chat turn: accepts an opaque customer-gateway connection id, text-only and never zero retention. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_BYO_GATEWAY", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER",
       "kind": "switch",
       "owner": "model-plane",
@@ -372,6 +427,18 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_JUDGE_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 S6 unattended goals: off, a schedule template naming a goal is refused and the internal judge route answers 404. Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED and MODEL_GATEWAY_GOAL_JUDGE_ENABLED. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED", "default": "false" }
       ]
     },
     {
@@ -431,6 +498,29 @@
       "codePath": "apps/Model Plane/rust/services/inference-core/src/config.rs"
     },
     {
+      "name": "ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 S6 orchestrator-core: a goal-bound scheduled fire asks model-gateway for the goal's completion judge once it completes. Off, such a fire is not judged. Needs MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "orchestrator-core", "env": "ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "PLUGIN_LOADER_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Plugin supply-chain pins (F-t3-059). On: create needs a commit-SHA or archive-digest source, a killed digest is refused, and enabling needs a pin and an install. Off: inert CRUD.",
+      "declarations": [
+        { "service": "capability-core", "env": "PLUGIN_LOADER_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "PROCESS_SWEEPER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -472,6 +562,28 @@
       "purpose": "EP-14 S10: a routing-policy PUT in inference-core records a candidate (202 with its offline diff) instead of writing live; POST .../candidates/:id/promote makes it live. Only the literal true enables it. Needs SESSION_CORE_ROUTING_CANDIDATES_ENABLED on session-core.",
       "declarations": [
         { "service": "inference-core", "env": "ROUTING_POLICY_PROMOTION_REQUIRED", "default": "false" }
+      ]
+    },
+    {
+      "name": "SESSION_ORG_ROUTING_OVERLAY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-BYO-3: GetOrgRoutingOverlay and SetOrgRoutingOverlay on session-core's RoutingPolicy service, over the org_routing_overlays table. Off, both RPCs answer UNAVAILABLE and the table is never touched. A write needs an organisation admin of that organisation and refuses a ZDR caller. Only the literal true enables it. Pair it with INFERENCE_ORG_OVERLAY on inference-core.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_ORG_ROUTING_OVERLAY", "default": "false" }
+      ]
+    },
+    {
+      "name": "SESSION_THREAD_IMPORT_FOREIGN_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-12 S15 foreign readers: ImportThread also reads a ChatGPT or Claude conversations.json. Only the literal true, and only while SESSION_THREAD_IMPORT_ENABLED is on.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_THREAD_IMPORT_FOREIGN_ENABLED", "default": "false" }
       ]
     },
     {

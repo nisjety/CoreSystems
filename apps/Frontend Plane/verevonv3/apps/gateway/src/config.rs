@@ -153,6 +153,12 @@ pub(crate) struct AppState {
     /// `agent_preview` is left as it came. A rollout control, never an authorization input: the
     /// builder's own access check and Convex decide who may read or write a draft.
     pub(crate) agent_definition_versions: bool,
+    /// `CHAT_PROCESS_OUTPUT_READ_ENABLED` (W4-P3): the owner's read of one background process's output,
+    /// `GET /api/v1/chat/runs/{run_id}/processes/{pid}/output`. Read once from the environment in
+    /// `build_state`, exactly `true` turns it on. Off, the route answers 404 `process_output_disabled`.
+    /// A rollout control, never an authorization input: Control's sandbox-manager read decision and
+    /// Model Gateway's run-owner check decide what a caller reads.
+    pub(crate) chat_process_output_enabled: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -770,6 +776,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         continue_park_form: continue_park_form_enabled(),
         model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
         agent_definition_versions: agent_definition_versions_enabled(),
+        chat_process_output_enabled: chat_process_output_enabled(),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
@@ -972,6 +979,18 @@ fn agent_definition_versions_enabled() -> bool {
 /// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE`
 /// would publish agent versions and expose a draft preview before anyone chose to.
 pub(crate) fn agent_definition_versions_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CHAT_PROCESS_OUTPUT_READ_ENABLED`, read once by `build_state` (W4-P3). Off unless it is exactly
+/// `true`. The process output route reads it from `AppState`, never from the environment.
+fn chat_process_output_enabled() -> bool {
+    chat_process_output_from(env::var("CHAT_PROCESS_OUTPUT_READ_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE`
+/// would open a route that relays a process's output before anyone chose to.
+fn chat_process_output_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 

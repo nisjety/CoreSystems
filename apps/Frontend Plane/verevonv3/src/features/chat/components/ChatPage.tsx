@@ -1795,6 +1795,10 @@ export default function ChatPage() {
         orgId={session.activeOrg?.id}
         runId={liveRunId()}
         meter={activeRunTurn()?.meter}
+        // EP-1 W4-P4: the computer panel's tabs read this turn's tool calls and the thread's own Space. The Space is read
+        // here, not through the projects switch, so the live process tail works for a Space thread either way.
+        computerCalls={activeRunTurn()?.toolCalls}
+        spaceRef={activeProjectRef() ?? undefined}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
         onBrowserGiveBack={(runId, note) => void giveBackBrowserRun(runId, note)}

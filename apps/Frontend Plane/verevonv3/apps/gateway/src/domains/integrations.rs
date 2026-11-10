@@ -2,6 +2,7 @@ mod browse;
 mod connect_sessions;
 pub(crate) mod connections;
 pub(crate) mod model_subscriptions;
+mod model_connections;
 mod profile;
 pub(crate) mod providers;
 mod shared;
@@ -36,6 +37,20 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/model-subscriptions/openai-codex/connections/{connection_id}/usage",
             get(model_subscriptions::openai_codex_subscription_usage),
+        )
+        // Customer-gateway model connections (W4-BYO-6): an org admin registers, lists and removes the org's own
+        // OpenAI-compatible gateway. Integration Core holds the key; the browser never reads it back.
+        .route(
+            "/api/v1/model-connections/customer-gateway",
+            get(model_connections::list_customer_gateways),
+        )
+        .route(
+            "/api/v1/model-connections/customer-gateway",
+            post(model_connections::create_customer_gateway),
+        )
+        .route(
+            "/api/v1/model-connections/customer-gateway",
+            delete(model_connections::delete_customer_gateway),
         )
         .route("/api/v1/integrations/algolia/connections",get(algolia::connections))
         .route("/api/v1/integrations/algolia/connect-session",post(algolia::connect).layer(axum::extract::DefaultBodyLimit::max(2048)))

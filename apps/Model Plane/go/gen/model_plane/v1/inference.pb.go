@@ -393,6 +393,13 @@ type InferRequest struct {
 	// model, then the cheap fallback. Empty names none. It carries no content, so
 	// Zero Data Retention does not change it.
 	RoleFallbackModel string `protobuf:"bytes,23,opt,name=role_fallback_model,json=roleFallbackModel,proto3" json:"role_fallback_model,omitempty"`
+	// The opaque Integration Core id of a customer-gateway model connection (W4-BYO-5): the
+	// organisation's own OpenAI-compatible endpoint, registered and held in Integration Core. Read only
+	// when INFERENCE_BYO_GATEWAY_ENABLED is the literal true. A call that names a connection is served by
+	// that gateway alone, never by a platform provider, and a call that names one while the switch is off
+	// is refused. Model Plane never receives the gateway's address or key. A customer gateway is never zero
+	// data retention, so a ZDR call that names one is refused. Empty names no connection.
+	ModelConnectionId string `protobuf:"bytes,24,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -584,6 +591,13 @@ func (x *InferRequest) GetRunId() string {
 func (x *InferRequest) GetRoleFallbackModel() string {
 	if x != nil {
 		return x.RoleFallbackModel
+	}
+	return ""
+}
+
+func (x *InferRequest) GetModelConnectionId() string {
+	if x != nil {
+		return x.ModelConnectionId
 	}
 	return ""
 }
@@ -1413,6 +1427,7 @@ func (x *InferChunk) GetRouteNote() *RouteNote {
 //   - the handler origin: the gRPC handler's entry, before authorization;
 //   - the attempt origin: the start of the provider attempt that finally
 //     served the call.
+//
 // A caller's transport overhead is its own wall time for the call minus
 // `handler_ms`. inference-core's own overhead is `handler_ms` minus
 // `provider_ms`, `failed_attempts_ms` and `retry_wait_ms`.
@@ -4330,9 +4345,15 @@ type GenerateImageRequest struct {
 	// Provider quality hint, e.g. "standard" or "hd".
 	Quality string `protobuf:"bytes,7,opt,name=quality,proto3" json:"quality,omitempty"`
 	// Number of images requested.
-	N             uint32 `protobuf:"varint,8,opt,name=n,proto3" json:"n,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	N uint32 `protobuf:"varint,8,opt,name=n,proto3" json:"n,omitempty"`
+	// When true, the call is served by one provider only: the first configured provider that matches
+	// provider_hint and, when model is set, lists that model as an image model. That provider alone is
+	// tried, and its error comes back as it is, so no other provider answers in its place. A request
+	// that names no such provider is refused as image_model_unavailable before any provider is called.
+	// False walks the ordered provider chain, as before.
+	StrictProvider bool `protobuf:"varint,9,opt,name=strict_provider,json=strictProvider,proto3" json:"strict_provider,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GenerateImageRequest) Reset() {
@@ -4419,6 +4440,13 @@ func (x *GenerateImageRequest) GetN() uint32 {
 		return x.N
 	}
 	return 0
+}
+
+func (x *GenerateImageRequest) GetStrictProvider() bool {
+	if x != nil {
+		return x.StrictProvider
+	}
+	return false
 }
 
 // GeneratedImage — one generated image artifact.
@@ -6395,7 +6423,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xb4\b\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xe4\b\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6424,7 +6452,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"imageParts\x126\n" +
 	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\x12\x15\n" +
 	"\x06run_id\x18\x16 \x01(\tR\x05runId\x12.\n" +
-	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\"f\n" +
+	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\x12.\n" +
+	"\x13model_connection_id\x18\x18 \x01(\tR\x11modelConnectionId\"f\n" +
 	"\x0eInferImagePart\x12#\n" +
 	"\rmessage_index\x18\x01 \x01(\rR\fmessageIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
@@ -6762,7 +6791,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"nativeName\x12\x1c\n" +
 	"\tdirection\x18\x04 \x01(\tR\tdirection\"i\n" +
 	" ListTranslationLanguagesResponse\x12E\n" +
-	"\tlanguages\x18\x01 \x03(\v2'.model_plane.v1.TranslationLanguageInfoR\tlanguages\"\xdb\x01\n" +
+	"\tlanguages\x18\x01 \x03(\v2'.model_plane.v1.TranslationLanguageInfoR\tlanguages\"\x84\x02\n" +
 	"\x14GenerateImageRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6772,7 +6801,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_hint\x18\x05 \x01(\tR\fproviderHint\x12\x12\n" +
 	"\x04size\x18\x06 \x01(\tR\x04size\x12\x18\n" +
 	"\aquality\x18\a \x01(\tR\aquality\x12\f\n" +
-	"\x01n\x18\b \x01(\rR\x01n\"d\n" +
+	"\x01n\x18\b \x01(\rR\x01n\x12'\n" +
+	"\x0fstrict_provider\x18\t \x01(\bR\x0estrictProvider\"d\n" +
 	"\x0eGeneratedImage\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x19\n" +
 	"\bb64_json\x18\x02 \x01(\tR\ab64Json\x12%\n" +

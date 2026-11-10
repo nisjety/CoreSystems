@@ -223,6 +223,8 @@ fn config(azure_endpoint: &str, broker_url: &str) -> InferenceConfig {
         codex_subscription_integration_core_url: Some(broker_url.to_owned()),
         codex_subscription_internal_api_key: Some(BROKER_KEY.to_owned()),
         codex_subscription_models: vec![MODEL.to_owned()],
+        byo_gateway_enabled: false,
+        customer_gateway_internal_api_key: None,
         azure_openai_endpoint: Some(azure_endpoint.to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),
@@ -292,6 +294,7 @@ impl Stack {
             language: LanguageAnalyticsChain::from_env(),
             realtime: RealtimeChain::new_with_providers(vec![]),
             video: VideoChain::new_with_providers(vec![]),
+            customer_gateway: None,
             capture: None,
         };
         Self {

@@ -740,6 +740,25 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_plugin_proxy)
                 .delete(delete_plugin_proxy),
         )
+        // W4-PL-3: the org's approved plugin catalogue, its approvals, the kill list, and a plugin's install report,
+        // install and uninstall (W4-PL-2). capability-core mounts them only while PLUGIN_LOADER_ENABLED is on and
+        // answers 404 otherwise; it decides every admin, ZDR and platform check.
+        .route("/v1/plugin-catalog", get(list_plugin_catalog_proxy))
+        .route(
+            "/v1/plugin-catalog/:id/approve",
+            post(approve_plugin_catalog_proxy),
+        )
+        .route(
+            "/v1/plugin-catalog/:id/unapprove",
+            post(unapprove_plugin_catalog_proxy),
+        )
+        .route(
+            "/v1/plugin-kill-list",
+            post(create_plugin_kill_proxy).delete(delete_plugin_kill_proxy),
+        )
+        .route("/v1/plugins/:id/components", get(plugin_components_proxy))
+        .route("/v1/plugins/:id/install", post(install_plugin_proxy))
+        .route("/v1/plugins/:id/uninstall", post(uninstall_plugin_proxy))
         // Run watchers (AUTO-2): "notify me when this run finishes". Backed
         // by capability-core's run_watch_subscriptions; org_id/user_id are
         // never in this proxy's control, only the verified capability bearer
@@ -6244,6 +6263,7 @@ async fn generate_image(
                 size: req.size.unwrap_or_default(),
                 quality: req.quality.unwrap_or_default(),
                 n: req.n.unwrap_or(1),
+                strict_provider: false,
             },
             inference_bearer,
         ))
@@ -9325,6 +9345,124 @@ async fn delete_plugin_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("plugins/{id}"), "DELETE", None).await
 }
 
+/// W4-PL-3: a plugin id as one segment of the capability-core URL. Only the characters an id is made of pass, so a
+/// segment can never climb out of the route it is put in.
+fn plugin_path_segment(id: &str) -> Result<&str, HttpJsonError> {
+    if !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Ok(id);
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": "invalid plugin id"})),
+    ))
+}
+
+/// W4-PL-3: a manifest digest as capability-core writes it: `sha256:` and 64 lowercase hex digits.
+fn is_plugin_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// W4-PL-3: the org's approved plugin catalogue (open to members; capability-core answers from the caller's org).
+async fn list_plugin_catalog_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "plugin-catalog", "GET", None).await
+}
+/// W4-PL-3: list one of the org's packages in the catalogue (capability-core decides the org admin check).
+async fn approve_plugin_catalog_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugin-catalog/{}/approve", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
+}
+/// W4-PL-3: take one of the org's packages out of the catalogue (capability-core decides the org admin check).
+async fn unapprove_plugin_catalog_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugin-catalog/{}/unapprove", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
+}
+/// W4-PL-3: add a kill-list entry. The org is never in the body; capability-core derives it from the caller.
+async fn create_plugin_kill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "plugin-kill-list", "POST", Some(&b)).await
+}
+/// W4-PL-3: remove a kill-list entry. Only the digest and the scope pass, and each is checked before it is put in the
+/// upstream URL; a missing scope means the caller's org.
+async fn delete_plugin_kill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let digest = q.get("digest").map(String::as_str).unwrap_or_default();
+    let scope = match q.get("scope").map(String::as_str) {
+        None | Some("") => "org",
+        Some(scope) => scope,
+    };
+    if !is_plugin_digest(digest) || !matches!(scope, "org" | "global") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "a digest and a scope of org or global are required"})),
+        ));
+    }
+    let path = format!("plugin-kill-list?digest={digest}&scope={scope}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+/// W4-PL-3: a plugin's install report: every component, its digest and whether an install would refuse it.
+async fn plugin_components_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugins/{}/components", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+/// W4-PL-3: install a plugin with the digests the admin consented to (capability-core decides the admin check).
+async fn install_plugin_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugins/{}/install", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", Some(&b)).await
+}
+/// W4-PL-3: uninstall a plugin (capability-core decides the admin check).
+async fn uninstall_plugin_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugins/{}/uninstall", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
+}
+
 pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
     let status = match error.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
@@ -11206,6 +11344,12 @@ pub struct InvokeRequest {
     /// invocation. Browser cookies and OAuth tokens are never accepted here.
     #[serde(default, alias = "subscriptionConnectionId")]
     pub subscription_connection_id: Option<String>,
+    /// Opaque Integration Core id of one of the caller's customer-gateway model connections (W4-BYO-6).
+    /// Honoured only while `MODEL_GATEWAY_BYO_GATEWAY` is the literal `true`, and only for a plain text,
+    /// non-ZDR chat turn; inference-core verifies that the connection belongs to the caller's organisation.
+    /// Blank is absent.
+    #[serde(default, alias = "modelConnectionId")]
+    pub model_connection_id: Option<String>,
     pub session_key: Option<String>,
     pub thread_id: Option<String>,
     /// Server-injected, fresh Control decision for a message appended to an
@@ -16827,7 +16971,7 @@ async fn invoke(
     // `zdr_posture`). The refusal is typed instead of the generic 502 the connection used to get.
     let route = crate::zdr_posture::Route::named(
         req.provider.as_deref(),
-        req.subscription_connection_id.as_deref(),
+        crate::normalize::connection_named_by(&req),
         req.zdr,
     );
     let posture = match crate::zdr_posture::decide_for(&claims, &route) {
@@ -17209,6 +17353,7 @@ async fn invoke(
                     model: normalized.model.clone(),
                     provider_hint: normalized.provider_hint.clone(),
                     subscription_connection_id: normalized.subscription_connection_id.clone(),
+                    model_connection_id: normalized.model_connection_id.clone(),
                     messages: vec![ChatMessage {
                         compaction_summary: String::new(),
                         role: "user".to_owned(),

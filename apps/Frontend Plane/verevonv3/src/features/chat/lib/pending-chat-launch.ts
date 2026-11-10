@@ -67,6 +67,8 @@ export type PendingChatLaunch = {
   startNewThread?: boolean
   /** Opaque Integration Core connection id; never an OAuth credential. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of a customer gateway (W4-BYO-6). Never a key. */
+  modelConnectionId?: string
   /** Exact support scope that should receive the resulting Chat answer. */
   supportHandoff?: PendingSupportHandoff
   text: string

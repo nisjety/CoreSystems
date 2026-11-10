@@ -4,12 +4,14 @@ pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
 mod library;
+mod processes;
 pub(crate) mod shared;
 mod search;
 mod streams;
 pub(crate) mod support;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{get, post, put},
     Router,
 };
@@ -103,6 +105,20 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/chat/threads/{thread_id}/export",
             get(history::export_thread),
+        )
+        // The owner's import of one export file as a new conversation (Wave 3 EP-12 S15): Model Gateway's
+        // answer relayed unchanged. 404 `thread_export_disabled` from Model Gateway while its switch is off.
+        .route(
+            "/api/v1/chat/threads/import",
+            post(history::import_thread).layer(DefaultBodyLimit::max(
+                history::THREAD_IMPORT_BODY_LIMIT_BYTES,
+            )),
+        )
+        // The owner's read of one background process's output in a run (W4-P3): Model Gateway's page,
+        // read under the room's own sandbox read decision. 404 `process_output_disabled` while its switch is off.
+        .route(
+            "/api/v1/chat/runs/{run_id}/processes/{pid}/output",
+            get(processes::get_run_process_output),
         )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",

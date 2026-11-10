@@ -11,6 +11,8 @@ export type AiModelSelection = Readonly<{
   label: string
   provider?: string
   subscriptionConnectionId?: string
+  /** The customer-gateway connection a "Your gateway" model is served on (W4-BYO-6). Absent otherwise. */
+  modelConnectionId?: string
   /**
    * The tier `/api/v1/models` last reported for this model and provider
    * (`'unspecified'` = it claimed none). Only a fallback: a composer sends it
@@ -51,6 +53,7 @@ function normalizeSelection(value: unknown): AiModelSelection | undefined {
   // A garbled tier is dropped, not guessed: without one the composer falls
   // back to the strictest tier.
   const privacyTier = normalizePrivacyTier(raw.privacyTier)
+  const modelConnectionId = typeof raw.modelConnectionId === 'string' ? raw.modelConnectionId.trim() : ''
   if (!model || !label) return undefined
   if (provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && !subscriptionConnectionId) {
     return { model, label, provider, ...(privacyTier ? { privacyTier } : {}) }
@@ -60,6 +63,7 @@ function normalizeSelection(value: unknown): AiModelSelection | undefined {
     label,
     ...(provider ? { provider } : {}),
     ...(subscriptionConnectionId ? { subscriptionConnectionId } : {}),
+    ...(modelConnectionId ? { modelConnectionId } : {}),
     ...(privacyTier ? { privacyTier } : {}),
   }
 }

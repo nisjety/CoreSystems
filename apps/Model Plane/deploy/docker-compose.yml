@@ -254,6 +254,8 @@ services:
       MODEL_GATEWAY_WIDGET_GUIDANCE: ${MODEL_GATEWAY_WIDGET_GUIDANCE:-false}
       # EP-9 T2: the thread's effective-policy read (GET only). Off by default (404); only the literal `true`.
       MODEL_GATEWAY_POLICY_EFFECTIVE: ${MODEL_GATEWAY_POLICY_EFFECTIVE:-false}
+      # W4-BYO-6: a turn may name one of the user's customer-gateway model connections (text-only, never zero retention). Literal true only.
+      MODEL_GATEWAY_BYO_GATEWAY: ${MODEL_GATEWAY_BYO_GATEWAY:-false}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a
@@ -490,6 +492,10 @@ services:
       # EP-7 S3: the completion judge judges a settled goal turn that completed and records its verdict. Needs
       # MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the literal true.
       MODEL_GATEWAY_GOAL_JUDGE_ENABLED: ${MODEL_GATEWAY_GOAL_JUDGE_ENABLED:-false}
+      # EP-7 S6: unattended goals. Off, a schedule template naming a goal is refused and the internal judge route
+      # (POST /internal/v1/goals/:goal_id/judge-turn) answers 404. Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED and
+      # MODEL_GATEWAY_GOAL_JUDGE_ENABLED. Only the literal true.
+      MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED: ${MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED:-false}
       # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
       MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
       # EP-6 P3: a thread listing takes the agent filter (one named agent's threads). Off, the parameter is ignored.
@@ -1116,6 +1122,10 @@ services:
       # RoutingPolicy candidates (EP-14 S10): propose, evaluate and promote RPCs. Off answers
       # FAILED_PRECONDITION on every candidate RPC; set_policy's expected_version check is always on.
       SESSION_CORE_ROUTING_CANDIDATES_ENABLED: ${SESSION_CORE_ROUTING_CANDIDATES_ENABLED:-false}
+      # Per-organisation routing overlay (W4-BYO-3): GetOrgRoutingOverlay and SetOrgRoutingOverlay on the
+      # RoutingPolicy service. Only the literal true enables it; off, both RPCs answer UNAVAILABLE and the
+      # org_routing_overlays table is never read or written. Pair it with INFERENCE_ORG_OVERLAY on inference-core.
+      SESSION_ORG_ROUTING_OVERLAY: ${SESSION_ORG_ROUTING_OVERLAY:-false}
       # AES-256-GCM key for encrypted approval continuation descriptors. The
       # service fails closed when a descriptor is requested without this key.
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
@@ -1252,6 +1262,9 @@ services:
       SESSION_THREAD_SHARES_ENABLED: ${SESSION_THREAD_SHARES_ENABLED:-false}
       # EP-12 S15: the owner's ImportThread (ThreadExportService). Only the literal true.
       SESSION_THREAD_IMPORT_ENABLED: ${SESSION_THREAD_IMPORT_ENABLED:-false}
+      # EP-12 S15 (foreign): ImportThread also reads a ChatGPT or Claude conversations.json. Only the
+      # literal true, and only while SESSION_THREAD_IMPORT_ENABLED is on.
+      SESSION_THREAD_IMPORT_FOREIGN_ENABLED: ${SESSION_THREAD_IMPORT_FOREIGN_ENABLED:-false}
       # EP-11 S2: the SkillVersionService read of immutable skill versions. Only the literal true;
       # set it together with SKILL_VERSIONS_API on capability-core.
       SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
@@ -1391,6 +1404,14 @@ services:
       # makes an evaluated candidate live. Needs SESSION_CORE_ROUTING_CANDIDATES_ENABLED on
       # session-core (otherwise 503 candidate_store_disabled). Only the literal true enables it.
       ROUTING_POLICY_PROMOTION_REQUIRED: ${ROUTING_POLICY_PROMOTION_REQUIRED:-false}
+      # F-t3-065 phase 1: the platform catalogue overlay in the routing policy (hide, order, model-id aliases),
+      # applied to the model listing and to pinned requests. Only the literal true enables it; off, a stored overlay
+      # is ignored and the listing and admission are as they were.
+      INFERENCE_CATALOGUE_OVERLAY: ${INFERENCE_CATALOGUE_OVERLAY:-false}
+      # W4-BYO-3: the per-organisation overlay (hide, order, role candidates; narrow-only), read from session-core
+      # and applied after the platform overlay to the model listing and ahead of the platform role table. Only the
+      # literal true enables it; off, a stored overlay is ignored. Needs SESSION_ORG_ROUTING_OVERLAY on session-core.
+      INFERENCE_ORG_OVERLAY: ${INFERENCE_ORG_OVERLAY:-false}
       # EP-13 S6-S8: Vertex AI Gemini, a provider route that stays OFF. Only the literal
       # `true` enables it. Read before turning it on: it is EU-resident only when the
       # location is an EU one, it is NOT ZDR-capable (a ZDR turn skips it, and the release
@@ -1414,6 +1435,13 @@ services:
       CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL: ${CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL:-}
       CODEX_SUBSCRIPTION_INTERNAL_API_KEY: ${CODEX_SUBSCRIPTION_INTERNAL_API_KEY:-}
       CODEX_SUBSCRIPTION_MODELS: ${CODEX_SUBSCRIPTION_MODELS:-}
+      # F-t3-065 phase 2: customer-gateway model connections (bring your own endpoint). A call that names a
+      # connection is served by that gateway alone, through the Integration Core URL above, and no platform
+      # provider answers it. Only the literal true enables it; off, such a call is refused as not implemented.
+      # A customer gateway is never zero data retention and is billed to the customer. The service key is the
+      # one Integration Core's customer-gateway broker accepts; unset, the subscription key above is used.
+      INFERENCE_BYO_GATEWAY_ENABLED: ${INFERENCE_BYO_GATEWAY_ENABLED:-false}
+      CUSTOMER_GATEWAY_INTERNAL_API_KEY: ${CUSTOMER_GATEWAY_INTERNAL_API_KEY:-}
       # The same switch model-gateway and execution-core read (see the
       # model-gateway block). Here it only adds the `agentic` feature to the
       # subscription models in the catalog, so the composer follows the server
@@ -1927,6 +1955,10 @@ services:
       # as one stream). Only the literal "true" turns it on; off, tty is ignored and the process gets plain pipes.
       # A tty request on a zero-retention or waived run is refused whatever this says.
       EXECUTION_PROCESS_TTY_ENABLED: ${EXECUTION_PROCESS_TTY_ENABLED:-false}
+      # W4-P6: process_read with spill: true writes a background process's output beyond one page into a workspace file
+      # under .tmp, which is never uploaded with the Space. Only the literal "true" turns it on; off, spill is ignored.
+      # A spill on a zero-retention or waived run is refused whatever this says.
+      EXECUTION_PROCESS_OUTPUT_SPILL: ${EXECUTION_PROCESS_OUTPUT_SPILL:-false}
       # WS24-S3/S4: workspace tools for Space Do runs. `off` by default; `read` offers the read tools, `all` also the
       # per-run overlay writes (workspace_edit, workspace_put). cap.workspace.read and cap.workspace.write stay
       # unattested until then. ZDR and non-Space runs never get them; plan mode refuses the writes.
@@ -2098,6 +2130,9 @@ services:
       SESSION_CORE_ADDR: session-core:9091
       # WS20-S6: must agree with execution-core's switch of the same name. Empty is off.
       EXECUTION_SCHEDULED_AGENT_ENABLED: ${EXECUTION_SCHEDULED_AGENT_ENABLED:-}
+      # EP-7 S6: a goal-bound scheduled fire asks model-gateway for the goal's completion judge once the fire completes.
+      # Off, such a fire is not judged. Needs MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED on model-gateway. Only the literal true.
+      ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED: ${ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED:-false}
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
@@ -2106,6 +2141,8 @@ services:
       INFERENCE_CORE_ADDR: inference-core:9092
       EXECUTION_CORE_ADDR: execution-core:9093
       CAPABILITY_CORE_ADDR: capability-core:9097
+      # model-gateway's HTTP listener, for the goal judge's internal route (EP-7 S6). Without it the judge fails closed.
+      MODEL_GATEWAY_URL: http://model-gateway:8080
       ENABLE_COMPAT_ADAPTER: "false"
       MP_COMPAT_MODE: v1_only
       # Durable store for feedback_ratings (thumbs up/down -> skill promotion
@@ -2292,6 +2329,10 @@ services:
       SKILL_IMPORT_ENABLED: ${SKILL_IMPORT_ENABLED:-false}
       # EP-11 S9: only the literal `true` turns it on.
       SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
+      # F-t3-059 (W4-PL-1): plugin supply-chain pins. Only the literal `true` enables them. Off, plugin registration stays
+      # inert CRUD. On, create needs a commit-SHA or archive-digest source, a killed digest is refused, and enabling needs a
+      # pin and an install. Migration 0039 adds the columns and the kill list either way.
+      PLUGIN_LOADER_ENABLED: ${PLUGIN_LOADER_ENABLED:-false}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with

@@ -452,6 +452,12 @@ export function browserSessionFromChatRun(
   const latest = latestBrowserStep(state)
   const framed = [...state.steps].reverse().find((step) => step.screenshotUrl && !step.screenshotFailed)
   const timeline: BrowserTimelineViewEntry[] = state.steps.map((step) => ({
+    action: {
+      id: step.actionId,
+      observed: step.observed,
+      status: step.status ?? '',
+      type: step.actionType ?? '',
+    },
     observedAt: step.at,
     screenshotArtifactId: step.screenshotRef ?? null,
     screenshotUrl: step.screenshotUrl ?? null,

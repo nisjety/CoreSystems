@@ -102,6 +102,16 @@ type Config struct {
 	// (one Codex auth.json per connection, written by the Codex CLI sign-in
 	// and refreshed in place by the broker), never in the integration
 	// database.
+	// CustomerGatewayConnectionsEnabled mounts the customer-gateway model connection routes
+	// (an org admin's own OpenAI-compatible endpoint, key sealed in this service) and the
+	// Model-Plane-only inference broker. Off unless CUSTOMER_GATEWAY_CONNECTIONS_ENABLED is
+	// exactly "true".
+	CustomerGatewayConnectionsEnabled bool
+	// CustomerGatewayModelPlaneAPIKey authenticates Model Plane on the customer-gateway
+	// broker routes. It falls back to CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY, the same
+	// Model-Plane-to-Integration-Core credential, when CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY
+	// is unset.
+	CustomerGatewayModelPlaneAPIKey    string
 	ZDRAcknowledgementEnabled          bool
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
@@ -406,6 +416,9 @@ func Load() (Config, error) {
 		RateLimitWindow:     envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
 		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
 
+		// Exactly "true" only: envBool uses ParseBool, which would also switch this on for "1" or "T".
+		CustomerGatewayConnectionsEnabled:  strings.TrimSpace(os.Getenv("CUSTOMER_GATEWAY_CONNECTIONS_ENABLED")) == "true",
+		CustomerGatewayModelPlaneAPIKey:    strings.TrimSpace(envOr("CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY", os.Getenv("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY"))),
 		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
 		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
@@ -550,6 +563,14 @@ func (c Config) ValidateRuntime() error {
 	}
 	if c.ControlPlaneInternalAPIKey() == "" {
 		return fmt.Errorf("AUTH_CORE_INTERNAL_API_KEY or INTERNAL_API_KEY is required")
+	}
+	if c.CustomerGatewayConnectionsEnabled {
+		if c.CustomerGatewayModelPlaneAPIKey == "" {
+			return fmt.Errorf("CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY (or CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY) is required when CUSTOMER_GATEWAY_CONNECTIONS_ENABLED=true")
+		}
+		if len(c.EncryptionKey) == 0 {
+			return fmt.Errorf("the credential encryption key is required when CUSTOMER_GATEWAY_CONNECTIONS_ENABLED=true")
+		}
 	}
 	if c.CodexSubscriptionEnabled {
 		if strings.TrimSpace(c.CodexAppServerCommand) == "" {

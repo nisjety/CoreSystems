@@ -16,6 +16,9 @@ pub const ROLE_MODEL_ID: &str = "verevon-role";
 /// Where the chosen model came from, in the order the resolver tries them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoleSource {
+    /// A candidate of the caller's organisation's own table entry (W4-BYO-3), which is tried before the
+    /// platform table.
+    OrgTable,
     /// A candidate of the purpose's table entry.
     Table,
     /// The turn's own model, which the gateway names as the fallback.
@@ -29,6 +32,7 @@ impl RoleSource {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::OrgTable => "org_table",
             Self::Table => "table",
             Self::TurnModel => "turn_model",
             Self::CheapFallback => "cheap_fallback",
@@ -101,6 +105,32 @@ pub fn choose(
     turn_model: &str,
     admits: impl Fn(&str) -> bool,
 ) -> RoleChoice {
+    choose_with_org(policy, &[], purpose, turn_model, admits)
+}
+
+/// [`choose`] with the caller's organisation's candidates for the purpose tried first (W4-BYO-3). `org_candidates`
+/// is the organisation's narrowed list for this purpose, already limited to ids the platform catalogue lists, and
+/// each one is still asked of `admits`, so the entitlement, ZDR, privacy-tier and residency floors apply to it as
+/// they do to a platform candidate. An organisation candidate sets no effort: the effort is the platform entry's,
+/// and it applies only when the platform entry picks the model. An empty list is [`choose`] exactly.
+#[must_use]
+pub fn choose_with_org(
+    policy: &RoutingPolicy,
+    org_candidates: &[String],
+    purpose: RolePurpose,
+    turn_model: &str,
+    admits: impl Fn(&str) -> bool,
+) -> RoleChoice {
+    if let Some(model) = org_candidates.iter().find(|candidate| admits(candidate)) {
+        return RoleChoice {
+            model: model.clone(),
+            decision: RoleDecision {
+                table_entry: Some(purpose),
+                source: RoleSource::OrgTable,
+            },
+            effort: None,
+        };
+    }
     if let Some(entry) = policy.roles.get(&purpose) {
         if let Some(model) = entry.candidates.iter().find(|candidate| admits(candidate)) {
             return RoleChoice {

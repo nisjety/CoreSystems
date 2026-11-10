@@ -25,6 +25,8 @@ const (
 	RoutingPolicy_RecordCandidateEvaluation_FullMethodName = "/model_plane.v1.RoutingPolicy/RecordCandidateEvaluation"
 	RoutingPolicy_PromoteCandidate_FullMethodName          = "/model_plane.v1.RoutingPolicy/PromoteCandidate"
 	RoutingPolicy_ListCandidates_FullMethodName            = "/model_plane.v1.RoutingPolicy/ListCandidates"
+	RoutingPolicy_GetOrgRoutingOverlay_FullMethodName      = "/model_plane.v1.RoutingPolicy/GetOrgRoutingOverlay"
+	RoutingPolicy_SetOrgRoutingOverlay_FullMethodName      = "/model_plane.v1.RoutingPolicy/SetOrgRoutingOverlay"
 )
 
 // RoutingPolicyClient is the client API for RoutingPolicy service.
@@ -77,6 +79,18 @@ type RoutingPolicyClient interface {
 	PromoteCandidate(ctx context.Context, in *PromoteCandidateRequest, opts ...grpc.CallOption) (*PromoteCandidateResponse, error)
 	// List candidates, newest first.
 	ListCandidates(ctx context.Context, in *ListCandidatesRequest, opts ...grpc.CallOption) (*ListCandidatesResponse, error)
+	// Read one organisation's routing overlay (W4-BYO-3). A user reads its own
+	// organisation's; a service holding the `routing:read` scope reads any, which is
+	// how inference-core applies the overlay. Answers `{}` at version 0 for an
+	// organisation that never wrote one. Refused UNAVAILABLE while
+	// SESSION_ORG_ROUTING_OVERLAY is off.
+	GetOrgRoutingOverlay(ctx context.Context, in *GetOrgRoutingOverlayRequest, opts ...grpc.CallOption) (*OrgRoutingOverlayMessage, error)
+	// Replace one organisation's routing overlay. The overlay only narrows the
+	// platform catalogue and role table: it holds `hidden`, `order` and `roles`, and
+	// nothing that adds a model. The caller must be an organisation admin of that
+	// organisation as the gateway has checked it, and a Zero Data Retention caller
+	// is refused. Refused UNAVAILABLE while SESSION_ORG_ROUTING_OVERLAY is off.
+	SetOrgRoutingOverlay(ctx context.Context, in *SetOrgRoutingOverlayRequest, opts ...grpc.CallOption) (*OrgRoutingOverlayMessage, error)
 }
 
 type routingPolicyClient struct {
@@ -147,6 +161,26 @@ func (c *routingPolicyClient) ListCandidates(ctx context.Context, in *ListCandid
 	return out, nil
 }
 
+func (c *routingPolicyClient) GetOrgRoutingOverlay(ctx context.Context, in *GetOrgRoutingOverlayRequest, opts ...grpc.CallOption) (*OrgRoutingOverlayMessage, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OrgRoutingOverlayMessage)
+	err := c.cc.Invoke(ctx, RoutingPolicy_GetOrgRoutingOverlay_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *routingPolicyClient) SetOrgRoutingOverlay(ctx context.Context, in *SetOrgRoutingOverlayRequest, opts ...grpc.CallOption) (*OrgRoutingOverlayMessage, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(OrgRoutingOverlayMessage)
+	err := c.cc.Invoke(ctx, RoutingPolicy_SetOrgRoutingOverlay_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RoutingPolicyServer is the server API for RoutingPolicy service.
 // All implementations must embed UnimplementedRoutingPolicyServer
 // for forward compatibility.
@@ -197,6 +231,18 @@ type RoutingPolicyServer interface {
 	PromoteCandidate(context.Context, *PromoteCandidateRequest) (*PromoteCandidateResponse, error)
 	// List candidates, newest first.
 	ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error)
+	// Read one organisation's routing overlay (W4-BYO-3). A user reads its own
+	// organisation's; a service holding the `routing:read` scope reads any, which is
+	// how inference-core applies the overlay. Answers `{}` at version 0 for an
+	// organisation that never wrote one. Refused UNAVAILABLE while
+	// SESSION_ORG_ROUTING_OVERLAY is off.
+	GetOrgRoutingOverlay(context.Context, *GetOrgRoutingOverlayRequest) (*OrgRoutingOverlayMessage, error)
+	// Replace one organisation's routing overlay. The overlay only narrows the
+	// platform catalogue and role table: it holds `hidden`, `order` and `roles`, and
+	// nothing that adds a model. The caller must be an organisation admin of that
+	// organisation as the gateway has checked it, and a Zero Data Retention caller
+	// is refused. Refused UNAVAILABLE while SESSION_ORG_ROUTING_OVERLAY is off.
+	SetOrgRoutingOverlay(context.Context, *SetOrgRoutingOverlayRequest) (*OrgRoutingOverlayMessage, error)
 	mustEmbedUnimplementedRoutingPolicyServer()
 }
 
@@ -224,6 +270,12 @@ func (UnimplementedRoutingPolicyServer) PromoteCandidate(context.Context, *Promo
 }
 func (UnimplementedRoutingPolicyServer) ListCandidates(context.Context, *ListCandidatesRequest) (*ListCandidatesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListCandidates not implemented")
+}
+func (UnimplementedRoutingPolicyServer) GetOrgRoutingOverlay(context.Context, *GetOrgRoutingOverlayRequest) (*OrgRoutingOverlayMessage, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetOrgRoutingOverlay not implemented")
+}
+func (UnimplementedRoutingPolicyServer) SetOrgRoutingOverlay(context.Context, *SetOrgRoutingOverlayRequest) (*OrgRoutingOverlayMessage, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetOrgRoutingOverlay not implemented")
 }
 func (UnimplementedRoutingPolicyServer) mustEmbedUnimplementedRoutingPolicyServer() {}
 func (UnimplementedRoutingPolicyServer) testEmbeddedByValue()                       {}
@@ -354,6 +406,42 @@ func _RoutingPolicy_ListCandidates_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RoutingPolicy_GetOrgRoutingOverlay_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetOrgRoutingOverlayRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoutingPolicyServer).GetOrgRoutingOverlay(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RoutingPolicy_GetOrgRoutingOverlay_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoutingPolicyServer).GetOrgRoutingOverlay(ctx, req.(*GetOrgRoutingOverlayRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _RoutingPolicy_SetOrgRoutingOverlay_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetOrgRoutingOverlayRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RoutingPolicyServer).SetOrgRoutingOverlay(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RoutingPolicy_SetOrgRoutingOverlay_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RoutingPolicyServer).SetOrgRoutingOverlay(ctx, req.(*SetOrgRoutingOverlayRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RoutingPolicy_ServiceDesc is the grpc.ServiceDesc for RoutingPolicy service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -384,6 +472,14 @@ var RoutingPolicy_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListCandidates",
 			Handler:    _RoutingPolicy_ListCandidates_Handler,
+		},
+		{
+			MethodName: "GetOrgRoutingOverlay",
+			Handler:    _RoutingPolicy_GetOrgRoutingOverlay_Handler,
+		},
+		{
+			MethodName: "SetOrgRoutingOverlay",
+			Handler:    _RoutingPolicy_SetOrgRoutingOverlay_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

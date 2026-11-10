@@ -149,6 +149,10 @@ pub(crate) struct InferenceService {
     language: LanguageAnalyticsChain,
     realtime: RealtimeChain,
     video: VideoChain,
+    /// The customer-gateway adapter (W4-BYO-5). `None` unless `INFERENCE_BYO_GATEWAY_ENABLED` is the
+    /// literal `true` and the broker is configured; then a call that names a connection is refused, never
+    /// served by a platform provider.
+    customer_gateway: Option<provider::customer_gateway::CustomerGatewayProvider>,
     /// Request snapshots (EP-14 S6). `None` unless `INFERENCE_REQUEST_CAPTURE`
     /// is on, and then the handlers do exactly what they did before capture.
     capture: Option<crate::request_capture::RequestCapture>,
@@ -237,6 +241,54 @@ impl InferenceService {
         }
         Ok(principal)
     }
+
+    /// The customer-gateway adapter a chat call must be served by (W4-BYO-5), when the call names a connection
+    /// (`model_connection_id`). `None` for every other call, which runs on the chain as before. A call that
+    /// names a connection is never served by a platform provider: with the switch off it is refused as not
+    /// implemented, and with it on it goes to the gateway alone.
+    ///
+    /// # Errors
+    ///
+    /// The posture refusal of [`reject_unattested_customer_gateway`], or `unimplemented` when the switch is off.
+    fn customer_gateway_for(
+        &self,
+        req: &pb::InferRequest,
+        principal: &AuthenticatedPrincipal,
+    ) -> Result<Option<&provider::customer_gateway::CustomerGatewayProvider>, Status> {
+        if req.model_connection_id.trim().is_empty() {
+            return Ok(None);
+        }
+        reject_unattested_customer_gateway(principal, req)?;
+        match &self.customer_gateway {
+            Some(gateway) => Ok(Some(gateway)),
+            None => Err(provider_error_to_status(provider::ProviderError::UnsupportedModel(
+                "customer gateway connections are not enabled on this deployment".to_owned(),
+            ))),
+        }
+    }
+}
+
+/// The posture of a chat call that names a customer-gateway connection, checked before any gateway is called
+/// (W4-BYO-5). The connection is a user-owned route, so the route check applies to it as to any connection:
+/// an `api_key` principal is refused on it, and a waiver is refused off its own route (`enforce_zdr_route`).
+/// A customer gateway is never zero retention and is never attested, so a turn that asks for ZDR, by the
+/// token or by its own flag, is refused as a modality with no attested deployment is refused.
+fn reject_unattested_customer_gateway(
+    principal: &AuthenticatedPrincipal,
+    req: &pb::InferRequest,
+) -> Result<(), Status> {
+    principal.enforce_zdr_route(
+        provider::customer_gateway::PROVIDER_ID,
+        req.model_connection_id.trim(),
+        req.zdr,
+    )?;
+    if principal.effective_zdr(req.zdr) {
+        return Err(zdr_unavailable_status(
+            "ZDR chat is unavailable on a customer gateway connection because no gateway is independently attested"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse a modality with no independently attested zero-retention deployment
@@ -363,11 +415,19 @@ impl InferenceCore for InferenceService {
             .map_err(provider_error_to_status)?;
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
+        // A call that names a customer-gateway connection is served by that gateway alone (W4-BYO-5). Every
+        // other call runs on the chain exactly as before.
+        let gateway = self.customer_gateway_for(&req, &principal)?;
         clock.enter_chain();
-        let outcome = self
-            .chain
-            .infer_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model), !no_store)
-            .await;
+        let outcome = match gateway {
+            Some(gateway) => provider::ProviderRouter::infer(gateway, &internal_req)
+                .await
+                .map(|response| (response, None)),
+            None => self
+                .chain
+                .infer_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model), !no_store)
+                .await,
+        };
         // Behind the provider call and never awaited: a failed call is captured
         // too, under the model it asked for, because a failed run is what gets
         // debugged.
@@ -414,11 +474,18 @@ impl InferenceCore for InferenceService {
             .map_err(provider_error_to_status)?;
         let internal_req = with_access(to_internal_request(&req, &principal)?, access);
 
+        // The customer-gateway route (W4-BYO-5), as on the unary path.
+        let gateway = self.customer_gateway_for(&req, &principal)?;
         clock.enter_chain();
-        let outcome = self
-            .chain
-            .infer_stream_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model))
-            .await;
+        let outcome = match gateway {
+            Some(gateway) => provider::ProviderRouter::infer_stream(gateway, &internal_req)
+                .await
+                .map(|rx| (rx, None)),
+            None => self
+                .chain
+                .infer_stream_role_noted(&internal_req, &RoleCall::from_wire(req.purpose, &req.role_fallback_model))
+                .await,
+        };
         // Behind the provider call and never awaited. The serving model is named
         // only by the stream's chunks, so a streamed call records the model it
         // asked for.
@@ -575,6 +642,28 @@ impl InferenceCore for InferenceService {
         // distinct ids and are unaffected.
         let mut seen = std::collections::HashSet::new();
         models.retain(|model| seen.insert(model.id.clone()));
+        // The platform catalogue overlay, while INFERENCE_CATALOGUE_OVERLAY is on: hidden
+        // models drop out, each alias lists as its target, and the order the policy names
+        // comes first. It runs before the entitlement filter, which still applies to what
+        // is left.
+        if provider::catalogue_overlay::catalogue_overlay_enabled() {
+            self.chain
+                .policy_handle()
+                .load()
+                .catalogue_overlay
+                .apply_to_listing(&mut models);
+        }
+        // The caller's own organisation overlay (INFERENCE_ORG_OVERLAY), after the platform's: it can only hide
+        // models and move some to the front, never add or rename one. A read that fails leaves the listing as the
+        // platform overlay made it. The entitlement filter below still applies to what is left.
+        if provider::catalogue_overlay::org_overlay_enabled() {
+            if let Some(client) = self.chain.policy_client() {
+                client
+                    .org_overlay(&principal.org_id)
+                    .await
+                    .apply_to_listing(&mut models);
+            }
+        }
 
         // The caller's organisation policy applies to chat models only; every
         // other modality passes unfiltered. Without a policy answer to apply
@@ -833,6 +922,7 @@ impl InferenceCore for InferenceService {
                 size: req.size,
                 quality: req.quality,
                 n: req.n.max(1),
+                strict_provider: req.strict_provider,
             })
             .await
             .map_err(provider_error_to_status)?;
@@ -1310,6 +1400,7 @@ fn to_internal_request(
         tool_choice: req.tool_choice.clone(),
         min_residency: req.min_residency.clone(),
         subscription_connection_id: req.subscription_connection_id.clone(),
+        model_connection_id: req.model_connection_id.trim().to_owned(),
         image_parts: image_parts_from_wire(req)?,
         prompt_tiers: req
             .prompt_tiers
@@ -1526,6 +1617,8 @@ pub struct ProviderChains {
     pub language: LanguageAnalyticsChain,
     pub realtime: RealtimeChain,
     pub video: VideoChain,
+    /// The customer-gateway adapter (W4-BYO-5); `None` unless `INFERENCE_BYO_GATEWAY_ENABLED` is on.
+    pub customer_gateway: Option<provider::customer_gateway::CustomerGatewayProvider>,
 }
 
 /// Canonical service name for the standard gRPC health check. Both this name
@@ -1567,6 +1660,7 @@ pub async fn serve_with_providers_and_readiness(
         language,
         realtime,
         video,
+        customer_gateway,
     } = chains;
     let service = InferenceService {
         auth,
@@ -1578,6 +1672,7 @@ pub async fn serve_with_providers_and_readiness(
         language,
         realtime,
         video,
+        customer_gateway,
         capture: crate::request_capture::RequestCapture::from_env(),
     };
     // Every RPC is counted by the decorator, so none can ship unmetered.
@@ -1785,6 +1880,16 @@ pub const PROVIDER_ERROR_VISION_UNSUPPORTED: &str = "vision_unsupported";
 /// is called.
 pub const PROVIDER_ERROR_TIER_UNAVAILABLE: &str = "tier_unavailable";
 
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when the platform catalogue overlay hides
+/// the model the caller pinned (`INFERENCE_CATALOGUE_OVERLAY`). Refused before any
+/// provider is called, and a retry cannot change the answer.
+pub const PROVIDER_ERROR_MODEL_HIDDEN: &str = "model_hidden";
+
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when a strict image call (`strict_provider`) names a provider or
+/// model that no configured image provider serves. Refused before any provider is called, and no other
+/// provider answers in its place. A retry cannot change the answer.
+pub const PROVIDER_ERROR_IMAGE_MODEL_UNAVAILABLE: &str = "image_model_unavailable";
+
 /// Add one typed trailer. Every value here is a static code, a number or a
 /// formatted timestamp, all valid ASCII; if one ever were not, that signal is
 /// simply absent and the status code still applies.
@@ -1930,6 +2035,32 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
         }
         provider::ProviderError::EntitlementUnavailable => {
             mp_contracts::model_entitlement::Refusal::unavailable().grpc_status()
+        }
+        // A model the platform catalogue hides. NOT_FOUND: the platform offers no such
+        // model, so a retry cannot change the answer. The kind names the refusal.
+        provider::ProviderError::ModelHidden { model } => typed_status(
+            tonic::Code::NotFound,
+            format!("model `{model}` is not offered on this platform"),
+            PROVIDER_ERROR_MODEL_HIDDEN,
+            None,
+            None,
+        ),
+        // A strict image call that no configured image provider serves. NOT_FOUND, as for a hidden model:
+        // the deployment offers no such image model, so a retry cannot change the answer. The kind names the
+        // refusal, and the message names the model only when the caller named one.
+        provider::ProviderError::ImageModelUnavailable { model } => {
+            let message = if model.is_empty() {
+                "no configured image provider serves this request".to_owned()
+            } else {
+                format!("image model `{model}` is not served by a configured image provider")
+            };
+            typed_status(
+                tonic::Code::NotFound,
+                message,
+                PROVIDER_ERROR_IMAGE_MODEL_UNAVAILABLE,
+                None,
+                None,
+            )
         }
     }
 }
@@ -2515,6 +2646,12 @@ mod tests {
             E::ModelNotEntitled {
                 model: "gpt-5".to_owned(),
                 reason: mp_contracts::model_entitlement::Reason::ExplicitlyDenied,
+            },
+            E::ModelHidden {
+                model: "gpt-5".to_owned(),
+            },
+            E::ImageModelUnavailable {
+                model: "gpt-image-1".to_owned(),
             },
             E::EntitlementUnavailable,
         ] {
@@ -3111,6 +3248,8 @@ mod tests {
             E::VisionUnsupported(_) => "ProviderError::VisionUnsupported",
             E::ModelNotEntitled { .. } => "ProviderError::ModelNotEntitled",
             E::EntitlementUnavailable => "ProviderError::EntitlementUnavailable",
+            E::ModelHidden { .. } => "ProviderError::ModelHidden",
+            E::ImageModelUnavailable { .. } => "ProviderError::ImageModelUnavailable",
         }
     }
 

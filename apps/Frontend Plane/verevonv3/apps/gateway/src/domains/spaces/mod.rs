@@ -1646,7 +1646,7 @@ async fn agent_work_offer(state: &AppState, user: &AuthenticatedUser) -> Value {
 /// `service_audience` values Control will sign a thread-read decision for.
 /// Empty means Session Core, which is what every caller before S4.2 asked for
 /// implicitly and what the runs section still asks for.
-const READ_AUDIENCE_SANDBOX_MANAGER: &str = "model-plane-sandbox-manager";
+pub(crate) const READ_AUDIENCE_SANDBOX_MANAGER: &str = "model-plane-sandbox-manager";
 
 async fn shared_thread_read_decision(
     state: &AppState,
@@ -1665,7 +1665,7 @@ async fn shared_thread_read_decision(
 /// point — a token leaked from one path cannot be replayed against the other —
 /// and the cost is one extra Control call on a page that already makes
 /// several.
-async fn shared_thread_read_decision_for_typed(
+pub(crate) async fn shared_thread_read_decision_for_typed(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,

@@ -23,7 +23,7 @@ import {
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
-import { parseChatHistoryAction, threadExportInput } from '@/shared/actions/chat-history'
+import { parseChatHistoryAction, threadExportInput, threadImportInput } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
@@ -292,6 +292,8 @@ export type ChatInvokeRequest = {
   provider?: string
   /** Opaque Integration Core connection id; never a ChatGPT token. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of one of the person's customer gateways (W4-BYO-6). Never zero retention. */
+  modelConnectionId?: string
   threadId?: string
   /** The requested personal Space for a new durable chat thread. The BFF
    * exchanges this selection for a Control-signed, effect-bound decision. */
@@ -2109,7 +2111,10 @@ export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unkn
       : 'auto'
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
+  // A customer-gateway turn is text-only, as a subscription route is (W4-BYO-6): the gateway refuses tools,
+  // images, research, attachments and plan mode, so it takes the same suppressions below.
   const subscriptionBacked = request.provider === 'openai-codex-subscription'
+    || Boolean(request.modelConnectionId?.trim())
   if (subscriptionBacked && (request.attachments ?? []).length > 0) throw new AttachmentsNotSentError()
   const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
@@ -2199,6 +2204,7 @@ export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unkn
     model: request.model,
     provider: request.provider,
     subscription_connection_id: request.subscriptionConnectionId,
+    model_connection_id: request.modelConnectionId?.trim() || undefined,
     profile: request.profile ?? 'chat',
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
@@ -3953,6 +3959,37 @@ function downloadNameOf(disposition: string | null): string | null {
   return disposition?.match(/filename="([^"]+)"/)?.[1] ?? null
 }
 
+/** What an import made (EP-12 S15): the new thread, how many turns it kept, and how many things the file held that it left out. */
+export type ChatThreadImport = {
+  threadId: string
+  importedMessages: number
+  dropped: number
+}
+
+/**
+ * Make a new thread of one of the owner's conversation export files (EP-12 S15). The file's text is checked against
+ * the action contract before anything is sent: at most 2 MiB. Resolves to the new thread and the two counts. Rejects
+ * with the server's typed refusal: `thread_import_disabled` (or `thread_export_disabled`) while importing is off, the
+ * zero-retention code for a zero-retention caller, and `thread_import_invalid` (with `details.reason`) for a file
+ * this deployment cannot read as an export.
+ */
+export async function importThread(exportJson: string, title?: string): Promise<ChatThreadImport> {
+  const request = threadImportInput.parse({ exportJson, ...(title ? { title } : {}) })
+  const raw = objectValue(
+    await requestJson<unknown>('/api/v1/chat/threads/import', {
+      method: 'POST',
+      body: JSON.stringify({ export_json: request.exportJson, title: request.title ?? '' }),
+    }),
+  )
+  const threadId = str(raw?.thread_id)
+  if (!threadId) throw new ApiError('The import did not name a conversation.', 502, 'thread_import_failed')
+  return {
+    threadId,
+    importedMessages: frameCount(raw?.imported_messages),
+    dropped: frameCount(raw?.dropped),
+  }
+}
+
 /** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
 export type ChatBranchMove = {
   activeLeafMessageId: string
@@ -4363,8 +4400,15 @@ export async function listDeckTemplates(): Promise<DeckTemplate[] | null> {
 export type McpAppResource = {
   uri: string
   html: string
-  /** The app declared network origins; the frame's CSP still allows none (D12). */
+  /** The app declared network origins; the frame's CSP allows none unless the client takes `csp` (D12, W4-M2). */
   needsNetwork: boolean
+  /**
+   * The frame's policy the server built from the origins the app declares and the org allows (W4-M2). Present only
+   * while the server's `MCP_APPS_NETWORK_ENABLED` is on; the frame takes it only once `validatedAppCsp` accepts it.
+   */
+  csp?: string
+  /** The origins `csp` names, as the server lists them. The frame reads the policy itself, not this list. */
+  networkOrigins?: string[]
 }
 
 /**
@@ -4387,7 +4431,19 @@ export async function getMcpAppResource(serverId: string, tool: string): Promise
   const uri = str(record?.uri)
   const html = typeof record?.html === 'string' ? record.html : ''
   if (!uri?.startsWith('ui://') || !html.trim()) return null
-  return { uri, html, needsNetwork: record?.needs_network === true }
+  // Only the server's network switch adds these two; without it the document reads as it always did.
+  const csp = str(record?.csp)
+  const origins = record?.network_origins
+  const networkOrigins = Array.isArray(origins)
+    ? origins.filter((origin): origin is string => typeof origin === 'string')
+    : undefined
+  return {
+    uri,
+    html,
+    needsNetwork: record?.needs_network === true,
+    ...(csp === undefined ? {} : { csp }),
+    ...(networkOrigins === undefined ? {} : { networkOrigins }),
+  }
 }
 
 /** One call an MCP App asks its host to make on the app's own server (EP-4 S10). */

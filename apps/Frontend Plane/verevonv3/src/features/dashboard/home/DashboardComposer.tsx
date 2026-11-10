@@ -77,6 +77,7 @@ import {
 } from "solid-js";
 import { Dynamic, Portal, type JSX } from "@solidjs/web";
 import { createResource } from "@/shared/lib/create-resource-compat";
+import { listCustomerGateways } from "@/shared/api/model-connections-client";
 import { dictateAudioBlob } from "@/shared/api/audio-client";
 import {
 	actionKey,
@@ -499,6 +500,8 @@ export type DashboardComposerSubmitPayload = {
 	provider?: string;
 	/** Opaque Integration Core connection id; this is not a ChatGPT credential. */
 	subscriptionConnectionId?: string;
+	/** Opaque Integration Core id of a "Your gateway" customer connection (W4-BYO-6). Never a key. */
+	modelConnectionId?: string;
 	text: string;
 	tools: Array<"image" | "research" | "search">;
 	/**
@@ -1535,9 +1538,30 @@ export function DashboardComposer(props: {
 			? { provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER, connectionId: connection.id }
 			: undefined;
 	});
+	// W4-BYO-6: a customer gateway the person picked under "Your gateway". The gateway is text-only and never zero
+	// retention, so its group is offered only outside a Temporary chat and for an organisation without zero retention.
+	const customerGatewayEnabled = import.meta.env.VITE_BYO_GATEWAY === "true";
+	const [selectedGatewayConnectionId, setSelectedGatewayConnectionId] = createSignal<string | undefined>(
+		initialModelSelection.modelConnectionId,
+	);
+	const gatewayRoute = createMemo(() => {
+		const connectionId = selectedGatewayConnectionId();
+		return connectionId ? { connectionId } : undefined;
+	});
+	const [customerGateways] = createResource(
+		() => (customerGatewayEnabled && activeOrgId() ? activeOrgId() : false),
+		async () => {
+			try {
+				return await listCustomerGateways();
+			} catch {
+				return [];
+			}
+		},
+	);
 	const [staleSubscriptionNotice, setStaleSubscriptionNotice] =
 		createSignal(false);
 	const selectModel = (id: string, provider?: string) => {
+		setSelectedGatewayConnectionId(undefined);
 		setStaleSubscriptionNotice(false);
 		setPolicyResetModel(null);
 		setSubmitError(null);
@@ -1559,6 +1583,21 @@ export function DashboardComposer(props: {
 		});
 		setModelOpen(false);
 	};
+	// A "Your gateway" model: served on the person's own connection, never on a platform provider (W4-BYO-6).
+	const selectGatewayModel = (connectionId: string, modelId: string) => {
+		setStaleSubscriptionNotice(false);
+		setPolicyResetModel(null);
+		setSubmitError(null);
+		setSelectedModel(modelId);
+		setSelectedModelProvider(undefined);
+		setSelectedGatewayConnectionId(connectionId);
+		rememberAiModelSelection(activeOrgId() || "", {
+			model: modelId,
+			label: modelId,
+			modelConnectionId: connectionId,
+		});
+		setModelOpen(false);
+	};
 	// The model the organisation's policy took from this person, by name, until
 	// they choose again. A selection is local state (and remembered in the browser),
 	// so a policy change leaves a stale one behind; sending it would be refused.
@@ -1569,8 +1608,11 @@ export function DashboardComposer(props: {
 			meta: entitlementMeta(),
 			model: selectedModel(),
 			provider: selectedModelProvider(),
+			gateway: selectedGatewayConnectionId(),
 		}),
 		(state) => {
+			// A gateway model is not in the platform catalogue, so the catalogue never lists it.
+			if (state.gateway) return;
 			if (!selectionIsStale({ model: state.model, provider: state.provider }, state.catalogue, state.meta)) {
 				return;
 			}
@@ -1735,6 +1777,13 @@ export function DashboardComposer(props: {
 		() => props.temporaryChatLocked || (props.temporaryChat ?? false),
 	);
 	// `/learn` (EP-11 S7). Offered only behind VITE_LEARN_COMMAND, and only where the page says this chat is saved,
+	// W4-BYO-6: the "Your gateway" models the menu offers. None in a Temporary chat or for a zero-retention organisation.
+	const gatewayModelOptions = createMemo(() => {
+		if (!customerGatewayEnabled || temporaryChat() || orgZeroRetention() === true) return [];
+		return (customerGateways() ?? []).flatMap((connection) =>
+			connection.modelIds.map((modelId) => ({ connectionId: connection.id, modelId })),
+		);
+	});
 	// not temporary or zero retention, and allowed to learn. The composer also reads its own temporary and
 	// zero-retention state (the organization's included), so a page that leaves that out still hides it. The server
 	// refuses each case on its own too.
@@ -3062,6 +3111,7 @@ export function DashboardComposer(props: {
 			provider: subscriptionRoute?.provider,
 			responseMode: effectiveResponseMode(),
 			subscriptionConnectionId: subscriptionRoute?.connectionId,
+			modelConnectionId: gatewayRoute()?.connectionId,
 			text: initialSnapshot.submittedText,
 			tone: settings().tone,
 			zdr: temporaryChat(),
@@ -3451,7 +3501,40 @@ export function DashboardComposer(props: {
 										)}
 										tabindex={0}
 									>
-										<For each={shownChatModelGroups()}>
+										<Show when={gatewayModelOptions().length > 0}>
+	<div class="dashboard-composer-model-group">
+		<p class="dashboard-composer-model-group__label">{i18n.tr("Din gateway", "Your gateway")}</p>
+		<For each={gatewayModelOptions()}>
+			{(option) => (
+				<button
+					type="button"
+					title={i18n.tr(`Bruk ${option.modelId} på din gateway`, `Use ${option.modelId} on your gateway`)}
+					onClick={() => selectGatewayModel(option.connectionId, option.modelId)}
+					class={{
+						"dashboard-composer-model-menu__item--active":
+							selectedGatewayConnectionId() === option.connectionId && selectedModel() === option.modelId,
+					}}
+				>
+					<span>
+						<span>
+							<Zap class="size-3" />
+						</span>
+						<span>{option.modelId}</span>
+					</span>
+					<span class="dashboard-composer-model-menu__right">
+						<span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">
+							{i18n.tr("Egen gateway", "Own gateway")}
+						</span>
+						<Show when={selectedGatewayConnectionId() === option.connectionId && selectedModel() === option.modelId}>
+							<Check class="size-4" />
+						</Show>
+					</span>
+				</button>
+			)}
+		</For>
+	</div>
+</Show>
+<For each={shownChatModelGroups()}>
 											{(group) => {
 												// A folded group opens by itself while the search is on (it lists only matching models) and when the selection is one of its models.
 												const opened = () =>
@@ -4665,6 +4748,7 @@ function createComposerSubmitPayload(input: {
 	provider?: string;
 	responseMode: ResponseMode;
 	subscriptionConnectionId?: string;
+	modelConnectionId?: string;
 	text: string;
 	tone: ComposerTone;
 	zdr: boolean;
@@ -4689,6 +4773,9 @@ function createComposerSubmitPayload(input: {
 			...(input.provider ? { provider: input.provider } : {}),
 			...(input.subscriptionConnectionId
 				? { subscriptionConnectionId: input.subscriptionConnectionId }
+				: {}),
+			...(input.modelConnectionId
+				? { modelConnectionId: input.modelConnectionId }
 				: {}),
 			// Key omitted entirely when no tier applies (intent modes, unspecified):
 			// callers and tests treat presence as "the user pinned a tier".

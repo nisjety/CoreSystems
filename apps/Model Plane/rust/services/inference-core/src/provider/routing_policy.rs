@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use super::catalogue_overlay::CatalogueOverlay;
 use super::effort::Level;
 use super::intent::{Complexity, VerevonMode, CHEAP_FALLBACK};
 use super::ModelInfo;
@@ -62,6 +63,12 @@ pub struct RoutingPolicy {
     /// while empty, so a policy that never set it reads and writes as before.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub roles: RoleTable,
+    /// The platform catalogue overlay (`INFERENCE_CATALOGUE_OVERLAY`): models the
+    /// listing hides and admission refuses, the listing's order, and model-id
+    /// aliases. Left out of the stored JSON while empty, so a policy without one
+    /// reads and writes as before.
+    #[serde(default, skip_serializing_if = "CatalogueOverlay::is_empty")]
+    pub catalogue_overlay: CatalogueOverlay,
 }
 
 /// The side-task purposes the role table can name (EP-13 S4). The snake_case
@@ -211,6 +218,7 @@ impl Default for RoutingPolicy {
             tool_fallback_ladder: default_tool_fallback_ladder(),
             complexity: ComplexityWeights::default(),
             roles: RoleTable::new(),
+            catalogue_overlay: CatalogueOverlay::default(),
             // Ladder over the deployed roster, ascending cost/capability:
             //   gpt-5-nano < gpt-4o-mini < gpt-5-mini < claude-sonnet-4-6 < claude-opus-4-8.
             // Each mode owns a distinct cost/quality identity; complexity climbs
@@ -401,7 +409,7 @@ impl RoutingPolicy {
 
 /// Whether a model takes a call with no reasoning in it: it has no effort control,
 /// or it accepts the `minimal` level (EP-13 D7). A small-budget side task needs one.
-fn accepts_no_reasoning(model: &ModelInfo) -> bool {
+pub(super) fn accepts_no_reasoning(model: &ModelInfo) -> bool {
     model.effort_levels.is_empty() || model.effort_levels.contains(&Level::Minimal)
 }
 

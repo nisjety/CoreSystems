@@ -24,7 +24,6 @@ import (
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/pkg/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
-	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
@@ -39,6 +38,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/runwatch"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"github.com/triodelab/model-plane/services/capability-core/internal/watch"
 	"google.golang.org/grpc"
@@ -298,10 +298,10 @@ func main() {
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
-	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	skillsHandler := api.NewSkillsHandler(pool).WithPublisher(recPub)
+	skillsHandler.Register(protectedMux)
 	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)
-	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewOrgHooksHandler(pool).Register(protectedMux)
@@ -311,6 +311,15 @@ func main() {
 	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken).
 		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 	mcpHandler.Register(protectedMux)
+	// Behind PLUGIN_LOADER_ENABLED (off by default): source pins, the kill list, the enable gate and the
+	// install, uninstall and components routes, which write children through the skills and MCP stores above.
+	// Off is inert CRUD.
+	api.NewPluginsHandler(pool).WithPublisher(recPub).WithSupplyChainPins(api.PluginLoaderFromLookup(os.Getenv)).
+		WithChildStores(skillsHandler, mcpHandler).Register(protectedMux)
+	// Behind the same PLUGIN_LOADER_ENABLED switch (W4-PL-3): the org-curated catalogue and its approvals, and the
+	// kill list. A kill uninstalls every installed copy of the killed digest through the same child stores.
+	api.NewPluginCatalogHandler(pool).WithPublisher(recPub).WithLoaderEnabled(api.PluginLoaderFromLookup(os.Getenv)).
+		WithChildStores(skillsHandler, mcpHandler).Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
 	// comment — these routes authenticate themselves (X-Mcp-Service-Token) and
 	// must not sit behind the per-user JWT middleware wrapping protectedMux

@@ -384,7 +384,8 @@
       "session-core",
       "inference-core",
       "capability-core",
-      "letta-bridge"
+      "letta-bridge",
+      "model-gateway"
     ],
     "consumerEnv": "ORCHESTRATOR_CORE_SERVICE_API_KEY",
     "orgIds": [],
@@ -392,6 +393,7 @@
       "capability-core": "persistent",
       "inference-core": "persistent",
       "letta-bridge": "persistent",
+      "model-gateway": "persistent",
       "session-core": "persistent"
     },
     "scopes": [
@@ -400,6 +402,7 @@
       "inference:invoke",
       "memory:read",
       "memory:write",
+      "model:goal_judge",
       "session:runs:system-owner",
       "session:write"
     ],
@@ -414,6 +417,9 @@
       "letta-bridge": [
         "memory:read",
         "memory:write"
+      ],
+      "model-gateway": [
+        "model:goal_judge"
       ],
       "session-core": [
         "session:runs:system-owner",

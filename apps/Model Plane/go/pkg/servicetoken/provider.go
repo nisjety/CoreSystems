@@ -51,7 +51,9 @@
 // The `{audience}` path segment is the plane-audience slug — `session-core`,
 // `inference-core`. auth-core's `exactAudience()` throws unless the configured
 // audience string equals that slug, so the response `audience` is always
-// exactly the slug and is safe to assert.
+// exactly the slug and is safe to assert. The one audience auth-core mints on
+// another controller is the Model Plane gateway's: its token comes from
+// `/api/model-plane/internal-token`, which a caller names with Config.MintPath.
 //
 // Request fields can only NARROW the deployment allowlist, never widen it: the
 // service principal's registry entry owns the ceiling on audiences, orgs and
@@ -137,6 +139,11 @@ type Config struct {
 	// Reason is audited by Auth Core, so it must describe the real purpose
 	// rather than be copied from another caller.
 	Reason string
+	// MintPath overrides the mint route: a path on AuthCoreURL that starts with
+	// "/". Empty mints on /api/{audience}/internal-token, which every plane
+	// audience uses. The Model Plane gateway's audience is minted on
+	// /api/model-plane/internal-token, so its caller names that route.
+	MintPath string
 
 	// HTTPClient overrides the default client (tests).
 	HTTPClient *http.Client
@@ -147,6 +154,7 @@ type Config struct {
 // Provider mints and caches tokens for exactly one audience.
 type Provider struct {
 	authCoreURL string
+	mintPath    string
 	serviceID   string
 	credential  string
 	audience    string
@@ -192,6 +200,13 @@ func New(cfg Config) (*Provider, error) {
 	if strings.TrimSpace(cfg.Reason) == "" {
 		return nil, errors.New("servicetoken: reason is required (Auth Core audits it)")
 	}
+	mintPath := strings.TrimSpace(cfg.MintPath)
+	if mintPath == "" {
+		mintPath = "/api/" + strings.TrimSpace(cfg.Audience) + "/internal-token"
+	}
+	if !strings.HasPrefix(mintPath, "/") {
+		return nil, errors.New("servicetoken: mint path must start with /")
+	}
 
 	httpClient := cfg.HTTPClient
 	if httpClient == nil {
@@ -204,6 +219,7 @@ func New(cfg Config) (*Provider, error) {
 
 	return &Provider{
 		authCoreURL: authCoreURL,
+		mintPath:    mintPath,
 		serviceID:   strings.TrimSpace(cfg.ServiceID),
 		credential:  strings.TrimSpace(cfg.Credential),
 		audience:    strings.TrimSpace(cfg.Audience),
@@ -298,7 +314,7 @@ func (p *Provider) mint(ctx context.Context, key, orgID string) (string, error) 
 		return "", fmt.Errorf("servicetoken: encode %s token request: %w", p.audience, err)
 	}
 
-	endpoint := p.authCoreURL + "/api/" + p.audience + "/internal-token"
+	endpoint := p.authCoreURL + p.mintPath
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("servicetoken: build %s token request: %w", p.audience, err)

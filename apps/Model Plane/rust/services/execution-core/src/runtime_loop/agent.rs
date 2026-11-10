@@ -3674,6 +3674,8 @@ async fn run_rounds(
             // The run's images, on every round beside the goal they were attached to.
             image_parts: image_parts.clone(),
             role_fallback_model: String::new(),
+            // A run's rounds never name a customer-gateway connection (W4-BYO-5): empty names none.
+            model_connection_id: String::new(),
         });
         infer_request.metadata_mut().insert(
             "authorization",
@@ -8107,7 +8109,7 @@ mod capability_binding_contract {
 /// the process produces it writes a plan that silently never completes. It has
 /// to know that reading is a pull with a cursor.
 fn process_tool_defs() -> Vec<pb::ToolDefinition> {
-    vec![
+    let mut defs = vec![
         pb::ToolDefinition {
             name: "process_start".to_owned(),
             description: "Start a LONG-RUNNING background process in this Space's persistent workspace and return immediately with a process_id. Use it for work that outlives one tool call - a build, a test suite, a watcher, a server, a long computation - where code_interpreter's per-call timeout would kill it. The program is Python (or POSIX sh), same sandbox as code_interpreter: NO NETWORK, read-only system, and it can only write this Space's workspace. Unlike code_interpreter the workspace PERSISTS, so files it writes are still there for later calls. It does NOT stream output to you: collect output with process_read using the returned process_id. Set tty to run it on a pseudo-terminal, where this deployment offers one, so it behaves as it would at a terminal. The process is killed at its TTL (30 minutes by default, 1 hour maximum, and never past this Space's sandbox lease), so treat it as bounded work, not a permanent service.".to_owned(),
@@ -8133,7 +8135,15 @@ fn process_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "List this Space's background processes with their state, exit code and redacted command. Use it to find a process_id you no longer have - processes survive the turn that started them, so one may have been started by an earlier conversation in this Space. Finished processes are hidden unless include_finished is true.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"include_finished":{"type":"boolean","description":"Include processes that have already ended; default false"},"limit":{"type":"integer","description":"Max processes to return; default 20, max 100"},"after_process_id":{"type":"string","description":"Cursor: the last process_id of the previous page"}},"required":[]}"#.to_owned(),
         },
-    ]
+    ];
+    // `spill` is offered only where its switch is on, so a deployment without it offers the schema it
+    // always has.
+    if crate::process_tools::output_spill_enabled() {
+        for def in defs.iter_mut().filter(|def| def.name == "process_read") {
+            def.parameters_json = crate::process_tools::READ_PARAMETERS_WITH_SPILL.to_owned();
+        }
+    }
+    defs
 }
 
 fn offered_tool_defs() -> Vec<pb::ToolDefinition> {

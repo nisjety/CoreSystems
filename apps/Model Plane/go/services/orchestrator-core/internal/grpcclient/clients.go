@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/triodelab/model-plane/services/orchestrator-core/internal/servicecred"
@@ -22,6 +23,18 @@ type Clients struct {
 	SandboxManager *grpc.ClientConn
 	BrowserBroker  *grpc.ClientConn
 	LettaBridge    *grpc.ClientConn
+
+	// ModelGateway is the HTTP route to model-gateway's goal judge (EP-7 S6). It is nil when no
+	// base URL is configured, and the judge activity then fails closed.
+	ModelGateway *ModelGateway
+}
+
+// ModelGateway is orchestrator-core's HTTP route to model-gateway, which its goal judge calls with
+// its own service credentials (EP-7 S6). BaseURL has no trailing slash. Minters supplies the two
+// bearers the call presents: the gateway's own token, and the inference-core bearer the judge spends.
+type ModelGateway struct {
+	BaseURL string
+	Minters servicecred.Minters
 }
 
 // Options configures the gRPC client factory.
@@ -42,6 +55,10 @@ type Options struct {
 
 	// Logger receives the interceptor's re-mint warnings.
 	Logger *slog.Logger
+
+	// ModelGatewayURL is model-gateway's HTTP base URL, for the goal judge (EP-7 S6). Empty leaves
+	// the judge unconfigured.
+	ModelGatewayURL string
 }
 
 // Dial creates gRPC connections to all configured sibling services.
@@ -101,6 +118,11 @@ func Dial(ctx context.Context, opts Options) (*Clients, error) {
 	clients.SandboxManager = dial(opts.SandboxManagerAddr, "sandbox-manager", "")
 	clients.BrowserBroker = dial(opts.BrowserBrokerAddr, "browser-broker", "")
 	clients.LettaBridge = dial(opts.LettaBridgeAddr, "letta-bridge", servicecred.AudienceLettaBridge)
+
+	if base := strings.TrimRight(strings.TrimSpace(opts.ModelGatewayURL), "/"); base != "" {
+		clients.ModelGateway = &ModelGateway{BaseURL: base, Minters: opts.Minters}
+		logger.Info("model-gateway goal judge endpoint configured", "base_url", base)
+	}
 
 	return clients, nil
 }

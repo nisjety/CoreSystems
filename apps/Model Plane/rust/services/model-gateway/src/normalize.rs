@@ -31,6 +31,11 @@ pub struct NormalizedRequest {
     /// Opaque Integration Core subscription reference. This is validated again
     /// by Integration Core with the caller's verified org/user scope.
     pub subscription_connection_id: String,
+    /// Opaque Integration Core id of one of the caller's customer-gateway model
+    /// connections (W4-BYO-6). Non-empty only on a turn the `MODEL_GATEWAY_BYO_GATEWAY`
+    /// switch admits, and inference-core then serves that turn on the gateway alone.
+    /// Empty on every other turn.
+    pub model_connection_id: String,
     #[allow(dead_code)]
     pub session_key: Option<String>,
     #[allow(dead_code)]
@@ -137,6 +142,45 @@ pub(crate) fn load_default_model() -> String {
         .ok()
         .map(|m| m.trim().to_owned())
         .unwrap_or_default()
+}
+
+/// The provider hint a customer-gateway turn may carry: its own registry id, or none (W4-BYO-6).
+const CUSTOMER_GATEWAY_PROVIDER_HINT: &str = "customer-gateway";
+
+/// The refusal a customer-gateway turn gets for anything beyond plain text chat (W4-BYO-6). The gateway
+/// has no tool, image, research, plan or agent route, so such a turn is refused rather than sent on.
+const CUSTOMER_GATEWAY_TEXT_ONLY_REFUSAL: &str = "customer gateway connections support text-only chat without image generation, deep research, plan mode, attachments, tool specs or agentic runs";
+
+/// Whether a customer-gateway connection may be named on a chat turn: the `MODEL_GATEWAY_BYO_GATEWAY`
+/// switch, read as the literal `true` only. Off by default (W4-BYO-6).
+#[must_use]
+pub fn byo_gateway_enabled() -> bool {
+    std::env::var("MODEL_GATEWAY_BYO_GATEWAY").ok().as_deref() == Some("true")
+}
+
+/// The shape of an opaque customer-gateway connection id: non-empty, at most 128 bytes, and made of ASCII
+/// letters, digits, `-`, `_` and `.`. Integration Core decides whether the id belongs to the caller.
+#[must_use]
+pub fn byo_connection_id_well_formed(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// A connection id that names something: non-blank. A blank id is no connection at all.
+fn non_blank(id: Option<&str>) -> Option<&str> {
+    id.filter(|id| !id.trim().is_empty())
+}
+
+/// The user connection a request names for the turn's posture decision (`zdr_posture::Route`): the
+/// subscription connection when it is not blank, else the customer-gateway connection (W4-BYO-6). A blank
+/// subscription id names nothing, so it cannot hide a gateway id behind it.
+#[must_use]
+pub fn connection_named_by(req: &InvokeRequest) -> Option<&str> {
+    non_blank(req.subscription_connection_id.as_deref())
+        .or_else(|| non_blank(req.model_connection_id.as_deref()))
 }
 
 /// The refusal a subscription turn has always got for anything beyond
@@ -453,6 +497,76 @@ fn normalize_with(
         }
     }
 
+    // A customer-gateway connection (W4-BYO-6) is named only with its switch on, and only for a plain text chat
+    // turn that is not zero-retention. Any other turn would reach a platform provider through a tool, image,
+    // research, plan or agent route, which never goes to the user's own connection. Every refusal is typed and
+    // nothing is sent.
+    let model_connection_id = req
+        .model_connection_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_owned();
+    if !model_connection_id.is_empty() {
+        if !byo_gateway_enabled() {
+            return Err((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "error": "customer gateway connections are not enabled on this deployment",
+                    "code": "customer_gateway_disabled",
+                })),
+            ));
+        }
+        if !subscription_connection_id.is_empty() {
+            return Err(refusal(
+                "a turn names one connection: a subscription or a customer gateway, not both",
+                Some("connection_ambiguous"),
+            ));
+        }
+        if !byo_connection_id_well_formed(&model_connection_id) {
+            return Err(refusal(
+                "model_connection_id is not a customer gateway connection id",
+                Some("model_connection_invalid"),
+            ));
+        }
+        if !provider_hint.is_empty()
+            && !provider_hint.eq_ignore_ascii_case(CUSTOMER_GATEWAY_PROVIDER_HINT)
+        {
+            return Err(refusal(
+                "a customer gateway turn names no platform provider",
+                Some("connection_ambiguous"),
+            ));
+        }
+        // The same answer the posture decision gives an explicit ZDR request on a connection (`zdr_posture`),
+        // so a body that asks for zero retention here is refused whichever check it meets first.
+        if req.zdr {
+            return Err(crate::zdr_precheck::http(
+                &mp_contracts::zdr_refusal::Refusal::EXPLICIT_REQUEST_NOT_SUPPORTED_BY_CONNECTION,
+            ));
+        }
+        let agentic = req.features.iter().any(|feature| feature == "agentic");
+        let agent_profile = req.profile.as_deref().map(str::trim) == Some("deployed_agent");
+        let structured = req
+            .structured_output_schema
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
+        if req.deep_research
+            || req.generate_image
+            || req.plan_mode
+            || req.execute_granted
+            || agentic
+            || agent_profile
+            || structured
+            || !req.attachments.is_empty()
+            || !req.tools.is_empty()
+        {
+            return Err(refusal(
+                CUSTOMER_GATEWAY_TEXT_ONLY_REFUSAL,
+                Some("feature_not_supported"),
+            ));
+        }
+    }
+
     // Validate model against allowlist — but skip when the model is unspecified
     // (empty): inference-core resolves it to a provider default downstream, so
     // there is nothing to validate against the allowlist yet.
@@ -503,6 +617,7 @@ fn normalize_with(
         model,
         provider_hint,
         subscription_connection_id,
+        model_connection_id,
         session_key: req.session_key.clone(),
         thread_id: req.thread_id.clone(),
         space_context: req.space_context.clone(),
@@ -577,6 +692,7 @@ mod tests {
             model: model.map(str::to_owned),
             provider: None,
             subscription_connection_id: None,
+            model_connection_id: None,
             session_key: None,
             thread_id: None,
             space_context: None,

@@ -4,8 +4,10 @@ use tracing::warn;
 
 pub mod anthropic;
 pub mod artifact_ref;
+pub mod catalogue_overlay;
 pub mod codex_subscription;
 mod codex_subscription_tools;
+pub mod customer_gateway;
 pub mod doc_intel;
 pub mod effort;
 pub mod fallback;
@@ -170,6 +172,10 @@ pub struct InferRequest {
     /// included in the prompt-cache scope so two connections cannot share a
     /// cached response or bypass the broker's per-connection audit boundary.
     pub subscription_connection_id: String,
+    /// Opaque Integration Core id of a customer-gateway model connection (W4-BYO-5), as the caller names
+    /// it. Non-empty only for a call that the customer-gateway adapter serves, which never routes through the
+    /// platform chain. It is a routing reference, never a credential, and empty names none.
+    pub model_connection_id: String,
     /// How many leading messages are standing (Stable) and authored (Context)
     /// text. The default names none and is the pre-existing behaviour
     /// byte-for-byte. Read only by the Anthropic adapter, behind
@@ -1199,6 +1205,18 @@ pub enum ProviderError {
     /// within its bound, so nothing was sent (fail closed, ZDR included).
     #[error("model entitlement unavailable")]
     EntitlementUnavailable,
+
+    /// The platform catalogue overlay hides the model the caller pinned
+    /// (`INFERENCE_CATALOGUE_OVERLAY`). Refused before any provider was called.
+    /// `model` is the id the caller named, which may be an alias.
+    #[error("model hidden by the platform catalogue: {model}")]
+    ModelHidden { model: String },
+
+    /// A strict image call (`strict_provider`) names a provider or model that no configured image provider
+    /// serves. Refused before any provider was called, and no other provider answers in its place. `model` is
+    /// the model the caller named, empty when it named none.
+    #[error("image model unavailable: {model}")]
+    ImageModelUnavailable { model: String },
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU

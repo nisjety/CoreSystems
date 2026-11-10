@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
+	"github.com/triodelab/integration-corev2/internal/customergateway"
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/handoff"
@@ -66,6 +67,10 @@ type ServerConfig struct {
 	// CodexSubscriptions owns ChatGPT subscription device-code flows and
 	// execution. It is nil unless explicitly enabled in deployment config.
 	CodexSubscriptions *codexsubscription.Manager
+	// CustomerGateway registers a customer's OpenAI-compatible gateway (key sealed in this service)
+	// and brokers inference to it for Model Plane. It is nil, and its routes absent, unless
+	// CUSTOMER_GATEWAY_CONNECTIONS_ENABLED is exactly "true".
+	CustomerGateway *customergateway.Broker
 	// OrgZDR reads the organisation's ZDR posture from org-core for the acknowledgement API. Nil
 	// refuses every acknowledgement (fail closed), and the routes exist only with the switch on.
 	OrgZDR ZDROrgPosture
@@ -194,6 +199,10 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})
 	codexSubscriptionModelPlaneAuth := auth.InternalOnly(auth.Config{
 		APIKey:       cfg.Config.CodexSubscriptionModelPlaneAPIKey,
+		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
+	})
+	customerGatewayModelPlaneAuth := auth.InternalOnly(auth.Config{
+		APIKey:       cfg.Config.CustomerGatewayModelPlaneAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
 	})
 	app.Get("/metrics", internalAuth, func(c *fiber.Ctx) error {
@@ -1334,6 +1343,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			if errors.Is(err, oauth.ErrResourceBoundToken) {
 				return apiError(c, fiber.StatusForbidden, "resource_bound_token", "Algolia authority is restricted to Integration Core's read-only MCP adapter.")
 			}
+			if errors.Is(err, oauth.ErrBrokerOnlyCredential) {
+				return apiError(c, fiber.StatusForbidden, "broker_only_credential", "This connection's credential is used only by Integration Core's broker and cannot be leased.")
+			}
 			if errors.Is(err, store.ErrNotFound) {
 				return apiError(c, fiber.StatusNotFound, "connection_not_found", "No active connection exists for this organization and connector.")
 			}
@@ -1346,6 +1358,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})...)
 
 	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
+	registerCustomerGatewayRoutes(app, cfg, customerGatewayModelPlaneAuth, bearerOnlyAuth, rateLimited)
 	registerZDRAcknowledgementRoutes(app, cfg, bearerOnlyAuth, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {

@@ -18,6 +18,21 @@ const threadExportFields = {
   profile: z.enum(['full', 'redacted']),
 }
 
+// The most an import takes (EP-12 S15): the export file's text, at most 2 MiB as the gateway and Session Core read it.
+export const THREAD_IMPORT_MAX_BYTES = 2 * 1024 * 1024
+
+// The owner's import of one export file (EP-12 S15): the file's text, and a title only when one is given; the file's
+// own title is used otherwise. The new thread is the caller's, so no owner or organisation is named here.
+const threadImportFields = {
+  exportJson: z
+    .string()
+    .min(1)
+    .refine((text) => new TextEncoder().encode(text).length <= THREAD_IMPORT_MAX_BYTES, {
+      message: 'The file is larger than an import takes.',
+    }),
+  title: z.string().trim().max(96).optional(),
+}
+
 // The three members the command palette runs (W5-077-c) are named, so the palette's inputs reuse them
 // instead of restating the fields. The union below is unchanged.
 export const threadArchiveAction = z.object({ type: z.literal('thread.archive'), threadId })
@@ -33,6 +48,7 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('thread.mark_read'), threadId }),
   z.object({ type: z.literal('thread.search'), query: z.string().trim().min(1).max(200), threadId: threadId.optional() }),
   z.object({ type: z.literal('thread.export'), ...threadExportFields }),
+  z.object({ type: z.literal('thread.import'), ...threadImportFields }),
   z.object({ type: z.literal('message.switch_version'), threadId, messageId, index: z.number().int().min(0).max(100) }),
   // A rewind moves the active leaf and deletes nothing, but it still changes
   // which answer the next turn sees, so the caller must confirm it explicitly.
@@ -45,6 +61,10 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
 // The registry's input for the same export: the three fields and nothing else. The owner is the
 // session's, so a body that names an owner or an organisation is refused rather than dropped.
 export const threadExportInput = z.object(threadExportFields).strict()
+
+// The registry's input for the import: the file's text and the optional title, and nothing else. The new thread is the
+// session's, so a body that names an owner or an organisation is refused rather than dropped.
+export const threadImportInput = z.object(threadImportFields).strict()
 
 export type ChatHistoryAction = z.infer<typeof chatHistoryActionSchema>
 

@@ -13,10 +13,15 @@ import (
 
 	"github.com/triodelab/integration-corev2/internal/config"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
+	"github.com/triodelab/integration-corev2/internal/customergateway"
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/providers"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
+
+// ErrBrokerOnlyCredential is returned when a token lease is asked for a connection whose
+// credential only Integration Core's own broker may use (a customer gateway's API key).
+var ErrBrokerOnlyCredential = errors.New("this connection's credential is used only by Integration Core's broker and cannot be leased")
 
 type Service struct {
 	cfg       config.Config
@@ -446,7 +451,8 @@ func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason
 
 	revokeStatus := "not_required"
 	var revokeErr error
-	if connection.DeletedAt == nil && connection.EncryptedAccessToken != "" {
+	// A customer gateway's key lives only in this service: there is no provider to revoke it at.
+	if connection.DeletedAt == nil && connection.EncryptedAccessToken != "" && connection.ProviderKey != customergateway.ProviderKey {
 		if client, ok := s.clients[connection.ProviderKey]; ok {
 			accessToken, decryptErr := s.vault.Decrypt(connection.EncryptedAccessToken, []byte(connection.ID))
 			if decryptErr != nil {
@@ -539,6 +545,9 @@ func (s *Service) DisconnectConnection(ctx context.Context, connectionID, reason
 }
 
 func (s *Service) accessTokenForConnection(ctx context.Context, connection store.Connection) (AccessTokenResult, error) {
+	if connection.ProviderKey == customergateway.ProviderKey {
+		return AccessTokenResult{}, ErrBrokerOnlyCredential
+	}
 	if connection.DeletedAt != nil || connection.Status != "active" {
 		return AccessTokenResult{}, store.ErrNotFound
 	}

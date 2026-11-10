@@ -6,6 +6,8 @@ interface ImportMetaEnv {
 	readonly VITE_ALLOW_DEV_AUTH_BYPASS?: string;
 	readonly VITE_TURNSTILE_SITE_KEY?: string;
 	readonly VITE_FLEET_CONSOLE?: string;
+	/** "true" shows the customer-gateway settings section and the "Your gateway" model group (W4-BYO-6). Default off. */
+	readonly VITE_BYO_GATEWAY?: string;
 	readonly VITE_AGENT_BUILDER?: string;
 	readonly VITE_BROWSER_OMNIBOX_SEARCH?: string;
 	/** "1" shows the composer's `@tab` chips and sends `browserContext` (E3.3-c). Default off. */
@@ -68,6 +70,8 @@ interface ImportMetaEnv {
 	readonly VITE_SPACE_MEMORY_TAB?: string;
 	/** "true" makes the MCP add flow probe a server first, then offer a tool picker before it is saved (W4-CC-2). Default off. */
 	readonly VITE_MCP_PROBE?: string;
+	/** "true" lets an MCP app frame take the server's network policy once the client re-validates it (W4-M2). Default off. */
+	readonly VITE_MCP_APPS_NETWORK?: string;
 	/** "true" lets an inline widget quote a passage of its own text as a chip the person clicks into the composer (EP-4 W4-IO-2). Default off. */
 	readonly VITE_WIDGET_SELECTION?: string;
 	/** "true" draws a generated image's tool call as an image card: the model and provider that made it, and any typed refusal (W4-IMG-4). Default off. */
@@ -78,6 +82,12 @@ interface ImportMetaEnv {
 	readonly VITE_SHELL_TOASTS?: string;
 	/** "true" lets two bare Escape presses within 600 ms stop the streaming chat answer (F-t3-077). Default off. */
 	readonly VITE_CHAT_DOUBLE_ESCAPE_STOP?: string;
+	/** "true" mounts the catalogue overlay editor (hide, order, aliases) on the router-policy page (F-t3-065). Default off. */
+	readonly VITE_CATALOGUE_OVERLAY?: string;
+	/** "true" offers importing a conversation export as a new conversation, beside the export on the latest answer (EP-12 S15). Default off. */
+	readonly VITE_THREAD_IMPORT?: string;
+	/** "true" shows the plugin supply-chain controls in settings: source pin, manifest digest, catalogue approval, kill state and the install consent dialog (F-t3-059, W4-PL-4). Default off. */
+	readonly VITE_PLUGIN_LOADER?: string;
 }
 
 interface ImportMeta {

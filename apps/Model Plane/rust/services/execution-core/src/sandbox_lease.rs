@@ -648,8 +648,15 @@ async fn record_workspace_overlay(
             )
             .await
         } else {
-            crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
-                .await
+            // Everything the run changed, except a process's output spill (W4-P6). A spill is
+            // never durable: it is local to this lease's workspace and goes with it.
+            crate::workspace_hydrate::diff_and_upload_where(
+                cas,
+                &workspace.path,
+                &workspace.baseline,
+                |path, _| !crate::process_tools::is_output_spill(path),
+            )
+            .await
         };
         match diffed {
             Ok(changed) if changed.is_empty() => outcome.uploaded = true,

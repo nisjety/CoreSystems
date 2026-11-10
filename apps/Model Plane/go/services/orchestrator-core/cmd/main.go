@@ -83,6 +83,7 @@ func main() {
 		SandboxManagerAddr: cfg.SandboxManagerAddr,
 		BrowserBrokerAddr:  cfg.BrowserBrokerAddr,
 		LettaBridgeAddr:    cfg.LettaBridgeAddr,
+		ModelGatewayURL:    cfg.ModelGatewayURL,
 		Minters:            minters,
 		Logger:             logger,
 	})
@@ -166,6 +167,9 @@ func main() {
 	w.RegisterActivity(a.ExecuteStepLoopActivity)
 	w.RegisterActivity(a.ExecuteStepActivity)
 	w.RegisterActivity(a.CompleteRunActivity)
+	// JudgeGoalTurnActivity runs only for a goal-bound fire, behind ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED
+	// (EP-7 S6); it is registered unconditionally so histories that recorded it replay.
+	w.RegisterActivity(a.JudgeGoalTurnActivity)
 	w.RegisterActivity(a.FailRunActivity)
 	w.RegisterActivity(a.QueryMemoryEntriesActivity)
 	w.RegisterActivity(a.SummarizeMemoryActivity)

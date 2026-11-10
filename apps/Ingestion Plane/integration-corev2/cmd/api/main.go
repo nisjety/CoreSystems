@@ -22,6 +22,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
+	"github.com/triodelab/integration-corev2/internal/customergateway"
 	"github.com/triodelab/integration-corev2/internal/db"
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/egress"
@@ -136,6 +137,17 @@ func main() {
 	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("initialize token vault")
+	}
+
+	// Customer-gateway model connections (dark): the broker seals a gateway key with this vault and
+	// calls the gateway through the egress guard. Without the switch it is not built and its routes
+	// are absent.
+	var customerGateway *customergateway.Broker
+	if cfg.CustomerGatewayConnectionsEnabled {
+		customerGateway, err = customergateway.New(customergateway.Config{Vault: vault})
+		if err != nil {
+			logger.Fatal().Err(err).Msg("initialize customer gateway broker")
+		}
 	}
 
 	// Microsoft's token/profile endpoints are fixed deployment config
@@ -316,6 +328,7 @@ func main() {
 		WriteAttestations:  writeAttestations,
 		HotPath:            hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
 		CodexSubscriptions: codexSubscriptions,
+		CustomerGateway:    customerGateway,
 		// Same finspo-core client the finspo worker uses; lets the generic
 		// sync route answer 409 no_sources_registered instead of queuing a
 		// Microsoft job that has no library to sync. ErrNotConfigured (no

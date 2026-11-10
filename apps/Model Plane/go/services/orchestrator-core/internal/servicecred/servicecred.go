@@ -75,6 +75,9 @@ const (
 	// The connection interceptor filters this audience to that method, so the
 	// user-bound ExecuteStep/RunAgent methods never receive a service token.
 	AudienceExecutionCore = "execution-core"
+	// AudienceModelGateway is the Model Plane gateway's audience, used only for the goal judge's call
+	// (EP-7 S6). Its token is minted on auth-core's Model Plane route; see mintPathOverrides.
+	AudienceModelGateway = "model-gateway"
 )
 
 // metadataAuthorization is the gRPC metadata key every Model Plane service reads

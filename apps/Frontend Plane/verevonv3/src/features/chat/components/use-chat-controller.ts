@@ -2561,6 +2561,7 @@ export function useChatController() {
             minPrivacyTier: pending.minPrivacyTier,
             provider: pending.provider,
             subscriptionConnectionId: pending.subscriptionConnectionId,
+            modelConnectionId: pending.modelConnectionId,
             tone: pending.tone,
             zdr: pending.zdr,
           })
@@ -3750,6 +3751,7 @@ export function useChatController() {
           model,
           provider: options.provider,
           subscriptionConnectionId: options.subscriptionConnectionId,
+          modelConnectionId: options.modelConnectionId,
           tools,
           attachments: displayAttachments,
         }
@@ -3778,6 +3780,7 @@ export function useChatController() {
       model,
       provider: options.provider,
       subscriptionConnectionId: options.subscriptionConnectionId,
+      modelConnectionId: options.modelConnectionId,
       tools,
       attachments: [],
     }
@@ -3992,6 +3995,7 @@ export function useChatController() {
           model,
           provider: options.provider,
           subscriptionConnectionId: options.subscriptionConnectionId,
+          modelConnectionId: options.modelConnectionId,
           // A scoped first turn lets Session Core mint the durable thread ID.
           // The local provisional ID remains only a UI correlation key until
           // `onConnected` replaces it; sending it as a thread ID would make
@@ -4425,6 +4429,7 @@ export function useChatController() {
       actions,
       provider: payload.provider,
       subscriptionConnectionId: payload.subscriptionConnectionId,
+      modelConnectionId: payload.modelConnectionId,
       zdr: payload.zdr,
       effort: payload.effort,
       tone: payload.tone,
@@ -5332,6 +5337,8 @@ export function useChatController() {
       provider: lastUser.provider,
       // Looked up again for a subscription turn: a reconnect replaces the id.
       subscriptionConnectionId,
+      // A customer-gateway turn stays on its own gateway (W4-BYO-6): kept from the turn, never looked up.
+      modelConnectionId: lastUser.modelConnectionId,
       // Regenerating within an already-temporary thread must keep sending
       // ZDR — the thread-level lock, not the (possibly since-toggled)
       // composer state, decides.
@@ -5460,6 +5467,7 @@ export function useChatController() {
       tools: user.tools,
       provider: route.provider,
       subscriptionConnectionId,
+      modelConnectionId: user.modelConnectionId ?? assistant.modelConnectionId,
       zdr: isTemporaryThread(state.threadId),
     })
   }
@@ -5546,6 +5554,7 @@ export function useChatController() {
       tools: original.tools,
       provider: original.provider,
       subscriptionConnectionId,
+      modelConnectionId: original.modelConnectionId,
       // Same thread-level ZDR lock as `regenerateLatest`.
       zdr: isTemporaryThread(state.threadId),
       // The edit happened in the composer and never reached the server as a

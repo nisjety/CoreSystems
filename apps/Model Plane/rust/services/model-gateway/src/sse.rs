@@ -1156,6 +1156,14 @@ pub(crate) fn subscription_scoped_request(request: InferRequest, route: &InferRe
         request.subscription_connection_id.clone_from(&route.subscription_connection_id);
         request.zdr = route.zdr;
     }
+    // A customer-gateway turn's auxiliary calls (title, follow-ups, judge) take its gateway and model too
+    // (W4-BYO-6), so the turn's content reaches the user's own connection and no platform provider.
+    if !route.model_connection_id.is_empty() {
+        request.model.clone_from(&route.model);
+        request.provider_hint.clone_from(&route.provider_hint);
+        request.model_connection_id.clone_from(&route.model_connection_id);
+        request.zdr = route.zdr;
+    }
     request
 }
 
@@ -2152,7 +2160,7 @@ pub async fn invoke_stream_sse(
     // the body's flag alone.
     let requested_route = crate::zdr_posture::Route::named(
         req.provider.as_deref(),
-        req.subscription_connection_id.as_deref(),
+        crate::normalize::connection_named_by(&req),
         req.zdr,
     );
     let turn_posture = match crate::zdr_posture::decide_for(&claims, &requested_route) {
@@ -2672,6 +2680,8 @@ pub async fn invoke_stream_sse(
     // leaves both exactly as normalized.
     let provider_hint = normalized.provider_hint.clone();
     let subscription_connection_id = normalized.subscription_connection_id.clone();
+    // The customer-gateway connection the turn names (W4-BYO-6), empty on every other turn.
+    let model_connection_id = normalized.model_connection_id.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
 
     // chat-parity §1 — stream-path idempotency. A concurrent duplicate (same
@@ -3448,6 +3458,7 @@ pub async fn invoke_stream_sse(
             model: &model,
             provider_hint: &provider_hint,
             subscription_connection_id: &subscription_connection_id,
+            model_connection_id: &model_connection_id,
             zdr: effective_zdr,
             conversation_only,
             min_privacy_tier: min_privacy_tier_wire,
@@ -4100,6 +4111,11 @@ pub async fn invoke_stream_sse(
             content: notice.to_owned(),
             ..Default::default()
         });
+    }
+    // A customer-gateway turn is text-only (W4-BYO-6): no tool is offered to it, so the tool phase never runs
+    // and no tool round is sent to a platform provider on its behalf (a tool round never names a gateway).
+    if !model_connection_id.is_empty() {
+        tool_defs.clear();
     }
     // The tools lead an OpenAI prompt, so with the stable order the ones
     // offered on some turns only go last and the rest stay one prefix.
@@ -4937,6 +4953,7 @@ pub async fn invoke_stream_sse(
             model: answer_model.clone(),
             provider_hint,
             subscription_connection_id,
+            model_connection_id: model_connection_id.clone(),
             messages,
             temperature: 0.7,
             max_tokens: answer_token_budget(),
@@ -7559,6 +7576,8 @@ struct SummarizerContext<'a> {
     model: &'a str,
     provider_hint: &'a str,
     subscription_connection_id: &'a str,
+    /// The customer-gateway connection of the turn (W4-BYO-6). A summary is never made on a gateway turn.
+    model_connection_id: &'a str,
     zdr: bool,
     conversation_only: bool,
     /// Caller-selected minimum privacy tier, already normalized to the wire
@@ -8209,6 +8228,7 @@ async fn summarize_head(
             summarizer.model,
             summarizer.provider_hint,
             summarizer.subscription_connection_id,
+            summarizer.model_connection_id,
             &crate::compaction::summary_prompt_with_memory(transcript, &memory_directive),
             // The summary becomes a prefix later turns repeat; on an adapter
             // that forwards a temperature, sampling must not vary it.
@@ -8777,6 +8797,7 @@ fn image_gen_stream(
                     size: "1024x1024".to_owned(),
                     quality: "standard".to_owned(),
                     n: 1,
+                    strict_provider: false,
                 },
                 &inference_bearer,
             ))
@@ -10711,12 +10732,20 @@ async fn direct_infer(
     model: &str,
     provider_hint: &str,
     subscription_connection_id: &str,
+    model_connection_id: &str,
     content: &str,
     temperature: f32,
     zdr: bool,
     min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<DirectAnswer, tonic::Status> {
+    // A customer-gateway turn's content never goes to a platform provider, so no summary is made for it here
+    // (W4-BYO-6). The caller takes the truncation fallback on a failed summary, as it does for any other failure.
+    if !model_connection_id.trim().is_empty() {
+        return Err(tonic::Status::failed_precondition(
+            "compaction is not made on a customer gateway turn",
+        ));
+    }
     direct_infer_turn(
         state,
         request_id,

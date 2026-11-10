@@ -17,9 +17,14 @@ package authztaxonomy
 // here first, and the type must already be ownable in resource_taxonomy.json.
 
 // ownerServices maps an ownable resource type to the one service principal
-// allowed to write its grants in owner-asserted mode.
+// allowed to write its grants in owner-asserted mode. Each owner service's
+// user-core credential row (USER_CORE_SERVICE_CREDENTIALS in docker-compose.yml)
+// must carry authz:read and authz:write.
 var ownerServices = map[string]string{
-	"document": "documents-api",
+	// Share snapshots: session-core owns the snapshot store (ADR
+	// conversation-share-model, decision 3). Never Space-grantable; view only.
+	"conversation_snapshot": "session-core",
+	"document":              "documents-api",
 }
 
 // spaceGrantable lists the resource types a Space may hold a view grant on

@@ -68,8 +68,9 @@ const DEFAULT_TTL: Duration = Duration::from_mins(30);
 
 /// Total output one process may produce before it is stopped. The registry's
 /// head+tail retention keeps this readable, but an unbounded logger is a
-/// resource bug rather than a use case.
-const MAX_TOTAL_OUTPUT_BYTES: i64 = 64 * 1024 * 1024;
+/// resource bug rather than a use case. Also the most one `process_read` spill
+/// writes out, so it is shared with [`crate::process_tools`].
+pub(crate) const MAX_TOTAL_OUTPUT_BYTES: i64 = 64 * 1024 * 1024;
 
 /// The environment switch that lets `process_start` ask for a pseudo-terminal.
 /// Only the literal `true` turns it on. Off, a `tty` request gets the plain

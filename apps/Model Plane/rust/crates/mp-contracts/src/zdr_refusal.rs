@@ -414,6 +414,12 @@ pub const FEATURES: &[Feature] = &[
         key: "named_agent",
         label: "named agent memory",
     },
+    // W4-P6: process_read's spill writes a background process's output into a workspace file, which is
+    // retained content, so a ZDR or waived run is refused before any read or write.
+    Feature {
+        key: "process_output_spill",
+        label: "saving background process output to files",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

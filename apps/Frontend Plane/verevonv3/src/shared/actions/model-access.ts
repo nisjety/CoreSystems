@@ -356,6 +356,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.set_transcript_density': exempt('ui_state_only', 'external_write'),
   'chat.inspect_run_request': exempt('no_owner_executor', 'read'),
   'thread.export': exempt('no_owner_executor', 'read'),
+  'thread.import': exempt('no_owner_executor', 'context_write'),
   'chat.open_cited_passage': exempt('no_owner_executor', 'read'),
   'chat.list_artifact_revisions': exempt('no_owner_executor', 'read'),
   'chat.save_artifact_revision': exempt('no_owner_executor', 'context_write'),
@@ -422,6 +423,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'browser.blocked.try_other_source': exempt('no_owner_executor', 'external_write'),
   'browser_download.send_to_knowledge': exempt('no_owner_executor', 'external_write'),
   'router_policy.update': exempt('no_owner_executor', 'external_write'),
+  'models.create_customer_gateway': exempt('human_identity_or_security', 'external_write'),
+  'models.delete_customer_gateway': exempt('irreversible_destructive', 'destructive'),
   'audit.verify_chain': exempt('no_owner_executor', 'external_write'),
   'audit.list_events': exempt('no_owner_executor', 'read'),
   'audit.export_log': exempt('no_owner_executor', 'external_write'),
@@ -441,6 +444,12 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'agents.versions.list': exempt('no_owner_executor', 'read'),
   'agents.preview': exempt('agent_cannot_self_govern', 'read'),
   'agents.admitted_actions.list': exempt('no_owner_executor', 'read'),
+  // W4-PL-4: the plugin catalogue and install surface. Human only, so the agent is never offered any of them.
+  'plugins.list_catalog': exempt('no_owner_executor', 'read'),
+  'plugins.install': exempt('agent_cannot_self_govern', 'context_write'),
+  'plugins.uninstall': exempt('agent_cannot_self_govern', 'destructive'),
+  'plugins.approve_catalog': exempt('agent_cannot_self_govern', 'context_write'),
+  'plugins.kill_digest': exempt('irreversible_destructive', 'destructive'),
 }
 
 /**

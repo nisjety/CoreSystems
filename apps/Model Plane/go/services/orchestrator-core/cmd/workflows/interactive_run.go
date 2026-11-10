@@ -57,16 +57,11 @@ type ScheduledRunInput struct {
 	GoalID string `json:"goal_id,omitempty"`
 }
 
-// GoalJudgeTurnInput asks model-gateway to judge the goal turn one finished fire spent (EP-7 S6).
-// It carries ids only: Temporal history must never hold the objective, the criteria or the answer,
-// so the judge reads them itself from their owners.
-type GoalJudgeTurnInput struct {
-	GoalID     string `json:"goal_id"`
-	RunID      string `json:"run_id"`
-	OrgID      string `json:"org_id"`
-	ScheduleID string `json:"schedule_id"`
-	FireKey    string `json:"fire_key"`
-}
+// GoalJudgeTurnInput is the input of JudgeGoalTurnActivity (EP-7 S6). The type lives in the
+// activities package, which this package already imports, so the workflow and the activity share
+// one definition. It carries ids only: Temporal history must never hold the objective, the criteria
+// or the answer, so the judge reads them itself from their owners.
+type GoalJudgeTurnInput = activities.GoalJudgeTurnInput
 
 const (
 	// SignalApproval is sent to approve a pending human-approval step.

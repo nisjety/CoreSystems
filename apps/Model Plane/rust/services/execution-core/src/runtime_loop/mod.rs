@@ -2050,7 +2050,9 @@ async fn execute_thread_code_interpreter(
 /// listing, signalling and writing stdin deliberately do not — forcing a lease
 /// acquisition just to LIST would create sandbox state as a side effect of a
 /// read, and every process those calls can name exists only because an earlier
-/// `process_start` already passed the gate.
+/// `process_start` already passed the gate. The one read that does resolve the
+/// workspace is a spill (`process_read` with `spill`), which writes a file into
+/// it, so it resolves the workspace the way the workspace tools do.
 ///
 /// Note what is NOT re-checked here: `processes_permitted`. That is
 /// `process_start`'s gate alone, because the other four cannot reach a process
@@ -2086,6 +2088,22 @@ async fn execute_process_tool(
         Err(error) => {
             return tool_error(format!("process registry unavailable: {error}"))
         }
+    };
+
+    // A spill writes into the Space workspace, so a read that asks for one resolves the run's
+    // workspace as the workspace tools do. A zero-retention or waived run never gets here with a
+    // spill: process_tools refuses it first, so it takes no lease for a read it may not make. A
+    // failure is kept, not returned: it refuses only a read that turns out to need the spill.
+    let spill_asked = tool_name == crate::process_tools::PROCESS_READ
+        && !persistence_free
+        && crate::process_tools::spill_requested(tool_input);
+    let spill_workspace: Option<Result<std::path::PathBuf, String>> = if spill_asked {
+        Some(match state {
+            Some(state) => ensure_space_workspace(sandbox, state, run_id, org_id, user_id).await,
+            None => Err("process_read with spill requires run state tracking".to_owned()),
+        })
+    } else {
+        None
     };
 
     let (lease, workspace) = if tool_name == crate::process_tools::PROCESS_START {
@@ -2133,9 +2151,15 @@ async fn execute_process_tool(
         token: &token,
         start,
         persistence_free,
+        spill_root: match &spill_workspace {
+            None => crate::process_tools::SpillRoot::NotRequested,
+            Some(Ok(path)) => crate::process_tools::SpillRoot::Ready(path.as_path()),
+            Some(Err(message)) => crate::process_tools::SpillRoot::Unavailable(message.clone()),
+        },
     };
     // The process family works in the Space tree, so a call holds the run's workspace exclusively
-    // while it executes, as `code_interpreter` does (WS24-S4). Its calls are short registry RPCs.
+    // while it executes, as `code_interpreter` does (WS24-S4). Its calls are short registry RPCs,
+    // except a spill, which pages through and writes up to the output budget under the same lock.
     let workspace_lock = state.map(|state| state.workspace_lock(run_id));
     let _exclusive = match &workspace_lock {
         Some(lock) => Some(lock.write().await),

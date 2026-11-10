@@ -777,6 +777,109 @@ fn export_answer_headers(content_type: Option<&str>, disposition: Option<&str>) 
     headers
 }
 
+/// The body of `POST /api/v1/chat/threads/import` (EP-12 S15): the export file's text and an optional title.
+/// Nothing else is read, so an owner or organisation named in the body is refused rather than used.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ImportThreadBody {
+    export_json: String,
+    title: Option<String>,
+}
+
+/// The largest import body the gateway takes: Model Gateway's own file cap (`IMPORT_BODY_LIMIT_BYTES`). The file
+/// travels inside this JSON body, so a file near the cap can meet the limit here first.
+pub(super) const THREAD_IMPORT_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
+/// The longest title an import takes. The title rides on the upstream query string, so it is kept short, as a
+/// fork's title is.
+const THREAD_IMPORT_TITLE_MAX_CHARS: usize = 96;
+
+/// Make one of the caller's own export files into a new conversation (EP-12 S15). The BFF adds only the org
+/// scope and the owner's own bearers, as the export does. Model Gateway refuses a zero-retention or waived caller
+/// before it reads the file, and Session Core parses the file strictly and stores the turns it keeps; each refusal
+/// reaches the browser as the gateway wrote it. Nothing is stored here.
+pub(super) async fn import_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<ImportThreadBody>,
+) -> Response {
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
+    let title = body.title.as_deref().unwrap_or_default().trim();
+    if title.chars().count() > THREAD_IMPORT_TITLE_MAX_CHARS {
+        return bad_request("title is too long.");
+    }
+    let url = thread_import_url(&state.model_gateway_url, title);
+    let model_token = shared::model_token(&state, &user, &headers).await;
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    relay_thread_import(
+        &state,
+        &user,
+        &url,
+        body.export_json,
+        model_token.as_deref(),
+        &session_token,
+    )
+    .await
+}
+
+/// The upstream import URL. Model Gateway reads the file from the body and the title from the query, so the
+/// title, when the owner gave one, is the only thing that rides on the query string.
+fn thread_import_url(base: &str, title: &str) -> String {
+    if title.is_empty() {
+        format!("{base}/v1/threads/import")
+    } else {
+        format!(
+            "{base}/v1/threads/import?title={}",
+            urlencoding::encode(title)
+        )
+    }
+}
+
+/// One call to Model Gateway's import route under the owner's own model and session bearers, as the export
+/// sends them. The file is the body, as Model Gateway reads it. Its answer is relayed with its status, a typed
+/// refusal included; an answer that is not JSON becomes the gateway's own unavailable envelope.
+async fn relay_thread_import(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    url: &str,
+    export_json: String,
+    model_token: Option<&str>,
+    session_token: &str,
+) -> Response {
+    let org_id = authorized_org_id(state, user).await;
+    let request = owner_export_request(
+        state
+            .client
+            .post(url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(export_json),
+        &user.user_id,
+        org_id.trim(),
+        model_token,
+        session_token,
+    );
+    let response = match crate::request_id::apply(request).send().await {
+        Ok(response) => response,
+        Err(_) => return export_unavailable(),
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(_) => return export_unavailable(),
+    };
+    match serde_json::from_slice::<Value>(&body) {
+        Ok(answer) => (status, [(header::CACHE_CONTROL, "no-store")], Json(answer)).into_response(),
+        Err(_) => export_unavailable(),
+    }
+}
+
 /// The body of `PUT /api/v1/chat/threads/{id}/goal` (Wave 3 EP-7 S1). Only these fields are
 /// relayed; the owner, org and thread come from the session and the path, never from the body.
 #[derive(Debug, Deserialize)]

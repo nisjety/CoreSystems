@@ -37,15 +37,21 @@
 //! `process_not_local` with the reason stated, the same honesty as the lease's
 //! own backend-pin refusal. Cross-host control is an explicit non-goal.
 
+use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
-use mp_contracts::model_plane::v1::{Process, ProcessSignal, ProcessState, ProcessStream};
+use mp_contracts::model_plane::v1::{
+    Process, ProcessOutputChunk, ProcessSignal, ProcessState, ProcessStream,
+    ReadProcessOutputResponse,
+};
 use mp_contracts::zdr_refusal::Refusal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::process_host::{ProcessHost, StagedProgram, StartRequest};
+use crate::code_interpreter::TEMP_SUBDIR;
+use crate::process_host::{ProcessHost, StagedProgram, StartRequest, MAX_TOTAL_OUTPUT_BYTES};
 use crate::sandbox_manager_client::SandboxManagerClient;
 
 /// The family's entry point, and the name capability-core's row is keyed on.
@@ -87,9 +93,57 @@ const MAX_LIST_LIMIT: i32 = 100;
 const PYTHON_FILENAME: &str = "program.py";
 const SH_FILENAME: &str = "program.sh";
 
+/// The environment switch for `process_read`'s `spill` option. Only the literal
+/// `true` turns it on; off, the field is ignored and the read is what it was.
+pub(crate) const OUTPUT_SPILL_SWITCH_ENV: &str = "EXECUTION_PROCESS_OUTPUT_SPILL";
+/// The feature a spill is refused under on a zero-retention or waived run: the
+/// output would be kept in a file.
+const OUTPUT_SPILL_FEATURE: &str = "process_output_spill";
+/// The directory a spill writes into, under the workspace's `.tmp/`.
+const OUTPUT_SPILL_SUBDIR: &str = "process-output";
+/// The `process_read` parameters offered where the spill switch is on: the ones a
+/// deployment without the switch offers, plus `spill`. Substituted over the offered
+/// definition in `runtime_loop::agent`.
+pub(crate) const READ_PARAMETERS_WITH_SPILL: &str = r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"after_seq":{"type":"integer","description":"Exclusive cursor; omit or 0 to read from the beginning of what is retained"},"max_bytes":{"type":"integer","description":"Byte budget for this page; default 32768, max 262144"},"spill":{"type":"boolean","description":"When more than one page (262144 bytes) of output is retained after after_seq, write it to a workspace file and return its path as spilled_to, with only the first 32768 bytes inline. Read that file with the workspace tools rather than paging. Refused on zero-retention runs. Default false"}},"required":["process_id"]}"#;
+
 #[must_use]
 pub(crate) fn is_process_tool(name: &str) -> bool {
     PROCESS_TOOL_NAMES.contains(&name)
+}
+
+/// Whether the deployment lets `process_read` write long output to a workspace
+/// file. Read once, as the process host's own switches are.
+#[must_use]
+pub(crate) fn output_spill_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        output_spill_enabled_from(std::env::var(OUTPUT_SPILL_SWITCH_ENV).ok().as_deref())
+    })
+}
+
+/// The strict parse: only the exact value `true` enables it.
+fn output_spill_enabled_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Whether a `process_read` call asks for a spill on a deployment that allows
+/// one. The dispatch layer asks this before it resolves a workspace, so a call
+/// that cannot spill never acquires one.
+#[must_use]
+pub(crate) fn spill_requested(tool_input: &str) -> bool {
+    output_spill_enabled()
+        && serde_json::from_str::<ReadInput>(tool_input).is_ok_and(|input| input.spill)
+}
+
+/// Whether a workspace-relative path (`/`-separated) is a process's output
+/// spill. The Space's release-time upload leaves these out: a spill is local to
+/// the lease's workspace and is removed with it, so it is never durable.
+#[must_use]
+pub(crate) fn is_output_spill(path: &str) -> bool {
+    let mut parts = path.split('/');
+    parts.next() == Some(TEMP_SUBDIR)
+        && parts.next() == Some(OUTPUT_SPILL_SUBDIR)
+        && parts.next().is_some()
 }
 
 /// Everything the five tools need. Assembled by the dispatch layer, which is
@@ -117,6 +171,21 @@ pub(crate) struct ProcessToolContext<'a> {
     /// output is content the registry would keep, so a `tty` request is refused
     /// on such a run.
     pub persistence_free: bool,
+    /// Where a `process_read` spill writes. Resolved by the dispatch layer only for
+    /// a read that asks for a spill on a run that may keep content.
+    pub spill_root: SpillRoot<'a>,
+}
+
+/// Where a `process_read` spill writes, as the dispatch layer resolved it.
+pub(crate) enum SpillRoot<'a> {
+    /// The call asks for no spill, or the run may keep no content, so no workspace
+    /// was resolved for it.
+    NotRequested,
+    /// The Space workspace the spill writes into.
+    Ready(&'a Path),
+    /// The workspace could not be resolved. Refused only when a spill is actually
+    /// needed, so a read that fits in one page still answers.
+    Unavailable(String),
 }
 
 /// The extra context `process_start` needs, resolved lazily so that reading
@@ -254,47 +323,45 @@ struct ReadInput {
     after_seq: Option<i64>,
     #[serde(default)]
     max_bytes: Option<i64>,
+    /// Write what is retained after the cursor to a workspace file when it is
+    /// more than one page, and return the file's path. Honoured only where the
+    /// deployment has enabled it; see [`output_spill_enabled`].
+    #[serde(default)]
+    spill: bool,
 }
 
 async fn read(tool_input: &str, ctx: &ProcessToolContext<'_>) -> Result<String, String> {
     let input: ReadInput = serde_json::from_str(tool_input)
         .map_err(|error| format!("invalid process_read input: {error}"))?;
+    let spill = input.spill && output_spill_enabled();
+    if spill {
+        if ctx.persistence_free {
+            // Refused before the registry is asked or a file is written: a spill
+            // keeps the output, which a zero-retention or waived run may not.
+            return Err(Refusal::feature_not_supported(OUTPUT_SPILL_FEATURE).message());
+        }
+        spill_file_stem(&input.process_id)?;
+    }
     authorize_in_space(&input.process_id, ctx).await?;
+    if spill {
+        if let Some(output) = spill_output(&input, ctx).await? {
+            return Ok(output);
+        }
+    }
 
     let max_bytes = input
         .max_bytes
         .unwrap_or(DEFAULT_READ_BYTES)
         .clamp(1, MAX_READ_BYTES);
-    let page = ctx
-        .client
-        .read_process_output(
-            ctx.token,
-            &input.process_id,
-            // The Space this run belongs to. `authorize_in_space` above already
-            // proved the process is in it, so this states the same fact to the
-            // registry rather than asking it to be taken on trust.
-            ctx.space_id,
-            input.after_seq.unwrap_or(0).max(0),
-            max_bytes,
-        )
-        .await
-        .map_err(|status| format!("process_read failed: {}", status.message()))?;
+    let page = read_page(
+        ctx,
+        &input.process_id,
+        input.after_seq.unwrap_or(0).max(0),
+        max_bytes,
+    )
+    .await?;
 
-    let chunks: Vec<Value> = page
-        .chunks
-        .iter()
-        .map(|chunk| {
-            json!({
-                "seq": chunk.seq,
-                "stream": stream_name(chunk.stream),
-                // Lossy on purpose: the registry stores bytes, a tool result is
-                // text, and a program that emits invalid UTF-8 should still be
-                // readable rather than failing the whole page.
-                "text": String::from_utf8_lossy(&chunk.content),
-                "ends_with_newline": chunk.ends_with_newline,
-            })
-        })
-        .collect();
+    let chunks: Vec<Value> = page.chunks.iter().map(chunk_json).collect();
 
     Ok(json!({
         "state": state_name(page.state),
@@ -308,6 +375,238 @@ async fn read(tool_input: &str, ctx: &ProcessToolContext<'_>) -> Result<String, 
         "retained_from_seq": page.retained_from_seq,
     })
     .to_string())
+}
+
+/// One page of a process's output, read for the Space the run belongs to.
+/// `authorize_in_space` has already proved the process is in it, so the Space is
+/// stated to the registry rather than taken on trust.
+async fn read_page(
+    ctx: &ProcessToolContext<'_>,
+    process_id: &str,
+    after_seq: i64,
+    max_bytes: i64,
+) -> Result<ReadProcessOutputResponse, String> {
+    ctx.client
+        .read_process_output(ctx.token, process_id, ctx.space_id, after_seq, max_bytes)
+        .await
+        .map_err(|status| format!("process_read failed: {}", status.message()))
+}
+
+/// One chunk as the model sees it.
+fn chunk_json(chunk: &ProcessOutputChunk) -> Value {
+    json!({
+        "seq": chunk.seq,
+        "stream": stream_name(chunk.stream),
+        // Lossy on purpose: the registry stores bytes, a tool result is
+        // text, and a program that emits invalid UTF-8 should still be
+        // readable rather than failing the whole page.
+        "text": String::from_utf8_lossy(&chunk.content),
+        "ends_with_newline": chunk.ends_with_newline,
+    })
+}
+
+/// Reads everything retained after the cursor into the Space workspace, and
+/// returns the answer to the call with the first page of it inline. `None` when
+/// the output after the cursor fits in one page, which the ordinary read answers
+/// as it always has.
+async fn spill_output(
+    input: &ReadInput,
+    ctx: &ProcessToolContext<'_>,
+) -> Result<Option<String>, String> {
+    let stem = spill_file_stem(&input.process_id)?;
+    let after = input.after_seq.unwrap_or(0).max(0);
+
+    // A page at the largest budget a read may ask for. Output still behind it is
+    // more than one page can carry, which is the case a spill is for.
+    let mut page = read_page(ctx, &input.process_id, after, MAX_READ_BYTES).await?;
+    if !page.has_more {
+        return Ok(None);
+    }
+    // Only a read that needs the spill needs the workspace, so an unavailable one
+    // is reported here and nowhere earlier.
+    let root = match &ctx.spill_root {
+        SpillRoot::Ready(root) => *root,
+        SpillRoot::Unavailable(message) => return Err(message.clone()),
+        SpillRoot::NotRequested => {
+            return Err("process_read with spill requires a Space workspace".to_owned())
+        }
+    };
+    let gap_before = page.gap_before;
+    let (file, spilled_to) = create_spill(root, stem)?;
+    let mut file = BufWriter::new(file);
+
+    // Pages are written as they arrive, so a long spill is never held in memory
+    // whole. The cursor stops at the last chunk written, so a spill that reached
+    // the output budget says where a reader resumes.
+    let head_budget = usize::try_from(DEFAULT_READ_BYTES).unwrap_or(usize::MAX);
+    let mut head: Vec<ProcessOutputChunk> = Vec::new();
+    let mut head_bytes = 0_usize;
+    let mut admitted_bytes = 0_i64;
+    let mut written_bytes = 0_usize;
+    let mut cursor = after;
+    // The cursor the current page was read from, which the next page must move past.
+    let mut requested = after;
+    let mut capped = false;
+    loop {
+        let mut taken = 0_usize;
+        for chunk in std::mem::take(&mut page.chunks) {
+            let size = i64::try_from(chunk.content.len()).unwrap_or(i64::MAX);
+            if admitted_bytes.saturating_add(size) > MAX_TOTAL_OUTPUT_BYTES {
+                capped = true;
+                break;
+            }
+            admitted_bytes += size;
+            cursor = chunk.seq;
+            taken += 1;
+            let text = spill_text(&chunk.content);
+            file.write_all(text.as_bytes())
+                .map_err(|error| format!("could not write the spill file: {error}"))?;
+            written_bytes += text.len();
+            if head_bytes < head_budget {
+                head_bytes += chunk.content.len();
+                head.push(chunk);
+            }
+        }
+        if capped {
+            break;
+        }
+        cursor = page.next_cursor;
+        // A page that gave nothing, or a cursor that did not move, would only ask
+        // again for what was just read.
+        if !page.has_more || taken == 0 || cursor <= requested {
+            break;
+        }
+        requested = cursor;
+        page = read_page(ctx, &input.process_id, requested, MAX_READ_BYTES).await?;
+    }
+    file.flush()
+        .map_err(|error| format!("could not write the spill file: {error}"))?;
+
+    let mut note = SPILL_NOTE.to_owned();
+    if written_bytes > crate::workspace_edit::MAX_FILE_BYTES {
+        note.push_str(SPILL_NOTE_LARGE);
+    }
+    Ok(Some(
+        json!({
+            "state": state_name(page.state),
+            "exit_code": page.exit_code,
+            "chunks": inline_chunks(&head),
+            "next_cursor": cursor,
+            "has_more": capped || page.has_more,
+            "gap_before": gap_before,
+            "retained_from_seq": page.retained_from_seq,
+            "spilled_to": spilled_to,
+            "bytes": written_bytes,
+            "note": note,
+        })
+        .to_string(),
+    ))
+}
+
+/// What a spilled read tells the model about the file it was given.
+const SPILL_NOTE: &str =
+    "The output after after_seq is in the workspace file spilled_to; only the first chunks are inline. Read that file with the workspace read or grep tools, or from code_interpreter. The file is not kept with the Space. A later spill of this process replaces it, so read it first. When has_more is true, process_read from next_cursor reads on.";
+/// Added when the file is larger than the workspace read tools will open.
+const SPILL_NOTE_LARGE: &str =
+    " The file is over the 1 MiB limit of the workspace read and grep tools, so read it from code_interpreter or page through process_read.";
+
+/// The first `DEFAULT_READ_BYTES` of a spill as chunks: whole chunks while they
+/// fit, and, when the first one alone does not, its text cut at a character
+/// boundary.
+fn inline_chunks(head: &[ProcessOutputChunk]) -> Vec<Value> {
+    let budget = usize::try_from(DEFAULT_READ_BYTES).unwrap_or(usize::MAX);
+    let mut left = budget;
+    let mut inline = Vec::new();
+    for chunk in head {
+        let size = chunk.content.len();
+        if size <= left {
+            left -= size;
+            inline.push(chunk_json(chunk));
+            continue;
+        }
+        if inline.is_empty() {
+            let text = String::from_utf8_lossy(&chunk.content).into_owned();
+            let mut end = budget.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            inline.push(json!({
+                "seq": chunk.seq,
+                "stream": stream_name(chunk.stream),
+                "text": &text[..end],
+                "ends_with_newline": false,
+            }));
+        }
+        break;
+    }
+    inline
+}
+
+/// The text a spill writes for one chunk: lossy like the inline text, and with
+/// NUL replaced, because the workspace read tools refuse a file holding one as
+/// binary.
+fn spill_text(content: &[u8]) -> String {
+    String::from_utf8_lossy(content).replace('\0', "\u{FFFD}")
+}
+
+/// A process id as a spill file's name. Ids are ULIDs, so only letters, digits,
+/// `-` and `_` are admitted: anything that could name a directory, climb out of
+/// the workspace or spell a drive is refused before the registry is asked.
+fn spill_file_stem(process_id: &str) -> Result<&str, String> {
+    let well_formed = !process_id.is_empty()
+        && process_id.len() <= 128
+        && process_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if well_formed {
+        Ok(process_id)
+    } else {
+        Err("process_id is not a valid process id for a spill".to_owned())
+    }
+}
+
+/// Creates `<root>/.tmp/process-output/<stem>.log`, replacing an earlier spill of
+/// the same process, and returns the file with its path relative to the
+/// workspace. No component may be a symbolic link, so the file lands inside the
+/// workspace whatever a process running in it has linked.
+fn create_spill(root: &Path, stem: &str) -> Result<(std::fs::File, String), String> {
+    let temp = root.join(TEMP_SUBDIR);
+    let dir = temp.join(OUTPUT_SPILL_SUBDIR);
+    ensure_plain_dir(&temp)?;
+    ensure_plain_dir(&dir)?;
+    let path = dir.join(format!("{stem}.log"));
+    // Removed first, so the exclusive create below cannot follow a link that
+    // appeared since the last spill. remove_file takes the link itself, never
+    // what it points at.
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("could not replace the earlier spill: {error}")),
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|error| format!("could not create the spill file: {error}"))?;
+    Ok((
+        file,
+        format!("{TEMP_SUBDIR}/{OUTPUT_SPILL_SUBDIR}/{stem}.log"),
+    ))
+}
+
+/// Makes `path` a directory, or confirms that it is one. A symbolic link is
+/// refused rather than followed.
+fn ensure_plain_dir(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err("the spill directory is a symbolic link, which a spill does not follow".to_owned())
+        }
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err("the spill path is not a directory".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(path)
+            .map_err(|error| format!("could not create the spill directory: {error}")),
+        Err(error) => Err(format!("could not inspect the spill directory: {error}")),
+    }
 }
 
 #[derive(Deserialize)]

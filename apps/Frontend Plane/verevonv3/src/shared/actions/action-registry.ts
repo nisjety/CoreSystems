@@ -1,7 +1,13 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 import { spaceActions } from '@/shared/actions/domains/spaces'
-import { threadArchiveAction, threadExportInput, threadMarkUnreadAction, threadStarAction } from '@/shared/actions/chat-history'
+import {
+  threadArchiveAction,
+  threadExportInput,
+  threadImportInput,
+  threadMarkUnreadAction,
+  threadStarAction,
+} from '@/shared/actions/chat-history'
 import {
   chatLibraryListInput,
   chatLibraryOpenOriginInput,
@@ -2150,6 +2156,13 @@ const threadExportOutput = z.object({
   filename: z.string().min(1),
 })
 
+// The new thread an import made (EP-12 S15): its id, how many turns it kept and how many things the file held that it left out.
+const threadImportOutput = z.object({
+  threadId: z.string().min(1),
+  importedMessages: z.number().int().nonnegative(),
+  dropped: z.number().int().nonnegative(),
+})
+
 // The library's answers (F-t3-080): one page of document metadata, never text, and one document's text when it is read.
 const chatLibraryListOutput = z.object({
   documents: z.array(z.record(z.string(), z.unknown())),
@@ -2391,6 +2404,17 @@ const routerPolicyRoleInput = z.object({
   effort: z.string().optional(),
 })
 
+// The platform catalogue overlay (F-t3-065 phase 1): the models the listing hides, the order it puts first and the alias
+// ids that stand for a listed model. inference-core caps the lists at 200, 200 and 50 entries, and an alias id is one to
+// 64 lower-case letters, digits, `.`, `_` or `-`; it checks the aliases against the catalogue on every write.
+const routerPolicyCatalogueOverlayInput = z.object({
+  hidden: z.array(z.string().min(1)).max(200),
+  order: z.array(z.string().min(1)).max(200),
+  aliases: z
+    .record(z.string().regex(/^[a-z0-9._-]{1,64}$/), z.string().min(1))
+    .refine((aliases) => Object.keys(aliases).length <= 50, 'at most 50 aliases'),
+})
+
 // The owner enforces no admin gate on this write today — only org-scoping.
 // See dispatch_router_policy_update's own comment: the high risk/
 // requires-approval posture here compensates for that at the registry level,
@@ -2426,6 +2450,7 @@ const routerPolicyUpdateInput = z.object({
   }),
   tool_fallback_ladder: z.array(z.string().min(1)).max(8),
   roles: z.partialRecord(z.enum(routerPolicyRolePurposes), routerPolicyRoleInput).optional(),
+  catalogue_overlay: routerPolicyCatalogueOverlayInput.optional(),
 })
 
 const chatSubmitFeedbackInput = z.object({
@@ -2557,6 +2582,23 @@ const auditUpdateSiemDestinationInput = z.object({
 const auditDeleteSiemDestinationInput = z.object({
   destinationId: z.string().min(1).max(64),
 })
+
+// W4-BYO-6: an organisation's own OpenAI-compatible model gateway. The key is sent once, sealed by
+// Integration Core and never read back. A customer gateway is never zero data retention.
+const modelsCreateCustomerGatewayInput = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    base_url: z.string().trim().min(1).max(2048),
+    api_key: z.string().min(1).max(4096),
+    model_ids: z.array(z.string().trim().min(1).max(128)).min(1).max(20),
+  })
+  .strict()
+
+const modelsDeleteCustomerGatewayInput = z
+  .object({
+    connection_id: z.string().trim().min(1).max(128),
+  })
+  .strict()
 
 const envelopeStatusOutput = z.object({
   status: z.string(),
@@ -2737,6 +2779,82 @@ const spaceAgentMemoryDeleteInput = z.object({
 const spaceAgentMemoryDeleteOutput = z.object({
   memory_id: z.string(),
   deleted: z.boolean(),
+})
+
+// W4-PL-4: the org's plugin catalogue, and the admin's install, uninstall, catalogue and kill-list writes (F-t3-059).
+// Human only: every row is model access none, so the agent is never offered these. The routes are the gateway's
+// pass-through to capability-core (agent_actions.rs), and capability-core decides every admin, zero-data-retention,
+// consent and kill check. A digest has the shape capability-core writes: sha256 and 64 lower-case hex digits.
+const pluginDigestInput = z.string().regex(/^sha256:[0-9a-f]{64}$/)
+const pluginIdInput = z.string().trim().min(1).max(200)
+
+const pluginsListCatalogInput = z.object({}).strict()
+
+const pluginCatalogOutput = z.object({
+  plugins: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      version: z.string(),
+      description: z.string(),
+      risk_level: z.string(),
+      enabled: z.boolean(),
+      rollout_state: z.string(),
+      source_kind: z.string(),
+      source_ref: z.string(),
+      source_pin: z.string(),
+      manifest_digest: z.string(),
+      installed: z.boolean(),
+      components: z.array(z.object({ kind: z.string(), name: z.string(), status: z.string() })),
+    }),
+  ),
+})
+
+const pluginIdOnlyInput = z.object({ pluginId: pluginIdInput }).strict()
+
+const pluginInstallInput = z
+  .object({
+    pluginId: pluginIdInput,
+    consentedDigests: z.array(pluginDigestInput).min(1).max(256),
+  })
+  .strict()
+
+const pluginInstallOutput = z.object({
+  plugin_id: z.string(),
+  installed: z.boolean(),
+  components: z.array(
+    z.object({ kind: z.string(), name: z.string(), digest: z.string(), status: z.string(), report: z.string().optional() }),
+  ),
+  children: z.array(z.object({ kind: z.string(), name: z.string(), id: z.string(), digest: z.string().optional() })),
+})
+
+const pluginCatalogApproveInput = z
+  .object({
+    pluginId: pluginIdInput,
+    approved: z.boolean(),
+  })
+  .strict()
+
+const pluginCatalogApproveOutput = z.object({
+  id: z.string(),
+  catalog_approved: z.boolean(),
+  updated_at: z.string(),
+})
+
+const pluginKillDigestInput = z
+  .object({
+    digest: pluginDigestInput,
+    reason: z.string().trim().min(1).max(500),
+  })
+  .strict()
+
+const pluginKillDigestOutput = z.object({
+  digest: z.string(),
+  scope: z.string(),
+  org_id: z.string(),
+  created: z.boolean(),
+  uninstalled_plugins: z.array(z.string()),
+  children_removed: z.number().int().min(0),
 })
 
 // Registry entries are the product contract shared by humans and the Model Plane.
@@ -4992,6 +5110,17 @@ export const actionRegistry = [
     outputSchema: threadExportOutput,
   },
   {
+    id: 'thread.import',
+    label: 'Import chat thread',
+    description: 'Make a new chat thread the caller owns from one of their own conversation export files (verevon.thread-export.v1, JSON, at most 2 MiB). The file is untrusted input: it is parsed strictly, only the person\'s and the assistant\'s text is kept as quoted text, and what the file holds that a thread does not keep is left out and counted. Owner only. Refused under zero data retention and for a waived caller; the route answers 404 while the import is off. Never model-executable: a model does not write a person\'s conversation into their history.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadImportInput,
+    outputSchema: threadImportOutput,
+  },
+  {
     id: 'chat.save_artifact_revision',
     label: 'Save an edit of an artifact',
     description: 'Save the person\'s own text of a document, code or HTML artifact in the Output panel as its newest version, under a compare-and-set on the version the panel showed: a moved head is refused with revision_mismatch and the head now stored, and nothing is overwritten unless the person chooses to. Owner only. Refused under zero data retention, in a thread that holds a waived run, in a Space thread, while a run in the thread is still working, and for any other kind (a deck is never edited as text). Off until artifact editing is switched on. Reversible: every earlier version stays and can be restored. Never model-executable: the model revises artifacts through its own tools.',
@@ -5762,6 +5891,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'models.create_customer_gateway',
+    label: 'Register customer gateway',
+    description: 'Register the organisation\'s own OpenAI-compatible model gateway. Owners and admins only. Integration Core seals the key and never returns it. A customer gateway is never zero data retention and is the lowest privacy tier.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: modelsCreateCustomerGatewayInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'models.delete_customer_gateway',
+    label: 'Remove customer gateway',
+    description: 'Remove one of the organisation\'s customer gateways. Owners and admins only. Its key is discarded and its models stop being offered.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: modelsDeleteCustomerGatewayInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'audit.verify_chain',
     label: 'Verify audit log integrity',
     description: 'Recompute the organization\'s audit hash chain and report verified, verified_with_legacy, broken (with the first broken position), partial or key_unavailable. Read-only; owner or admin, human sessions only. The run is itself recorded in the audit log.',
@@ -5969,6 +6120,61 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: agentAdmittedActionsListInput,
     outputSchema: agentAdmittedActionsListOutput,
+  },
+  {
+    id: 'plugins.list_catalog',
+    label: 'List the plugin catalogue',
+    description: 'Read the organization\'s plugin catalogue: the packages an admin listed that are still pinned to a source and not on the kill list, with their risk level and component summary. Any member may read it, zero data retention included. Read only; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginsListCatalogInput,
+    outputSchema: pluginCatalogOutput,
+  },
+  {
+    id: 'plugins.install',
+    label: 'Install a plugin\'s components',
+    description: 'An org admin consents to the exact component digests a plugin\'s install report lists, and the loader creates the skills, remote MCP servers and commands its manifest declares. Hooks, binaries, scripts and stdio servers are reported as not installed and never run. Refused under zero data retention, and the consent must match the manifest exactly. Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginInstallInput,
+    outputSchema: pluginInstallOutput,
+  },
+  {
+    id: 'plugins.uninstall',
+    label: 'Uninstall a plugin',
+    description: 'Remove every skill and remote MCP server one plugin installed, mark its components removed, and take the plugin out of service (disabled and not installed). Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginIdOnlyInput,
+    outputSchema: pluginInstallOutput,
+  },
+  {
+    id: 'plugins.approve_catalog',
+    label: 'List or unlist a plugin in the catalogue',
+    description: 'List one of the organization\'s pinned plugin packages in the org catalogue, or take it out again. Listing refuses a package that is not pinned to a source, has no digest, or whose digest is on the kill list. Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginCatalogApproveInput,
+    outputSchema: pluginCatalogApproveOutput,
+  },
+  {
+    id: 'plugins.kill_digest',
+    label: 'Kill a plugin digest',
+    description: 'Put one manifest digest on the organization\'s kill list. Every installed copy of it is uninstalled and its catalogue listing is cleared, in one transaction. Org scope only: a global kill needs a platform service principal and is not offered here. Not reversible from here, because what the kill removed stays removed. Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: pluginKillDigestInput,
+    outputSchema: pluginKillDigestOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 

@@ -8,10 +8,11 @@ use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
+use super::catalogue_overlay;
 use super::gemini::GeminiProvider;
 use super::policy_client::PolicyClient;
 use super::role::{self, RoleCall};
-use super::routing_policy::RoutingPolicy;
+use super::routing_policy::{RolePurpose, RoutingPolicy};
 use super::timing::{CallClock, StreamClock};
 use super::{
     anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
@@ -1289,7 +1290,7 @@ impl FallbackChain {
     ///
     /// [`ProviderError::RequestRejected`] when the call names no purpose the role table serves. Nothing
     /// has been sent anywhere.
-    fn resolve_role_call(
+    async fn resolve_role_call(
         &self,
         req: &InferRequest,
         role: Option<&RoleCall>,
@@ -1307,10 +1308,19 @@ impl FallbackChain {
             })?;
         let fallback_model = role.map_or("", |call| call.fallback_model.as_str());
         let catalogue = self.list_models("chat", &req.provider_hint);
+        // The caller's organisation's own candidates for the purpose, tried before the platform table's
+        // (INFERENCE_ORG_OVERLAY). Read before the policy is loaded, so no guard is held across the await.
+        let org_candidates = self
+            .org_role_candidates(&req.org_id, purpose, &catalogue)
+            .await;
         let policy = self.policy.load();
-        let choice = role::choose(&policy, purpose, fallback_model, |model| {
-            self.role_candidate_admitted(req, &catalogue, model)
-        });
+        let choice = role::choose_with_org(
+            &policy,
+            &org_candidates,
+            purpose,
+            fallback_model,
+            |model| self.role_candidate_admitted(req, &catalogue, model),
+        );
         let mut resolved = req.clone();
         resolved.model.clone_from(&choice.model);
         // The table's effort is the role's default, so it applies only when the caller names no effort.
@@ -1327,6 +1337,32 @@ impl FallbackChain {
             "verevon role resolved"
         );
         Ok(Some((resolved, choice.decision)))
+    }
+
+    /// The organisation's role candidates for `purpose` (W4-BYO-3): the ids its overlay names that the platform
+    /// catalogue lists, minus any the platform overlay hides. Empty while `INFERENCE_ORG_OVERLAY` is off, when no
+    /// policy store is wired, when the organisation has no overlay, or when its overlay cannot be read. Each
+    /// candidate is still asked of [`Self::role_candidate_admitted`], so the entitlement, ZDR, privacy-tier and
+    /// residency floors apply to it.
+    async fn org_role_candidates(
+        &self,
+        org_id: &str,
+        purpose: RolePurpose,
+        catalogue: &[ModelInfo],
+    ) -> Vec<String> {
+        if !catalogue_overlay::org_overlay_enabled() {
+            return Vec::new();
+        }
+        let Some(client) = &self.policy_client else {
+            return Vec::new();
+        };
+        let overlay = client.org_overlay(org_id).await;
+        let mut candidates = overlay.role_candidates(purpose, catalogue);
+        if catalogue_overlay::catalogue_overlay_enabled() {
+            let policy = self.policy.load();
+            candidates.retain(|id| !policy.catalogue_overlay.is_hidden(id));
+        }
+        candidates
     }
 
     /// Whether a role candidate may serve this call (EP-13 S4). A candidate the chain does not list is
@@ -1546,6 +1582,48 @@ impl FallbackChain {
         first
     }
 
+    /// The catalogue overlay at admission, while `INFERENCE_CATALOGUE_OVERLAY` is on.
+    /// An alias is answered as the model it stands for, and a hidden model is refused
+    /// before any provider is called or the entitlement check names it. `None` leaves
+    /// the request as it was: the overlay is off or empty, or the request names no
+    /// concrete model (an automatic, `verevon-*` or role id), which the routing layer
+    /// answers for itself.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::ModelHidden`] when the model the caller named, or the model its
+    /// alias stands for, is hidden. Nothing has been sent anywhere.
+    fn overlay_admission(&self, req: &InferRequest) -> Result<Option<InferRequest>, ProviderError> {
+        if !catalogue_overlay::catalogue_overlay_enabled()
+            || catalogue_overlay::is_reserved_id(&req.model)
+        {
+            return Ok(None);
+        }
+        let policy = self.policy.load();
+        let overlay = &policy.catalogue_overlay;
+        if overlay.is_empty() {
+            return Ok(None);
+        }
+        let target = overlay.alias_target(&req.model);
+        if overlay.is_hidden(target.unwrap_or(req.model.as_str())) {
+            return Err(ProviderError::ModelHidden {
+                model: req.model.clone(),
+            });
+        }
+        let Some(target) = target else {
+            return Ok(None);
+        };
+        info!(
+            request_id = %req.request_id,
+            alias = %req.model,
+            resolved_model = %target,
+            "catalogue alias resolved"
+        );
+        let mut mapped = req.clone();
+        mapped.model = target.to_owned();
+        Ok(Some(mapped))
+    }
+
     /// The model the caller named, after checking it against their entitlement:
     /// `None` for an unspecified (automatic) model, `Some` for a pinned one the
     /// policy allows on some provider.
@@ -1646,13 +1724,17 @@ impl FallbackChain {
         cache_response: bool,
     ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
+        // The catalogue overlay answers an alias as its target and refuses a hidden
+        // model, before the retired-id, role and entitlement checks name it.
+        let aliased = self.overlay_admission(req)?;
+        let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, so the entitlement check,
         // the cache key and every rung of the ladder all name the model that serves.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A `verevon-role` call is resolved to a concrete model before anything else reads it, so the
         // name never reaches the entitlement check, the intent layer or a provider (EP-13 S4).
-        let roled = self.resolve_role_call(req, role)?;
+        let roled = self.resolve_role_call(req, role).await?;
         let role_decision = roled.as_ref().map(|(_, decision)| *decision);
         let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // A model the caller named is checked against their organisation's
@@ -2137,11 +2219,15 @@ impl FallbackChain {
         role: Option<&RoleCall>,
     ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
+        // The catalogue overlay answers an alias as its target and refuses a hidden
+        // model, as on the unary path.
+        let aliased = self.overlay_admission(req)?;
+        let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, as on the unary path.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A `verevon-role` call is resolved first, as on the unary path.
-        let roled = self.resolve_role_call(req, role)?;
+        let roled = self.resolve_role_call(req, role).await?;
         let role_decision = roled.as_ref().map(|(_, decision)| *decision);
         let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // Entitlement of a pinned model first, as on the unary path.

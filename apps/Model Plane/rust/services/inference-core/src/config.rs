@@ -43,6 +43,17 @@ pub struct InferenceConfig {
     /// provider registers, so it cannot capture arbitrary OpenAI model traffic.
     pub codex_subscription_models: Vec<String>,
 
+    /// Whether a call that names a customer-gateway model connection may be served (from
+    /// `INFERENCE_BYO_GATEWAY_ENABLED`, the literal `true` only). The gateway is reached through the
+    /// Integration Core URL above, which the subscription route shares. Off, such a call is refused, and no
+    /// platform provider ever serves it.
+    pub byo_gateway_enabled: bool,
+
+    /// The service credential Integration Core's customer-gateway broker accepts from Model Plane (from
+    /// `CUSTOMER_GATEWAY_INTERNAL_API_KEY`, falling back to `CODEX_SUBSCRIPTION_INTERNAL_API_KEY` as the broker
+    /// itself falls back). It authenticates this service, not the customer's endpoint.
+    pub customer_gateway_internal_api_key: Option<String>,
+
     /// Azure `OpenAI` endpoint (from `AZURE_OPENAI_ENDPOINT`).
     pub azure_openai_endpoint: Option<String>,
 
@@ -304,6 +315,11 @@ impl InferenceConfig {
             ),
             codex_subscription_internal_api_key: trimmed_env("CODEX_SUBSCRIPTION_INTERNAL_API_KEY"),
             codex_subscription_models: csv_env("CODEX_SUBSCRIPTION_MODELS", &[]),
+            byo_gateway_enabled: byo_gateway_switch_on(
+                std::env::var("INFERENCE_BYO_GATEWAY_ENABLED").ok().as_deref(),
+            ),
+            customer_gateway_internal_api_key: trimmed_env("CUSTOMER_GATEWAY_INTERNAL_API_KEY")
+                .or_else(|| trimmed_env("CODEX_SUBSCRIPTION_INTERNAL_API_KEY")),
             azure_openai_endpoint: std::env::var("AZURE_OPENAI_ENDPOINT").ok(),
             azure_openai_api_key: std::env::var("AZURE_OPENAI_API_KEY").ok(),
             azure_openai_api_version: std::env::var("AZURE_OPENAI_API_VERSION")
@@ -528,6 +544,12 @@ impl VertexGeminiConfig {
             credentials_file: trimmed_env("VERTEX_GEMINI_CREDENTIALS_FILE").unwrap_or_default(),
         }
     }
+}
+
+/// The strict reading of `INFERENCE_BYO_GATEWAY_ENABLED`: only the literal `true` enables it, as it does
+/// for the Vertex switch. Anything else, including `1`, `TRUE` and an empty value, leaves it off.
+fn byo_gateway_switch_on(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
 }
 
 /// The strict reading of `VERTEX_GEMINI_ENABLED`: only the literal `true` enables it.

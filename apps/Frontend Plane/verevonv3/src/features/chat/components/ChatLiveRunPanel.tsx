@@ -12,6 +12,9 @@
  * `chat-run-watch.ts` separates "not yet" from "never will be (ZDR)" from
  * "never will be (no capture)" from "existed but could not be fetched", and
  * each renders its own honest copy plus whatever metadata IS present.
+ *
+ * When the run used a terminal or a file and VITE_CHAT_COMPUTER_PANEL is on, a tab strip (ComputerPanelTabs) sits above
+ * the browser region: Browser, Terminal and Files, each drawn from the run's own tool calls. Never on a zero-retention turn.
  */
 
 import { For, Show, createEffect, createMemo, createSignal, untrack } from 'solid-js'
@@ -65,7 +68,9 @@ import { useI18n, translateApiError } from '@/shared/i18n'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
 import { RunCostMeter } from './RunCostMeter'
-import type { RunMeter } from './chat-types'
+import type { ChatToolCall, RunMeter } from './chat-types'
+import { ComputerPanelTabs, computerPicksOf, type ComputerPicks, type ComputerTab } from './computer/ComputerPanelTabs'
+import { chatComputerPanelEnabled } from './computer/ComputerViewer'
 
 // The run stores its error as this Norwegian text; the reader's language is chosen where it is shown.
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
@@ -249,6 +254,16 @@ export function ChatLiveRunPanel(props: {
   onRefreshApprovals?: (runId: string) => void
   /** The watched turn's running cost and usage (WS27-S4). Shown here while no Work panel is open. */
   meter?: RunMeter
+  /**
+   * The watched turn's tool calls (EP-1 W4-P4). The computer panel's Terminal and Files tabs draw from them, behind
+   * `VITE_CHAT_COMPUTER_PANEL`; a zero-retention turn never shows them.
+   */
+  computerCalls?: ChatToolCall[]
+  /**
+   * The Space the watched run's processes live in (EP-1 W4-P4). The Terminal tab's live tail reads through it; without
+   * it the tab shows the transcript only.
+   */
+  spaceRef?: string
   /**
    * The Quarry run the turn's browser runs on and who holds it (EP-1 S1), from the owner-only
    * `browser_session_opened` binding (WS21-S6). Absent until the turn is bound; read only while
@@ -550,6 +565,22 @@ export function ChatLiveRunPanel(props: {
     }
   }
 
+  // The computer panel's tabs (EP-1 W4-P4, F-t3-035). Off unless VITE_CHAT_COMPUTER_PANEL is on, and never on a
+  // zero-retention turn. A run that used neither a terminal nor a file keeps the panel it always had: no tab strip.
+  const [computerTab, setComputerTab] = createSignal<ComputerTab>('browser')
+  const computerPicks = createMemo<ComputerPicks>(() => (
+    chatComputerPanelEnabled() && !props.zdr ? computerPicksOf(props.computerCalls ?? []) : {}
+  ))
+  const computerTabsShown = createMemo(() => computerPicks().terminal !== undefined || computerPicks().file !== undefined)
+  /** The tab on screen: the chosen one while this run still has its kind, otherwise Browser. */
+  const activeComputerTab = createMemo<ComputerTab>(() => {
+    const tab = computerTab()
+    const picks = computerPicks()
+    if (tab === 'terminal' && picks.terminal) return 'terminal'
+    if (tab === 'files' && picks.file) return 'files'
+    return 'browser'
+  })
+  const browserTabShown = () => activeComputerTab() === 'browser'
   const steps = () => watch()?.steps ?? []
   const activity = () => watch()?.activity ?? []
   const live = () => watch()?.live ?? false
@@ -693,9 +724,19 @@ export function ChatLiveRunPanel(props: {
               <Show when={controlError()}>
                 {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
               </Show>
+              {/* EP-1 W4-P4: the Terminal and Files tabs for the kinds this run used. Nothing mounts without one, or while the panel is hidden. */}
+              <Show when={computerTabsShown() && !props.hidden}>
+                <ComputerPanelTabs
+                  picks={computerPicks()}
+                  selected={activeComputerTab()}
+                  onSelect={(tab) => setComputerTab(tab)}
+                  runId={runId()}
+                  spaceRef={props.spaceRef}
+                />
+              </Show>
               <Show
-                when={framed() && session()}
-                fallback={(
+                when={browserTabShown() && framed() && session()}
+                fallback={browserTabShown() ? (
                   <ChatRunEvidenceFallback
                     error={watch()?.error ?? null}
                     live={live()}
@@ -703,7 +744,7 @@ export function ChatLiveRunPanel(props: {
                     steps={steps()}
                     zdr={zdr()}
                   />
-                )}
+                ) : undefined}
               >
                 {(model) => (
                   <>
@@ -731,7 +772,7 @@ export function ChatLiveRunPanel(props: {
                 )}
               </Show>
 
-              <Show when={steps().length > 0}>
+              <Show when={browserTabShown() && steps().length > 0}>
                 <section class="verevon-chat-run-shots" aria-label={i18n.tr('Skjermbilder per steg', 'Screenshots per step')}>
                   <div class="verevon-chat-run-shots__rail">
                     <For each={steps()}>

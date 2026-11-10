@@ -25,6 +25,9 @@ async fn main() -> Result<()> {
     );
 
     let chain = provider::fallback::FallbackChain::from_config(&cfg);
+    // The customer-gateway route (W4-BYO-5) serves only the calls that name a connection, so it is kept
+    // apart from the chain: `None` unless INFERENCE_BYO_GATEWAY_ENABLED is the literal true.
+    let customer_gateway = provider::customer_gateway::CustomerGatewayProvider::from_config(&cfg);
     let speech = provider::speech::SpeechChain::from_env();
     info!(
         providers = speech.provider_count(),
@@ -81,6 +84,7 @@ async fn main() -> Result<()> {
             language,
             realtime,
             video,
+            customer_gateway,
         },
         auth,
         grpc_readiness.clone(),

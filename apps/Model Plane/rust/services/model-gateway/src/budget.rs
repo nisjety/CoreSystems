@@ -213,6 +213,7 @@ mod tests {
             model: String::new(),
             provider_hint: String::new(),
             subscription_connection_id: String::new(),
+            model_connection_id: String::new(),
             session_key: None,
             thread_id: None,
             space_context: None,

@@ -3,6 +3,7 @@ import { ResearchPlanCard, researchPlanTurnEnabled } from './ResearchPlanCard'
 import type { ConnectIntent } from '@/shared/integrations/connect-intent'
 import { ForkAction, threadForkEnabled } from './ForkAction'
 import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
+import { ImportConversationAction, threadImportEnabled } from './ImportConversationAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
 import {
@@ -1028,6 +1029,10 @@ export function AssistantMessage(props: {
                 temporaryChat={props.temporaryChat}
                 spaceScoped={props.spaceScoped}
               />
+            </Show>
+            {/* An import makes a new conversation from a file, so it is offered beside the export on the same answer (EP-12 S15). */}
+            <Show when={threadImportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
+              <ImportConversationAction temporaryChat={props.temporaryChat} spaceScoped={props.spaceScoped} />
             </Show>
             <Show when={canRemember()}>
               <MessageAction

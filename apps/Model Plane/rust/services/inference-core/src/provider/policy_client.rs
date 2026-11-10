@@ -9,6 +9,7 @@
 //! transport/parse failure (or an empty/`{}` store) yields `None` so the caller
 //! keeps its in-memory default. Only the explicit write path surfaces errors.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,10 +19,11 @@ use tonic::transport::{Channel, Endpoint};
 
 use mp_contracts::model_plane::v1::routing_policy_client::RoutingPolicyClient;
 use mp_contracts::model_plane::v1::{
-    GetRoutingPolicyRequest, PolicyCandidate, PromoteCandidateRequest, ProposeCandidateRequest,
-    SetRoutingPolicyRequest,
+    GetOrgRoutingOverlayRequest, GetRoutingPolicyRequest, PolicyCandidate, PromoteCandidateRequest,
+    ProposeCandidateRequest, SetRoutingPolicyRequest,
 };
 
+use super::catalogue_overlay::OrgOverlay;
 use super::routing_policy::RoutingPolicy;
 
 /// Service identity inference-core presents to auth-core to mint a session-core
@@ -159,11 +161,76 @@ impl std::fmt::Display for CandidateError {
     }
 }
 
+/// How long an organisation's overlay is trusted before it is read again (W4-BYO-3).
+const ORG_OVERLAY_TTL: Duration = Duration::from_secs(120);
+
+/// How long a read that failed is not retried. The caller serves the last overlay it held, or none, meanwhile,
+/// so session-core being down or its switch being off costs one read per organisation per window, not one per
+/// request.
+const ORG_OVERLAY_RETRY: Duration = Duration::from_secs(15);
+
+/// The most organisations whose overlay is held at once. At the cap the entry that expires soonest makes room.
+const ORG_OVERLAY_MAX_ORGS: usize = 1000;
+
+/// One organisation's overlay as last read, and when the read stops being trusted.
+struct CachedOrgOverlay {
+    overlay: Arc<OrgOverlay>,
+    expires_at: Instant,
+}
+
+/// The per-organisation overlay cache (W4-BYO-3): at most [`ORG_OVERLAY_MAX_ORGS`] organisations, each for
+/// [`ORG_OVERLAY_TTL`]. It holds model ids and nothing else, and lives in memory for the process.
+#[derive(Default)]
+struct OrgOverlayCache {
+    entries: std::sync::Mutex<HashMap<String, CachedOrgOverlay>>,
+}
+
+impl OrgOverlayCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, CachedOrgOverlay>> {
+        // A panic while holding the lock leaves a map that is still valid, so a poisoned lock is used as it is.
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The overlay held for `org_id` and whether it is still trusted at `now`.
+    fn get(&self, org_id: &str, now: Instant) -> Option<(Arc<OrgOverlay>, bool)> {
+        self.lock()
+            .get(org_id)
+            .map(|entry| (entry.overlay.clone(), entry.expires_at > now))
+    }
+
+    /// Hold `overlay` for `org_id` until `now + ttl`, making room first when the cache is full.
+    fn put(&self, org_id: &str, overlay: Arc<OrgOverlay>, now: Instant, ttl: Duration) {
+        let mut entries = self.lock();
+        if entries.len() >= ORG_OVERLAY_MAX_ORGS && !entries.contains_key(org_id) {
+            entries.retain(|_, entry| entry.expires_at > now);
+            if entries.len() >= ORG_OVERLAY_MAX_ORGS {
+                let soonest = entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.expires_at)
+                    .map(|(key, _)| key.clone());
+                if let Some(key) = soonest {
+                    entries.remove(&key);
+                }
+            }
+        }
+        entries.insert(
+            org_id.to_owned(),
+            CachedOrgOverlay {
+                overlay,
+                expires_at: now + ttl,
+            },
+        );
+    }
+}
+
 /// Lazily-connected client for session-core's `RoutingPolicy` gRPC service.
 #[derive(Clone)]
 pub struct PolicyClient {
     channel: Channel,
     auth: Option<Arc<PolicyAuth>>,
+    org_overlays: Arc<OrgOverlayCache>,
 }
 
 impl PolicyClient {
@@ -181,6 +248,7 @@ impl PolicyClient {
         Some(Self {
             channel,
             auth: PolicyAuth::from_env(),
+            org_overlays: Arc::new(OrgOverlayCache::default()),
         })
     }
 
@@ -214,6 +282,56 @@ impl PolicyClient {
             }
         };
         parse_config_json(&resp.config_json)
+    }
+
+    /// The organisation's routing overlay (W4-BYO-3), from the cache while it is fresh (120 seconds, 1000
+    /// organisations) and from session-core otherwise. Fail-soft: a read that fails serves the last overlay held
+    /// for the organisation, or the empty overlay, and is not retried for 15 seconds. An empty overlay changes
+    /// nothing, so a failure never narrows what the platform serves and never widens it either. A blank
+    /// organisation id has no overlay.
+    pub async fn org_overlay(&self, org_id: &str) -> Arc<OrgOverlay> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return Arc::new(OrgOverlay::default());
+        }
+        let now = Instant::now();
+        let held = self.org_overlays.get(org_id, now);
+        if let Some((overlay, true)) = &held {
+            return overlay.clone();
+        }
+        match self.fetch_org_overlay(org_id).await {
+            Some(overlay) => {
+                let overlay = Arc::new(overlay);
+                self.org_overlays
+                    .put(org_id, overlay.clone(), Instant::now(), ORG_OVERLAY_TTL);
+                overlay
+            }
+            None => {
+                let overlay =
+                    held.map_or_else(|| Arc::new(OrgOverlay::default()), |(held, _)| held);
+                self.org_overlays
+                    .put(org_id, overlay.clone(), Instant::now(), ORG_OVERLAY_RETRY);
+                overlay
+            }
+        }
+    }
+
+    /// Read one organisation's overlay from session-core. `None` on any failure, including session-core
+    /// answering UNAVAILABLE because its `SESSION_ORG_ROUTING_OVERLAY` switch is off.
+    async fn fetch_org_overlay(&self, org_id: &str) -> Option<OrgOverlay> {
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self
+            .authed_request(GetOrgRoutingOverlayRequest {
+                org_id: org_id.to_owned(),
+            })
+            .await;
+        match client.get_org_routing_overlay(request).await {
+            Ok(response) => Some(OrgOverlay::from_json(&response.into_inner().config_json)),
+            Err(error) => {
+                tracing::warn!(%error, "org routing overlay fetch failed; keeping what is held");
+                None
+            }
+        }
     }
 
     /// Persist `policy` to session-core, returning the stored policy as

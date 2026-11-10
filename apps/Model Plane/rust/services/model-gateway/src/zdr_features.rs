@@ -73,6 +73,15 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
             feature: None,
         },
     ),
+    // A customer-gateway connection is refused by the turn's posture decision as well (W4-BYO-6), before this
+    // module is consulted; the same code as the subscription connection.
+    (
+        "model_connection_id",
+        Treatment::Refused {
+            code: code::CONNECTION_NOT_ACKNOWLEDGED,
+            feature: None,
+        },
+    ),
     (
         "session_key",
         Treatment::Inert(
@@ -270,6 +279,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         model: _,
         provider: _,
         subscription_connection_id: _,
+        model_connection_id: _,
         session_key: _,
         thread_id: _,
         space_append_context: _,
@@ -333,6 +343,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "model",
         "provider",
         "subscription_connection_id",
+        "model_connection_id",
         "session_key",
         "thread_id",
         "space_append_context",

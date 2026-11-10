@@ -306,6 +306,14 @@ message InferRequest {
   // model, then the cheap fallback. Empty names none. It carries no content, so
   // Zero Data Retention does not change it.
   string role_fallback_model = 23;
+
+  // The opaque Integration Core id of a customer-gateway model connection (W4-BYO-5): the
+  // organisation's own OpenAI-compatible endpoint, registered and held in Integration Core. Read only
+  // when INFERENCE_BYO_GATEWAY_ENABLED is the literal true. A call that names a connection is served by
+  // that gateway alone, never by a platform provider, and a call that names one while the switch is off
+  // is refused. Model Plane never receives the gateway's address or key. A customer gateway is never zero
+  // data retention, so a ZDR call that names one is refused. Empty names no connection.
+  string model_connection_id = 24;
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -1290,6 +1298,13 @@ message GenerateImageRequest {
 
   // Number of images requested.
   uint32 n = 8;
+
+  // When true, the call is served by one provider only: the first configured provider that matches
+  // provider_hint and, when model is set, lists that model as an image model. That provider alone is
+  // tried, and its error comes back as it is, so no other provider answers in its place. A request
+  // that names no such provider is refused as image_model_unavailable before any provider is called.
+  // False walks the ordered provider chain, as before.
+  bool strict_provider = 9;
 }
 
 // GeneratedImage — one generated image artifact.

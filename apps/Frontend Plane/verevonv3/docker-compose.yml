@@ -235,6 +235,9 @@ services:
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
       # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
       CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
+      # W4-P3 (F-t3-035): the owner's read of a background process's output, GET /api/v1/chat/runs/{run_id}/processes/{pid}/output.
+      # Only the literal `true` enables it; off, the route answers 404 process_output_disabled.
+      CHAT_PROCESS_OUTPUT_READ_ENABLED: ${CHAT_PROCESS_OUTPUT_READ_ENABLED:-false}
       # EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat turn.
       # Only the literal `true` enables them; off, the builder routes answer 404. Pairs with VITE_AGENT_BUILDER
       # on the frontend service, which mounts the page. Both default off.

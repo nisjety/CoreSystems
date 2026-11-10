@@ -999,6 +999,7 @@ mod tests {
             continue_park_form: false,
             model_entitlement_admin_enabled: false,
             agent_definition_versions: false,
+            chat_process_output_enabled: false,
             mail_task_pipeline: None,
             space_features: Default::default(),
         }

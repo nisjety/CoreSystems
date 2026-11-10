@@ -251,6 +251,7 @@ Key environment variables (defaults in `internal/config/config.go`):
 | `SANDBOX_MANAGER_ADDR` | `localhost:50054` | sandbox-manager gRPC endpoint |
 | `BROWSER_BROKER_ADDR` | `browser-broker:9095` | browser-broker gRPC endpoint; the client is created at start-up, and no activity calls it yet (WS21 S4 adds the first `AcquireGrant` caller) |
 | `LETTA_BRIDGE_ADDR` | `localhost:50056` | letta-bridge gRPC endpoint |
+| `MODEL_GATEWAY_URL` | — | model-gateway HTTP base URL for the goal judge (`JudgeGoalTurnActivity`, EP-7 S6); unset, the judge fails closed |
 | `ORCHESTRATOR_GRPC_ADDR` | `:9080` | gRPC listener for both served services |
 | `ORCHESTRATOR_CORE_AUTH_AUDIENCES` | `orchestrator-core` | Comma-separated token audiences `StartWorkflow` accepts |
 | `ORCHESTRATOR_INTERNAL_SERVICE_TOKEN` | — | Model-Plane-local secret for `StartWorkflow`; requires the org list below |

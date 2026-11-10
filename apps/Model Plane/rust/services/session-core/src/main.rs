@@ -69,6 +69,7 @@ mod test_log_capture;
 mod thread_export;
 mod thread_fork;
 mod thread_import;
+mod thread_import_foreign;
 mod thread_reference;
 mod thread_shares;
 mod thread_goals;

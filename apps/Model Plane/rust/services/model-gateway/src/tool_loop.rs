@@ -9324,6 +9324,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     cache_scope_key,
                     image_parts: Vec::new(),
                     role_fallback_model: String::new(),
+                    // A tool round never names a customer-gateway connection (W4-BYO-5): empty names none.
+                    model_connection_id: String::new(),
                 },
                 inference_bearer,
             );

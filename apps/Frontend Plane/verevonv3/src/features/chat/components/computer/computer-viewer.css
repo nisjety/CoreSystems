@@ -17,3 +17,42 @@
 .verevon-computer-viewer pre.verevon-computer-viewer__stderr {
   color: var(--danger);
 }
+
+/* The computer panel's own strip and views (EP-1 W4-P4), in the run panel's body. The strip reuses the chat tab
+   classes and drops their page padding; a live tail scrolls inside its own box, so a long run cannot push the browser
+   view off the panel. */
+
+.verevon-computer-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.verevon-chat-tabs.verevon-computer-tabs {
+  gap: 1px;
+  padding: 0;
+  overflow-x: auto;
+  background: transparent;
+  backdrop-filter: none;
+  scrollbar-width: none;
+}
+
+.verevon-computer-tabs .verevon-chat-tab {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.verevon-computer-panel__view {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.verevon-computer-panel .verevon-computer-viewer__output {
+  max-height: 40vh;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

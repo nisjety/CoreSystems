@@ -125,7 +125,7 @@ pub async fn diff_and_upload_syncable(
 
 /// The walk both diffs share. `keep` sees each file's path and size once it is read, and before
 /// anything is hashed or uploaded.
-async fn diff_and_upload_where(
+pub(crate) async fn diff_and_upload_where(
     cas: &CasClient,
     target_dir: &Path,
     baseline: &HashMap<String, String>,

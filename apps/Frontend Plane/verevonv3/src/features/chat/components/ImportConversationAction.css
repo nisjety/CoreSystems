@@ -1,0 +1,80 @@
+/* The conversation import beside the export and fork on the latest answer (EP-12 S15). */
+.verevon-chat-import {
+  position: relative;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+/* The picker stays focusable and is drawn by its label, so it is visually hidden rather than removed. */
+.verevon-chat-import__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+  white-space: nowrap;
+}
+
+.verevon-chat-import__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  color: var(--verevon-e-muted, #667085);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-import__trigger:hover {
+  background: var(--verevon-surface-soft, #f3f4f6);
+  color: inherit;
+}
+
+.verevon-chat-import__input:focus-visible + .verevon-chat-import__trigger {
+  outline: 2px solid var(--verevon-chat-fjord, #2b5cd9);
+  outline-offset: 2px;
+}
+
+.verevon-chat-import__input:disabled + .verevon-chat-import__trigger {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.verevon-chat-import__result {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.verevon-chat-import__open {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft, #f3f4f6);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-import__open:focus-visible {
+  outline: 2px solid var(--verevon-chat-fjord, #2b5cd9);
+  outline-offset: 2px;
+}
+
+.verevon-chat-import__refusal {
+  margin: 0;
+  color: #b42318;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
