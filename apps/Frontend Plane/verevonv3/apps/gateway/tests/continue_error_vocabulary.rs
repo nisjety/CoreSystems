@@ -574,28 +574,48 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         "found only {total} relay callers; the scan is vacuous"
     );
 
-    // The one non-empty caller is `continue_run`, passing CONTINUE_RELAYED_ERRORS.
+    // The non-empty callers are named here, each with its own closed list: `continue_run`
+    // (CONTINUE_RELAYED_ERRORS) and, since WS09-S4, the room live view `space_run_live`
+    // (spaces/run_live.rs, RELAYED: model-gateway's typed refusals of a member attach, each
+    // with the BFF's fixed words). Any other caller must pass the empty list.
+    const ALLOWED: &[(&str, &str, &str)] = &[
+        (
+            "src/domains/orchestration.rs",
+            "CONTINUE_RELAYED_ERRORS",
+            "continue_run(",
+        ),
+        (
+            "src/domains/spaces/run_live.rs",
+            "RELAYED",
+            "space_run_live(",
+        ),
+    ];
     assert_eq!(
         relaying.len(),
-        1,
-        "exactly one caller may pass a relay list; found {:?}",
+        ALLOWED.len(),
+        "only the named callers may pass a relay list; found {:?}",
         relaying
             .iter()
             .map(|(file, last, _)| (file, last))
             .collect::<Vec<_>>()
     );
-    let (file, last, before) = &relaying[0];
-    assert!(file.ends_with("src/domains/orchestration.rs"), "{file}");
-    assert_eq!(last, "CONTINUE_RELAYED_ERRORS");
-    let handler = before
-        .rfind("pub(crate) async fn ")
-        .map(|at| &before[at..])
-        .expect("an enclosing function");
-    assert!(
-        handler.starts_with("pub(crate) async fn continue_run("),
-        "the relay list is passed from `{}`, not from continue_run",
-        handler.lines().next().unwrap_or("")
-    );
+    for (file, last, before) in &relaying {
+        let allowed = ALLOWED
+            .iter()
+            .find(|(suffix, _, _)| file.ends_with(suffix))
+            .unwrap_or_else(|| panic!("{file} passes a relay list and is not a named caller"));
+        assert_eq!(last, allowed.1, "{file} must pass {}", allowed.1);
+        let handler = before
+            .rfind("async fn ")
+            .map(|at| &before[at + "async fn ".len()..])
+            .expect("an enclosing function");
+        assert!(
+            handler.starts_with(allowed.2),
+            "the relay list in {file} is passed from `{}`, not from {}",
+            handler.lines().next().unwrap_or(""),
+            allowed.2
+        );
+    }
 }
 
 /// The body of `fn name(` in `source`, with whole-line comments dropped.
