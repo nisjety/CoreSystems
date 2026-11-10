@@ -101,8 +101,9 @@ use crate::tab_control::{
 use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
     BrowserEgressPolicy, BrowserEgressProxyProvider, BrowserHealth, BrowserNativeProjection,
-    BrowserNativeTarget, BrowserSession, BrowserTab, LiveAgentCursor, LiveFrame, LiveFrameFormat, LiveFrameOptions,
-    ReputationOutcome, SessionInner, SlotHealth, VerifiedTargetAction, VerifiedTargetOperation,
+    BrowserNativeTarget, BrowserPointHit, BrowserSession, BrowserTab, LiveAgentCursor, LiveFrame,
+    LiveFrameFormat, LiveFrameOptions, ReputationOutcome, SessionInner, SlotHealth,
+    VerifiedTargetAction, VerifiedTargetOperation,
 };
 
 const LIVE_FRAME_CACHE_TTL_MS: u64 = 250;
@@ -3681,6 +3682,21 @@ fn frame_warning(error: &QuarryError, frame_id: &str, limit: Duration) -> Deadli
     }
 }
 
+/// E3.3-l: a [`DeadlineWarning`] as the plain-data warning a projection carries. The frame id is
+/// dropped: the observation lists its frames already, and a warning never names one.
+fn projection_warning(warning: &DeadlineWarning) -> crate::ProjectionWarning {
+    let code = match warning.code {
+        DeadlineWarningCode::AxFrameTimeout => "ax_frame_timeout",
+        DeadlineWarningCode::AxFrameUnavailable => "ax_frame_unavailable",
+        DeadlineWarningCode::AxBudgetExhausted => "ax_budget_exhausted",
+        DeadlineWarningCode::AxFrameLimit => "ax_frame_limit",
+    };
+    crate::ProjectionWarning {
+        code: code.to_owned(),
+        deadline_ms: warning.deadline_ms,
+    }
+}
+
 /// The nodes of the frames the top-level read left out (E3.3-k), each read under its own bound and
 /// all of them under the snapshot's `Op::AxSnapshot` budget, counted from `started`. A frame that
 /// does not answer is left out and named in a warning; the others still come through. Once the
@@ -3792,6 +3808,7 @@ fn native_projection_from_cdp_capped(
         frames,
         targets,
         redaction: None,
+        warnings: Vec::new(),
     }
 }
 
@@ -6483,11 +6500,24 @@ impl BrowserDriver for ChromiumoxideDriver {
         &self,
         session: &BrowserSession,
     ) -> QuarryResult<BrowserNativeProjection> {
-        // The warnings have no field on the projection yet (E3.3-k, ask 1 in the status file).
-        // The accessibility projection's `truncated` flag already says that it is partial.
+        // E3.3-l: the deadline warnings ride on the projection as plain data (code and bound, no
+        // frame id), and the accessibility projection's `truncated` flag still says it is partial.
         self.native_page_projection_checked(session)
             .await
-            .map(|(projection, _warnings)| projection)
+            .map(|(mut projection, warnings)| {
+                projection.warnings = warnings.iter().map(projection_warning).collect();
+                projection
+            })
+    }
+
+    /// E3.3-h: the trait's point hit test, answered by the inherent `hit_test_point`. Read-only.
+    async fn point_hit(
+        &self,
+        session: &BrowserSession,
+        x: i64,
+        y: i64,
+    ) -> QuarryResult<Option<BrowserPointHit>> {
+        ChromiumoxideDriver::hit_test_point(self, session, x, y).await
     }
 
     async fn dialogs(&self, session: &BrowserSession) -> QuarryResult<Vec<BrowserDialog>> {
@@ -7242,15 +7272,10 @@ impl ChromiumoxideDriver {
 /// accessibility ancestors, nearest first.
 pub const HIT_TEST_CHAIN_LIMIT: usize = 32;
 
-/// What a point hit test found (E3.3-h). `backend_node_ids[0]` is the DOM node under the point and
-/// the rest are its accessibility ancestors, nearest first; `frame_id` is the frame that owns the
-/// node. These are CDP handles: they stay inside Quarry and never reach a response or an
-/// observation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PointHit {
-    pub backend_node_ids: Vec<i64>,
-    pub frame_id: Option<String>,
-}
+/// What a point hit test found (E3.3-h), under this module's name: the trait type
+/// [`BrowserPointHit`], which carries the same fields. Its backend node ids are CDP handles; the
+/// hit-test route matches them against the caller's observed targets and never returns them.
+pub type PointHit = BrowserPointHit;
 
 /// One accessibility node of a partial tree, reduced to the fields the ancestor walk reads.
 #[derive(Debug, Clone, PartialEq, Eq)]

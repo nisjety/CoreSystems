@@ -178,6 +178,11 @@ import {
 	type TabMentionResolution,
 	type TabMentionUnresolvedReason,
 } from "@/features/browser/page-context/tab-mention";
+import type {
+	BrowserRegionAttachment,
+	RegionRect,
+} from "@/features/browser/page-context/region-attach";
+import { hostnameOf } from "./knowledge-preview";
 import {
 	listChatGptSubscriptions,
 	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
@@ -392,10 +397,25 @@ export type DashboardComposerTabMention = {
 	tabId: string | null;
 };
 
-/** The browser page context a turn asks for (E3.3-c). Mention-only, never a grant. */
+/**
+ * One browser region attached to the message (E3.3-d2b), as the send names it: the session, the tab and the
+ * region in viewport CSS pixels. No picture and no attachment id: the gateway answers a region ephemerally and
+ * keeps nothing, so a send can only name the region it was drawn over. The picture stays in the composer.
+ */
+export type DashboardComposerBrowserRegion = {
+	sessionId: string;
+	tabId: string;
+	region: RegionRect;
+};
+
+/**
+ * The browser page context a turn asks for (E3.3-c, E3.3-d2b). Mention-only, never a grant.
+ * `regions` is omitted when no region is attached.
+ */
 export type DashboardComposerBrowserContext = {
 	sessionId: string;
 	tabMentions: DashboardComposerTabMention[];
+	regions?: DashboardComposerBrowserRegion[];
 };
 
 /**
@@ -405,6 +425,28 @@ export type DashboardComposerBrowserContext = {
 export function tabMentionChipsEnabled(): boolean {
 	return import.meta.env.VITE_BROWSER_TAB_MENTIONS === "1";
 }
+
+/** Most browser regions one message carries (E3.3-d2b). */
+export const BROWSER_REGION_CHIPS_MAX = 3;
+
+/**
+ * Build-time switch for the browser region chips (E3.3-d2b): the same switch that offers the region select in
+ * the browser pane, VITE_BROWSER_REGION_ATTACH. Only `true` turns it on. Off, nothing renders and nothing is added.
+ */
+export function browserRegionChipsEnabled(): boolean {
+	return import.meta.env.VITE_BROWSER_REGION_ATTACH === "true";
+}
+
+/**
+ * The composer's intake for browser regions (E3.3-d2b). The page hands each region the browser pane attached to
+ * `add`, and calls `clear` when the browser session changes or ends. Neither makes a network call.
+ */
+export type DashboardComposerBrowserRegionIntake = {
+	/** Adds a region. False when it is refused: the switch is off, the turn is zero-retention or the list is full. */
+	add: (attachment: BrowserRegionAttachment) => boolean;
+	/** Drops every attached region. */
+	clear: () => void;
+};
 
 /**
  * The `browserContext` a send carries, or undefined when it carries none:
@@ -424,6 +466,24 @@ export function composerBrowserContext(
 	return tabMentions.length > 0 ? { sessionId: id, tabMentions } : undefined;
 }
 
+/**
+ * The `browserContext` a send carries (E3.3-c, E3.3-d2b): the `@tab` mentions and the browser regions attached to
+ * the message. Undefined when there is neither. The regions name their own session; the mentions are kept only
+ * when they name that same session, since one send names one browser session.
+ */
+export function composerBrowserContextWithRegions(
+	tabContext: DashboardComposerBrowserContext | undefined,
+	regions: readonly DashboardComposerBrowserRegion[],
+): DashboardComposerBrowserContext | undefined {
+	const [first] = regions;
+	if (!first) return tabContext;
+	return {
+		sessionId: first.sessionId,
+		tabMentions: tabContext && tabContext.sessionId === first.sessionId ? tabContext.tabMentions : [],
+		regions: [...regions],
+	};
+}
+
 function tabMentionReasonText(
 	reason: TabMentionUnresolvedReason,
 	tr: (noText: string, enText: string) => string,
@@ -440,6 +500,31 @@ function tabMentionReasonText(
 		case "unknown-tab":
 			return tr("ukjent fane", "unknown tab");
 	}
+}
+
+/**
+ * The host of a region's page, for its chip, named the way the browser pane names its session (no `www.`, no port).
+ * Null when the tab has no http(s) address. The path and query are never shown.
+ */
+function browserRegionHost(attachment: BrowserRegionAttachment): string | null {
+	const target = attachment.target;
+	if (!target) return null;
+	const host = hostnameOf(target);
+	// `hostnameOf` gives the address back unchanged when it does not parse. That address is never shown.
+	return host && host !== target ? host : null;
+}
+
+function browserRegionChipLabel(
+	attachment: BrowserRegionAttachment,
+	tr: (noText: string, enText: string) => string,
+): string {
+	const host = browserRegionHost(attachment);
+	return host ? tr(`Område fra ${host}`, `Region of ${host}`) : tr("Valgt område", "Selected area");
+}
+
+/** The picture the gateway answered, as the chip's thumbnail. Its type is PNG or JPEG, the only types the gateway accepts. */
+function browserRegionThumbnailUrl(attachment: BrowserRegionAttachment): string {
+	return `data:${attachment.image.mimeType};base64,${attachment.image.dataBase64}`;
 }
 
 export type DashboardComposerSubmitPayload = {
@@ -475,6 +560,12 @@ export type DashboardComposerSubmitPayload = {
 	 * closed before anything reaches a model. Never carries page content or a
 	 * grant. Omitted unless VITE_BROWSER_TAB_MENTIONS is on, a session is
 	 * known, the turn is not zero-retention and the text has a mention.
+	 *
+	 * `browserContext.regions` (E3.3-d2b) names the browser regions attached to
+	 * the message: references only, never their pictures. It is omitted when no
+	 * region is attached, and never set on a zero-retention turn. The chat
+	 * controller refuses a send that carries one until the gateway can
+	 * re-resolve it.
 	 */
 	browserContext?: DashboardComposerBrowserContext;
 	actions: ComposerActiveAction[];
@@ -1045,6 +1136,11 @@ export function DashboardComposer(props: {
 	 */
 	browserSessionId?: string | null;
 	browserTabs?: readonly BrowserTab[] | null;
+	/**
+	 * Receives the composer's browser-region intake (E3.3-d2b) once, when the composer is set up. The page feeds
+	 * the regions its browser pane attached through it. Omit it and no region can be attached from this composer.
+	 */
+	onBrowserRegionIntake?: (intake: DashboardComposerBrowserRegionIntake) => void;
 	/** Once a message has been sent in a temporary thread, the toggle can no longer be turned off mid-conversation. */
 	temporaryChatLocked?: boolean;
 	/**
@@ -1468,6 +1564,44 @@ export function DashboardComposer(props: {
 	createEffect(() => contextRefsAvailable(), (available) => {
 		if (!available) setContextRefs([]);
 	});
+	// Browser regions (E3.3-d2b). The composer keeps the regions the browser pane attached to the next message,
+	// at most BROWSER_REGION_CHIPS_MAX, and shows each as a chip. The pictures stay here; a send carries only
+	// references. Removing a chip calls no network.
+	const [browserRegions, setBrowserRegions] = createSignal<BrowserRegionAttachment[]>([]);
+	const [browserRegionNotice, setBrowserRegionNotice] = createSignal<string | null>(null);
+	const addBrowserRegion = (attachment: BrowserRegionAttachment): boolean => {
+		if (!browserRegionChipsEnabled()) return false;
+		if (zeroRetentionTurn()) {
+			setBrowserRegionNotice(i18n.tr(
+				"Områder legges ikke ved i en midlertidig chat.",
+				"Areas are not attached in a temporary chat.",
+			));
+			return false;
+		}
+		if (browserRegions().length >= BROWSER_REGION_CHIPS_MAX) {
+			setBrowserRegionNotice(i18n.tr(
+				`Du kan legge ved opptil ${BROWSER_REGION_CHIPS_MAX} områder. Fjern ett for å legge til et nytt.`,
+				`You can attach up to ${BROWSER_REGION_CHIPS_MAX} areas. Remove one to add another.`,
+			));
+			return false;
+		}
+		setBrowserRegionNotice(null);
+		setBrowserRegions((current) => [...current, attachment]);
+		return true;
+	};
+	const removeBrowserRegions = (removed: readonly BrowserRegionAttachment[]): void => {
+		setBrowserRegionNotice(null);
+		setBrowserRegions((current) => current.filter((item) => !removed.includes(item)));
+	};
+	const clearBrowserRegions = (): void => {
+		setBrowserRegionNotice(null);
+		setBrowserRegions([]);
+	};
+	// A picture of the page is never carried into a zero-retention turn, so the regions go when the turn becomes one.
+	createEffect(() => zeroRetentionTurn(), (zeroRetention) => {
+		if (zeroRetention) clearBrowserRegions();
+	});
+	props.onBrowserRegionIntake?.({ add: addBrowserRegion, clear: clearBrowserRegions });
 	const selectedModelLabel = () => {
 		const id = selectedModel();
 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
@@ -1800,6 +1934,7 @@ export function DashboardComposer(props: {
 		return Boolean(body && !draftCommand() && files().length === 0 && activeActions().length === 0 &&
 			!browsing && !deepSearch() && !shouldResearchLinkedProducts({ browseWeb: browsing, message: body }) &&
 			!imageMode() && !agentMode() && retrievalScope() === 'auto' && connectorScope().length === 0 &&
+			browserRegions().length === 0 &&
 			!(tabMentionChipsEnabled() && composerBrowserContext(body, props.browserSessionId, zeroRetentionTurn() || temporaryChat())));
 	};
 	const submitEnabled = createMemo(() =>
@@ -2939,13 +3074,27 @@ export function DashboardComposer(props: {
 		const submittedSourceScope = sourceScope();
 		const submittedConversationOnly = conversationOnly();
 		const submittedRetrievalScope = retrievalScope();
-		const submittedBrowserContext = tabMentionChipsEnabled()
+		// `@tab` mentions (E3.3-c) are not sent on a conversation-only turn, which reads no page. Browser regions
+		// (E3.3-d2b) are sent even then, so the controller refuses them rather than dropping them. Neither travels
+		// on a zero-retention turn.
+		const submittedTabContext = tabMentionChipsEnabled()
 			? composerBrowserContext(
 					initialSnapshot.submittedText,
 					props.browserSessionId,
 					zeroRetentionTurn() || temporaryChat(),
 				)
 			: undefined;
+		const submittedBrowserRegions: BrowserRegionAttachment[] = (zeroRetentionTurn() || temporaryChat())
+			? []
+			: browserRegions();
+		const submittedBrowserContext = composerBrowserContextWithRegions(
+			submittedConversationOnly ? undefined : submittedTabContext,
+			submittedBrowserRegions.map((item) => ({
+				sessionId: item.sessionId,
+				tabId: item.tabId,
+				region: item.region,
+			})),
+		);
 		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()
 			? normalizeConnectorScope(connectorScope())
 			: [];
@@ -2978,8 +3127,8 @@ export function DashboardComposer(props: {
 			if (submittedContextRefs.length > 0) payload.contextRefs = submittedContextRefs;
 			// Omitted when nothing was picked, like `connectorScope` above.
 			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
-			// Omitted unless the text has a mention; a conversation-only turn reads no page.
-			if (submittedBrowserContext && !submittedConversationOnly) payload.browserContext = submittedBrowserContext;
+			// Omitted unless the text has a mention or a browser region is attached (see above).
+			if (submittedBrowserContext) payload.browserContext = submittedBrowserContext;
 			if (submittedConversationOnly) {
 				payload.tools = [];
 				payload.actions = [];
@@ -2990,6 +3139,8 @@ export function DashboardComposer(props: {
 			// The picks were consent for this turn, so they go with it. A failed send keeps them for a retry.
 			if (submittedConnectorScope.length > 0) setConnectorScope([]);
 			if (submittedContextRefs.length > 0) setContextRefs([]);
+			// The regions the send named were consent for this turn too; regions added while it was in flight stay.
+			if (submittedBrowserRegions.length > 0) removeBrowserRegions(submittedBrowserRegions);
 		} catch (error) {
 			const message = error instanceof PendingChatLaunchError
 				? error.reason === 'unreadable'
@@ -4082,6 +4233,72 @@ export function DashboardComposer(props: {
 								)}
 							</For>
 						</div>
+					</Show>
+					<Show when={browserRegions().length > 0}>
+						<div
+							class="dashboard-composer-region-chips"
+							role="list"
+							aria-label={i18n.tr("Områder fra nettleseren", "Areas from the browser")}
+							style={{ display: "flex", "flex-wrap": "wrap", gap: "4px", padding: "2px 12px" }}
+						>
+							<For each={browserRegions()}>
+								{(region) => (
+									<span
+										role="listitem"
+										class="dashboard-composer-region-chip"
+										data-kind="browser-region"
+										style={{
+											display: "inline-flex",
+											"align-items": "center",
+											gap: "6px",
+											"max-width": "240px",
+											padding: "1px 6px 1px 1px",
+											"border-radius": "999px",
+											"font-size": "12px",
+											border: "1px solid currentColor",
+										}}
+									>
+										<img
+											src={browserRegionThumbnailUrl(region)}
+											alt=""
+											width="24"
+											height="24"
+											style={{ "object-fit": "cover", "border-radius": "999px", "flex-shrink": "0" }}
+										/>
+										<span style={{ overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+											{browserRegionChipLabel(region, i18n.tr)}
+										</span>
+										<button
+											type="button"
+											aria-label={i18n.tr("Fjern området", "Remove the area")}
+											title={i18n.tr("Fjern området", "Remove the area")}
+											onClick={() => removeBrowserRegions([region])}
+											style={{
+												display: "inline-flex",
+												border: "0",
+												background: "transparent",
+												color: "inherit",
+												padding: "0",
+												cursor: "pointer",
+											}}
+										>
+											<X class="size-2.5" />
+										</button>
+									</span>
+								)}
+							</For>
+						</div>
+					</Show>
+					<Show when={browserRegionNotice()}>
+						{(notice) => (
+							<p
+								class="dashboard-composer-region-notice"
+								role="status"
+								style={{ margin: "0", padding: "2px 12px", "font-size": "12px" }}
+							>
+								{notice()}
+							</p>
+						)}
 					</Show>
 					<Show when={voiceRecording()}>
 						<div class="dashboard-composer-loading-bar">

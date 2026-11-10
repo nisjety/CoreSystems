@@ -81,6 +81,8 @@ mod tests {
             target_resolution: None,
             telemetry: quarry_core::contracts::BrowserTelemetry::default(),
             redaction: None,
+            warnings: Vec::new(),
+            settle_ms: None,
             observed_at: Utc::now(),
         }
     }

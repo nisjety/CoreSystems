@@ -70,6 +70,8 @@ mod tab_ledger;
 #[cfg(feature = "browser-agent")]
 mod attach;
 #[cfg(feature = "browser-agent")]
+mod origin_extension;
+#[cfg(feature = "browser-agent")]
 mod router;
 #[cfg(all(test, feature = "browser-agent"))]
 mod tests;
@@ -114,6 +116,8 @@ pub use self::tabs::*;
 use self::tab_ledger::*;
 #[cfg(feature = "browser-agent")]
 use self::attach::*;
+#[cfg(feature = "browser-agent")]
+pub use self::origin_extension::*;
 #[cfg(feature = "browser-agent")]
 pub use self::router::*;
 

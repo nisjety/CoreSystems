@@ -1388,6 +1388,19 @@ fn crawl_request_refusal(
     (status, Json(Envelope::<()>::err(request_id, error)))
 }
 
+/// W3-E3.5-3: count a job this handoff created, by whether it carries a per-job webhook. Dark:
+/// nothing is counted while `QUARRY_EDGE__JOB_WEBHOOK` is off, so a default deployment emits no
+/// new series. The labels are closed (`kind` is `crawl` or `batch`, `has_webhook` a bool): the
+/// URL and the host are never a label and never logged.
+fn count_job_webhook_handoff(kind: &'static str, has_webhook: bool) {
+    if !crate::crawl_request::CrawlRequestSettings::current().job_webhook {
+        return;
+    }
+    let has_webhook = if has_webhook { "true" } else { "false" };
+    metrics::counter!("job_webhook_handoff_total", "kind" => kind, "has_webhook" => has_webhook)
+        .increment(1);
+}
+
 async fn crawl_handoff(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -1534,6 +1547,14 @@ async fn crawl_handoff(
         if let Some(allowed) = robots_override.as_ref() {
             params.insert("robots".to_owned(), allowed.params_value());
         }
+        // W3-E3.5-3: the checked per-job webhook, stamped only when the caller sent one. Control
+        // vets the resolved host again before it stores the hook on the job.
+        if let Some(hook) = req.webhook.as_ref() {
+            params.insert(
+                crate::crawl_request::JOB_WEBHOOK_KEY.to_owned(),
+                hook.params_value(),
+            );
+        }
     }
     // WS7.G 6b: the policy this crawl was admitted under rides with the job to every page.
     stamp_policy_snapshot(&mut job_params, &state, &decision);
@@ -1556,6 +1577,9 @@ async fn crawl_handoff(
     // refused or failed handoff (queue full included) created no job, and a replay of
     // an Idempotency-Key (Control answered 200) created nothing new.
     let billed_job = crate::handoff::billable_job_id(&ack);
+    if billed_job.is_some() {
+        count_job_webhook_handoff("crawl", req.webhook.is_some());
+    }
     if crate::usage_attrs::corrected_rules(&*state.usage) {
         if let Some(job_id) = billed_job {
             let mut attrs = crate::usage_attrs::UsageAttrs::new(
@@ -1643,6 +1667,11 @@ pub struct BatchRequest {
     pub redact_pii: Option<serde_json::Value>,
     #[serde(default, rename = "redactPii")]
     pub redact_pii_camel: Option<serde_json::Value>,
+    /// W3-E3.5-3: the per-job webhook, checked as a crawl's is (see
+    /// [`crate::crawl_request::job_webhook_value`]). Refused while
+    /// `QUARRY_EDGE__JOB_WEBHOOK` is off.
+    #[serde(default)]
+    pub webhook: Option<serde_json::Value>,
 }
 
 /// CW-1: a batch page runs without per-page scrape options, so it cannot be redacted.
@@ -1687,6 +1716,30 @@ async fn batch_handoff(
             Json(Envelope::<()>::err(&request_id, err)),
         ));
     }
+    // W3-E3.5-3: the per-job webhook is checked after the ZDR refusal above and with the other
+    // body checks, before anything is created (a crawl checks its body the same way). The refusal
+    // above already covers a ZDR caller, so the ZDR argument is false here; it is passed anyway so
+    // the rule stays in one place. Off, a present key is the `reserved_field` 400.
+    let webhook = match crate::crawl_request::job_webhook_value(
+        req.webhook.as_ref(),
+        crate::crawl_request::CrawlRequestSettings::current().job_webhook,
+        claims.effective_zdr(req.zdr.unwrap_or(false)),
+    ) {
+        Ok(found) => found,
+        Err(fields) => {
+            let err = QuarryError::new(
+                ErrorCode::BadRequest,
+                "the batch request has invalid fields",
+            )
+            .with_details(serde_json::json!({
+                "fields": crate::crawl_request::fields_json(&fields),
+            }));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(Envelope::<()>::err(&request_id, err)),
+            ));
+        }
+    };
     refuse_while_draining(&request_id)?;
     // WS14.S5: every URL is checked statically before anything is created (no network work).
     // When none can be crawled the batch is a 400 with `details.rejected`; otherwise the
@@ -1744,6 +1797,14 @@ async fn batch_handoff(
         "user_id": claims.user_id,
         "ingest": req.ingest,
     });
+    // W3-E3.5-3: the checked per-job webhook rides with the job, stamped only when the caller
+    // sent one.
+    if let (Some(hook), Some(params)) = (webhook.as_ref(), batch_params.as_object_mut()) {
+        params.insert(
+            crate::crawl_request::JOB_WEBHOOK_KEY.to_owned(),
+            hook.params_value(),
+        );
+    }
     // WS7.G 6b: the policy this batch was admitted under rides with the job to every page.
     stamp_policy_snapshot(&mut batch_params, &state, &decision);
     let batch_params = crate::handoff::with_admission(batch_params, &org_limits);
@@ -1786,6 +1847,9 @@ async fn batch_handoff(
     // handoff created no job, and a replay of an Idempotency-Key (Control answered 200)
     // created nothing new, so neither is billed.
     let billed_job = crate::handoff::billable_job_id(&ack);
+    if billed_job.is_some() {
+        count_job_webhook_handoff("batch", webhook.is_some());
+    }
     if crate::usage_attrs::corrected_rules(&*state.usage) {
         if let Some(job_id) = billed_job {
             let mut attrs = crate::usage_attrs::UsageAttrs::new(

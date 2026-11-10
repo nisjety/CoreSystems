@@ -5824,6 +5824,184 @@ pub(super) async fn dispatch_browser_run_control(
     owner_json_response_to_envelope("browser_run.control", user, status, payload)
 }
 
+/// The most characters a steer message may carry (the registry's `content` bound, and the
+/// model-gateway queued-input cap it enforces again).
+const BROWSER_STEER_MAX_CHARS: usize = 2000;
+
+/// The owner's typed refusals of a steer, as (upstream code, fixed message). The owner sends
+/// them as `{ "error": "<code>" }` (a bare string, no envelope), so they are re-keyed here into
+/// the gateway's `{ error: { code, message } }` envelope with a message the gateway wrote; the
+/// upstream text itself is never relayed.
+const BROWSER_STEER_REFUSALS: &[(&str, &str)] = &[
+    ("steer_text_empty", "The message is empty."),
+    ("steer_text_too_long", "The message is too long."),
+    (
+        "steer_text_not_allowed_with_stop",
+        "A message cannot be sent together with a stop.",
+    ),
+    (
+        "browser_steer_disabled",
+        "Sending a message into a running browser task is not enabled.",
+    ),
+    (
+        "steer_queue_full",
+        "The browser task already has messages waiting. Try again in a moment.",
+    ),
+];
+
+/// How the owner answered a steer, for [`dispatch_browser_run_steer`].
+#[derive(Debug, PartialEq)]
+enum BrowserSteerAnswer {
+    /// The run holds the message and takes it at its next step.
+    Queued,
+    /// No run of this person's has that id (404) or it is no longer running (409): nothing was
+    /// taken and nothing was started.
+    RunEnded,
+    /// The owner refused or failed; the response carries the gateway-shaped error.
+    Refused(StatusCode, Value),
+}
+
+/// Whether the owner's refusal payload is its zero-data-retention one: the typed catalogue
+/// refusal (`error.code`), or the plain-text one `control_browser_run` used before it was typed.
+fn is_zdr_steer_refusal(payload: &Value) -> bool {
+    payload.pointer("/error/code").and_then(Value::as_str) == Some("zdr_feature_not_supported")
+        || is_zdr_run_controls_refusal(payload)
+}
+
+fn browser_steer_answer(status: StatusCode, payload: &Value) -> BrowserSteerAnswer {
+    if status.is_success() {
+        return BrowserSteerAnswer::Queued;
+    }
+    if is_zdr_steer_refusal(payload) {
+        // A message into a run is content the zero-data-retention path does not carry. The
+        // refusal stays a 403 naming the feature, in the catalogue shape the SPA renders.
+        return BrowserSteerAnswer::Refused(
+            StatusCode::FORBIDDEN,
+            json!({
+                "error": {
+                    "code": "zdr_feature_not_supported",
+                    "message": "This is not supported with zero data retention yet: sending a message into a browser task. The request was refused before anything was sent.",
+                    "retryable": false,
+                    "action": "turn_off_feature",
+                    "feature": "browser_run_steer",
+                }
+            }),
+        );
+    }
+    if matches!(status, StatusCode::NOT_FOUND | StatusCode::CONFLICT) {
+        return BrowserSteerAnswer::RunEnded;
+    }
+    let upstream_code = payload
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| payload.pointer("/error/code").and_then(Value::as_str));
+    if let Some((code, message)) = BROWSER_STEER_REFUSALS
+        .iter()
+        .find(|(known, _)| Some(*known) == upstream_code)
+    {
+        return BrowserSteerAnswer::Refused(status, error(*code, *message));
+    }
+    BrowserSteerAnswer::Refused(status, payload.clone())
+}
+
+/// `browser_run.steer`: one message from the person into a running browser-agent run. The
+/// owner's run-control route carries the text on `resume`, which queues it for the run's next
+/// step and moves nothing on a run that is already running (a `pause` would stop it), so that is
+/// the action sent. A run that is paused is resumed by the same call, which is what sending it a
+/// message means.
+///
+/// Human-only: the registry exempts the id from the Model's eligibility list, and this arm
+/// refuses a body that states any actor but the person. The text is held only in this call's
+/// stack: it is never logged, echoed or stored here, and the owner refuses it under zero data
+/// retention. `control_ai_run` forwards no idempotency key to the owner's control route, so
+/// `clientMessageId` is echoed back to the caller and not sent upstream.
+pub(super) async fn dispatch_browser_run_steer(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    if let Some(actor) = input.get("actor") {
+        if actor.as_str() != Some("human") {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "browser_steer_human_only",
+                    "Only the person can send a message into a browser task.",
+                )),
+            )
+                .into_response();
+        }
+    }
+    let run_id = ticket_string(input, "runId");
+    if run_id.is_empty() {
+        return ticket_bad_request("browser_run.steer requires a non-empty 'runId'");
+    }
+    let content = match input.get("content") {
+        Some(Value::String(content)) => content.trim(),
+        _ => return ticket_bad_request("browser_run.steer requires 'content' as a string"),
+    };
+    if content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("steer_text_empty", "The message is empty.")),
+        )
+            .into_response();
+    }
+    if content.chars().count() > BROWSER_STEER_MAX_CHARS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error("steer_text_too_long", "The message is too long.")),
+        )
+            .into_response();
+    }
+    let client_message_id = match input.get("clientMessageId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id))
+            if !id.is_empty()
+                && id.len() <= 128
+                && id.starts_with(|c: char| c.is_ascii_alphanumeric())
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')) =>
+        {
+            Some(id.as_str())
+        }
+        Some(_) => {
+            return ticket_bad_request(
+                "browser_run.steer 'clientMessageId' must be 1 to 128 letters, digits, '_' or '-'",
+            )
+        }
+    };
+    let response = control_ai_run(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(run_id.to_owned()),
+        Json(json!({ "action": "resume", "text": content })),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    match browser_steer_answer(status, &payload) {
+        BrowserSteerAnswer::Refused(status, payload) => (status, Json(payload)).into_response(),
+        answer => {
+            let outcome = if answer == BrowserSteerAnswer::Queued {
+                "queued"
+            } else {
+                "run_ended"
+            };
+            let mut result = json!({ "outcome": outcome });
+            if let Some(id) = client_message_id {
+                result["clientMessageId"] = Value::String(id.to_owned());
+            }
+            owner_json_response_to_envelope(
+                "browser_run.steer",
+                user,
+                StatusCode::OK,
+                json!({ "data": result }),
+            )
+        }
+    }
+}
+
 /// How a request to stop an AI browser run came out, for
 /// [`dispatch_browser_blocked_try_other_source`].
 #[derive(Debug, PartialEq, Eq)]

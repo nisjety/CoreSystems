@@ -272,6 +272,8 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
         last_rejected_epoch: None,
         tab_origins: Default::default(),
         nav_policy: crate::agent_routes::human_browse::RunNavPolicy::Allowlist,
+        origin_extension: None,
+        origin_extension_lane_stale: false,
     };
     let run_id = entry.run_id.to_string();
     let live = RunLive::new(

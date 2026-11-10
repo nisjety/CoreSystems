@@ -6,18 +6,15 @@
 //! and that switch is off by default. A ZDR run may use it: the answer goes back to the caller
 //! and is neither stored nor logged, and the route logs nothing about the point or the page.
 //!
-//! The browser half is `ChromiumoxideDriver::hit_test_point` (`DOM.getNodeForLocation`, then the
-//! node's accessibility ancestors). The ref half reads the person's lane, the last observation the
-//! caller already holds, and returns the nearest ancestor that is one of its targets. Backend node
-//! ids never leave this process.
-//!
-//! Not wired yet: `BrowserDriver` has no point hit test. The trait lives in
-//! `quarry-browser/src/lib.rs`, which this unit does not own, so [`point_hit`] answers
-//! `unsupported` until that default method lands (see the unit's status file).
+//! The browser half is `BrowserDriver::point_hit`, which `ChromiumoxideDriver` answers with its
+//! `hit_test_point` (`DOM.getNodeForLocation`, then the node's accessibility ancestors). A driver
+//! with no point hit test keeps the trait default and answers `unsupported`. The ref half reads the
+//! person's lane, the last observation the caller already holds, and returns the nearest ancestor
+//! that is one of its targets. The answer carries no backend node id and no frame id.
 
 use super::*;
 
-use quarry_browser::chromiumoxide::PointHit;
+use quarry_browser::BrowserPointHit;
 
 /// The switch. Read per call, like `QUARRY_EDGE__DOWNLOADS`, so it needs no AppState plumbing.
 pub const HIT_TEST_FLAG: &str = "QUARRY_EDGE__HIT_TEST";
@@ -147,7 +144,7 @@ pub struct HitTestData {
 
 /// The answer for one point, from what the browser found and what the lane last observed.
 pub(super) fn hit_answer(
-    hit: Option<&PointHit>,
+    hit: Option<&BrowserPointHit>,
     observed: Option<&ObservedSnapshot>,
     zdr: bool,
 ) -> HitTestData {
@@ -182,18 +179,15 @@ pub(super) fn hit_answer(
     }
 }
 
-/// The browser half: the DOM node under the point and its accessibility ancestors. `BrowserDriver`
-/// has no point hit test yet. The trait lives in `quarry-browser/src/lib.rs`, which this unit does
-/// not own, so every call answers `unsupported` until that default method lands. It will delegate
-/// to `ChromiumoxideDriver::hit_test_point`.
+/// The browser half: the DOM node under the point and its accessibility ancestors, from the
+/// driver's read-only `point_hit`. The route is dark until `QUARRY_EDGE__HIT_TEST` is on.
 async fn point_hit(
     state: &AppState,
     session: &BrowserSession,
     x: i64,
     y: i64,
-) -> QuarryResult<Option<PointHit>> {
-    let _ = (state, session, x, y);
-    Err(QuarryError::unsupported_action("hit_test"))
+) -> QuarryResult<Option<BrowserPointHit>> {
+    state.agent_driver.point_hit(session, x, y).await
 }
 
 /// `GET /v1/agent/runs/{run_id}/hit-test?x=&y=` (E3.3-h). Answers `403 hit_test_disabled` until
@@ -354,7 +348,7 @@ mod hit_test_tests {
     #[test]
     fn the_answer_names_its_snapshot_and_says_why_it_has_no_ref() {
         let snapshot = observed(vec![target(10, "@e1", "Save")]);
-        let hit = PointHit {
+        let hit = BrowserPointHit {
             backend_node_ids: vec![10],
             frame_id: Some("frame-1".to_owned()),
         };
@@ -375,7 +369,7 @@ mod hit_test_tests {
         assert!(unobserved.hit);
         assert_eq!(unobserved.reason, Some("no_snapshot"));
 
-        let elsewhere = PointHit {
+        let elsewhere = BrowserPointHit {
             backend_node_ids: vec![55],
             frame_id: None,
         };
@@ -388,7 +382,7 @@ mod hit_test_tests {
     #[test]
     fn the_wire_answer_carries_refs_and_no_browser_handles() {
         let snapshot = observed(vec![target(10, "@e1", "Save")]);
-        let hit = PointHit {
+        let hit = BrowserPointHit {
             backend_node_ids: vec![10],
             frame_id: Some("frame-1".to_owned()),
         };

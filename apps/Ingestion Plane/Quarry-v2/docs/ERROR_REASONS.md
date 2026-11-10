@@ -252,8 +252,11 @@ Not errors: a model failure, a rate limit, a schema the output could not satisfy
 | 400 | `events` | `events_empty` | no event named | name `change_detected` |
 | 400 | `events` | `events_unsupported` | an event outside the closed list (`*`, a run event, the dotted subject) | use `change_detected` |
 | 400 | `description` | `description_too_long` | over 200 characters | shorten it |
+| 400 | `notify_on_change` | `notify_types_empty` | the filter names no change type | name `new`, `changed` or `removed` |
+| 400 | `notify_on_change` | `notify_type_unsupported` | a change type outside the closed list | use `new`, `changed` or `removed` |
+| 400 | `notify_on_change` | `notify_min_delta_out_of_range` | `min_paragraph_delta` is below 0 or above 1000 | use a value from 0 to 1000 |
 | 400 | `body` | `body_invalid` | the body is not JSON of the documented shape, or has an unknown field | send only the documented fields |
-| 400 | `body` | `empty_patch` | a `PATCH` named no field | name `active`, `events` or `description` |
+| 400 | `body` | `empty_patch` | a `PATCH` named no field | name `active`, `events`, `description` or `notify_on_change` |
 | 400 | `status`, `limit`, `cursor` | `status_unsupported`, `limit_invalid`, `cursor_invalid` | a bad query value on a list | fix the query |
 | 403 `FORBIDDEN` | | `webhook_off_process` | the caller is under Zero Data Retention (create, patch, retry only) | none: a ZDR organization cannot subscribe |
 | 409 `CONFLICT` | | `subscription_exists` | the organization has a subscription with this URL and these events | use the existing one |

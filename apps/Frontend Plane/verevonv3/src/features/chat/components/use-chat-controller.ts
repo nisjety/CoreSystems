@@ -4226,9 +4226,25 @@ export function useChatController() {
     }
   }
 
+  /**
+   * E3.3-d: a send that carries browser regions is refused before anything reaches a model. Unlike an `@tab`
+   * mention, a region has no live source to re-resolve against: the picture a send would carry is the
+   * client's own copy, and the region attach route keeps nothing that vouches for it. The Model Plane has no
+   * classification for a browser-region attachment yet either. The composer keeps the draft and the regions.
+   * Lift this refusal together with the forwarding once both are in place.
+   */
+  const assertComposerRegionsSendable = (payload: DashboardComposerSubmitPayload): void => {
+    if ((payload.browserContext?.regions?.length ?? 0) === 0) return
+    throw new Error(i18n.tr(
+      'Områder fra nettleseren kan ikke sendes ennå. Fjern området og send på nytt. Utkastet er beholdt.',
+      'Areas from the browser cannot be sent yet. Remove the area and send again. Your draft is kept.',
+    ))
+  }
+
   const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload) => {
     if (isForeignOriginThread(state.threadId)) return
     // Before the launch motion and before any model-bound step: a refusal throws, the composer keeps the draft.
+    assertComposerRegionsSendable(payload)
     const browserTabRefs = await resolveComposerTabMentions(payload)
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)

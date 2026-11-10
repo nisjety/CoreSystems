@@ -882,6 +882,21 @@ pub struct BrowserNativeProjection {
     /// WS12.S1: what the field-facts probe and the masking did to this projection.
     /// `None` only for a projection that was not produced by the masking pass.
     pub redaction: Option<ProjectionRedaction>,
+    /// E3.3-l: what the accessibility read gave up on (a frame that did not answer, a spent budget,
+    /// a frame limit). Plain data: a closed code and the bound, never a frame id, URL or page text.
+    /// Empty unless `QUARRY_BROWSER_AX_PER_FRAME` is on and a frame was left out.
+    pub warnings: Vec<ProjectionWarning>,
+}
+
+/// E3.3-l: one deadline warning of a [`BrowserNativeProjection`], as plain data so a caller does not
+/// need the driver's own types. `code` is one of `ax_frame_timeout`, `ax_frame_unavailable`,
+/// `ax_budget_exhausted`, `ax_frame_limit`. It carries no frame id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionWarning {
+    /// The closed warning code.
+    pub code: String,
+    /// The bound that expired, in ms, when the warning is about one.
+    pub deadline_ms: Option<u64>,
 }
 
 /// WS12.S1 stamp for one native projection: counts and rule ids only, never
@@ -923,6 +938,18 @@ pub struct BrowserDownloadedFile {
     pub bytes: bytes::Bytes,
     pub suggested_filename: String,
     pub source_url: String,
+}
+
+/// What a viewport point hit test found (E3.3-h): the DOM node under the point and its
+/// accessibility ancestors. `backend_node_ids[0]` is the node under the point and the rest are its
+/// accessibility ancestors, nearest first; `frame_id` is the frame that owns the node. The ids are
+/// Chromium backend node ids (CDP handles). The hit-test route matches them against the caller's
+/// observed targets and returns only refs, never these ids. Plain types, so this module needs no
+/// chromiumoxide dependency.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserPointHit {
+    pub backend_node_ids: Vec<i64>,
+    pub frame_id: Option<String>,
 }
 
 /// Loopback endpoint of Quarry's DNS-pinning browser egress authority. It is
@@ -1445,6 +1472,18 @@ pub trait BrowserDriver: Send + Sync {
         _session: &BrowserSession,
     ) -> QuarryResult<BrowserNativeProjection> {
         Err(QuarryError::unsupported_action("native_page_projection"))
+    }
+
+    /// E3.3-h: the DOM node under a viewport point (CSS pixels from the top-left of the viewport)
+    /// and its accessibility ancestors. Read-only: no focus, scroll, input, navigation or write.
+    /// `Ok(None)` when no node lies at the point. Default: Unsupported.
+    async fn point_hit(
+        &self,
+        _session: &BrowserSession,
+        _x: i64,
+        _y: i64,
+    ) -> QuarryResult<Option<BrowserPointHit>> {
+        Err(QuarryError::unsupported_action("hit_test"))
     }
 
     /// Return currently open JavaScript dialogs. Drivers must never resolve a

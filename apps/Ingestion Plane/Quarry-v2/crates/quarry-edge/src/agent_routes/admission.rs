@@ -608,9 +608,9 @@ pub(super) fn admit_tab_operation(
 /// `navigate` to the run's allow list; the extension covers what the page reaches (an SSO
 /// redirect, a frame, a CDN, a link the person follows). Flag `QUARRY_EDGE__ORIGIN_CONSENT`,
 /// default off: off, the call is refused with 403 before any broker call.
-// Not wired to a route yet: the route that carries the extension grant id is outside this
-// unit's files (E3.2-e1 status, BUILD-LEFT).
-#[allow(dead_code)]
+///
+/// Q3-E3.2-e1w: `origin_extension::apply_origin_extension` is the route that calls this, and
+/// stores the returned extension on the run entry for the per-step revalidation.
 pub(super) async fn admit_origin_extension(
     state: &AppState,
     handle: &RunHandle,
@@ -630,7 +630,6 @@ pub(super) async fn admit_origin_extension(
 }
 
 /// [`admit_origin_extension`] with the flag passed in (tests).
-#[allow(dead_code)]
 pub(super) async fn admit_origin_extension_with(
     enabled: bool,
     state: &AppState,

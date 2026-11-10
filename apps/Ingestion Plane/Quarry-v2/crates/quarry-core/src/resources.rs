@@ -405,6 +405,16 @@ pub struct WebhookLastDelivery {
     pub event_id: String,
 }
 
+/// The notifyOnChange filter of a subscription (E3.5-7). `types` names the change types it takes
+/// (`new`, `changed`, `removed`). `min_paragraph_delta` is the fewest paragraphs (added plus removed)
+/// a `changed` page must have; 0 is no threshold. A subscription without a filter takes every change.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NotifyOnChangeFilter {
+    pub types: Vec<String>,
+    #[serde(default)]
+    pub min_paragraph_delta: u32,
+}
+
 /// A webhook subscription of the caller's organization. It has no secret field: the HMAC
 /// secret is shown once, by [`WebhookSubscriptionCreated`] and [`WebhookSecretRotated`], and
 /// never read back. `secret_hint` is the last four characters, enough to tell two apart.
@@ -417,6 +427,9 @@ pub struct WebhookSubscription {
     pub active: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The notifyOnChange filter (E3.5-7). Absent when the subscription takes every change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_on_change: Option<NotifyOnChangeFilter>,
     pub secret_hint: String,
     pub created_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -324,6 +324,20 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Nettleseren er midlertidig utilgjengelig fordi den ikke svarer som den skal. Prøv igjen om litt, og kontakt en administrator hvis det vedvarer.',
     en: 'The browser is temporarily unavailable because it is not responding properly. Try again shortly, and contact an administrator if it persists.',
   },
+  // Settings > Browser, the viewer's own per-origin consent (gateway `domains/browser_consent.rs` and its dispatcher,
+  // user-core `browser_consent.go`). A listing that fails shows no rows instead, so only a forget can meet these.
+  browser_consent_unavailable: {
+    no: 'Samtykkene dine for nettsider kan ikke vises eller endres akkurat nå. Prøv igjen om litt.',
+    en: 'Your consent per website cannot be shown or changed right now. Try again shortly.',
+  },
+  browser_consent_disabled: {
+    no: 'Samtykker per nettsted er ikke slått på for denne installasjonen.',
+    en: 'Consent per website is not switched on for this installation.',
+  },
+  browser_consent_not_found: {
+    no: 'Dette samtykket finnes ikke lenger. Listen er oppdatert.',
+    en: 'This consent no longer exists. The list has been updated.',
+  },
   USER_TOOK_OVER: {
     no: 'En person har overtatt nettleseren, så agenten kan ikke handle akkurat nå. Vent til styringen er gitt tilbake.',
     en: 'A person has taken over the browser, so the agent cannot act right now. Wait until control is handed back.',

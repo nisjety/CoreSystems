@@ -94,7 +94,35 @@ pub struct BrowserObservation {
     /// through the runner (a fixture, an older peer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redaction: Option<crate::redaction::RedactionStamp>,
+    /// E3.3-l: page-quality warnings for this observation, so a planner can tell a partial page
+    /// read from a complete one. Each is a closed code with a fixed message; none carries page text,
+    /// a URL or a frame id. Capped at [`OBSERVATION_WARNINGS_MAX`]. Omitted when empty, so the wire
+    /// of an observation without warnings is unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ObservationWarning>,
+    /// E3.3-l: how long the page's DOM took to go quiet after the action this observation follows,
+    /// in ms. Mirrors `telemetry.settle_ms` at the top level, where a planner reads it. Absent
+    /// when the settle is off or the action only read the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_ms: Option<u64>,
     pub observed_at: DateTime<Utc>,
+}
+
+/// The most [`ObservationWarning`]s one observation carries.
+pub const OBSERVATION_WARNINGS_MAX: usize = 50;
+
+/// E3.3-l: one page-quality warning on a [`BrowserObservation`]. `code` is from a closed
+/// vocabulary (`ax_frame_timeout`, `ax_frame_unavailable`, `ax_budget_exhausted`,
+/// `ax_frame_limit`, `ax_truncated`, plus `ax_partial` for a driver code this build does not know)
+/// and `message` is the fixed text for that code. Neither holds
+/// page text, a URL or a frame id, so the warning is safe under ZDR. A reader that does not know a
+/// code still reads the message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObservationWarning {
+    /// The closed warning code.
+    pub code: String,
+    /// The fixed, page-free text for `code`.
+    pub message: String,
 }
 
 /// Browser execution telemetry attached to every observation and step proof.

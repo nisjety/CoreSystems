@@ -844,6 +844,73 @@ paths:
             The body does not parse: both spellings of the hint in one body, or a hint
             that is neither `human` nor `agent`. The answer is the HTTP framework's
             plain-text rejection, not an error envelope.
+  /v1/agent/runs/{run_id}/origin-extension:
+    post:
+      operationId: applyAgentOriginExtension
+      summary: Apply a person's per-origin consent to a live run (dark)
+      description: >-
+        Q3-E3.2-e1w. Off unless QUARRY_EDGE__ORIGIN_CONSENT is on: off, the call is refused with
+        403 origin_consent_disabled before any broker call. The caller is the run's owner or the
+        service principal that started it. The origin-extension grant (kind origin_extension, a
+        child of the run's grant, owned by the run's owner, the start host plus at most eight
+        listed hosts, one extend_origin:turn, extend_origin:conversation or extend_origin:always
+        action; a ZDR run takes turn only) is validated, the org's consent caps are applied, and
+        any web-policy, grant or denied-list deny beats the approval; only then is the run's
+        browser egress widened. The extension reaches what a page loads or is redirected through,
+        and never widens the run's own navigation allow list. Quarry reads the grant again before
+        every step, before a tab is opened and before an attachment starts; when it is no longer
+        usable the run's own egress policy is restored and the extension is dropped. Nothing is
+        persisted, and a resumed run starts from its own grant. The answer never names a host.
+        Refusal reasons (in error.details.reason): origin_consent_disabled (403),
+        origin_extension_api_key_run (403), origin_extension_grant_invalid,
+        origin_extension_host_invalid, origin_extension_too_many_hosts,
+        origin_extension_zdr_scope, org_origin_consent_disabled, org_origin_consent_scope,
+        org_origin_consent_unreadable, origin_extension_denied (SECURITY_BLOCKED).
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - extension_grant_id
+              properties:
+                extension_grant_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+      responses:
+        '200':
+          description: The extension was applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      scope:
+                        type: string
+                        enum:
+                        - turn
+                        - conversation
+                        - always
+                      host_count:
+                        type: integer
+                        description: The hosts the run may now also reach, the start host included
+        '400':
+          description: extension_grant_id is empty or longer than 256 characters
+        '403':
+          description: Origin consent is off (origin_consent_disabled) or the run is an API-key run
+        '404':
+          description: Run not found, not the caller's, or no longer live
+        '422':
+          description: The body does not parse
   /v1/agent/runs/{run_id}/attach:
     post:
       operationId: attachAgentRun
@@ -3802,7 +3869,8 @@ paths:
         The URL must be `https`, carry no credentials or fragment, be at most 2048 characters,
         and resolve only to public addresses (a private, loopback, link-local, metadata or
         carrier-grade-NAT address is refused; every delivery is vetted again at connect time).
-        An organization holds at most 10 subscriptions. Unknown body fields are a 400.
+        An organization holds at most 10 subscriptions. Unknown body fields are a 400. The optional
+        `notify_on_change` narrows which change types the subscription takes (`NotifyOnChangeFilter`).
 
         Off unless the edge runs with `QUARRY_EDGE__WEBHOOK_SUBSCRIPTIONS` on and control with
         `QUARRY_CONTROL__WEBHOOK_SUBSCRIPTIONS` on (501 otherwise). A Zero Data Retention
@@ -3955,7 +4023,8 @@ paths:
       operationId: update_webhook_subscription
       summary: Pause, resume or change the events of a subscription (INNH-5)
       description: |
-        Names at least one of `active`, `events`, `description`. The URL is not editable: delete
+        Names at least one of `active`, `events`, `description`, `notify_on_change`. A `null`
+        `notify_on_change` removes the filter. The URL is not editable: delete
         the subscription and create a new one, so every target goes through the create-time
         check. Refused for a Zero Data Retention caller (403, `webhook_off_process`), because it
         can resume pushing.
@@ -3987,7 +4056,7 @@ paths:
                   meta:
                     $ref: '#/components/schemas/ResponseMeta'
         '400':
-          description: No field named (`reason` is `empty_patch`), an unsupported event, a description over 200 characters, or an unknown field (`body_invalid`).
+          description: No field named (`reason` is `empty_patch`), an unsupported event, a description over 200 characters, a `notify_on_change` refused for `notify_types_empty`, `notify_type_unsupported` or `notify_min_delta_out_of_range`, or an unknown field (`body_invalid`).
           content:
             application/json:
               schema:
@@ -6233,9 +6302,39 @@ components:
           - $ref: '#/components/schemas/RedactionStamp'
           nullable: true
           description: What the secret-redaction pass did to this observation. Counts per rule id only; no content and no lengths.
+        warnings:
+          type: array
+          maxItems: 50
+          description: Page-quality warnings for this observation, so a planner can tell a partial page read from a complete one. Omitted when there are none. Each warning is a closed code with a fixed message; none carries page text, a URL or a frame id, so they are safe under ZDR.
+          items:
+            $ref: '#/components/schemas/ObservationWarning'
+        settle_ms:
+          type: integer
+          minimum: 0
+          description: How long the page's DOM took to go quiet after the action this observation follows, in milliseconds. Never more than the settle bound (QUARRY_BROWSER_ACTION_SETTLE_MS). A value equal to the bound means the DOM was still changing when the bound ran out. Omitted when the settle is off or the action only read the page; mirrors telemetry.settle_ms.
         observed_at:
           type: string
           format: date-time
+    ObservationWarning:
+      type: object
+      required:
+      - code
+      - message
+      description: One page-quality warning on a BrowserObservation.
+      properties:
+        code:
+          type: string
+          description: The closed warning code. A reader that does not know a code still reads the message.
+          enum:
+          - ax_frame_timeout
+          - ax_frame_unavailable
+          - ax_budget_exhausted
+          - ax_frame_limit
+          - ax_truncated
+          - ax_partial
+        message:
+          type: string
+          description: The fixed, page-free text for the code.
     BrowserTelemetry:
       type: object
       required:
@@ -8988,6 +9087,8 @@ components:
           description: >-
             WS14.S6. `true` is a 403 `policy_denied` for every request until the entitlement
             (WS14.S7) is built. `false` is accepted. Service principals are refused in any case.
+        webhook:
+          $ref: '#/components/schemas/JobWebhook'
     BatchRequest:
       type: object
       required:
@@ -9004,6 +9105,41 @@ components:
           description: >-
             CW-1. A batch page has no per-page scrape options, so it cannot be redacted: `on`
             (or `redactPii: on`) is a 400 `unsupported_option`. `off` is the default.
+        webhook:
+          $ref: '#/components/schemas/JobWebhook'
+    JobWebhook:
+      type: object
+      description: >-
+        W3-E3.5-3. A per-job webhook: Quarry posts the run's events to `url`, signed like a webhook
+        subscription. A bare URL string is also accepted, with the default events. Dark: with
+        QUARRY_EDGE__JOB_WEBHOOK off, `webhook` is a 400 `reserved_field`. The edge checks an https URL
+        with no credentials or fragment, no literal private, loopback or link-local address and no
+        `localhost`, and a closed `events` list; a malformed value is a 400 with `details.fields[]`
+        (path `webhook`, `webhook.url` or `webhook.events`). A zero-data-retention request may not carry
+        one. Control vets the host again before it stores the hook.
+      required:
+      - url
+      properties:
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: The https URL the events are posted to.
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+            - page_failed
+            - page_fetched
+            - run_cancelled
+            - run_completed
+            - run_failed
+            - run_started
+            - run_timed_out
+          description: >-
+            The events to deliver, from this closed list; duplicates are dropped. Absent takes
+            run_cancelled, run_completed, run_failed and run_timed_out.
     CachePolicy:
       type: object
       properties:
@@ -9820,6 +9956,8 @@ components:
         description:
           type: string
           maxLength: 200
+        notify_on_change:
+          $ref: '#/components/schemas/NotifyOnChangeFilter'
     UpdateWebhookSubscription:
       type: object
       additionalProperties: false
@@ -9836,6 +9974,33 @@ components:
         description:
           type: string
           maxLength: 200
+        notify_on_change:
+          description: The filter to set. `null` removes it, so the subscription takes every change again. An absent key leaves it as it is.
+          oneOf:
+          - $ref: '#/components/schemas/NotifyOnChangeFilter'
+          - type: 'null'
+    NotifyOnChangeFilter:
+      type: object
+      description: The change types a subscription takes, and the paragraph threshold for a changed page. A subscription without one takes every change. It filters `change_detected` events only.
+      required:
+      - types
+      properties:
+        types:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+            - new
+            - changed
+            - removed
+          description: '`new` is a first capture and `changed` a content change. `removed` names a page that is gone. No producer sends `new` or `removed` yet, so a filter that names only those matches nothing until one does.'
+        min_paragraph_delta:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          default: 0
+          description: The fewest paragraphs (added plus removed) a `changed` page must have. 0 means no threshold. It applies to `changed` only, and a change whose delta is unknown is not dropped.
     WebhookLastDelivery:
       type: object
       required:
@@ -9881,6 +10046,8 @@ components:
           type: boolean
         description:
           type: string
+        notify_on_change:
+          $ref: '#/components/schemas/NotifyOnChangeFilter'
         secret_hint:
           type: string
           description: '`whsec_...` and the last four characters of the secret.'

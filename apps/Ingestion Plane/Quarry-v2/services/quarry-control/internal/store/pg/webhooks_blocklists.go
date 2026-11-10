@@ -17,12 +17,24 @@ type webhooksStore struct{ pool *pgxpool.Pool }
 
 // webhookColumns is the one column list every webhooks SELECT uses, in the order
 // scanWebhook reads it.
-const webhookColumns = `id, org_id, url, secret, secret_hint, events, active, description, created_by, created_at`
+const webhookColumns = `id, org_id, url, secret, secret_hint, events, active, description, created_by, created_at, notify_on_change`
 
 func scanWebhook(row pgx.Row) (store.Webhook, error) {
 	var v store.Webhook
-	err := row.Scan(&v.ID, &v.OrgID, &v.URL, &v.Secret, &v.SecretHint, &v.Events, &v.Active, &v.Description, &v.CreatedBy, &v.CreatedAt)
+	// notify_on_change is scanned as bytes: SQL NULL reads as nil, a JSONB document as its JSON text.
+	var notify []byte
+	err := row.Scan(&v.ID, &v.OrgID, &v.URL, &v.Secret, &v.SecretHint, &v.Events, &v.Active, &v.Description, &v.CreatedBy, &v.CreatedAt, &notify)
+	v.NotifyOnChange = notify
 	return v, err
+}
+
+// notifyOnChangeParam is the notify_on_change value a write binds: the stored document, or SQL NULL
+// for a subscription that takes every change.
+func notifyOnChangeParam(doc []byte) any {
+	if len(doc) == 0 {
+		return nil
+	}
+	return doc
 }
 
 func (s *webhooksStore) Create(v store.Webhook) error {
@@ -31,8 +43,9 @@ func (s *webhooksStore) Create(v store.Webhook) error {
 	}
 	_, err := s.pool.Exec(context.Background(),
 		`INSERT INTO webhooks(`+webhookColumns+`)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		string(v.ID), v.OrgID, v.URL, v.Secret, v.SecretHint, v.Events, v.Active, v.Description, v.CreatedBy, v.CreatedAt)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		string(v.ID), v.OrgID, v.URL, v.Secret, v.SecretHint, v.Events, v.Active, v.Description, v.CreatedBy, v.CreatedAt,
+		notifyOnChangeParam(v.NotifyOnChange))
 	return mapPgErr(err)
 }
 
@@ -72,8 +85,9 @@ func (s *webhooksStore) CreateCapped(v store.Webhook, maxPerOrg int) error {
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO webhooks(`+webhookColumns+`)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		string(v.ID), v.OrgID, v.URL, v.Secret, v.SecretHint, v.Events, v.Active, v.Description, v.CreatedBy, v.CreatedAt); err != nil {
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		string(v.ID), v.OrgID, v.URL, v.Secret, v.SecretHint, v.Events, v.Active, v.Description, v.CreatedBy, v.CreatedAt,
+		notifyOnChangeParam(v.NotifyOnChange)); err != nil {
 		return mapPgErr(err)
 	}
 	return mapPgErr(tx.Commit(ctx))
@@ -198,9 +212,9 @@ func (s *webhooksStore) UpdateByOrg(v store.Webhook) error {
 		v.Events = []string{}
 	}
 	ct, err := s.pool.Exec(context.Background(),
-		`UPDATE webhooks SET events=$3, active=$4, secret=$5, secret_hint=$6, description=$7
+		`UPDATE webhooks SET events=$3, active=$4, secret=$5, secret_hint=$6, description=$7, notify_on_change=$8
 		 WHERE id=$1 AND org_id=$2`,
-		string(v.ID), v.OrgID, v.Events, v.Active, v.Secret, v.SecretHint, v.Description)
+		string(v.ID), v.OrgID, v.Events, v.Active, v.Secret, v.SecretHint, v.Description, notifyOnChangeParam(v.NotifyOnChange))
 	if err != nil {
 		return mapPgErr(err)
 	}

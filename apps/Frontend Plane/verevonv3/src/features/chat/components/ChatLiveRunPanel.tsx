@@ -36,11 +36,15 @@ import { listRunEventReplay, streamRunEvents } from '@/shared/api/run-console-cl
 import { controlBrowserAiRun, type BrowserAiRunControlAction } from '@/shared/api/browser-run-client'
 import type { BrowserControlMode } from '@/shared/api/browser-client'
 import { STALE_CONTROL_COPY, changeBrowserControl } from '@/features/browser/dock/browser-control'
+import { SteerInput } from '@/features/browser/dock/SteerInput'
+import { createBrowserSteer, isChatBrowserSteerEnabled, type SteerResend } from '@/features/browser/dock/steer-input'
 import type {
   BrowserActionApprovalRequiredEvent,
   RunPausedForApprovalEvent,
 } from '@/shared/api/run-console-client'
 import { getRun } from '@/shared/api/runs-client'
+import type { ActionActor } from '@/shared/actions/types'
+import { getSession } from '@/shared/session/session-store'
 import {
   CHAT_RUN_SCREENSHOT_NOTES,
   applyBrowserAction,
@@ -100,6 +104,16 @@ export const GIVE_BACK_NOTE_MAX_CHARS = 500
 
 function isTerminalRunStatus(status?: string): boolean {
   return TERMINAL_RUN_STATUSES.has((status ?? '').trim().toLowerCase())
+}
+
+/**
+ * The signed-in person acting as themselves in the active organization, for a steer (E3.3-g). Undefined
+ * before the session has both, so the controller refuses the steer as signed out instead of sending it.
+ */
+function steerActorFromSession(): ActionActor | undefined {
+  const session = getSession()
+  if (!session.user || !session.activeOrg) return undefined
+  return { type: 'human', userId: session.user.id, orgId: session.activeOrg.id }
 }
 
 function screenshotNoteIcon(state: Exclude<ChatRunScreenshotState, 'ready'>) {
@@ -263,6 +277,11 @@ export function ChatLiveRunPanel(props: {
    * model. Nothing typed into the page is ever sent.
    */
   onBrowserGiveBack?: (runId: string, note: string) => void
+  /**
+   * The messages the person queued while the run worked (E3.3-g), handed over once the run has ended. The page
+   * sends them as ordinary messages. Without this prop the composer does not offer the queue.
+   */
+  onSteerHeldMessages?: (messages: readonly SteerResend[]) => void
 }) {
   const i18n = useI18n()
   // One name for two attributes: the button carries the same text as its
@@ -273,6 +292,14 @@ export function ChatLiveRunPanel(props: {
       ? i18n.tr('Vis live-panelet', 'Show the live panel')
       : i18n.tr('Skjul live-panelet', 'Hide the live panel')
   const [watch, setWatch] = createSignal<ChatRunWatchState | null>(null)
+  // The steer composer's controller for the run this panel watches (E3.3-g). The stream re-arms it when a new
+  // run starts and settles it when the run has ended. It reads the watched run at send time, so it is never stale.
+  const steer = createBrowserSteer({
+    runId: () => props.runId ?? undefined,
+    live: () => watch()?.live === true,
+    zdr: () => watch()?.zdr ?? props.zdr,
+    actor: steerActorFromSession,
+  })
   const [expandedStep, setExpandedStep] = createSignal<number | null>(null)
   const [reconnectVersion, setReconnectVersion] = createSignal(0)
   const [controlPending, setControlPending] = createSignal<BrowserAiRunControlAction | null>(null)
@@ -291,6 +318,26 @@ export function ChatLiveRunPanel(props: {
         ? apply(current)
         : current
     ))
+  }
+
+  // The watched run has ended: settle the steer composer and hand any held messages to the page. Only the
+  // stream that is still current may settle, so a stream the panel has moved on from changes nothing.
+  const settleSteer = (runId: string, generation: number) => {
+    if (generation !== activeStreamGeneration || props.runId !== runId) return
+    const held = steer.settle()
+    if (held.length > 0) props.onSteerHeldMessages?.(held)
+  }
+
+  // A stream that closed on its own may be a run that ended or a dropped connection. The durable run status
+  // decides: a run that is not terminal settles nothing, and an aborted read settles nothing.
+  const confirmSteerEnded = (runId: string, generation: number, signal: AbortSignal) => {
+    void getRun(runId, signal)
+      .then((detail) => {
+        if (detail && isTerminalRunStatus(detail.status) && !signal.aborted) settleSteer(runId, generation)
+      })
+      .catch(() => {
+        // The read model is unavailable: the run is not confirmed ended, so nothing is settled.
+      })
   }
 
   createEffect(
@@ -315,6 +362,8 @@ export function ChatLiveRunPanel(props: {
       if (resuming && existing) {
         setWatch({ ...existing, error: null, live: true, zdr })
       } else {
+        // A new run: its strip starts empty and its steer controller is re-armed.
+        steer.reset()
         setWatch(emptyChatRunWatch(runId, zdr))
       }
       const resumeFrom = resuming ? existing?.lastEventId ?? undefined : undefined
@@ -364,6 +413,7 @@ export function ChatLiveRunPanel(props: {
             !controller.signal.aborted
           ) {
             update(runId, (state) => closeChatRunWatch(state), generation)
+            settleSteer(runId, generation)
             controller.abort()
           }
         }).catch(() => {
@@ -444,7 +494,15 @@ export function ChatLiveRunPanel(props: {
           kind: 'resume',
           title: 'Fortsatte',
         })),
-        onDone: () => update(runId, (state) => closeChatRunWatch(state), generation),
+        onDone: () => {
+          update(runId, (state) => closeChatRunWatch(state), generation)
+          // Only a browser-agent run with the composer on asks the durable status, so a build with the flag off
+          // makes no extra call. A stream the panel closed itself (a run switch, an unmount, the terminal check)
+          // settles nothing here.
+          if (!controller.signal.aborted && isChatBrowserSteerEnabled() && browserAgentRun()) {
+            confirmSteerEnded(runId, generation, controller.signal)
+          }
+        },
         onError: () => update(runId, (state) => closeChatRunWatch(state, RUN_STREAM_ERROR), generation),
         onPlan: (event) => update(runId, (state) => appendActivity(state, {
           at: event.at ?? new Date().toISOString(),
@@ -553,6 +611,8 @@ export function ChatLiveRunPanel(props: {
   const steps = () => watch()?.steps ?? []
   const activity = () => watch()?.activity ?? []
   const live = () => watch()?.live ?? false
+  /** A browser-agent run: it has taken browser steps or holds a bound browser. Only these get the steer composer (E3.3-g). */
+  const browserAgentRun = () => steps().length > 0 || watch()?.browserControl !== undefined
   const zdr = () => watch()?.zdr ?? props.zdr
   const framed = createMemo(() => {
     const current = watch()
@@ -731,6 +791,14 @@ export function ChatLiveRunPanel(props: {
                 )}
               </Show>
 
+              {/* The steer composer under the live frame of a browser-agent run (E3.3-g). Not offered under zero retention. */}
+              <Show when={!zdr() && browserAgentRun()}>
+                <SteerInput
+                  steer={steer}
+                  live={live()}
+                  canQueue={props.onSteerHeldMessages !== undefined}
+                />
+              </Show>
               <Show when={steps().length > 0}>
                 <section class="verevon-chat-run-shots" aria-label={i18n.tr('Skjermbilder per steg', 'Screenshots per step')}>
                   <div class="verevon-chat-run-shots__rail">

@@ -60,7 +60,7 @@ function fakePort(
 ) {
   const loadCalls = vi.fn(load)
   const proposeCalls = vi.fn(propose)
-  const port: BrowserPolicyPort = { load: loadCalls, propose: proposeCalls }
+  const port: BrowserPolicyPort = { load: loadCalls, propose: proposeCalls, revokeOriginConsent: async () => undefined }
   return { port, loadCalls, proposeCalls }
 }
 
@@ -310,14 +310,14 @@ describe('BrowserPolicySection', () => {
     expect(screen.getByLabelText(/Ikke med i denne planen/)).toBeTruthy()
   })
 
-  it('lists per-origin consent read-only, with an empty state when there is none', async () => {
+  it('lists per-origin consent, with an empty state when there is none', async () => {
     signIn('admin')
     const { port } = fakePort(async () => loaded(storedView()))
     render(() => <BrowserPolicySection port={port} />)
     expect(await screen.findByTestId('browser-policy-consents-empty')).toBeTruthy()
   })
 
-  it('renders per-origin consent rows with no controls', async () => {
+  it('renders per-origin consent rows with only a forget control', async () => {
     signIn('admin')
     const { port } = fakePort(async () =>
       loaded(
@@ -338,6 +338,7 @@ describe('BrowserPolicySection', () => {
     const list = await screen.findByTestId('browser-policy-consents')
     expect(list.textContent).toContain('shop.example.com')
     expect(list.textContent).toContain('cdn.example.com')
-    expect(list.querySelectorAll('input, textarea, button')).toHaveLength(0)
+    expect(list.querySelectorAll('input, textarea')).toHaveLength(0)
+    expect(list.querySelectorAll('button')).toHaveLength(1)
   })
 })

@@ -23,6 +23,11 @@ export type SteerInputProps = {
   enabled?: boolean
   /** The person sends a message the run never took as a new message. The page decides where it goes. */
   onResend?: (content: string) => void
+  /**
+   * Offers the Queue button, which holds a message until the run has ended. The page passes true only when it
+   * sends the held messages on, so nothing held is lost. Defaults to true.
+   */
+  canQueue?: boolean
 }
 
 /**
@@ -35,7 +40,8 @@ export function SteerInput(props: SteerInputProps): JSX.Element {
   const [draft, setDraft] = createSignal('')
   const enabled = () => props.enabled ?? isChatBrowserSteerEnabled()
   const zdr = () => props.zdr === true
-  const visible = () => enabled() && (props.live || props.steer.entries().length > 0)
+  const canQueue = () => props.canQueue ?? true
+  const visible = () => enabled() && !props.steer.unavailable() && (props.live || props.steer.entries().length > 0)
   const canSend = () => draft().trim().length > 0 && draft().length <= STEER_MAX_CHARS
 
   const submit = async (mode: 'steer' | 'hold') => {
@@ -60,6 +66,8 @@ export function SteerInput(props: SteerInputProps): JSX.Element {
         return tr('Kjøringen er ikke i gang lenger', 'The run is no longer live')
       case 'signed_out':
         return tr('Logg inn på nytt for å styre kjøringen', 'Sign in again to steer the run')
+      case 'unavailable':
+        return tr('Styring av kjøringen er ikke tilgjengelig her', 'Steering the run is not available here')
       case 'queue_full':
         return tr(`Køen er full (${STEER_HELD_MAX} meldinger)`, `The queue is full (${STEER_HELD_MAX} messages)`)
       case 'too_long':
@@ -159,19 +167,23 @@ export function SteerInput(props: SteerInputProps): JSX.Element {
               <span class="browser-steer__count">
                 {draft().length}/{STEER_MAX_CHARS}
               </span>
-              <button type="button" class="browser-steer__button" disabled={!canSend()} onClick={() => void submit('hold')}>
-                {tr('Legg i kø', 'Queue')}
-              </button>
+              <Show when={canQueue()}>
+                <button type="button" class="browser-steer__button" disabled={!canSend()} onClick={() => void submit('hold')}>
+                  {tr('Legg i kø', 'Queue')}
+                </button>
+              </Show>
               <button type="submit" class="browser-steer__button browser-steer__button--primary" disabled={!canSend()}>
                 <Send class="size-3" aria-hidden="true" />
                 <span>{tr('Styr agenten', 'Steer the agent')}</span>
               </button>
             </div>
             <p class="browser-steer__hint">
-              {tr(
-                'Holdes bare i minnet, og lagres ikke i samtalen. «Legg i kø» sender når kjøringen er ferdig.',
-                'Held in memory only, and not saved to the conversation. Queue sends once the run has ended.',
-              )}
+              {canQueue()
+                ? tr(
+                    'Holdes bare i minnet, og lagres ikke i samtalen. «Legg i kø» sender når kjøringen er ferdig.',
+                    'Held in memory only, and not saved to the conversation. Queue sends once the run has ended.',
+                  )
+                : tr('Holdes bare i minnet, og lagres ikke i samtalen.', 'Held in memory only, and not saved to the conversation.')}
             </p>
           </form>
         </Show>

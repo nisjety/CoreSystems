@@ -268,6 +268,8 @@ fn browser_observation_serde_roundtrip() {
         target_resolution: None,
         telemetry: BrowserTelemetry::default(),
         redaction: None,
+        warnings: Vec::new(),
+        settle_ms: None,
         observed_at: chrono::Utc::now(),
     };
     let json = serde_json::to_string(&obs).unwrap();

@@ -1,6 +1,8 @@
 package resources
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
@@ -127,4 +129,86 @@ func jobWires(db store.DB, jobs []store.Job) []jobWire {
 		out = append(out, wire)
 	}
 	return out
+}
+
+// jobCreateResponse is the POST /v1/jobs response: the stored job as every read shows it, plus, when
+// the job carries a per-job webhook and the control key is set, the one-time signing secret under
+// `webhook.secret`. The secret is derived, never stored, and appears in no list or get response.
+type jobCreateResponse struct {
+	store.Job
+	// Webhook is set only on the response that creates the job.
+	Webhook *jobCreateWebhook `json:"-"`
+}
+
+// jobCreateWebhook is the per-job webhook block of the create response.
+type jobCreateWebhook struct {
+	// URL and Events are what was stored, after normalisation.
+	URL    string   `json:"url"`
+	Events []string `json:"events"`
+	// Secret is the whjob_ signing secret, shown once.
+	Secret string `json:"secret"`
+}
+
+// MarshalJSON renders the job exactly as store.Job does and adds the webhook block. Without it
+// the promoted store.Job.MarshalJSON would drop the extra field.
+func (c jobCreateResponse) MarshalJSON() ([]byte, error) {
+	base, err := json.Marshal(c.Job)
+	if err != nil {
+		return nil, err
+	}
+	if c.Webhook == nil {
+		return base, nil
+	}
+	fields := map[string]json.RawMessage{}
+	if err := json.Unmarshal(base, &fields); err != nil {
+		return nil, err
+	}
+	hook, err := json.Marshal(c.Webhook)
+	if err != nil {
+		return nil, err
+	}
+	fields[JobWebhookParamKey] = hook
+	return json.Marshal(fields)
+}
+
+// withoutWebhookSecret returns j with any `secret` key removed from params.webhook. The secret
+// is never stored, and NormalizeJobWebhook refuses a request that names one, so this is a second
+// guard: a read of a job never echoes a signing secret. The params map is copied, not edited.
+func withoutWebhookSecret(j store.Job) store.Job {
+	hook, ok := j.Params[JobWebhookParamKey].(map[string]any)
+	if !ok {
+		return j
+	}
+	if _, has := hook["secret"]; !has {
+		return j
+	}
+	params := make(map[string]any, len(j.Params))
+	for k, v := range j.Params {
+		params[k] = v
+	}
+	cleaned := make(map[string]any, len(hook))
+	for k, v := range hook {
+		if k != "secret" {
+			cleaned[k] = v
+		}
+	}
+	params[JobWebhookParamKey] = cleaned
+	j.Params = params
+	return j
+}
+
+// jobParamsZdr reports whether the job params declare a zero-data-retention posture. The edge
+// refuses a ZDR request that carries a webhook, so this is control's own check of the stored
+// params: a truthy `zdr` (true, or "true"/"on"/"1"/"yes") counts.
+func jobParamsZdr(params map[string]any) bool {
+	switch v := params["zdr"].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "on", "1", "yes":
+			return true
+		}
+	}
+	return false
 }

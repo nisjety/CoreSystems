@@ -3,18 +3,18 @@ package dispatcher
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 
+	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/egress"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/resources"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
@@ -33,6 +33,11 @@ var backoff = []time.Duration{
 }
 
 const maxAttempts = 5
+
+// jobWebhookGetenv is the environment a job-webhook delivery reads its switch and control key from
+// at send time, so turning QUARRY_CONTROL__JOB_WEBHOOK off stops the deliveries already queued.
+// A test swaps it.
+var jobWebhookGetenv = os.Getenv
 
 // Run starts the dispatcher loop until ctx is cancelled.
 func Run(ctx context.Context, db store.DB, hc *http.Client, opts Options, logger zerolog.Logger) {
@@ -100,30 +105,16 @@ func dispatch(ctx context.Context, db store.DB, hc *http.Client, d store.Webhook
 		}
 	}
 
-	wh, ok := db.Webhooks().Get(d.WebhookID)
-	if !ok || !wh.Active {
-		d.Status = "failed"
-		d.LastError = "webhook missing or inactive"
-		updateDelivery(d, "missing_or_inactive")
-		return
-	}
-	// Tenancy (INNH-5), defence in depth behind the fan-out: a subscription with no org
-	// (legacy), or a delivery that belongs to another org than its subscription, is never
-	// sent. This also kills deliveries queued before migration 025 stamped an org on them.
-	if wh.OrgID == "" || wh.OrgID != d.OrgID {
-		d.Status = "failed"
-		d.LastError = "webhook org mismatch"
-		updateDelivery(d, "org_mismatch")
+	targetURL, secret, ok := deliveryTarget(db, &d, updateDelivery)
+	if !ok {
 		return
 	}
 
 	body := []byte(d.Payload)
 	ts := time.Now().Unix()
-	mac := hmac.New(sha256.New, []byte(wh.Secret))
-	fmt.Fprintf(mac, "%d.%s", ts, body)
-	sig := hex.EncodeToString(mac.Sum(nil))
+	sig := resources.SignWebhookBody(secret, ts, body)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, wh.URL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		d.Status = "dlq"
 		d.LastError = "request build: " + err.Error()
@@ -131,7 +122,7 @@ func dispatch(ctx context.Context, db store.DB, hc *http.Client, d store.Webhook
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Quarry-Signature", fmt.Sprintf("t=%d,v1=%s", ts, sig))
+	req.Header.Set("X-Quarry-Signature", sig)
 
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -154,6 +145,72 @@ func dispatch(ctx context.Context, db store.DB, hc *http.Client, d store.Webhook
 		d.LastError = fmt.Sprintf("http %d", resp.StatusCode)
 		updateDelivery(d, "dlq_4xx")
 	}
+}
+
+// deliveryTarget resolves where a delivery is posted and the secret that signs it. A subscription
+// delivery names a webhooks row, which must be active and belong to the delivery's org (INNH-5). A
+// job-webhook delivery names its job instead (WebhookID "job:<job id>"), see jobDeliveryTarget. ok
+// is false when the delivery is settled here, failed or dead-lettered, and must not be sent.
+func deliveryTarget(db store.DB, d *store.WebhookDelivery, updateDelivery func(store.WebhookDelivery, string)) (string, string, bool) {
+	if jobID, isJob := resources.JobWebhookDeliveryJobID(d.WebhookID); isJob {
+		return jobDeliveryTarget(db, d, jobID, updateDelivery)
+	}
+	wh, found := db.Webhooks().Get(d.WebhookID)
+	if !found || !wh.Active {
+		d.Status = "failed"
+		d.LastError = "webhook missing or inactive"
+		updateDelivery(*d, "missing_or_inactive")
+		return "", "", false
+	}
+	// Tenancy (INNH-5), defence in depth behind the fan-out: a subscription with no org
+	// (legacy), or a delivery that belongs to another org than its subscription, is never
+	// sent. This also kills deliveries queued before migration 025 stamped an org on them.
+	if wh.OrgID == "" || wh.OrgID != d.OrgID {
+		d.Status = "failed"
+		d.LastError = "webhook org mismatch"
+		updateDelivery(*d, "org_mismatch")
+		return "", "", false
+	}
+	return wh.URL, wh.Secret, true
+}
+
+// jobDeliveryTarget resolves a job-webhook delivery against its job (W3-E3.5-3c). The URL and the
+// events are the job's own params.webhook, read by an org-scoped lookup so a delivery never reaches
+// another org's job. The signing secret is derived now from the control key and the (org, job)
+// pair and is never stored. The switch is read here too, so turning QUARRY_CONTROL__JOB_WEBHOOK off
+// stops the deliveries already queued. A switch or key that is not configured dead-letters the
+// delivery as job_webhook_unconfigured. The delivery then goes through the same pinned client and
+// retry policy as a subscription delivery.
+func jobDeliveryTarget(db store.DB, d *store.WebhookDelivery, jobID string, updateDelivery func(store.WebhookDelivery, string)) (string, string, bool) {
+	settle := func(status, lastError, op string) (string, string, bool) {
+		d.Status = status
+		d.LastError = lastError
+		updateDelivery(*d, op)
+		return "", "", false
+	}
+	if !resources.JobWebhooksEnabled(jobWebhookGetenv) {
+		return settle("dlq", "job_webhook_unconfigured", "job_webhook_unconfigured")
+	}
+	if d.OrgID == "" {
+		return settle("failed", "webhook org mismatch", "org_mismatch")
+	}
+	job, found := db.Jobs().GetByOrg(d.OrgID, quarrycontracts.ID(jobID))
+	if !found || job.OrgID != d.OrgID {
+		return settle("failed", "job missing", "job_missing")
+	}
+	hook, found := resources.JobWebhookTarget(job)
+	if !found || !hook.Wants(d.EventType) {
+		return settle("failed", "job webhook has no target for this event", "job_webhook_missing")
+	}
+	key, err := resources.JobWebhookKey(jobWebhookGetenv)
+	if err != nil {
+		return settle("dlq", "job_webhook_unconfigured", "job_webhook_unconfigured")
+	}
+	secret, err := resources.JobWebhookSecret(key, d.OrgID, jobID)
+	if err != nil {
+		return settle("dlq", "job_webhook_unconfigured", "job_webhook_unconfigured")
+	}
+	return hook.URL, secret, true
 }
 
 func retryOrDLQ(db store.DB, d *store.WebhookDelivery, reason string, retryable bool, logger zerolog.Logger) {

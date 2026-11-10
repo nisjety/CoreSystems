@@ -242,6 +242,13 @@ pub async fn new_tab(
         .map_err(|error| driver_err(&request_id, error))?;
     }
 
+    // Q3-E3.2-e1w: a person's origin extension is read again before the tab opens and, while
+    // it stands, the tab starts from the widened boundary. A grant that is no longer usable is
+    // dropped here (fail closed) and the tab runs under the run's own policy.
+    super::origin_extension::revalidate_origin_extension(&state, &handle, &mut entry, None)
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
+
     // Tab creation bypasses ObservationRunner, so explicitly apply the
     // same run-scoped policy before this browser-owned navigation. The
     // Chromium Fetch listener then enforces it for redirects and every
@@ -251,12 +258,7 @@ pub async fn new_tab(
         .configure_egress_policy(
             &entry.session,
             // WS7.G: the run's web-policy deny list is part of the boundary a new tab runs under.
-            crate::agent_policy_gate::live_egress_policy(
-                &state,
-                &handle.live,
-                entry.zdr.is_active(),
-                &entry.constraints.allowed_domains,
-            ),
+            super::origin_extension::tab_egress_policy(&state, &handle, &entry),
         )
         .await
         .map_err(|error| driver_err(&request_id, error))?;

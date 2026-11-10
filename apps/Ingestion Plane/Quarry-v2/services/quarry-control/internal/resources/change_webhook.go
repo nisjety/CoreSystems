@@ -169,6 +169,9 @@ func changeWebhookHandler(db store.DB, sink notify.Sink) http.HandlerFunc {
 		// the schedule creator gets their in-product notification.
 		// The org is the signed query value the body's org_id was just checked against.
 		fanoutChangeWebhooks(db, evt, org, change, changeNotifyFilterOf)
+		// A change carries no run_id, so no job webhook is owed for it: this call is a no-op here
+		// and keeps the two ingest paths in step with the run-event batch.
+		fanoutJobWebhook(db, evt, org)
 		notifyOnChange(sink, evt)
 
 		writeChangeAck(w, r, http.StatusOK, evt.EventID, false)
@@ -229,17 +232,24 @@ func changeTypeOfStatus(status quarrycontracts.ChangeStatus) string {
 	}
 }
 
-// changeNotifyFilterOf is the notifyOnChange filter of a subscription. The filter is not persisted
-// yet (store.Webhook has no field for it; see W23-W3-E3.5-7-status.md), so every subscription reads
-// as unfiltered, which is the behaviour before this unit.
-func changeNotifyFilterOf(_ store.Webhook) *ChangeNotifyFilter {
-	return nil
+// eventChangeNotice classifies a change_detected run event for the batch fan-out (E3.5-7b). Its record
+// status is the payload's status field, the change check's result; change_type and paragraph_delta in the
+// payload refine it as they refine a signed change webhook. An event that names no status classifies to no
+// type: a typed filter does not take it, and an unfiltered subscription still does.
+func eventChangeNotice(ev quarrycontracts.Event) changeNotice {
+	return classifyChangeNotice(quarrycontracts.ChangeStatus(payloadString(ev.Payload, "status")), ev.Payload)
+}
+
+// changeNotifyFilterOf is the notifyOnChange filter of a subscription: the document the control plane
+// stored for it (E3.5-7), or nil for a subscription that takes every change.
+func changeNotifyFilterOf(wh store.Webhook) *ChangeNotifyFilter {
+	return notifyFilterOf(wh.NotifyOnChange)
 }
 
 // fanoutChangeWebhooks is fanoutWebhooks for a classified change (E3.5-7): the same org scope, event
 // match and dedupe key, with each subscription's notifyOnChange filter applied before its delivery
-// row is written. The run-event batch path still calls fanoutWebhooks, so the filter does not cover
-// the orchestrator's copy of a change yet (see the status file).
+// row is written. Both paths that carry a change call it: the signed change receiver, and the run-event
+// batch for a change_detected event (E3.5-7b). The shared dedupe key keeps one delivery per subscription.
 func fanoutChangeWebhooks(db store.DB, ev quarrycontracts.Event, orgID string, change changeNotice,
 	filterOf func(store.Webhook) *ChangeNotifyFilter) {
 	if orgID == "" {

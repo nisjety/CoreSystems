@@ -6,7 +6,7 @@ package resources
 //	POST   /v1/webhook-subscriptions                                  create (secret shown once)
 //	GET    /v1/webhook-subscriptions                                  list
 //	GET    /v1/webhook-subscriptions/{id}                             read
-//	PATCH  /v1/webhook-subscriptions/{id}                             active / events / description
+//	PATCH  /v1/webhook-subscriptions/{id}                             active / events / description / notify_on_change
 //	DELETE /v1/webhook-subscriptions/{id}                             delete (deliveries cascade)
 //	POST   /v1/webhook-subscriptions/{id}/rotate-secret               new secret, shown once
 //	GET    /v1/webhook-subscriptions/{id}/deliveries                  delivery log, no payload body
@@ -80,14 +80,15 @@ type WebhookSubscriptionOptions struct {
 
 // webhookSubscriptionView is a subscription as a caller sees it. It has no secret field.
 type webhookSubscriptionView struct {
-	ID           string               `json:"id"`
-	URL          string               `json:"url"`
-	Events       []string             `json:"events"`
-	Active       bool                 `json:"active"`
-	Description  string               `json:"description,omitempty"`
-	SecretHint   string               `json:"secret_hint"`
-	CreatedAt    string               `json:"created_at"`
-	LastDelivery *webhookLastDelivery `json:"last_delivery,omitempty"`
+	ID             string               `json:"id"`
+	URL            string               `json:"url"`
+	Events         []string             `json:"events"`
+	Active         bool                 `json:"active"`
+	Description    string               `json:"description,omitempty"`
+	NotifyOnChange *ChangeNotifyFilter  `json:"notify_on_change,omitempty"`
+	SecretHint     string               `json:"secret_hint"`
+	CreatedAt      string               `json:"created_at"`
+	LastDelivery   *webhookLastDelivery `json:"last_delivery,omitempty"`
 }
 
 type webhookLastDelivery struct {
@@ -122,7 +123,8 @@ func toSubscriptionView(w store.Webhook) webhookSubscriptionView {
 	}
 	return webhookSubscriptionView{
 		ID: string(w.ID), URL: w.URL, Events: events, Active: w.Active,
-		Description: w.Description, SecretHint: w.SecretHint, CreatedAt: unixRFC3339(w.CreatedAt),
+		Description: w.Description, NotifyOnChange: notifyFilterOf(w.NotifyOnChange),
+		SecretHint: w.SecretHint, CreatedAt: unixRFC3339(w.CreatedAt),
 	}
 }
 
@@ -269,7 +271,7 @@ const maxNotifyMinParagraphDelta = 1000
 // subscription without a filter takes every change, as before.
 type ChangeNotifyFilter struct {
 	Types             []string `json:"types"`
-	MinParagraphDelta int      `json:"min_paragraph_delta,omitempty"`
+	MinParagraphDelta int      `json:"min_paragraph_delta"`
 }
 
 // normalizeChangeNotifyFilter validates and canonicalises a filter: at least one type, every type in
@@ -296,6 +298,35 @@ func normalizeChangeNotifyFilter(in ChangeNotifyFilter) (f ChangeNotifyFilter, r
 	}
 	sort.Strings(types)
 	return ChangeNotifyFilter{Types: types, MinParagraphDelta: in.MinParagraphDelta}, "", ""
+}
+
+// encodeChangeNotifyFilter normalises a notifyOnChange filter and encodes it as the document the store
+// keeps. A refusal names the reason (the field is always notify_on_change). err is an encoding failure,
+// a server error and not a refusal of the caller's filter.
+func encodeChangeNotifyFilter(in ChangeNotifyFilter) (doc json.RawMessage, reason, msg string, err error) {
+	f, reason, msg := normalizeChangeNotifyFilter(in)
+	if reason != "" {
+		return nil, reason, msg, nil
+	}
+	doc, err = json.Marshal(f)
+	return doc, "", "", err
+}
+
+// notifyFilterOf reads a stored notifyOnChange document back into its filter. An absent, unreadable or
+// empty document is no filter: the subscription takes every change, as it did before E3.5-7.
+func notifyFilterOf(raw []byte) *ChangeNotifyFilter {
+	if len(raw) == 0 {
+		return nil
+	}
+	var in ChangeNotifyFilter
+	if err := json.Unmarshal(raw, &in); err != nil {
+		return nil
+	}
+	f, reason, _ := normalizeChangeNotifyFilter(in)
+	if reason != "" {
+		return nil
+	}
+	return &f
 }
 
 // changeNotice is one classified change as the fan-out sees it: its type, and the paragraph delta
@@ -384,10 +415,11 @@ func (h *subscriptionHandlers) viewWithLast(org string, wh store.Webhook) webhoo
 }
 
 type createSubscriptionBody struct {
-	URL         string   `json:"url"`
-	Events      []string `json:"events"`
-	Description string   `json:"description"`
-	CreatedBy   string   `json:"created_by"`
+	URL            string              `json:"url"`
+	Events         []string            `json:"events"`
+	Description    string              `json:"description"`
+	CreatedBy      string              `json:"created_by"`
+	NotifyOnChange *ChangeNotifyFilter `json:"notify_on_change"`
 }
 
 func (h *subscriptionHandlers) create(w http.ResponseWriter, r *http.Request) {
@@ -414,6 +446,20 @@ func (h *subscriptionHandlers) create(w http.ResponseWriter, r *http.Request) {
 		writeSubscriptionBadRequest(w, r, "description", "description_too_long", "description is longer than 200 characters")
 		return
 	}
+	// A notifyOnChange filter is normalised here, so the store only ever holds a valid document.
+	var notify json.RawMessage
+	if body.NotifyOnChange != nil {
+		doc, reason, msg, err := encodeChangeNotifyFilter(*body.NotifyOnChange)
+		if err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "notify_on_change could not be stored", nil)
+			return
+		}
+		if reason != "" {
+			writeSubscriptionBadRequest(w, r, "notify_on_change", reason, msg)
+			return
+		}
+		notify = doc
+	}
 	secret, hint, err := newWebhookSecret()
 	if err != nil {
 		httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "secret generation failed", nil)
@@ -431,6 +477,7 @@ func (h *subscriptionHandlers) create(w http.ResponseWriter, r *http.Request) {
 		CreatedBy:   body.CreatedBy,
 		CreatedAt:   time.Now().Unix(),
 	}
+	wh.NotifyOnChange = notify
 	if err := h.db.Webhooks().CreateCapped(wh, h.opts.MaxPerOrg); err != nil {
 		switch {
 		case errors.Is(err, store.ErrConflict):
@@ -483,10 +530,13 @@ func (h *subscriptionHandlers) get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, r, http.StatusOK, h.viewWithLast(org, wh))
 }
 
+// patchSubscriptionBody is the PATCH body. NotifyOnChange is kept raw so that an absent key (keep the
+// filter), a null (remove it) and an object (replace it) stay apart.
 type patchSubscriptionBody struct {
-	Active      *bool     `json:"active"`
-	Events      *[]string `json:"events"`
-	Description *string   `json:"description"`
+	Active         *bool           `json:"active"`
+	Events         *[]string       `json:"events"`
+	Description    *string         `json:"description"`
+	NotifyOnChange json.RawMessage `json:"notify_on_change"`
 }
 
 func (h *subscriptionHandlers) patch(w http.ResponseWriter, r *http.Request) {
@@ -521,6 +571,27 @@ func (h *subscriptionHandlers) patch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		wh.Description = *body.Description
+	}
+	if len(body.NotifyOnChange) > 0 {
+		// null removes the filter; an object replaces it after the checks create applies.
+		var in *ChangeNotifyFilter
+		if err := json.Unmarshal(body.NotifyOnChange, &in); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "decode body: "+err.Error(), nil)
+			return
+		}
+		wh.NotifyOnChange = nil
+		if in != nil {
+			doc, reason, msg, err := encodeChangeNotifyFilter(*in)
+			if err != nil {
+				httpx.WriteErr(w, r, quarrycontracts.CodeInternal, "notify_on_change could not be stored", nil)
+				return
+			}
+			if reason != "" {
+				writeSubscriptionBadRequest(w, r, "notify_on_change", reason, msg)
+				return
+			}
+			wh.NotifyOnChange = doc
+		}
 	}
 	if err := h.db.Webhooks().UpdateByOrg(wh); err != nil {
 		if errors.Is(err, store.ErrNotFound) {

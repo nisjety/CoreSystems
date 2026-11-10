@@ -428,6 +428,7 @@ mod tests {
             frames: vec![],
             targets: vec![native_target(1, "textbox", "Password", Some(&password()))],
             redaction: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -1557,6 +1558,8 @@ mod otp_read_denial_tests {
             target_resolution: None,
             telemetry: BrowserTelemetry::default(),
             redaction: None,
+            warnings: Vec::new(),
+            settle_ms: None,
             observed_at: chrono::Utc::now(),
         }
     }

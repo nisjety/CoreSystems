@@ -977,13 +977,13 @@ Edge routes (bearer; the organization is the token's, a caller-supplied `org_id`
 | `POST /v1/webhook-subscriptions` | 201 `data`: the subscription plus `secret` |
 | `GET /v1/webhook-subscriptions?limit&cursor` | 200 `data: {items, next_cursor?}` |
 | `GET /v1/webhook-subscriptions/{id}` | 200 `data`: the subscription |
-| `PATCH /v1/webhook-subscriptions/{id}` | 200 `data`; body names at least one of `active`, `events`, `description` |
+| `PATCH /v1/webhook-subscriptions/{id}` | 200 `data`; body names at least one of `active`, `events`, `description`, `notify_on_change` |
 | `DELETE /v1/webhook-subscriptions/{id}` | 204, no body |
 | `POST /v1/webhook-subscriptions/{id}/rotate-secret` | 200 `data: {id, secret, secret_hint}` |
 | `GET /v1/webhook-subscriptions/{id}/deliveries?status&limit&cursor` | 200 `data: {items, next_cursor?}` |
 | `POST /v1/webhook-subscriptions/{id}/deliveries/{delivery_id}/retry` | 202 `data`: the delivery, `pending` |
 
-Create body: `{ "url": "https://hooks.example.com/q", "events": ["change_detected"], "description": "prod" }`; an unknown field is a 400. A subscription is:
+Create body: `{ "url": "https://hooks.example.com/q", "events": ["change_detected"], "description": "prod" }`; an unknown field is a 400. `notify_on_change` is optional (see the bullet below). A subscription is:
 
 ```json
 { "id": "whk_...", "url": "...", "events": ["change_detected"], "active": true, "description": "prod",
@@ -996,7 +996,8 @@ Create body: `{ "url": "https://hooks.example.com/q", "events": ["change_detecte
 - **Secret.** Minted by control (32 random bytes, `whsec_` + 64 hex characters). Returned by create and by rotate-secret and by nothing else: the reads are typed views with no secret field, and the edge rebuilds every answer from a typed view as well. Control stores it in plaintext (the HMAC needs the key); see the owner decision in `RUNBOOKS.md`.
 - **URL.** `https` only; no user info or fragment; at most 2048 characters; every address the host resolves to must be public (checked at create with the egress guard, and again at every connect). The URL cannot be edited; delete and create.
 - **Events.** A closed list, `change_detected` today. The stored event type is `change_detected`; the `quarry.change.detected` subject appears in the delivery body only. Run-finished events (INNH-13) join the list without a contract change.
-- **Limits.** 10 subscriptions per organization (429 `subscription_limit`); the same URL with the same events twice is a 409 `subscription_exists`.
+- **notifyOnChange (E3.5-7).** An optional `notify_on_change`, `{ "types": ["changed"], "min_paragraph_delta": 3 }`, on create. On PATCH an absent key keeps the filter and `null` removes it. `types` is a non-empty list of `new`, `changed` or `removed`; `min_paragraph_delta` is 0 to 1000, and 0 means no threshold. The filter applies to `change_detected` events only, and a subscription without one takes every change. The subscription returns the filter as `notify_on_change`, and the field is absent when there is none. A refused value is a 400 with `details.field` `notify_on_change`; a body that is not the documented shape is `body_invalid`. The semantics, and the run-event batch path that is not filtered yet, are in `docs/CHANGE_TRACKING.md`, "Webhook emission".
+- **Limits.** 10 subscriptions per organization (429 `subscription_limit`); the same URL with the same events twice is a 409 `subscription_exists`, whatever their filters.
 - **Errors.** 400 with `error.details.field` and `error.details.reason` (`docs/ERROR_REASONS.md`); 404 for an unknown, foreign or malformed id (one answer); 403 for a service principal and for a Zero Data Retention caller on create, patch and retry (`details.reason` is `webhook_off_process`; reads, delete and rotate-secret stay open so an organization can wind down); 409 `delivery_not_retryable` for a delivery that is pending, in flight or delivered.
 - **Retention.** A delivery row holds the event payload. Finished deliveries (`success`, `failed`, `dlq`) are deleted after 14 days (`QUARRY_CONTROL__WEBHOOK_DELIVERY_RETENTION_DAYS`, 1 to 3650). Deleting a subscription deletes its deliveries. Organization erasure deletes both tables for the organization.
 - **Retired.** `GET/POST /v1/webhooks`, `GET /v1/webhooks/{id}` and `/v1/webhook-deliveries...` on control answer 410 `GONE`: they listed every organization's rows and returned secrets in cleartext, and nothing called them. `POST /v1/webhooks/change` (the edge's signed receiver) is unchanged.

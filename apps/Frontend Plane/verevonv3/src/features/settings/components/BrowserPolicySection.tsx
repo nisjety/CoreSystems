@@ -2,7 +2,7 @@ import { Loader2, ShieldCheck } from '@/shared/icons'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { translateApiError, useI18n } from '@/shared/i18n'
-import { DataRow, SectionHeader, SettingsButton, ToggleRow } from '@/features/settings/components/settings-ui'
+import { SectionHeader, SettingsButton, ToggleRow } from '@/features/settings/components/settings-ui'
 import { VerevonTextarea } from '@/shared/ui/verevon/VerevonTextarea'
 import { getSession } from '@/shared/session/session-store'
 
@@ -20,9 +20,9 @@ import { getSession } from '@/shared/session/session-store'
  * - A save replaces the whole document. Everything this section does not edit (capability keys
  *   it does not manage, robots_max, proxy_max) is carried over unchanged, because dropping a
  *   ceiling would loosen the policy.
- * - The viewer's own consent per website is listed read-only. Those decisions are per person
- *   (user-core browser_consent, E3.2-e3), and no gateway route serves them yet, so they cannot be
- *   changed here.
+ * - The viewer's own consent per website is listed, and each decision can be forgotten here
+ *   (E3.2-e3). The decisions are per person, so a person sees and forgets only their own. A
+ *   forgotten decision is not restored: the next browse from that site asks again.
  *
  * Until the action contract exists the section is wired to `unavailableBrowserPolicyPort`: it
  * stays hidden and sends nothing.
@@ -45,6 +45,10 @@ export type BrowserOriginConsent = {
   hosts: string[]
   decision: 'allow' | 'deny'
   scope: 'turn' | 'conversation' | 'always'
+  /** The conversation the decision is bound to, when it is bound to one. Part of the key a forget sends. */
+  conversationId?: string
+  /** The turn the decision is bound to, when it is bound to one. Part of the key a forget sends. */
+  turnId?: string
   decidedAt: string
 }
 
@@ -59,7 +63,7 @@ export type BrowserPolicyView = {
   effective: BrowserPolicyDocument
   /** Keyed by the computed entitlement names, for example "web.paid_search". */
   entitlements: Record<string, boolean>
-  /** The viewer's own per-origin decisions. Read-only here: no gateway route serves them yet. */
+  /** The viewer's own per-origin decisions. Each one can be forgotten from here. */
   originConsents: BrowserOriginConsent[]
 }
 
@@ -78,11 +82,14 @@ export type BrowserPolicyProposalResult =
 
 /**
  * The seam between this section and the action contract. The production port calls
- * browser.get_org_policy and browser.set_org_policy (E3.2-g1) through executeAction.
+ * browser.get_org_policy and browser.set_org_policy (E3.2-g1), and browser.list_origin_consents and
+ * browser.revoke_origin_consent (E3.2-e3), through executeAction.
  */
 export interface BrowserPolicyPort {
   load(orgId: string): Promise<BrowserPolicyLoad>
   propose(orgId: string, proposal: BrowserPolicyProposal): Promise<BrowserPolicyProposalResult>
+  /** Forgets one of the viewer's own consent decisions. It is not restored. The section reloads on success. */
+  revokeOriginConsent(consent: BrowserOriginConsent): Promise<void>
 }
 
 /** Thrown by a port when the If-Match revision is stale. The section reloads and keeps the draft. */
@@ -97,6 +104,9 @@ export class BrowserPolicyRevisionConflict extends Error {
 export const unavailableBrowserPolicyPort: BrowserPolicyPort = {
   load: async () => ({ available: false as const }),
   propose: async () => {
+    throw new Error('Browser policy changes are not available yet.')
+  },
+  revokeOriginConsent: async () => {
     throw new Error('Browser policy changes are not available yet.')
   },
 }
@@ -292,9 +302,17 @@ function consentScopeText(scope: BrowserOriginConsent['scope'], tr: Tr): string 
   return tr('Alltid', 'Always')
 }
 
+/** The decision, its scope and the further hosts it covers, on one line. */
 function consentDetail(consent: BrowserOriginConsent, tr: Tr): string {
-  const scope = consentScopeText(consent.scope, tr)
-  return consent.hosts.length > 0 ? `${scope} · ${consent.hosts.join(', ')}` : scope
+  const decision = consent.decision === 'allow' ? tr('Tillatt', 'Allowed') : tr('Nektet', 'Denied')
+  const parts = [decision, consentScopeText(consent.scope, tr)]
+  if (consent.hosts.length > 0) parts.push(consent.hosts.join(', '))
+  return parts.join(' · ')
+}
+
+/** Identifies one decision on screen. It is the same key the forget sends, so a row maps to one stored decision. */
+function consentKey(consent: BrowserOriginConsent): string {
+  return JSON.stringify([consent.startHost, consent.scope, consent.conversationId ?? null, consent.turnId ?? null])
 }
 
 function HostListField(props: {
@@ -352,6 +370,10 @@ export function BrowserPolicySection(props: { port?: BrowserPolicyPort }) {
   const [saving, setSaving] = createSignal(false)
   const [saveError, setSaveError] = createSignal<string | null>(null)
   const [savedNote, setSavedNote] = createSignal<string | null>(null)
+  // Forgetting a consent takes two clicks: the first arms its row, the second sends it.
+  const [forgetArmed, setForgetArmed] = createSignal<string | null>(null)
+  const [forgetting, setForgetting] = createSignal<string | null>(null)
+  const [forgetError, setForgetError] = createSignal<string | null>(null)
 
   const canManage = () => view()?.canManage === true
   const stored = (): BrowserPolicyDocument | null => view()?.document ?? null
@@ -492,6 +514,35 @@ export function BrowserPolicySection(props: { port?: BrowserPolicyPort }) {
     }
   }
 
+  const forget = async (consent: BrowserOriginConsent) => {
+    const key = consentKey(consent)
+    if (forgetting() !== null) return
+    if (forgetArmed() !== key) {
+      setForgetArmed(key)
+      setForgetError(null)
+      return
+    }
+    setForgetting(key)
+    setForgetError(null)
+    setSavedNote(null)
+    try {
+      await port().revokeOriginConsent(consent)
+      setSavedNote(tr('Samtykket er glemt.', 'The consent was forgotten.'))
+    } catch (err) {
+      setForgetError(
+        translateApiError(err, tr, {
+          no: 'Kunne ikke glemme samtykket. Prøv igjen.',
+          en: 'Could not forget the consent. Try again.',
+        }),
+      )
+    } finally {
+      setForgetArmed(null)
+      setForgetting(null)
+      // The list reloads either way: a refused forget can still have changed what is stored.
+      await refetch()
+    }
+  }
+
   return (
     <Show when={view()}>
       {(current) => (
@@ -575,24 +626,46 @@ export function BrowserPolicySection(props: { port?: BrowserPolicyPort }) {
               </p>
             }
           >
-            <div class="verevon-settings-field-grid" data-testid="browser-policy-consents">
+            <div class="verevon-settings-list-card" data-testid="browser-policy-consents">
               <For each={current().originConsents}>
-                {(consent) => (
-                  <DataRow
-                    primary={consent.startHost}
-                    secondary={consentDetail(consent, tr)}
-                    meta={consent.decision === 'allow' ? tr('Tillatt', 'Allowed') : tr('Nektet', 'Denied')}
-                  />
-                )}
+                {(consent) => {
+                  const key = consentKey(consent)
+                  return (
+                    <div class="verevon-settings-list-row">
+                      <div>
+                        <p>{consent.startHost}</p>
+                        <span>{consentDetail(consent, tr)}</span>
+                      </div>
+                      <SettingsButton
+                        settingsSize="sm"
+                        danger={forgetArmed() === key}
+                        disabled={saving() || forgetting() !== null}
+                        onClick={() => void forget(consent)}
+                      >
+                        <Show when={forgetting() === key}>
+                          <Loader2 size={14} aria-hidden="true" />
+                        </Show>
+                        {forgetArmed() === key ? tr('Bekreft glemsel?', 'Confirm forgetting?') : tr('Glem', 'Forget')}
+                      </SettingsButton>
+                    </div>
+                  )
+                }}
               </For>
             </div>
+            <p class="verevon-settings-help">
+              {tr(
+                'Et glemt samtykke kan ikke gjenopprettes. Neste gang agenten vil åpne nettstedet, spørres du på nytt.',
+                'A forgotten consent cannot be restored. The next time the agent wants to open that website, you are asked again.',
+              )}
+            </p>
           </Show>
-          <p class="verevon-settings-help">
-            {tr(
-              'Skrivebeskyttet for nå. Endring av samtykker per nettsted er ikke tilgjengelig her ennå.',
-              'Read-only for now. Changing consent per website is not available here yet.',
+          <Show when={forgetError()}>
+            {(message) => (
+              <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+                {message()}
+              </p>
             )}
-          </p>
+          </Show>
 
           <Show when={canManage() && edited()}>
             <div class="verevon-settings-actions">

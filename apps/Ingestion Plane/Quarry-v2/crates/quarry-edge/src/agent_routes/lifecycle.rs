@@ -823,6 +823,8 @@ pub async fn start_run(
         last_rejected_epoch: None,
         tab_origins: HashMap::new(),
         nav_policy,
+        origin_extension: None,
+        origin_extension_lane_stale: false,
     };
     let live = RunLive::new(
         entry.org_id.clone(),

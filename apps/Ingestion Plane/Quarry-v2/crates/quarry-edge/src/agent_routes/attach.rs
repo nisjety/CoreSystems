@@ -309,12 +309,30 @@ async fn attach_run_inner(
     }
 
     let attach_id = new_attach_id();
+    // Q3-E3.2-e1w: the run's origin extension is read again before an attachment starts from it.
+    super::origin_extension::revalidate_origin_extension(&state, &handle, &mut entry, None)
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
     let egress = match &attachment_policy {
         Some(policy) => crate::agent_policy_gate::attachment_egress_policy(
             policy,
             &allowed_domains,
             body.policy.as_ref().expect("resolved from an attachment ask"),
         ),
+        None if body.attach_tab.is_none() => {
+            // A separately opened agent tab inherits the hosts the person consented to for the
+            // run, for what its page loads or is redirected through. The delegate's navigation
+            // and landing checks keep the attach grant's own hosts. A tab borrowed from the
+            // person (`attach_tab`) stays pinned to its one origin and a delegate that asked for
+            // a narrower policy keeps it: neither is widened.
+            let mut hosts = allowed_domains.clone();
+            for host in super::origin_extension::attach_extension_hosts(&entry) {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+            BrowserEgressPolicy::from_allowed_domains(&hosts).with_public_assets()
+        }
         None => BrowserEgressPolicy::from_allowed_domains(&allowed_domains).with_public_assets(),
     };
     let (tab_id, tabs, borrowed, opened_by) = if let Some(target) = &body.attach_tab {
@@ -835,7 +853,7 @@ pub(super) async fn delegate_step(
             .ok_or_else(not_found)?;
         (attach.lane, attach.borrowed.is_some().then(|| entry.human_lane.clone()))
     };
-    let _owner_guard = match &owner_lane {
+    let mut _owner_guard = match &owner_lane {
         Some(lane) => Some(lane.0.lock().await),
         None => None,
     };
@@ -906,6 +924,19 @@ pub(super) async fn delegate_step(
             QuarryError::new(ErrorCode::SecurityBlocked, "attach_grant_invalid"),
         ));
     }
+
+    // Q3-E3.2-e1w: the run's origin extension is read again before the delegate's step as well.
+    // One that is no longer usable is dropped (the owner's session and this attachment's tab go
+    // back to their own boundaries) and the step is refused if that restore fails. The owner's
+    // lane is rebuilt at its next action, or here when this step already holds it.
+    super::origin_extension::revalidate_origin_extension(
+        state,
+        handle,
+        &mut entry,
+        _owner_guard.as_mut().map(|owner_lane| &mut owner_lane.ctx),
+    )
+    .await
+    .map_err(|error| driver_err(request_id, error))?;
 
     // The attachment's budget counts only delegate steps; a person's steps never reach it.
     let elapsed_s = unix_ms_now().saturating_sub(attach.started_ms) / 1000;

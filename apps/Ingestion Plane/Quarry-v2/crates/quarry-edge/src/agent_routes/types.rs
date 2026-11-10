@@ -54,6 +54,16 @@ pub struct RunEntry {
     /// The navigation authority this run holds (WS8.B): its own allow-list, or open
     /// web minus the broker's denied list for a person's `human_browse` run.
     pub nav_policy: super::human_browse::RunNavPolicy,
+    /// Q3-E3.2-e1w: the origin extension a person approved for this run, accepted by
+    /// `POST .../origin-extension` and held only while its grant stays usable (the edge
+    /// revalidates it before every step and every tab it opens, and drops it fail-closed).
+    /// Process-local, never written to a checkpoint: a resumed run starts from its own grant
+    /// again. Holds host names, so it is never logged, projected or counted by host.
+    pub origin_extension: Option<crate::agent_policy_gate::OriginExtension>,
+    /// Q3-E3.2-e1w: the person's lane still holds an egress boundary that no longer matches
+    /// `origin_extension` (the extension was dropped while another path held the entry), so its
+    /// next action rebuilds the boundary from the run's own policy before it runs.
+    pub origin_extension_lane_stale: bool,
 }
 
 /// WS8.H: the state one lane of a run owns. A lane is the person's browsing or one

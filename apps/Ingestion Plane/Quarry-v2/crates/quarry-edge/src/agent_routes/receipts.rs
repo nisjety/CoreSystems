@@ -227,6 +227,8 @@ mod receipt_url_tests {
             target_resolution: None,
             telemetry: BrowserTelemetry::default(),
             redaction: None,
+            warnings: Vec::new(),
+            settle_ms: None,
             observed_at: chrono::Utc::now(),
         }
     }

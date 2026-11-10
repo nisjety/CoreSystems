@@ -115,6 +115,23 @@ organization** (INNH-5): an organization registers an HTTPS endpoint with
 failures are retried is `docs/CONTRACTS.md` section 4; the API is "Webhook subscriptions" there.
 Under Zero Data Retention nothing is emitted, and a ZDR organization cannot create a subscription.
 
+**The notifyOnChange filter (E3.5-7).** A subscription may carry a `notify_on_change` filter,
+`{"types": [...], "min_paragraph_delta": N}`. It is set on create and changed on PATCH: an absent key
+keeps the filter and `null` removes it. The subscription returns it. A subscription without one takes
+every change, as before. `types` is a non-empty list from the closed set `new`, `changed` and
+`removed`. Every change webhook carries `change_type`, with no switch, so a `changed` filter works as
+soon as the subscription routes are on. Nothing sends `new` or `removed` yet: the edge sends no webhook
+for a first capture, and a page that is gone is not told apart from a failed fetch. A filter that names
+only those two matches nothing until a producer exists. `min_paragraph_delta` is 0 (no threshold) to
+1000: the fewest paragraphs, added plus removed, that a `changed` page must have. Moves do not count,
+and a markup-only change counts 0. The delta is measured from the stored text under
+`QUARRY_EDGE__CHANGE_WEBHOOK_DELTA`. With that switch off the delta is unknown, and an unknown delta is
+never dropped, so the threshold passes every change. The filter applies to `change_detected` events
+only. It holds on the change webhook path only: the run-event batch path still fans out unfiltered
+until E3.5-7b lands, so a filtered subscription can still receive a change by that path. A refused
+filter is a 400 that names the field `notify_on_change` and a reason: `notify_types_empty`,
+`notify_type_unsupported` or `notify_min_delta_out_of_range`.
+
 ## Tests
 
 `crates/quarry-core/src/change_history.rs`:

@@ -40,6 +40,12 @@ pub fn agent_router() -> Router<AppState> {
             "/v1/agent/procedures/impact-check",
             post(procedure_impact_check),
         )
+        // Q3-E3.2-e1w: a person's per-origin consent applied to the live run. Dark behind
+        // QUARRY_EDGE__ORIGIN_CONSENT (default off): off, it answers 403 before any broker call.
+        .route(
+            "/v1/agent/runs/:run_id/origin-extension",
+            post(apply_origin_extension),
+        )
         .route("/v1/agent/runs/:run_id/tabs", get(list_tabs).post(new_tab))
         // WS8.F: the agent attachment (dark behind QUARRY_EDGE__ATTACH) and the hand-over of a tab.
         .route("/v1/agent/runs/:run_id/attach", post(attach_run))

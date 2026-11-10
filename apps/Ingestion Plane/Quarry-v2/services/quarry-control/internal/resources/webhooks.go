@@ -16,6 +16,7 @@ import (
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
 // MountWebhooksGone answers the retired unscoped webhook CRUD with 410 Gone (INNH-5).
@@ -262,6 +263,37 @@ func JobWebhookFromParams(params map[string]any) (JobWebhook, bool) {
 		return JobWebhook{}, false
 	}
 	return hook, true
+}
+
+// JobWebhookTarget is the delivery target of a job's own webhook, as its params store it. ok is
+// false when the job has none, when the stored value is malformed, or when the job is
+// zero-data-retention: a ZDR job delivers nothing, so none of its events is stored or sent
+// (W3-E3.5-3c).
+func JobWebhookTarget(job store.Job) (JobWebhook, bool) {
+	if jobParamsZdr(job.Params) {
+		return JobWebhook{}, false
+	}
+	return JobWebhookFromParams(job.Params)
+}
+
+// JobWebhookDeliveryPrefix marks a webhook delivery whose target is a job's own webhook. Its
+// WebhookID is this prefix followed by the job id. No webhooks row has such an id, so the
+// dispatcher resolves the target against the job instead (W3-E3.5-3c).
+const JobWebhookDeliveryPrefix = "job:"
+
+// JobWebhookDeliveryWebhookID is the WebhookID a job's own webhook deliveries are stored under.
+func JobWebhookDeliveryWebhookID(jobID string) quarrycontracts.ID {
+	return quarrycontracts.ID(JobWebhookDeliveryPrefix + jobID)
+}
+
+// JobWebhookDeliveryJobID returns the job a delivery's WebhookID names. ok is false for a
+// subscription delivery, whose WebhookID names a webhooks row.
+func JobWebhookDeliveryJobID(webhookID quarrycontracts.ID) (string, bool) {
+	id := string(webhookID)
+	if !strings.HasPrefix(id, JobWebhookDeliveryPrefix) || len(id) == len(JobWebhookDeliveryPrefix) {
+		return "", false
+	}
+	return id[len(JobWebhookDeliveryPrefix):], true
 }
 
 // ErrJobWebhookKey is returned when the control key is missing or too short.

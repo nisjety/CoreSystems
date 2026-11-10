@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -185,7 +186,14 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 				return
 			}
 			markJobTerminalIfNeeded(db, batch[i])
-			fanoutWebhooks(db, batch[i], fanoutOrg)
+			if batch[i].Type == quarrycontracts.EvtChangeDetected {
+				// E3.5-7b: a change takes its subscriptions' notifyOnChange filter on this path too, as it does
+				// on the signed change receiver; the shared dedupe key keeps one delivery per subscription.
+				fanoutChangeWebhooks(db, batch[i], fanoutOrg, eventChangeNotice(batch[i]), changeNotifyFilterOf)
+			} else {
+				fanoutWebhooks(db, batch[i], fanoutOrg)
+			}
+			fanoutJobWebhook(db, batch[i], fanoutOrg)
 			notifyOnChange(sink, batch[i])
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, map[string]any{"accepted": len(batch)})
@@ -351,6 +359,9 @@ func listJobs(db store.DB) http.HandlerFunc {
 			limit = 50
 		}
 		items, _ := db.Jobs().List(limit, r.URL.Query().Get("cursor"))
+		for i := range items {
+			items[i] = withoutWebhookSecret(items[i])
+		}
 		httpx.WriteJSON(w, r, http.StatusOK, items)
 	}
 }
@@ -404,7 +415,7 @@ func createJob(db store.DB, adm Admission, robotsAudit RobotsAuditor) http.Handl
 		}
 		if idemKey != "" {
 			if existing, ok := db.Jobs().FindByIdempotencyKey(org, idemKey); ok {
-				httpx.WriteJSON(w, r, http.StatusOK, existing)
+				httpx.WriteJSON(w, r, http.StatusOK, withoutWebhookSecret(existing))
 				return
 			}
 		}
@@ -414,6 +425,12 @@ func createJob(db store.DB, adm Admission, robotsAudit RobotsAuditor) http.Handl
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
 			httpx.WriteErr(w, r, quarrycontracts.CodeRateLimited,
 				"this organization has too many jobs waiting", details)
+			return
+		}
+		// W3-E3.5-3b: vet and normalise the per-job webhook before anything is stored.
+		webhookKey, refused := prepareJobWebhook(r.Context(), in.Params)
+		if refused != nil {
+			refused(w, r)
 			return
 		}
 		job := store.Job{
@@ -453,8 +470,58 @@ func createJob(db store.DB, adm Admission, robotsAudit RobotsAuditor) http.Handl
 			httpx.WriteErr(w, r, quarrycontracts.CodeConflict, err.Error(), nil)
 			return
 		}
-		httpx.WriteJSON(w, r, http.StatusCreated, job)
+		created := jobCreateResponse{Job: job}
+		if hook, ok := JobWebhookFromParams(job.Params); ok && webhookKey != nil {
+			// The secret is derived from the control key and this (org, job) pair; it is not
+			// stored and no other response carries it.
+			if secret, err := JobWebhookSecret(webhookKey, org, string(job.ID)); err == nil {
+				created.Webhook = &jobCreateWebhook{URL: hook.URL, Events: hook.Events, Secret: secret}
+			}
+		}
+		httpx.WriteJSON(w, r, http.StatusCreated, created)
 	}
+}
+
+// jobWebhookGetenv and jobWebhookVetter are the switch reader and the SSRF vet the create path
+// uses; a test swaps them.
+var (
+	jobWebhookGetenv            = os.Getenv
+	jobWebhookVetter HostVetter = DefaultHostVetter
+)
+
+// prepareJobWebhook handles params.webhook of a job create (W3-E3.5-3b). Off
+// (QUARRY_CONTROL__JOB_WEBHOOK unset) the key is dropped silently: the edge flag is the
+// user-facing refusal and nothing may be delivered. On, the value is vetted and normalised
+// (NormalizeJobWebhook: shape, https, egress guard on every resolved address, closed events,
+// ZDR refused) and replaced by its stored form. The returned key is the control signing key,
+// nil when the job has no webhook. refused, when set, writes the typed refusal: a 400 naming the
+// field and reason, or 503 job_webhook_unconfigured when the key is missing or short, never an
+// unsigned hook.
+func prepareJobWebhook(ctx context.Context, params map[string]any) (key []byte, refused func(http.ResponseWriter, *http.Request)) {
+	raw, present := params[JobWebhookParamKey]
+	if !present {
+		return nil, nil
+	}
+	if !JobWebhooksEnabled(jobWebhookGetenv) {
+		delete(params, JobWebhookParamKey)
+		return nil, nil
+	}
+	hook, field, reason, msg := NormalizeJobWebhook(ctx, raw, jobParamsZdr(params), jobWebhookVetter)
+	if reason != "" {
+		return nil, func(w http.ResponseWriter, r *http.Request) {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, msg, map[string]any{"field": field, "reason": reason})
+		}
+	}
+	key, err := JobWebhookKey(jobWebhookGetenv)
+	if err != nil {
+		return nil, func(w http.ResponseWriter, r *http.Request) {
+			httpx.WriteErr(w, r, quarrycontracts.CodeRuntimeNotReady,
+				"per-job webhooks are not configured, so no job was created",
+				map[string]any{"reason": "job_webhook_unconfigured"})
+		}
+	}
+	params[JobWebhookParamKey] = hook.ParamsValue()
+	return key, nil
 }
 
 // RobotsAuditor is the audit sink a robots.txt override is written to before
@@ -633,7 +700,7 @@ func getJob(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
 			return
 		}
-		httpx.WriteJSON(w, r, http.StatusOK, v)
+		httpx.WriteJSON(w, r, http.StatusOK, withoutWebhookSecret(v))
 	}
 }
 
@@ -827,6 +894,46 @@ func fanoutWebhooks(db store.DB, ev quarrycontracts.Event, orgID string) {
 			CreatedAt:     now,
 		})
 	}
+}
+
+// fanoutJobWebhook creates the pending delivery of one run event to its job's own webhook
+// (params.webhook, W3-E3.5-3c), as fanoutWebhooks does for a subscription. The event's run must
+// belong to orgID, the org that owns the event: the job is found by run id and then compared with
+// that org, so a run of another tenant is never delivered. The job's stored hook must want the
+// event type. Nothing is created while QUARRY_CONTROL__JOB_WEBHOOK is off, and a ZDR job has no
+// delivery rows, so its payload is never persisted.
+func fanoutJobWebhook(db store.DB, ev quarrycontracts.Event, orgID string) {
+	if orgID == "" || ev.RunID == nil || !JobWebhookEvents[string(ev.Type)] || !JobWebhooksEnabled(jobWebhookGetenv) {
+		return
+	}
+	owner, found := db.Jobs().GetByRunID(*ev.RunID)
+	if !found || owner.OrgID != orgID {
+		return
+	}
+	hook, ok := JobWebhookTarget(owner)
+	if !ok || !hook.Wants(string(ev.Type)) {
+		return
+	}
+	payloadBytes, err := json.Marshal(ev)
+	if err != nil {
+		return
+	}
+	now := time.Now().Unix()
+	jobID := string(owner.ID)
+	// A duplicate (ErrConflict) is the same event reached by another path: dropped silently.
+	_ = db.WebhookDeliveries().Create(store.WebhookDelivery{
+		ID:            quarrycontracts.NewID(quarrycontracts.KindWebhookDelivery),
+		WebhookID:     JobWebhookDeliveryWebhookID(jobID),
+		OrgID:         orgID,
+		EventID:       ev.EventID,
+		EventType:     string(ev.Type),
+		DedupeKey:     JobWebhookDeliveryPrefix + jobID + ":" + string(ev.EventID),
+		Payload:       string(payloadBytes),
+		Status:        "pending",
+		Attempt:       0,
+		NextAttemptAt: now,
+		CreatedAt:     now,
+	})
 }
 
 // subscriptionMatches reports whether a subscription's event filter accepts evType.

@@ -19,8 +19,8 @@ use quarry_core::contracts::{
     DomSummary,
     ElementClickTarget, ElementFingerprint, EvidenceDelta, ExtractionFieldResult,
     ExtractionProfile, ExtractionResult, ExtractionSource, InteractiveElement, NetworkEntry,
-    NetworkEvidenceDelta, ObservationDelta, ProofBundle, ResolvedTargetProof, SemanticLocator,
-    SnapshotTarget,
+    NetworkEvidenceDelta, ObservationDelta, ObservationWarning, ProofBundle, ResolvedTargetProof,
+    SemanticLocator, SnapshotTarget, OBSERVATION_WARNINGS_MAX,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::event::{ActionStartedPayload, EventType};
@@ -984,6 +984,8 @@ impl ObservationRunner {
         if let Some(projection) = native_projection.as_mut() {
             redactor.projection(projection);
         }
+        // E3.3-l: read the page-quality warnings before the snapshot build consumes the projection.
+        let page_warnings = observation_warnings(native_projection.as_ref());
         let active_snapshot = (dom_summary.is_some() || native_projection.is_some()).then(|| {
             build_active_snapshot(
                 run_id,
@@ -1391,6 +1393,7 @@ impl ObservationRunner {
                 "quarry.redaction.observation"
             );
         }
+        let top_level_settle_ms = telemetry.settle_ms;
         let mut observation = BrowserObservation {
             run_id: run_id.clone(),
             step: ctx.step,
@@ -1415,6 +1418,8 @@ impl ObservationRunner {
             target_resolution,
             telemetry,
             redaction: Some(redaction_stamp),
+            warnings: page_warnings,
+            settle_ms: top_level_settle_ms,
             observed_at: Utc::now(),
         };
         if otp_denied {
@@ -2048,6 +2053,55 @@ fn validate_snapshot_frame_contract(
 
 fn target_repair(message: impl Into<String>, details: Value) -> QuarryError {
     QuarryError::new(ErrorCode::TargetRepairRequired, message).with_details(details)
+}
+
+/// E3.3-l: the fixed, page-free message for a warning code. A code this build does not know gets
+/// a generic text, so a newer driver never leaks its own wording onto the wire.
+fn observation_warning_message(code: &str) -> &'static str {
+    match code {
+        "ax_frame_timeout" => "a frame's accessibility tree did not answer in time and was left out",
+        "ax_frame_unavailable" => "a frame's accessibility tree could not be read and was left out",
+        "ax_budget_exhausted" => "the accessibility read ran out of time, so later frames were not read",
+        "ax_frame_limit" => "the page has more frames than are read, so the rest were left out",
+        "ax_truncated" => "the accessibility snapshot is partial",
+        _ => "the page read is partial",
+    }
+}
+
+/// E3.3-l: the page-quality warnings of one observation, from the driver's projection warnings and
+/// its accessibility `truncated` flag. Codes and fixed messages only, never a frame id, URL or page
+/// text, so they are safe under ZDR. Capped at [`OBSERVATION_WARNINGS_MAX`]. Empty for a driver
+/// without a native projection or a page read in full.
+fn observation_warnings(projection: Option<&BrowserNativeProjection>) -> Vec<ObservationWarning> {
+    let Some(projection) = projection else {
+        return Vec::new();
+    };
+    let truncated = projection
+        .accessibility
+        .as_ref()
+        .is_some_and(|accessibility| accessibility.truncated);
+    // The truncated flag goes first so the cap never drops it.
+    truncated
+        .then_some("ax_truncated")
+        .into_iter()
+        .chain(projection.warnings.iter().map(|warning| warning.code.as_str()))
+        .take(OBSERVATION_WARNINGS_MAX)
+        .map(|code| {
+            // A code outside the closed set is reported as a generic partial read.
+            let known = matches!(
+                code,
+                "ax_frame_timeout"
+                    | "ax_frame_unavailable"
+                    | "ax_budget_exhausted"
+                    | "ax_frame_limit"
+                    | "ax_truncated"
+            );
+            ObservationWarning {
+                code: if known { code } else { "ax_partial" }.to_owned(),
+                message: observation_warning_message(code).to_owned(),
+            }
+        })
+        .collect()
 }
 
 fn build_active_snapshot(

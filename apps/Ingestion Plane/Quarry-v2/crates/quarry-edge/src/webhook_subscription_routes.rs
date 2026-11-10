@@ -5,7 +5,7 @@
 //! POST   /v1/webhook-subscriptions                                 create (secret shown once)
 //! GET    /v1/webhook-subscriptions                                 list
 //! GET    /v1/webhook-subscriptions/:id                             read
-//! PATCH  /v1/webhook-subscriptions/:id                             active / events / description
+//! PATCH  /v1/webhook-subscriptions/:id                             active / events / description / notify_on_change
 //! DELETE /v1/webhook-subscriptions/:id                             delete (204)
 //! POST   /v1/webhook-subscriptions/:id/rotate-secret               new secret, shown once
 //! GET    /v1/webhook-subscriptions/:id/deliveries                  delivery log, no payload body
@@ -40,7 +40,7 @@ use axum::{
     response::{IntoResponse, Response},
     Extension, Json,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 
 use quarry_core::envelope::Envelope;
@@ -203,6 +203,8 @@ struct CreateBody {
     events: Vec<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    notify_on_change: Option<NotifyFilterBody>,
 }
 
 /// The body of `PATCH /v1/webhook-subscriptions/:id`. The URL is not editable: delete and
@@ -216,6 +218,38 @@ struct PatchBody {
     events: Option<Vec<String>>,
     #[serde(default)]
     description: Option<String>,
+    /// Absent keeps the filter, `null` removes it, and an object replaces it.
+    #[serde(default, deserialize_with = "nullable")]
+    notify_on_change: Option<Option<NotifyFilterBody>>,
+}
+
+/// The `notify_on_change` filter of a subscription body (E3.5-7). Its keys are closed here, so an
+/// unknown key is a 400 like any other body field. Its values are checked by control, which names
+/// the reason of a refusal.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotifyFilterBody {
+    #[serde(default)]
+    types: Vec<String>,
+    #[serde(default)]
+    min_paragraph_delta: i64,
+}
+
+impl NotifyFilterBody {
+    /// The filter as control's body takes it.
+    fn to_json(&self) -> Value {
+        json!({ "types": self.types, "min_paragraph_delta": self.min_paragraph_delta })
+    }
+}
+
+/// Reads a field that may be JSON `null`. With `#[serde(default)]` an absent field is `None`, a
+/// `null` is `Some(None)` and a value is `Some(Some(value))`, so PATCH can tell "keep" from "remove".
+fn nullable<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Option::<T>::deserialize(de).map(Some)
 }
 
 fn parse_body<T: DeserializeOwned>(raw: &Bytes) -> Result<T, QuarryError> {
@@ -354,6 +388,9 @@ pub async fn create(
         if let Some(description) = parsed.description {
             forward["description"] = Value::String(description);
         }
+        if let Some(filter) = &parsed.notify_on_change {
+            forward["notify_on_change"] = filter.to_json();
+        }
         let reply = call(
             &state,
             &claims,
@@ -444,11 +481,17 @@ pub async fn patch(
         if let Some(description) = parsed.description {
             forward.insert("description".into(), Value::String(description));
         }
+        if let Some(filter) = parsed.notify_on_change {
+            forward.insert(
+                "notify_on_change".into(),
+                filter.map_or(Value::Null, |f| f.to_json()),
+            );
+        }
         if forward.is_empty() {
             return Err(bad(
                 "body",
                 "empty_patch",
-                "name at least one of active, events, description",
+                "name at least one of active, events, description, notify_on_change",
             ));
         }
         let reply = call(

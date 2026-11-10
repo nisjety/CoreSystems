@@ -110,7 +110,7 @@ type WebhooksStore interface {
 	CountByOrg(orgID string) int
 	DeleteByOrg(id quarrycontracts.ID, orgID string) error
 	// UpdateByOrg writes the mutable fields (Events, Active, Secret, SecretHint,
-	// Description) of the row with w.ID in w.OrgID.
+	// Description, NotifyOnChange) of the row with w.ID in w.OrgID.
 	UpdateByOrg(w Webhook) error
 	// ListActiveByOrg returns up to limit active subscriptions of orgID. orgID "" returns none.
 	ListActiveByOrg(orgID string, limit int) []Webhook
@@ -780,6 +780,11 @@ type Webhook struct {
 	Description string             `json:"description,omitempty"`
 	CreatedBy   string             `json:"created_by,omitempty"`
 	CreatedAt   int64              `json:"created_at"`
+
+	// NotifyOnChange is the subscription's notifyOnChange filter (E3.5-7) as the JSON document the
+	// control plane normalised. Empty means the subscription takes every change. The store keeps the
+	// bytes and does not read them: the filter type lives in the resources package.
+	NotifyOnChange json.RawMessage `json:"notify_on_change,omitempty"`
 }
 
 type WebhookDelivery struct {
@@ -1774,6 +1779,7 @@ func (m *memWebhooks) UpdateByOrg(w Webhook) error {
 		return ErrNotFound
 	}
 	it.Events, it.Active, it.Secret, it.SecretHint, it.Description = w.Events, w.Active, w.Secret, w.SecretHint, w.Description
+	it.NotifyOnChange = w.NotifyOnChange
 	m.items[w.ID] = it
 	return nil
 }

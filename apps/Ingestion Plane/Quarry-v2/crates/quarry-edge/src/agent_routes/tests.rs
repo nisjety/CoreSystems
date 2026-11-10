@@ -353,6 +353,8 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         last_rejected_epoch: None,
         tab_origins: HashMap::new(),
         nav_policy: super::human_browse::RunNavPolicy::Allowlist,
+        origin_extension: None,
+        origin_extension_lane_stale: false,
     };
     assert!(enforce_step_budget(&entry).is_err());
     entry.constraints.max_steps = 0;
@@ -415,6 +417,8 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         last_rejected_epoch: None,
         tab_origins: HashMap::new(),
         nav_policy: super::human_browse::RunNavPolicy::Allowlist,
+        origin_extension: None,
+        origin_extension_lane_stale: false,
     }
 }
 

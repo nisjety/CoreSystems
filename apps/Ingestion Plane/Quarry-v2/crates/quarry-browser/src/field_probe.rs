@@ -471,6 +471,7 @@ mod tests {
             frames: Vec::new(),
             targets,
             redaction: None,
+            warnings: Vec::new(),
         }
     }
 

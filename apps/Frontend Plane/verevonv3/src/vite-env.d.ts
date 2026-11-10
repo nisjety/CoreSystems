@@ -60,6 +60,8 @@ interface ImportMetaEnv {
 	readonly VITE_INGEST_SELECTED?: string;
 	/** "true" offers the region select on the live browser frame and attaches the region (E3.3-d). Default off. */
 	readonly VITE_BROWSER_REGION_ATTACH?: string;
+	/** "1" or "true" mounts the steer composer in the live browser run dock (E3.3-g). Default off. */
+	readonly VITE_CHAT_BROWSER_STEER?: string;
 }
 
 interface ImportMeta {

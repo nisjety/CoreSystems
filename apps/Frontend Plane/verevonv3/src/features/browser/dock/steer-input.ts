@@ -34,8 +34,11 @@ export function isChatBrowserSteerEnabled(): boolean {
   return value === '1' || value === 'true'
 }
 
-/** Why a message was not sent or not queued. The composer shows the matching sentence. */
-export type SteerRefusal = 'empty' | 'too_long' | 'zdr' | 'not_live' | 'signed_out' | 'queue_full' | 'failed'
+/**
+ * Why a message was not sent or not queued. The composer shows the matching sentence. `unavailable`: the
+ * deployment does not take a steer at all (switched off, or no owner serves the route), so the composer hides.
+ */
+export type SteerRefusal = 'empty' | 'too_long' | 'zdr' | 'not_live' | 'signed_out' | 'queue_full' | 'unavailable' | 'failed'
 
 /**
  * Where one message stands. `sending`: the owner is answering. `queued`: the run has it for its next
@@ -88,6 +91,11 @@ export interface BrowserSteer {
   readonly entries: () => readonly SteerEntry[]
   /** At least one steer is waiting for the owner's answer. */
   readonly sending: () => boolean
+  /**
+   * The deployment does not take a steer (the owner answered unavailable). Set for this controller's life,
+   * so the composer stays hidden rather than offering a send that cannot land.
+   */
+  readonly unavailable: () => boolean
   /** Hands one message to the live run, to be taken at its next step. */
   readonly steer: (text: string) => Promise<SteerOutcome>
   /** Holds one message in this browser until the run has ended. Sends nothing. */
@@ -101,7 +109,7 @@ export interface BrowserSteer {
   readonly settle: () => readonly SteerResend[]
   /** Removes one entry from the strip. */
   readonly dismiss: (id: string) => void
-  /** A new run: clears the strip and re-arms the controller. */
+  /** A new run: clears the strip and re-arms the controller. An unavailable steer stays unavailable. */
   readonly reset: () => void
 }
 
@@ -115,9 +123,17 @@ export function normalizeSteerText(
   return { ok: true, content }
 }
 
-/** A failed send. The server names the feature of a zero-retention refusal; anything else reads as `failed`. */
+/**
+ * A failed send. The server names the feature of a zero-retention refusal. A steer that is switched off, or a
+ * route that serves none (501), reads as `unavailable`. Anything else reads as `failed`.
+ */
 function refusalOf(failure: unknown): SteerRefusal {
-  return failure instanceof ApiError && failure.feature !== null ? 'zdr' : 'failed'
+  if (!(failure instanceof ApiError)) return 'failed'
+  if (failure.feature !== null) return 'zdr'
+  if (failure.status === 501 || failure.code === 'browser_steer_disabled' || failure.code === 'browser_steer_unavailable') {
+    return 'unavailable'
+  }
+  return 'failed'
 }
 
 /**
@@ -129,6 +145,8 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
   const mint = options.mint ?? (() => crypto.randomUUID())
   const [entries, setEntries] = createSignal<readonly SteerEntry[]>([])
   const [inFlight, setInFlight] = createSignal(0)
+  // Set when the owner answers that steering is not available here. It stays set for this controller.
+  const [unavailableNow, setUnavailableNow] = createSignal(false)
   let counter = 0
   // Set when the run has ended. An answer that arrives after that is settled here, not left queued.
   let ended = false
@@ -153,6 +171,7 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
   // Whether the run can take a message at all right now. The person's identity is checked by `steer`.
   const blocked = (): SteerRefusal | undefined => {
     if (options.zdr()) return 'zdr'
+    if (unavailableNow()) return 'unavailable'
     if (!options.live()) return 'not_live'
     return undefined
   }
@@ -186,7 +205,9 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
       setInFlight((count) => count - 1)
     }
     const fail = (reason: SteerRefusal): SteerOutcome => {
-      retry = reason === 'zdr' ? undefined : { content: checked.content, clientMessageId }
+      // A refusal a retry cannot change keeps no retry: zero retention, and a steer the deployment lacks.
+      retry = reason === 'zdr' || reason === 'unavailable' ? undefined : { content: checked.content, clientMessageId }
+      if (reason === 'unavailable') setUnavailableNow(true)
       change(id, { state: 'refused', refusal: reason })
       return { outcome: 'refused', refusal: reason }
     }
@@ -251,6 +272,7 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
   return {
     entries,
     sending: () => inFlight() > 0,
+    unavailable: unavailableNow,
     steer,
     hold,
     markDelivered,

@@ -51,6 +51,9 @@ func scheduledParams(s store.Schedule) map[string]any {
 	for k, v := range s.Config {
 		out[k] = v
 	}
+	// A fired job carries no per-job webhook: a hook in the schedule config never went through
+	// the create-time vet (W3-E3.5-3b), so it is not copied onto the job.
+	delete(out, JobWebhookParamKey)
 	out["org_id"] = s.OrgID
 	out["user_id"] = s.CreatedBy
 	return out

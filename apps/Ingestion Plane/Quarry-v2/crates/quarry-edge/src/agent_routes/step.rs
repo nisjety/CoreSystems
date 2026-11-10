@@ -209,6 +209,18 @@ pub async fn step(
         return Err(run_closed_err(&state, &claims, &request_id, &run_id).await);
     }
 
+    // Q3-E3.2-e1w: a person's origin extension is read again before every step. One that is no
+    // longer usable is dropped and the lane goes back to the run's own egress boundary, so an
+    // extension never outlives its grant. Nothing to do (and no broker call) without one.
+    super::origin_extension::revalidate_origin_extension(
+        &state,
+        &handle,
+        &mut entry,
+        Some(&mut lane.ctx),
+    )
+    .await
+    .map_err(|error| driver_err(&request_id, error))?;
+
     // Every gate, in one fixed order (see `admit_action`).
     let admitted = admit_action(
         &state,
@@ -439,6 +451,14 @@ pub(super) async fn execute_ws_action(
     let mut lane = lane_ref.0.lock().await;
     let mut entry = handle.entry.lock().await;
     handle.live.touch();
+    // Q3-E3.2-e1w: as in `step`, the origin extension is read again before the action.
+    super::origin_extension::revalidate_origin_extension(
+        state,
+        handle,
+        &mut entry,
+        Some(&mut lane.ctx),
+    )
+    .await?;
     let admitted = admit_action(
         state,
         handle,

@@ -32,7 +32,8 @@
 //!   string) checked by [`check_job_webhook`]: https only, no credentials or fragment, no
 //!   literal private, loopback or link-local address and no `localhost`, `events` from the
 //!   closed [`JOB_WEBHOOK_EVENTS`] set. Control vets the resolved host again (the SSRF
-//!   guard) and signs every delivery. A ZDR request may not carry one.
+//!   guard) and signs every delivery. A ZDR request may not carry one. The same check
+//!   serves `/v1/batch` ([`job_webhook_value`]).
 //!
 //! `max_pages: 0` is the default in `lenient` and a 400 `invalid_option` in
 //! `strict` (the W1 WS6.A semantics until strict is set). `max_depth: 0` takes
@@ -537,7 +538,18 @@ pub fn job_webhook_field(
     enabled: bool,
     zdr: bool,
 ) -> Result<Option<JobWebhook>, Vec<RequestField>> {
-    let Some(value) = object.get(JOB_WEBHOOK_KEY).filter(|value| !value.is_null()) else {
+    job_webhook_value(object.get(JOB_WEBHOOK_KEY), enabled, zdr)
+}
+
+/// [`job_webhook_field`] for a route whose body is read into a struct (batch): takes the value
+/// under the `webhook` key, and `None` (absent or null) is `Ok(None)`. The same rules and the same
+/// field errors as [`job_webhook_field`].
+pub fn job_webhook_value(
+    value: Option<&Value>,
+    enabled: bool,
+    zdr: bool,
+) -> Result<Option<JobWebhook>, Vec<RequestField>> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(None);
     };
     if !enabled {

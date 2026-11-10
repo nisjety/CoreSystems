@@ -25,8 +25,10 @@ import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import {
   DashboardComposer,
   type DashboardComposerAttachment,
+  type DashboardComposerBrowserRegionIntake,
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
+import type { BrowserRegionAttachment } from '@/features/browser/page-context/region-attach'
 import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
 import { getComposerCapabilities, getThreadContext } from '@/shared/api/chat-client'
 import { importUpload } from '@/shared/api/knowledge-client'
@@ -404,6 +406,24 @@ export default function ChatPage() {
     tr: i18n.tr,
   })
 
+  // Browser regions for the next message (E3.3-d2b). The composer owns the list and hands over its intake once,
+  // when it is set up (the composer is created once for the page, see composerView). The browser pane feeds it
+  // through acceptBrowserRegion, and the list is cleared when the browser session changes or ends.
+  let composerBrowserRegions: DashboardComposerBrowserRegionIntake | null = null
+  const currentBrowserSessionId = (): string | null =>
+    dockSession.controller?.preview()?.browserSession?.session.id ?? null
+  const acceptBrowserRegion = (attachment: BrowserRegionAttachment) => {
+    // A region answered after its session closed belongs to a session that is no longer open.
+    if (attachment.sessionId !== currentBrowserSessionId()) return
+    composerBrowserRegions?.add(attachment)
+  }
+  createEffect(
+    () => currentBrowserSessionId(),
+    (sessionId, previousSessionId) => {
+      if (sessionId !== previousSessionId) composerBrowserRegions?.clear()
+    },
+  )
+
   // Chat per browser tab (WS9.H). The rule comes from the dock record: `keep` unless the record says `new`.
   // A chat moves only when the browser's active tab changes, and never without a browser session.
   const chatThreadsByTab = createChatThreadByTab()
@@ -553,6 +573,9 @@ export default function ChatPage() {
         onPlanModeChange={setPlanMode}
         onStop={handleStop}
         onSubmit={submitWithWorkPeriod}
+        onBrowserRegionIntake={(intake) => {
+          composerBrowserRegions = intake
+        }}
         onTemporaryChatChange={setTemporaryFromComposer}
         planMode={planMode()}
         agentModeCap={agentModeCap()}
@@ -1673,6 +1696,7 @@ export default function ChatPage() {
             onAskVerevon={askVerevonFromBrowser}
             onAskAboutPage={focusComposer}
             onClose={closeBrowserBody}
+            onRegionAttached={acceptBrowserRegion}
           />
         )}
       </Show>
