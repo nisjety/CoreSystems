@@ -18,7 +18,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { __resetPlanDraftsForTests, AssistantMessage } from './ChatMessages'
 import type { ChatTurn } from './chat-types'
 import type { SettledFold } from '../lib/settled-fold'
-import { createSettledFoldState, type SettledFoldState } from '../lib/settled-fold-state'
 import type { DockedNodes } from '@/shared/chat-nodes/types'
 
 const planTurn = (overrides: Partial<ChatTurn> = {}): ChatTurn => ({
@@ -50,7 +49,6 @@ function mount(
   onRejectPlan = vi.fn(),
   initialDocked?: DockedNodes,
   settledFold?: SettledFold,
-  settledFoldState?: SettledFoldState,
 ) {
   const [message, setMessage] = createStore<ChatTurn>(turn)
   const [status, setStatus] = createSignal<Status>(undefined)
@@ -69,7 +67,6 @@ function mount(
       planApproval={status()}
       docked={docked()}
       settledFold={settledFold}
-      settledFoldState={settledFoldState}
       onViewSteps={() => {}}
     />
   ))
@@ -237,18 +234,5 @@ describe('a settled plan turn inside the fold', () => {
     const view = mount(planTurn(RAN_A_TOOL))
     expect(view.container.querySelector('.verevon-chat-settled-fold')).toBeNull()
     expect(view.container.querySelector('.verevon-chat-plan')).not.toBeNull()
-  })
-
-  it('keeps the reader\'s fold choice when the message mounts again, as a virtualized turn does', () => {
-    const foldState = createSettledFoldState()
-    const first = mount(planTurn(RAN_A_TOOL), vi.fn(), vi.fn(), undefined, FOLD, foldState)
-    expect(foldBody(first.container)?.hasAttribute('hidden')).toBe(true)
-    fireEvent.click(first.container.querySelector<HTMLButtonElement>('.verevon-chat-settled-fold__toggle')!)
-    flush()
-    first.unmount()
-
-    const second = mount(planTurn(RAN_A_TOOL), vi.fn(), vi.fn(), undefined, FOLD, foldState)
-    expect(second.container.querySelector('.verevon-chat-settled-fold__toggle')?.getAttribute('aria-expanded')).toBe('true')
-    expect(foldBody(second.container)?.hasAttribute('hidden')).toBe(false)
   })
 })
