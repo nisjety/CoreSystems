@@ -2840,6 +2840,23 @@
       "reason": "Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS)."
     },
     {
+      "id": "mg:POST:/v1/mcp/servers/probe",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/mcp/servers/probe",
+      "handler": "mcp_probe.rs::post_mcp_probe",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "refuse",
+      "basis": "guard:zdr_or_refuse",
+      "idempotency": "unspecified",
+      "flag": "MODEL_GATEWAY_MCP_PROBE",
+      "payload_allow_list": [],
+      "reason": "Probes one MCP server's auth requirement and tools and saves nothing; a zero-retention or waived caller is refused with the mcp_execution feature before any dial (mcp_probe.rs)."
+    },
+    {
       "id": "mg:POST:/v1/mcp/servers/oauth/start",
       "kind": "route",
       "plane": "model",
@@ -3229,6 +3246,23 @@
       "flag": null,
       "payload_allow_list": [],
       "reason": "Refuses a ZDR or waived token before it runs (zdr_posture.rs DURABLE_MUTATIONS)."
+    },
+    {
+      "id": "mg:POST:/v1/spaces/:space_id/agents/:agent_subject_id/memory/erase",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "POST",
+      "path": "/v1/spaces/:space_id/agents/:agent_subject_id/memory/erase",
+      "handler": "http_routes.rs::erase_space_agent_memory",
+      "decision_type": "space-memory-decision",
+      "min_role": "admin",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "n/a",
+      "flag": null,
+      "payload_allow_list": [],
+      "reason": "Erases one named agent's notes in one Space when its binding is revoked (EP-6 P3, EP-8 S10). Deletes are allowed under every posture; Session Core verifies the per-agent Control decision."
     },
     {
       "id": "mg:POST:/v1/spaces/:space_id/approvals/:approval_id/decide",

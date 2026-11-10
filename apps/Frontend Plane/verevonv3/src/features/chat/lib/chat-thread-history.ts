@@ -7,6 +7,7 @@ import {
 } from '@/shared/session/client-storage'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import type { ConversationNode } from '@/shared/chat-nodes'
+import type { ThreadGoalStatus } from '@/shared/api/thread-goal-client'
 
 export const CHAT_ACTIVE_THREAD_KEY = 'verevon.chat.threadId'
 export const CHAT_THREAD_HISTORY_KEY = 'verevon.chat.threadHistory.v1'
@@ -68,6 +69,13 @@ export type ChatThreadHistoryItem = {
    * (see `withOriginCarry`) rather than needing an explicit resend like
    * `pinned` does. */
   origin?: string
+  /**
+   * The thread's goal status (EP-7 S5): one closed token (`active`, `paused`, `met`,
+   * `budget_reached`, `turns_reached` or `blocked`), read through {@link chatThreadGoalStatus}.
+   * Server-owned, and present only while the server's goal and attention switches are on. A server list
+   * replaces it; a local write keeps it.
+   */
+  goalStatus?: string
 }
 
 export type ChatThreadHistoryInput = {
@@ -88,6 +96,9 @@ export type ChatThreadHistoryInput = {
   /** Omit to leave the stored origin untouched (see `withOriginCarry`) — a
    * local snapshot write never knows it and must not erase it. */
   origin?: string
+  /** Omit to leave the stored goal status untouched (see `withGoalStatusCarry`). Only a closed
+   * token is kept; any other value reads as no goal. */
+  goalStatus?: string
 }
 
 export type ChatThreadTranscriptTurn = {
@@ -214,6 +225,24 @@ export type ChatThreadTranscriptInput = {
   updatedAt?: string
 }
 
+/** The goal statuses a thread row may show (EP-7 S5): the closed set the server reports. */
+const CHAT_THREAD_GOAL_STATUSES: readonly ThreadGoalStatus[] = [
+  'active',
+  'paused',
+  'met',
+  'budget_reached',
+  'turns_reached',
+  'blocked',
+]
+
+/**
+ * The goal status when it is one of the closed tokens, otherwise `undefined`. A word outside the set
+ * reads as no goal, so nothing but a status token reaches a thread row through the history store.
+ */
+export function chatThreadGoalStatus(value: string | undefined): ThreadGoalStatus | undefined {
+  return CHAT_THREAD_GOAL_STATUSES.find((candidate) => candidate === value)
+}
+
 export function readActiveChatThreadId(): string | null {
   return normalizeId(readClientValue(CHAT_ACTIVE_THREAD_KEY))
 }
@@ -240,7 +269,7 @@ export function upsertChatThreadHistory(input: ChatThreadHistoryInput): ChatThre
 
   const existing = readChatThreadHistory()
   const current = existing.find((candidate) => candidate.threadId === item.threadId)
-  const resolved = withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, current), current), current), current), current)
+  const resolved = withGoalStatusCarry(withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, current), current), current), current), current), current)
 
   // Replace in place, then order by activity. Position derives from
   // `updatedAt`, never from write order — selecting an old thread rewrites its
@@ -442,6 +471,7 @@ function normalizeHistoryInput(input: ChatThreadHistoryInput): ChatThreadHistory
   if (!threadId) return null
 
   const titleKind = normalizeTitleKind(input.titleKind)
+  const goalStatus = chatThreadGoalStatus(input.goalStatus)
   return {
     threadId,
     title: normalizeDisplayText(input.title, 'Verevon Chat', maxTitleLength),
@@ -460,6 +490,9 @@ function normalizeHistoryInput(input: ChatThreadHistoryInput): ChatThreadHistory
     // whatever is already stored rather than treating it as enabled.
     ...(typeof input.personaEnabled === 'boolean' ? { personaEnabled: input.personaEnabled } : {}),
     ...(normalizeOptionalText(input.origin) ? { origin: normalizeOptionalText(input.origin) } : {}),
+    // Only a closed goal token survives. Absent is "unspecified": a local write keeps the stored token
+    // (`withGoalStatusCarry`), and a server list reads it as no goal.
+    ...(goalStatus ? { goalStatus } : {}),
   }
 }
 
@@ -557,6 +590,22 @@ function withOriginCarry(
 ): ChatThreadHistoryItem {
   if (item.origin === undefined && current?.origin) {
     return { ...item, origin: current.origin }
+  }
+  return item
+}
+
+/**
+ * Goal status carry: like the run hint, a local snapshot write (a title, a rename, a pin toggle)
+ * does not know the server's goal, so it keeps the stored token rather than erasing the chip until
+ * the next server list. A server list does not go through here (see `replaceChatThreadHistory`), so a
+ * goal the server has cleared reads as no goal there.
+ */
+function withGoalStatusCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (item.goalStatus === undefined && current?.goalStatus) {
+    return { ...item, goalStatus: current.goalStatus }
   }
   return item
 }
@@ -821,7 +870,8 @@ function isChatThreadHistoryItem(value: unknown): value is ChatThreadHistoryItem
     )) &&
     (record.pinned === undefined || typeof record.pinned === 'boolean') &&
     (record.personaEnabled === undefined || typeof record.personaEnabled === 'boolean') &&
-    (record.origin === undefined || typeof record.origin === 'string')
+    (record.origin === undefined || typeof record.origin === 'string') &&
+    (record.goalStatus === undefined || typeof record.goalStatus === 'string')
   )
 }
 

@@ -387,6 +387,9 @@ services:
       # W4-D M1: the app frame's policy and the network origins it grants (resource response `csp`, `network_origins`).
       # Only the literal true turns it on; off, the response is the S8 shape and the frame keeps its no-network policy.
       MCP_APPS_NETWORK_ENABLED: ${MCP_APPS_NETWORK_ENABLED:-false}
+      # MCP server probe (POST /v1/mcp/servers/probe): a server's auth requirement and tools, saved nothing. Only the
+      # literal true turns it on; off, the route is a 404.
+      MODEL_GATEWAY_MCP_PROBE: ${MODEL_GATEWAY_MCP_PROBE:-false}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.
@@ -1920,6 +1923,10 @@ services:
       # space:processes before any of them can actually start.
       # See apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §3.1.
       EXECUTION_CORE_PROCESS_HOST: ${EXECUTION_CORE_PROCESS_HOST:-}
+      # S4.2 process_start with tty: true runs the process on a pseudo-terminal (120x40, TERM=dumb, stdout and stderr
+      # as one stream). Only the literal "true" turns it on; off, tty is ignored and the process gets plain pipes.
+      # A tty request on a zero-retention or waived run is refused whatever this says.
+      EXECUTION_PROCESS_TTY_ENABLED: ${EXECUTION_PROCESS_TTY_ENABLED:-false}
       # WS24-S3/S4: workspace tools for Space Do runs. `off` by default; `read` offers the read tools, `all` also the
       # per-run overlay writes (workspace_edit, workspace_put). cap.workspace.read and cap.workspace.write stay
       # unattested until then. ZDR and non-Space runs never get them; plan mode refuses the writes.
@@ -2733,6 +2740,10 @@ services:
       COST_CORE_AUTH_AUDIENCE: ${COST_CORE_AUTH_AUDIENCE:-cost-core,inference-core}
       COST_BILLING_CORE_URL: http://billing-core:3014
       COST_BILLING_CORE_SERVICE_TOKEN: ${COST_BILLING_CORE_SERVICE_TOKEN:?COST_BILLING_CORE_SERVICE_TOKEN is required}
+      # W4-IMG-2, off by default: prices image_generation usage per image from
+      # image_price_rates (no row is seeded; an unpriced image is recorded with no
+      # image cost and flagged). Only the literal true turns it on.
+      COST_CORE_IMAGE_PRICING_ENABLED: ${COST_CORE_IMAGE_PRICING_ENABLED:-false}
       # Optional Azure Cost Management actual-charge import. Grant this service
       # Cost Management Reader at the configured Azure scope and map Foundry
       # `project` tag values to Verevon organization IDs. Azure totals remain

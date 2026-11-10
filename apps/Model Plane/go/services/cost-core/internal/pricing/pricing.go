@@ -17,9 +17,11 @@ package pricing
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -89,11 +91,35 @@ type Rate struct {
 	Currency         string  `json:"currency"`
 }
 
+// ImageRate is the price of one generated image for one model, size and
+// quality, in USD per image, effective from a point in time. Rows come only
+// from image_price_rates, and no migration seeds them: a key with no row stays
+// unpriced rather than priced at a guess. An empty Quality is the row for any
+// quality the table has no row of its own for.
+type ImageRate struct {
+	Model         string
+	Size          string
+	Quality       string
+	USDPerImage   float64
+	Source        string
+	EffectiveFrom time.Time
+}
+
+// imageKey is the normalized (model, size, quality) key an ImageRate is held under.
+type imageKey struct {
+	model   string
+	size    string
+	quality string
+}
+
 // Resolver maps a model name to a Rate and computes USD cost. It is read-only
 // after construction (safe for concurrent use).
 type Resolver struct {
 	rates map[string]Rate // keyed by normalized model key
 	def   Rate            // the DefaultModelKey rate
+	// images holds the current per-image rate for each normalized key. It is
+	// empty for the built-in catalogue, because no image price is seeded.
+	images map[imageKey]ImageRate
 }
 
 // defaultSeed mirrors migrations/0002_model_pricing.up.sql so the in-memory /
@@ -128,9 +154,11 @@ func Default() *Resolver {
 	return fromRates(defaultSeed)
 }
 
-// LoadFromPool reads the model_pricing catalogue from Postgres. If the table is
-// empty or missing a default row, the built-in seed backfills it so a default
-// rate is always available.
+// LoadFromPool reads the model_pricing catalogue from Postgres, and the per-image
+// rates in effect now from image_price_rates. If the token table is empty or
+// missing a default row, the built-in seed backfills it so a default rate is
+// always available. A failed image-rate load leaves image usage unpriced and does
+// not fail the token catalogue.
 func LoadFromPool(ctx context.Context, pool *pgxpool.Pool) (*Resolver, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT model, input_per_million::double precision,
@@ -162,7 +190,66 @@ func LoadFromPool(ctx context.Context, pool *pgxpool.Pool) (*Resolver, error) {
 			loaded = append(loaded, r)
 		}
 	}
-	return fromRates(loaded), nil
+	resolver := fromRates(loaded)
+	// The per-image rates load with the token catalogue. A failure there must not
+	// cost the token prices, so image usage is left unpriced instead of failing
+	// the whole load.
+	images, err := loadImageRates(ctx, pool)
+	if err != nil {
+		slog.Warn("pricing: image price catalogue unavailable; image usage is recorded unpriced", "error", err)
+	}
+	resolver.images = indexImageRates(images)
+	return resolver, nil
+}
+
+// loadImageRates reads the image price rows in effect now, one row per stored
+// (model, size, quality) at its latest effective date. indexImageRates folds the
+// result into the lookup index.
+func loadImageRates(ctx context.Context, pool *pgxpool.Pool) ([]ImageRate, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT ON (model, size, quality)
+		       model, size, quality, usd_per_image::double precision, source, effective_from
+		FROM image_price_rates
+		WHERE effective_from <= now()
+		ORDER BY model, size, quality, effective_from DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var loaded []ImageRate
+	for rows.Next() {
+		var r ImageRate
+		if err := rows.Scan(&r.Model, &r.Size, &r.Quality, &r.USDPerImage, &r.Source, &r.EffectiveFrom); err != nil {
+			return nil, err
+		}
+		loaded = append(loaded, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return loaded, nil
+}
+
+// indexImageRates keys the rows by their normalized (model, size, quality). Two
+// stored keys that differ only in case or surrounding space would be one key
+// after normalization, and which price applies would then be a guess, so that
+// key is left unpriced.
+func indexImageRates(rates []ImageRate) map[imageKey]ImageRate {
+	index := make(map[imageKey]ImageRate, len(rates))
+	ambiguous := make(map[imageKey]bool)
+	for _, r := range rates {
+		key := imageKey{model: normalize(r.Model), size: normalize(r.Size), quality: normalize(r.Quality)}
+		if _, dup := index[key]; dup {
+			ambiguous[key] = true
+			continue
+		}
+		index[key] = r
+	}
+	for key := range ambiguous {
+		delete(index, key)
+	}
+	return index
 }
 
 func fromRates(rates []Rate) *Resolver {
@@ -242,6 +329,37 @@ func (r *Resolver) lookup(model string) Rate {
 		return best
 	}
 	return r.def
+}
+
+// ImageCost returns the USD cost of n generated images of one model, size and
+// quality, at the current per-image rate. known is false when no rate matches,
+// and the cost is then zero: an unpriced image is never priced at a guess.
+func (r *Resolver) ImageCost(model, size, quality string, n int) (usd float64, known bool) {
+	rate, ok := r.imageRate(model, size, quality)
+	if !ok {
+		return 0, false
+	}
+	if n < 0 {
+		n = 0
+	}
+	return float64(n) * rate.USDPerImage, true
+}
+
+// imageRate resolves the current rate for a generated image. The exact
+// (model, size, quality) row wins. A quality with no row of its own falls back
+// to the quality-agnostic row, whose quality is empty. Nothing else matches: no
+// prefix match and no default row, so an image the table does not price stays
+// unpriced.
+func (r *Resolver) imageRate(model, size, quality string) (ImageRate, bool) {
+	m, s, q := normalize(model), normalize(size), normalize(quality)
+	if rate, ok := r.images[imageKey{model: m, size: s, quality: q}]; ok {
+		return rate, true
+	}
+	if q == "" {
+		return ImageRate{}, false
+	}
+	rate, ok := r.images[imageKey{model: m, size: s}]
+	return rate, ok
 }
 
 // Rates returns the full catalogue, sorted by model key (default first), for

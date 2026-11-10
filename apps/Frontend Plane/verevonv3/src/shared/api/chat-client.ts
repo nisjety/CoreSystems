@@ -1511,6 +1511,12 @@ export type ChatThreadSession = {
   attentionSince?: string
   /** Whether the thread holds an unread reply. Present only with an attention state. */
   attentionUnseen?: boolean
+  /**
+   * The status of the thread's goal (EP-7 S5): one closed token (`active`, `paused`, `met`,
+   * `budget_reached`, `turns_reached` or `blocked`). Absent when the thread has no goal, or the server's
+   * thread goals or attention switch is off. A status word only, never the objective.
+   */
+  goalStatus?: string
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -4705,6 +4711,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     ...(attentionState ? { attentionState } : {}),
     ...(attentionState && attentionSince ? { attentionSince } : {}),
     ...(attentionState ? { attentionUnseen: item.attentionUnseen === true } : {}),
+    ...(str(item.goalStatus) ? { goalStatus: str(item.goalStatus) } : {}),
     ...(archivedAt ? { archivedAt } : {}),
   }
 }

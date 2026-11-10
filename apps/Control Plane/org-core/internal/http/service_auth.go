@@ -24,6 +24,8 @@ const (
 	gatewayServicePrincipal   = "verevon-gateway"
 	siemExporterPrincipal     = "audit-core"
 	browserBrokerPrincipal    = "browser-broker"
+	modelGatewayPrincipal     = "model-gateway"
+	executionCorePrincipal    = "execution-core"
 	authCorePrincipal         = "auth-core"
 	domainReaderPrincipal     = "auth-core"
 	scimEdgePrincipal         = "verevon-scim-edge"
@@ -81,8 +83,9 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	"org:domain:read:any": {},
 	// Read-only access to one org's agent-browser site decision, through
 	// GET /internal/orgs/:orgId/browser-sites/resolve and nothing else (WS21-S3).
-	// Held by the browser broker alone (validateServiceCredential); the decision
-	// is the broker's input at grant mint, never a member's list.
+	// Held by the browser broker, model-gateway and execution-core alone
+	// (validateServiceCredential); the decision is the broker's input at grant
+	// mint and the Model Plane's web-domain check, never a member's list.
 	"org:browser-site:read:any": {},
 	// Quarry's per-org browser-profile key custody (WS17.E2): generate a data key
 	// under the org's KEK (wrap) and unwrap/rewrap it, through
@@ -208,7 +211,10 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 		if scope == "org:domain:read:any" && credential.Principal != domainReaderPrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
-		if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
+		// The site decision is read by the browser broker (WS21-S3) and by the two
+		// Model Plane services that apply the org's domain rules before a web call
+		// (EP-9 W3). The set is closed: every other principal is refused.
+		if scope == "org:browser-site:read:any" && !browserSiteReaderPrincipal(credential.Principal) {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		// The web policy read feeds a token claim that bounds what agents may do, so
@@ -231,6 +237,18 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 	principals[credential.Principal] = struct{}{}
 	tokens[tokenDigest] = struct{}{}
 	return nil
+}
+
+// browserSiteReaderPrincipal reports whether a principal may hold the browser-site
+// resolve scope. The set is closed: the browser broker, and model-gateway and
+// execution-core for the Model Plane's web-domain enforcement (EP-9 W3).
+func browserSiteReaderPrincipal(principal string) bool {
+	switch principal {
+	case browserBrokerPrincipal, modelGatewayPrincipal, executionCorePrincipal:
+		return true
+	default:
+		return false
+	}
 }
 
 func secureServiceCredentialToken(token string) bool {

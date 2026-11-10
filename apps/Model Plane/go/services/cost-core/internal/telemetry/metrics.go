@@ -19,6 +19,9 @@ var (
 	BudgetExceeded metric.Int64Counter
 	// RequestsTotal counts HTTP requests handled, labelled by method and path.
 	RequestsTotal metric.Int64Counter
+	// ImagesRecorded counts the images recorded from image_generation usage
+	// events, labelled by price_unknown (true when the catalogue had no price).
+	ImagesRecorded metric.Int64Counter
 )
 
 func init() {
@@ -38,5 +41,9 @@ func init() {
 	RequestsTotal, _ = meter.Int64Counter(
 		"cost_core_requests_total",
 		metric.WithDescription("Total HTTP requests handled by cost-core, labelled by method and path."),
+	)
+	ImagesRecorded, _ = meter.Int64Counter(
+		"cost.images.recorded",
+		metric.WithDescription("Images recorded from image-generation usage, labelled by price_unknown."),
 	)
 }

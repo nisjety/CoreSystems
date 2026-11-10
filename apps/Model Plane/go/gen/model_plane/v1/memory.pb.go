@@ -2035,8 +2035,7 @@ func (x *EraseAgentMemoryRequest) GetUserId() string {
 // What an agent memory erase removed.
 type EraseAgentMemoryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// How many durable agent rows were erased. Zero when the agent had none or
-	// agent memory is switched off.
+	// How many durable agent rows were erased. Zero when the agent had none.
 	Erased        uint64 `protobuf:"varint,1,opt,name=erased,proto3" json:"erased,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

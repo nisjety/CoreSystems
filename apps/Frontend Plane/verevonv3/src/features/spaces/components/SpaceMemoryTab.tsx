@@ -61,6 +61,12 @@ export function deleteSpaceMemory(spaceRef: string, memoryId: string): Promise<{
   })
 }
 
+/**
+ * `VITE_SPACE_MEMORY_TAB === 'true'` mounts this tab in a shared room's details (EP-8 S7). Off by default,
+ * and only the literal `true` turns it on. Presentation only: the gateway and Control decide every read and delete.
+ */
+export const spaceMemoryTabEnabled = (): boolean => import.meta.env.VITE_SPACE_MEMORY_TAB === 'true'
+
 type TabStatus = 'loading' | 'ready' | 'restricted' | 'disabled' | 'error'
 
 export function SpaceMemoryTab(props: SpaceMemoryTabProps) {

@@ -635,6 +635,9 @@ fn proxy_routes() -> Router<AppState> {
         // choice is ever asked for. Preferred over the two routes above,
         // which remain for direct/explicit use.
         .route("/v1/mcp/servers/connect", post(mcp_connect))
+        // The read-only probe of a server before it is saved: its auth requirement and tools, nothing
+        // registered and no credential sent (`crate::mcp_probe`). 404 while MODEL_GATEWAY_MCP_PROBE is off.
+        .route("/v1/mcp/servers/probe", post(crate::mcp_probe::post_mcp_probe))
         // What an MCP server's tools are, and a person's review of one whose
         // definition changed (WS05-S2); capability-core decides who may approve.
         .route(
@@ -13897,6 +13900,18 @@ fn attention_reason_name(reason: i32) -> Option<&'static str> {
     }
 }
 
+/// The wire form of a thread goal's status (EP-7 S5): one of the six closed tokens, or empty. Session
+/// Core fills the token only while the thread goals and attention switches are both on, and a token
+/// this build does not name reads as no goal, so the listing carries nothing but a closed status word.
+fn goal_status_token(status: &str) -> String {
+    match status {
+        "active" | "paused" | "met" | "budget_reached" | "turns_reached" | "blocked" => {
+            status.to_owned()
+        }
+        _ => String::new(),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ListAttentionQuery {
     /// Page size, 1 to 200. Absent or out of range reads as 200 in Session Core.
@@ -14012,6 +14027,12 @@ struct ThreadSummaryResponse {
     last_role: String,
     #[serde(skip_serializing_if = "is_zero_u32")]
     turn_count: u32,
+    /// The status of the thread's latest goal (EP-7 S5), one closed token: `active`, `paused`,
+    /// `met`, `budget_reached`, `turns_reached` or `blocked`. Omitted when the thread has no goal,
+    /// its goal was cleared, or the thread goals or attention switch is off. A status token only,
+    /// never the objective.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    goal_status: String,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -14309,6 +14330,7 @@ async fn list_threads(
             recent_author_subject_ids: thread.recent_author_subject_ids,
             last_role: thread.last_role,
             turn_count: thread.turn_count,
+            goal_status: goal_status_token(&thread.goal_status),
         })
         .collect();
 
@@ -15955,9 +15977,9 @@ async fn delete_space_memory_entry(
 }
 
 /// Erases one named agent's memory in a Space, under a Control Space memory decision issued for
-/// that agent (EP-6 P3). Session Core verifies the decision and is the authority; a no-op that
-/// answers zero while agent memory is off. Allowed under every posture, as every delete is, and the
-/// answer carries a count only.
+/// that agent (EP-6 P3). Session Core verifies the decision and is the authority; the erase is not
+/// gated by the agent switch, so rows written while it was on go too. Allowed under every posture,
+/// as every delete is, and the answer carries a count only.
 async fn erase_space_agent_memory(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -22663,6 +22685,7 @@ mod space_post_wire_tests {
             recent_author_subject_ids: Vec::new(),
             last_role: String::new(),
             turn_count: 0,
+            goal_status: String::new(),
         }
     }
 

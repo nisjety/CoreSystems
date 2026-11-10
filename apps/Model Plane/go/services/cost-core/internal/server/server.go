@@ -699,6 +699,70 @@ func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 		e.CostBasis != ledger.CostBasisSubscription {
 		e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
 	}
+	return s.recordPriced(ctx, e)
+}
+
+// ImageUsage is the image-generation part of a usage event: the size and quality
+// the images were made at, and how many there were. The decoder bounds Count.
+type ImageUsage struct {
+	Size    string
+	Quality string
+	Count   int
+}
+
+// RecordImageUsage records an image_generation usage event. Its images are
+// priced per image from the image catalogue (pricing.ImageCost), and any tokens
+// it carries are priced as RecordUsage prices them. As with RecordUsage, a cost
+// the producer stated is kept, and a subscription entry is never priced.
+//
+// An image the catalogue has no price for is recorded with no image cost. It is
+// logged and counted with price_unknown=true, never priced at a guess.
+func (s *Server) RecordImageUsage(ctx context.Context, e ledger.Entry, image ImageUsage) error {
+	if err := ledger.ValidateEntry(e); err != nil {
+		return err
+	}
+	known := true
+	if e.CostUSD == 0 && e.CostBasis != ledger.CostBasisSubscription {
+		if s.pricing != nil && (e.InputTokens > 0 || e.OutputTokens > 0) {
+			e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
+		}
+		var imageCost float64
+		imageCost, known = s.imageCostOf(e.Model, image)
+		e.CostUSD += imageCost
+	}
+	if err := s.recordPriced(ctx, e); err != nil {
+		return err
+	}
+	telemetry.ImagesRecorded.Add(ctx, int64(image.Count), metric.WithAttributes(
+		attribute.Bool("price_unknown", !known),
+	))
+	if !known {
+		slog.Warn("image usage has no catalogue price; recorded with no image cost",
+			"org_id", e.OrgID,
+			"request_id", e.RequestID,
+			"model", e.Model,
+			"size", image.Size,
+			"quality", image.Quality,
+			"images", image.Count,
+			"price_unknown", true,
+		)
+	}
+	return nil
+}
+
+// imageCostOf prices the images of an image usage from the catalogue. known is
+// false when no rate matches the model, size and quality.
+func (s *Server) imageCostOf(model string, image ImageUsage) (usd float64, known bool) {
+	if s.pricing == nil {
+		return 0, false
+	}
+	return s.pricing.ImageCost(model, image.Size, image.Quality, image.Count)
+}
+
+// recordPriced validates an entry that already carries its cost, appends it to
+// the ledger and records its tokens. RecordUsage and RecordImageUsage both end
+// here.
+func (s *Server) recordPriced(ctx context.Context, e ledger.Entry) error {
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
 	}

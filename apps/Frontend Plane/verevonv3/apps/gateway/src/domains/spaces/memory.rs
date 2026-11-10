@@ -285,14 +285,53 @@ async fn space_memory_core(
     relay_answer(status, &response, operation, memory_id)
 }
 
+/// `spaces.memory.list` (EP-8 S7-b): the work of `GET /api/v1/spaces/{space_ref}/memory`, behind the same
+/// switch, membership, lifecycle and Control decision. The action names no agent, so it lists the Space's
+/// own rows.
+pub(in crate::domains) async fn list_core(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+) -> Reply {
+    space_memory_core(state, user, headers, space_ref, OPERATION_LIST, "", "").await
+}
+
+/// `spaces.memory.delete` (EP-8 S7-b): the work of `DELETE /api/v1/spaces/{space_ref}/memory/{memory_id}`,
+/// behind the same switch, membership, lifecycle and Control decision.
+pub(in crate::domains) async fn delete_core(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+    memory_id: &str,
+) -> Reply {
+    space_memory_core(
+        state,
+        user,
+        headers,
+        space_ref,
+        OPERATION_DELETE,
+        memory_id,
+        "",
+    )
+    .await
+}
+
+/// Counts one failed revocation erase under its closed reason. Never an id, a count or content.
+fn record_erase_failure(reason: &'static str) {
+    metrics::counter!("verevon_space_agent_erase_failures_total", "reason" => reason).increment(1);
+}
+
 /// Best-effort erase of one named agent's memory once its binding is revoked (EP-6 P3, EP-8 S10).
 ///
-/// Runs after the revocation has landed and never changes the revoke's answer: any failure here is
-/// logged by status only and the revoke still succeeds. Not behind the Space memory UI flag, since
-/// that flag gates a screen, not whether a revoked agent's notes may outlive its binding. Session
-/// Core is the authority: it verifies the fresh Control decision issued for THIS agent, and erases
-/// nothing (answers zero) while agent memory is off. Allowed under every retention posture: the
-/// call removes rows and carries ids, never content, and only a row count is logged.
+/// The caller runs this only when `GATEWAY_SPACE_MEMORY_UI` is on (`SpaceFeatureFlags::memory_ui`,
+/// dark by default). It runs after the revocation has landed and never changes the revoke's answer:
+/// any failure here is logged by status only, counted under a closed reason, and the revoke still
+/// succeeds. Session Core is the authority: it verifies the fresh Control decision issued for THIS
+/// agent and erases that agent's rows in this Space, whatever its own agent switch says. Allowed
+/// under every retention posture: the call removes rows and carries ids, never content, and only a
+/// row count is logged.
 pub(super) async fn erase_agent_memory_after_revocation(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -305,6 +344,7 @@ pub(super) async fn erase_agent_memory_after_revocation(
     let agent_subject_id = agent_subject_id.trim();
     if org_id.trim().is_empty() || !valid_space_ref(space_ref) || !valid_memory_id(agent_subject_id) {
         tracing::warn!("revoked agent memory erase skipped: no valid Space or agent subject");
+        record_erase_failure("invalid_input");
         return;
     }
     let (decision_ref, token) = match space_memory_decision(
@@ -320,6 +360,7 @@ pub(super) async fn erase_agent_memory_after_revocation(
         Ok(decision) => decision,
         Err((status, _)) => {
             tracing::warn!(%status, "revoked agent memory erase skipped: Control gave no decision");
+            record_erase_failure("control_decision");
             return;
         }
     };
@@ -328,6 +369,7 @@ pub(super) async fn erase_agent_memory_after_revocation(
             Ok(token) => token,
             Err(_) => {
                 tracing::warn!("revoked agent memory erase skipped: delegated credentials unavailable");
+                record_erase_failure("credentials");
                 return;
             }
         };
@@ -356,6 +398,7 @@ pub(super) async fn erase_agent_memory_after_revocation(
         let erased = response.get("erased").and_then(Value::as_u64).unwrap_or(0);
         tracing::info!(erased, "revoked agent memory erased");
     } else {
+        record_erase_failure("upstream");
         tracing::warn!(%status, "revoked agent memory erase failed");
     }
 }

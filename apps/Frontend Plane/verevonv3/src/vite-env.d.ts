@@ -64,6 +64,14 @@ interface ImportMetaEnv {
 	readonly VITE_PRESET_AGENT_ACTIONS?: string;
 	/** "true" shows "What this agent remembers" on each agent a room owner or admin governs (EP-6 P3-c). Default off. */
 	readonly VITE_SPACE_AGENT_MEMORY?: string;
+	/** "true" shows the Space memory tab (EP-8 S7) in a shared room's details, to its owner or a manager. Default off. */
+	readonly VITE_SPACE_MEMORY_TAB?: string;
+	/** "true" makes the MCP add flow probe a server first, then offer a tool picker before it is saved (W4-CC-2). Default off. */
+	readonly VITE_MCP_PROBE?: string;
+	/** "true" lets an inline widget quote a passage of its own text as a chip the person clicks into the composer (EP-4 W4-IO-2). Default off. */
+	readonly VITE_WIDGET_SELECTION?: string;
+	/** "true" draws a generated image's tool call as an image card: the model and provider that made it, and any typed refusal (W4-IMG-4). Default off. */
+	readonly VITE_CHAT_IMAGE_TOOL?: string;
 }
 
 interface ImportMeta {

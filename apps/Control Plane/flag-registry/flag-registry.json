@@ -103,6 +103,17 @@
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
+      "name": "COST_CORE_IMAGE_PRICING_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Prices image_generation usage per image from image_price_rates. No row is seeded, so an unpriced image is recorded with no image cost and flagged. Off, image events record as ordinary usage. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "cost-core", "env": "COST_CORE_IMAGE_PRICING_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "CRON_SWEEPER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -179,6 +190,17 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_POST_MUTATION_VERIFY_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_PROCESS_TTY_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "S4.2 process_start tty: runs a background process on a pseudo-terminal (120x40, TERM=dumb) so stdout and stderr arrive as one stream. Only the literal true turns it on; off, a tty request gets plain pipes. A tty request on a zero-retention or waived run is refused whatever this says. Read once at start, so a change needs a restart.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_PROCESS_TTY_ENABLED", "default": "false" }
       ]
     },
     {
@@ -350,6 +372,17 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_JUDGE_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_MCP_PROBE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "MCP server probe (POST /v1/mcp/servers/probe): a server's auth requirement and tools, saved nothing. Off, the route is a 404. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_MCP_PROBE", "default": "false" }
       ]
     },
     {

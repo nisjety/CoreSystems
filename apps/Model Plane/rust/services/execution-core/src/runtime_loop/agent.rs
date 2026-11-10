@@ -294,6 +294,29 @@ fn org_web_refusal(req: &pb::RunAgentRequest, tool_name: &str) -> Option<String>
     })
 }
 
+/// The refusal of a call to a tool the run's agent tool allowlist does not cover (Wave 3 EP-6 S9), or `None` when the
+/// call may run. A run without an allowlist is unchanged. It is answered before the purpose lock, so the model is told
+/// the specific reason. It checks the same rule as [`narrow_offered_to_agent_allowlist`], which shapes the offer.
+fn agent_allowlist_refusal(req: &pb::RunAgentRequest, tool_name: &str) -> Option<String> {
+    let allowlist = req.agent_tool_allowlist.as_ref()?;
+    (!crate::capability_policy::agent_allowlist_permits(&allowlist.capability_ids, tool_name)).then(|| {
+        format!("agent_tool_not_allowed: the agent's tool allowlist does not cover '{tool_name}', so it is not run")
+    })
+}
+
+/// Keeps only the offered tools the run's agent tool allowlist permits (Wave 3 EP-6 S9). It only removes: a tool
+/// with no governed capability is dropped, and no tool is ever added. A run without an allowlist keeps its set.
+fn narrow_offered_to_agent_allowlist(
+    req: &pb::RunAgentRequest,
+    tools: &mut Vec<pb::ToolDefinition>,
+) {
+    if let Some(allowlist) = req.agent_tool_allowlist.as_ref() {
+        tools.retain(|tool| {
+            crate::capability_policy::agent_allowlist_permits(&allowlist.capability_ids, &tool.name)
+        });
+    }
+}
+
 /// Whether this offered set holds both a connected-account tool and a web or browser tool: the
 /// only case in which the routing question exists.
 #[must_use]
@@ -2135,6 +2158,12 @@ async fn run_agent_with_route_parkable(
         resumed.is_some(),
     );
     let derivable = derivable && !offer_subagent_roles(&mut tools, subagent_roles.unwrap_or(&[]));
+    // The run's agent tool allowlist (Wave 3 EP-6 S9) narrows the final offered set, after every tool added above
+    // (the result handle, the long-page reader, the subagent roles), so an added tool is held to it too. It only
+    // removes. A narrowed set is not one a park resume derives again (that derivation is the wider base set), so a
+    // run that carries an allowlist never parks.
+    narrow_offered_to_agent_allowlist(&req, &mut tools);
+    let derivable = derivable && req.agent_tool_allowlist.is_none();
 
     // Purpose-lock: the offered allowlist IS the scope lock. Tool calls outside
     // it are rejected, never dispatched.
@@ -4013,6 +4042,21 @@ async fn run_rounds(
             // The org turned web access off (Wave 3 EP-9 W2): a web call gets its own typed refusal, ahead of the
             // purpose lock, so the person is told why and no request leaves the run.
             if let Some(refusal) = org_web_refusal(req, &call.name) {
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(refusal),
+                }));
+                continue;
+            }
+            // The agent's tool allowlist (Wave 3 EP-6 S9): a call outside it is a tool error, ahead of the
+            // purpose lock, so the model reads why. The offer was already narrowed to it: this is the per-call guard.
+            if let Some(refusal) = agent_allowlist_refusal(req, &call.name) {
+                warn!(
+                    run_id = %req.run_id,
+                    tool = %call.name,
+                    "run_agent: rejecting a tool outside the agent's tool allowlist"
+                );
                 slots.push(CallSlot::Rejected(ToolStepResult {
                     name: call.name.clone(),
                     output: String::new(),
@@ -8066,8 +8110,8 @@ fn process_tool_defs() -> Vec<pb::ToolDefinition> {
     vec![
         pb::ToolDefinition {
             name: "process_start".to_owned(),
-            description: "Start a LONG-RUNNING background process in this Space's persistent workspace and return immediately with a process_id. Use it for work that outlives one tool call - a build, a test suite, a watcher, a server, a long computation - where code_interpreter's per-call timeout would kill it. The program is Python (or POSIX sh), same sandbox as code_interpreter: NO NETWORK, read-only system, and it can only write this Space's workspace. Unlike code_interpreter the workspace PERSISTS, so files it writes are still there for later calls. It does NOT stream output to you: collect output with process_read using the returned process_id. The process is killed at its TTL (30 minutes by default, 1 hour maximum, and never past this Space's sandbox lease), so treat it as bounded work, not a permanent service.".to_owned(),
-            parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Defaults to python"},"code":{"type":"string","description":"The complete program to run in the background"},"args":{"type":"array","items":{"type":"string"},"description":"Optional arguments passed to the program"},"ttl_secs":{"type":"integer","description":"Seconds before the process is stopped; default 1800, max 3600"},"stdin":{"type":"boolean","description":"Keep stdin open so process_stdin can write to it later; default false"}},"required":["code"]}"#.to_owned(),
+            description: "Start a LONG-RUNNING background process in this Space's persistent workspace and return immediately with a process_id. Use it for work that outlives one tool call - a build, a test suite, a watcher, a server, a long computation - where code_interpreter's per-call timeout would kill it. The program is Python (or POSIX sh), same sandbox as code_interpreter: NO NETWORK, read-only system, and it can only write this Space's workspace. Unlike code_interpreter the workspace PERSISTS, so files it writes are still there for later calls. It does NOT stream output to you: collect output with process_read using the returned process_id. Set tty to run it on a pseudo-terminal, where this deployment offers one, so it behaves as it would at a terminal. The process is killed at its TTL (30 minutes by default, 1 hour maximum, and never past this Space's sandbox lease), so treat it as bounded work, not a permanent service.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Defaults to python"},"code":{"type":"string","description":"The complete program to run in the background"},"args":{"type":"array","items":{"type":"string"},"description":"Optional arguments passed to the program"},"ttl_secs":{"type":"integer","description":"Seconds before the process is stopped; default 1800, max 3600"},"stdin":{"type":"boolean","description":"Keep stdin open so process_stdin can write to it later; default false"},"tty":{"type":"boolean","description":"Run it on a pseudo-terminal, so it behaves as it would at a terminal (line-buffered output, prompts). stdout and stderr then arrive as one stream, and input is typed into it only when stdin is also true. Where this deployment has no terminals, plain pipes are used instead. Default false"}},"required":["code"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "process_read".to_owned(),
@@ -14291,6 +14335,8 @@ mod tests {
             max_questions: 0,
             // An ordinary Do run, which is what every run before wide research (EP-2 S8) sent.
             wide_research: None,
+            // No agent allowlist, which is what every run before EP-6 S9 sent.
+            agent_tool_allowlist: None,
         }
     }
 

@@ -1695,6 +1695,15 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
     Some(capability.to_owned())
 }
 
+/// Whether a Do run's agent tool allowlist (Wave 3 EP-6 S9) permits a tool: the tool must have a governed
+/// capability ([`trusted_capability_id`]) and that capability must be one the allowlist lists. Fail closed: a tool
+/// with no binding, every MCP tool among them, is never permitted, so an allowlist only ever removes tools.
+#[must_use]
+pub fn agent_allowlist_permits(capability_ids: &[String], tool_name: &str) -> bool {
+    trusted_capability_id(tool_name)
+        .is_some_and(|capability| capability_ids.iter().any(|id| *id == capability))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

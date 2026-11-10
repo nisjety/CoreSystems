@@ -989,6 +989,15 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Forespørselen mangler noe eller er ugyldig. Ingenting er endret. Sjekk og prøv igjen.',
     en: 'The request is missing something or is not valid. Nothing was changed. Check it and try again.',
   },
+  // W4-CC-2 MCP probe: the address did not answer as an MCP server, or it did not answer in time. Nothing is saved.
+  probe_failed: {
+    no: 'Adressen svarte ikke som en MCP-tjener. Kontroller at URL-en er riktig, og prøv igjen. Ingenting er lagret.',
+    en: 'The address did not answer as an MCP server. Check that the URL is right and try again. Nothing was saved.',
+  },
+  probe_timeout: {
+    no: 'Tjeneren svarte ikke i tide. Prøv igjen om litt. Ingenting er lagret.',
+    en: 'The server did not answer in time. Try again in a moment. Nothing was saved.',
+  },
   no_sources_registered: {
     no: 'Ingen kilder er valgt for denne tilkoblingen ennå. Velg et bibliotek først.',
     en: 'No sources are chosen for this connection yet. Choose a library first.',

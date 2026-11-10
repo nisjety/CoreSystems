@@ -93,8 +93,8 @@ type MemoryServiceClient interface {
 	// scope = 'agent' row of that (Space, agent) binding. Called after the
 	// binding is revoked. Authorized by a Control Space memory decision issued to
 	// the Space's owner or admin for this agent; a person only, never a service.
-	// Open to a ZDR caller too: erasure only removes. A no-op that erases zero
-	// rows while SESSION_AGENT_MEMORY_ENABLED is off.
+	// Open to a ZDR caller too: erasure only removes. Not gated by
+	// SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
 	EraseAgentMemory(ctx context.Context, in *EraseAgentMemoryRequest, opts ...grpc.CallOption) (*EraseAgentMemoryResponse, error)
 }
 
@@ -286,8 +286,8 @@ type MemoryServiceServer interface {
 	// scope = 'agent' row of that (Space, agent) binding. Called after the
 	// binding is revoked. Authorized by a Control Space memory decision issued to
 	// the Space's owner or admin for this agent; a person only, never a service.
-	// Open to a ZDR caller too: erasure only removes. A no-op that erases zero
-	// rows while SESSION_AGENT_MEMORY_ENABLED is off.
+	// Open to a ZDR caller too: erasure only removes. Not gated by
+	// SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
 	EraseAgentMemory(context.Context, *EraseAgentMemoryRequest) (*EraseAgentMemoryResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }

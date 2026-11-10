@@ -92,6 +92,11 @@ struct ChatThreadSummary {
     /// The thread this one was forked from, when it is a fork (build plan WS17 S6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from_thread_id: Option<String>,
+    /// The status of the thread's latest goal (EP-7 S5), relayed from Model Gateway: one closed
+    /// token. Absent while the thread has no goal or the goal or attention switch is off, so the
+    /// sidebar chip needs no second call.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    goal_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +236,8 @@ struct DurableThreadSummary {
     attention_unseen: bool,
     #[serde(default, alias = "forkedFromThreadId")]
     forked_from_thread_id: String,
+    #[serde(default, alias = "goalStatus")]
+    goal_status: String,
 }
 
 pub(super) async fn list_threads(
@@ -1167,6 +1174,8 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
             .filter(|value| !value.is_empty()),
         attention_since: Some(item.attention_since.trim().to_owned())
             .filter(|value| !value.is_empty()),
+        // A closed status token from Model Gateway, relayed as it arrived; empty while goals are off.
+        goal_status: item.goal_status.trim().to_owned(),
     })
 }
 
@@ -1892,6 +1901,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             now,
         )
@@ -1917,6 +1927,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             now,
         )
@@ -1961,6 +1972,7 @@ mod tests {
                     attention_since: String::new(),
                     attention_unseen: false,
                     forked_from_thread_id: String::new(),
+                    goal_status: String::new(),
                 },
                 now,
             )
@@ -2010,6 +2022,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             now,
         )
@@ -2041,6 +2054,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -2509,6 +2523,7 @@ mod thread_paging_tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             "2026-10-28T11:00:00Z",
         )

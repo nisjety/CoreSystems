@@ -179,7 +179,7 @@ import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import type { HiddenTurn, RewindPlan, ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import './rewind-branch.css'
 import { streamActivityLabel, type StreamActivity, type Translator } from '@/features/chat/lib/stream-activity'
-import { narrate } from '@/shared/activity/narration'
+import { imageRefusalText, narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import {
@@ -2910,6 +2910,9 @@ function ToolIntentIcon(props: { intent: ToolIntent }) {
       <Match when={props.intent === 'diff'}>
         <GitCompare size={14} />
       </Match>
+      <Match when={props.intent === 'image'}>
+        <ImageIcon size={14} />
+      </Match>
     </Switch>
   )
 }
@@ -2927,16 +2930,31 @@ function ToolIntentIcon(props: { intent: ToolIntent }) {
 export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
+  const presentation = createMemo(() => toolPresentation(props.call))
+  // A refused image failed whatever status the gateway gave it: the typed refusal is its outcome.
   const failed = () =>
-    Boolean(props.call.error) || props.call.status === 'error'
+    Boolean(props.call.error) || props.call.status === 'error' || presentation().imageRefusal !== undefined
   const running = () => !props.call.status || props.call.status === 'running'
   const statusLabel = () =>
     failed() ? i18n.tr('feilet', 'failed') : running() ? i18n.tr('kjører ...', 'running ...') : i18n.tr('fullført', 'completed')
   const args = () => formatToolArgs(props.call.args)
-  const presentation = createMemo(() => toolPresentation(props.call))
   // With the step strip on, the row reads as a sentence that already carries the count and any truncation,
   // so those marks are dropped below. Off, the raw name and both marks stay as they were.
   const label = () => (stepStripEnabled ? narrate(props.call, i18n) : props.call.name)
+  // The image line under the header: who made the picture, or the typed refusal it came back with. Only an image
+  // intent has one, and that intent exists only while its switch is on. With the step strip on, the row already says
+  // a refusal in words, so the refusal is not said twice.
+  const imageLine = () => {
+    const current = presentation()
+    if (current.intent !== 'image') return undefined
+    if (current.imageRefusal !== undefined) {
+      return stepStripEnabled ? undefined : { text: imageRefusalText(current.imageRefusal, i18n), refused: true }
+    }
+    if (current.imageModel === undefined) return undefined
+    const made = current.imageProvider ? `${current.imageModel} (${current.imageProvider})` : current.imageModel
+    const text = i18n.tr(`Laget med ${made}`, `Made with ${made}`)
+    return { text: current.imageSize ? `${text} · ${current.imageSize}` : text, refused: false }
+  }
   // The computer panel's viewer for this call's intent, when the panel is on. Off, or for an intent the registry
   // does not claim, the body stays the raw output it always was.
   const computerViewer = () => (chatComputerPanelEnabled() ? pickComputerViewer(presentation().intent) : undefined)
@@ -2987,6 +3005,13 @@ export function ToolCallCard(props: { call: ChatToolCall; onInspect?: () => void
         </em>
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
+      <Show when={imageLine()}>
+        {(line) => (
+          <span class={line().refused ? 'verevon-chat-tool-call__made-with is-refused' : 'verevon-chat-tool-call__made-with'}>
+            {line().text}
+          </span>
+        )}
+      </Show>
       <Show when={props.onInspect}>
         <button type="button" class="verevon-chat-tool-call__inspect" onClick={() => props.onInspect?.()}>
           {i18n.tr('Åpne i Trace', 'Open in Trace')}

@@ -1471,7 +1471,15 @@ async fn execute_step_inner(
         }
     } else if crate::process_tools::is_process_tool(tool_name) {
         execute_process_tool(
-            tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
+            tool_name,
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            state,
+            sandbox,
+            zdr || waived,
         )
         .await
     } else if crate::workspace_tools::is_workspace_tool(tool_name) {
@@ -2057,6 +2065,8 @@ async fn execute_process_tool(
     step_id: &str,
     state: Option<&crate::state::StateStore>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    // The run is zero-retention or on a waived route: a pseudo-terminal's output is refused on it.
+    persistence_free: bool,
 ) -> tool_bridge::ToolExecution {
     let Some(sandbox) = sandbox else {
         return tool_error(
@@ -2122,6 +2132,7 @@ async fn execute_process_tool(
         client: sandbox.sandbox_manager_client,
         token: &token,
         start,
+        persistence_free,
     };
     // The process family works in the Space tree, so a call holds the run's workspace exclusively
     // while it executes, as `code_interpreter` does (WS24-S4). Its calls are short registry RPCs.

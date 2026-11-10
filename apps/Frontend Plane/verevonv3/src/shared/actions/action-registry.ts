@@ -917,6 +917,28 @@ const mcpShareServerInput = z.object({
   userIds: z.array(z.string().min(1)),
 })
 
+// The probe of an MCP server before it is saved (`POST /api/v1/mcp/servers/probe`, W4-CC-2). It takes the address
+// alone, so a credential has no field to travel in, and it answers the server's auth requirement and, when the server
+// needs no credential, its tools with the server's own hints. It registers nothing and is not a connect: connecting is
+// still the one entry point above. Served to the settings page only; the model is never offered it.
+const mcpProbeServerInput = z
+  .object({
+    url: z.string().trim().min(1).max(2048),
+  })
+  .strict()
+
+const mcpProbeServerOutput = z.object({
+  auth: z.enum(['none', 'oauth', 'bearer_required']),
+  tools: z.array(
+    z.object({
+      name: z.string(),
+      description: z.string(),
+      read_only_hint: z.boolean().nullable(),
+      destructive_hint: z.boolean().nullable(),
+    }),
+  ),
+})
+
 // A tool is approved by naming the digest of the definition the person reviewed,
 // never "whatever is observed now": the owner pins only a digest that is still the
 // observed one, so a definition that changed after the person looked is not pinned
@@ -1534,6 +1556,14 @@ const chatGoalAwayStartInput = z
 const chatStageWidgetFollowupInput = z
   .object({
     text: z.string().min(1).max(500),
+  })
+  .strict()
+
+// A passage an inline widget selected (EP-4 W4-IO-2), quoted as a chip the person clicks into the composer. Only the
+// text: the widget, the answer and the thread are the host's, and the bridge's own limit is 2,000 characters.
+const chatStageWidgetSelectionInput = z
+  .object({
+    text: z.string().min(1).max(2000),
   })
   .strict()
 
@@ -3953,6 +3983,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'mcp.probe_server',
+    label: 'Probe MCP server',
+    description: 'Ask what an MCP server needs before it is saved: its auth requirement and, when it needs no credential, up to 64 of its tools with the server\'s own hints. Read only. Saves nothing, registers nothing and sends no credential. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: mcpProbeServerInput,
+    outputSchema: mcpProbeServerOutput,
+  },
+  {
     id: 'mcp.delete_server',
     label: 'Delete MCP server',
     description: 'Delete a connected MCP server.',
@@ -5262,6 +5303,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatStageWidgetFollowupInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.stage_widget_selection',
+    label: 'Quote text an inline widget selected',
+    description: 'Show a passage an inline widget in a chat answer selected as a quote under that widget, labelled as selected in the widget. Nothing is sent: only the person\'s click on the quote puts it, quoted, into the composer through the answer\'s ordinary follow-up handler, and the person sends it as an ordinary turn. One quote per widget at a time, five per answer per minute shared with its follow-up chips, and 2,000 characters; line breaks become spaces and other control characters are removed. Never model-executable: a widget is model output, and the person decides what they send.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatStageWidgetSelectionInput,
     outputSchema: envelopeStatusOutput,
   },
   {

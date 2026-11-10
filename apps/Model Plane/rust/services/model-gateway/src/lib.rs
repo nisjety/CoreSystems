@@ -66,6 +66,7 @@ pub mod mcp_elicitation;
 pub mod mcp_http;
 pub mod mcp_jsonrpc;
 pub mod mcp_oauth;
+pub mod mcp_probe;
 pub mod memory_prefetch;
 pub mod memory_provenance;
 pub mod model_access;

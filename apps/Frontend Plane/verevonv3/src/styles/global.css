@@ -47089,6 +47089,20 @@ so it
   background: color-mix(in srgb, var(--warning) 16%, transparent);
 }
 
+/* The image tool's line under its header: the model and provider that made the picture, or its typed refusal. A span,
+   not a paragraph, because the card's paragraphs take the error colour. */
+.verevon-chat-tool-call__made-with {
+  display: block;
+  padding: 0 16px 12px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-chat-tool-call__made-with.is-refused {
+  color: var(--danger);
+}
+
 /* Chat steps panel — context inspector.
    Collapsed by default: diagnostic, not part of reading an answer. The token
    figures are tabular so segment sizes line up down the column. */

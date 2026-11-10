@@ -1272,9 +1272,13 @@ impl MemoryService for MemoryGrpc {
             agent_subject_id,
         )
         .await?;
-        // With agent memory off no agent row is written or read, so there is nothing to erase.
-        if !crate::space_memory::agent_enabled() {
-            return Ok(Response::new(EraseAgentMemoryResponse { erased: 0 }));
+        // Not gated by SESSION_AGENT_MEMORY_ENABLED (EP-8 S10): a row written while the switch was on
+        // must go with its binding even when the switch is off by then. A Space id holding ':' names
+        // no one binding, so it is refused rather than answered with a silent zero.
+        if crate::space_memory::agent_scope_id(space_id, agent_subject_id).is_none() {
+            return Err(Status::invalid_argument(
+                "space_id and agent_subject_id name no agent",
+            ));
         }
         let erased = crate::space_memory::erase_agent_memory(&self.pool, org_id, space_id, agent_subject_id)
             .await

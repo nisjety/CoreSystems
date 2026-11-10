@@ -96,6 +96,7 @@ use super::dispatchers_spaces::ws10::{
     dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
 };
 use super::dispatchers_spaces::ws10b::dispatch_spaces_set_tool_policy;
+use super::dispatchers_spaces::ep08::{dispatch_spaces_memory_delete, dispatch_spaces_memory_list};
 use super::dispatchers_spaces::ws11::{
     dispatch_spaces_mark_all_read, dispatch_spaces_mark_unread, dispatch_spaces_set_attention_item_state,
     dispatch_spaces_set_notify_level, dispatch_spaces_set_status, dispatch_spaces_set_thread_follow,
@@ -742,6 +743,12 @@ pub(super) async fn execute_action(
         }
         "spaces.set_tool_policy" => {
             dispatch_spaces_set_tool_policy(&state, &user, &body.input).await
+        }
+        "spaces.memory.list" => {
+            dispatch_spaces_memory_list(&state, &user, &headers, &body.input).await
+        }
+        "spaces.memory.delete" => {
+            dispatch_spaces_memory_delete(&state, &user, &headers, &body.input).await
         }
         "spaces.set_attention_item_state" => {
             dispatch_spaces_set_attention_item_state(&state, &user, &body.input).await

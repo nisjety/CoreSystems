@@ -307,9 +307,10 @@ fn agent_tool_allowlist_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bo
 /// cannot be read is refused rather than dropped, because dropping it would drop its allowlist and cap.
 const AGENT_PIN_INVALID_CODE: &str = "agent_pin_invalid";
 
-/// The typed refusal for a Do or execute turn whose agent states a tool allowlist. execution-core
-/// owns the binding from a tool to its governed capability (`trusted_capability_id`) and does not
-/// receive the allowlist yet, so such a run could reach tools outside it.
+/// The typed refusal for a Do or execute turn that reaches the gateway's own tool narrowing. A Do or
+/// execute turn is never narrowed here: its allowlist travels on the run (`RunAgentRequest.agent_tool_allowlist`)
+/// and execution-core, which owns the binding from a tool to its governed capability, applies it. So this refusal
+/// guards the split: a Do turn passed to the Ask narrowing is refused, never left unnarrowed.
 const AGENT_ALLOWLIST_DO_CODE: &str = "agent_tool_allowlist_do_unsupported";
 
 /// The bound Convex puts on a version's allowlist (`MAX_TOOL_CAPABILITY_IDS`).
@@ -441,12 +442,28 @@ fn agent_version_pin_of(pin: &AgentPin) -> mp_contracts::model_plane::v1::AgentV
     }
 }
 
-/// Narrows a turn to its agent's tool allowlist: one more intersection beside the binding policy
+/// The tool allowlist a Do or execute turn carries on its run (EP-6 S9): the capability ids its pinned version
+/// states, with the version they were read from. Ids only, never the instructions. `None` when the turn has no pin
+/// or the version states no allowlist, so the run is offered exactly the tools it was offered before.
+fn agent_tool_allowlist_of(
+    pin: Option<&AgentPin>,
+) -> Option<mp_contracts::model_plane::v1::AgentToolAllowlist> {
+    let pin = pin?;
+    let capability_ids = pin.tool_capability_ids.clone()?;
+    Some(mp_contracts::model_plane::v1::AgentToolAllowlist {
+        agent_ref: pin.agent_ref.clone(),
+        version: pin.version,
+        capability_ids,
+    })
+}
+
+/// Narrows an Ask turn to its agent's tool allowlist: one more intersection beside the binding policy
 /// (BFF), the org policy and the WS05 bindings, so it only ever removes. The gateway holds no binding
 /// from a client-declared or built-in tool name to its governed capability (execution-core does), so
 /// no tool of an Ask turn can be shown to be on the list: the tool loop, the client tools and the web
-/// toggle are all withdrawn. A Do or execute turn is refused (see [`AGENT_ALLOWLIST_DO_CODE`]). A
-/// version without an allowlist changes nothing.
+/// toggle are all withdrawn. A Do or execute turn is never narrowed here (its allowlist is carried on the
+/// run, see [`agent_tool_allowlist_of`]), so one that reaches this function is refused (see
+/// [`AGENT_ALLOWLIST_DO_CODE`]). A version without an allowlist changes nothing.
 fn narrow_to_agent_allowlist(
     pin: Option<&AgentPin>,
     execute_granted: bool,
@@ -2061,20 +2078,30 @@ pub async fn invoke_stream_sse(
     // The version a managed run records on `runs.metadata.agent` (EP-6 S9): ids and a digest only.
     // None with the switch off, so the start carries no pin and nothing is recorded.
     let agent_version_pin = agent_pin.as_ref().map(agent_version_pin_of);
-    if let Err(code) = narrow_to_agent_allowlist(
-        agent_pin.as_ref(),
-        req.execute_granted,
-        &mut req.features,
-        &mut req.tools,
-        &mut req.browse_web,
-    ) {
-        return error_stream(
-            &request_id,
-            code,
-            "This agent's tool list cannot be enforced on a Do run yet. Ask it instead.",
+    // EP-6 S9: an Ask turn narrows its own tool loop here, as it always has. A Do or execute turn is not narrowed
+    // here: its agent's allowlist (ids only) travels on the run, and execution-core offers and admits only the tools
+    // it names. Off, or for a version without an allowlist, the run carries none and is offered what it was before.
+    let do_turn = req.execute_granted || req.features.iter().any(|feature| feature == "agentic");
+    let run_tool_allowlist = if do_turn {
+        agent_tool_allowlist_of(agent_pin.as_ref())
+    } else {
+        // An Ask turn is never an execute turn, so the narrowing is told it is not one.
+        if let Err(code) = narrow_to_agent_allowlist(
+            agent_pin.as_ref(),
             false,
-        );
-    }
+            &mut req.features,
+            &mut req.tools,
+            &mut req.browse_web,
+        ) {
+            return error_stream(
+                &request_id,
+                code,
+                "This agent's tool list cannot be enforced on a Do run yet. Ask it instead.",
+                false,
+            );
+        }
+        None
+    };
     let features = req.features.clone();
     let conversation_only = features.iter().any(|f| f == "conversation_only");
     if conversation_only && (req.deep_research || req.generate_image
@@ -3333,6 +3360,8 @@ pub async fn invoke_stream_sse(
             wide_research,
             goal_recitation,
             goal_turn,
+            // The agent's tool allowlist of this Do turn (EP-6 S9); `None` for an Ask turn.
+            run_tool_allowlist,
         );
     }
 
@@ -12875,6 +12904,8 @@ fn spawn_run_dispatch(
     max_questions: u32,
     // The wide-research request (EP-2 S8), item cap clamped to the org's; `None` for every other run.
     wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
+    // The agent's tool allowlist of a Do turn (EP-6 S9); `None` for every other dispatch.
+    agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -13010,6 +13041,9 @@ fn spawn_run_dispatch(
             wide_research_max_subagents(run_agent_req.max_subagents, wide.item_cap);
         run_agent_req.wide_research = Some(wide);
     }
+    // The agent's tool allowlist of this Do run (EP-6 S9), ids only: execution-core offers and admits only the tools
+    // it names, and never adds one. Absent for an Ask-only dispatch, so the request is what it was before.
+    run_agent_req.agent_tool_allowlist = agent_tool_allowlist;
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -13270,6 +13304,9 @@ fn build_run_agent_request(
         // A wide-research request is set by the caller (`spawn_run_dispatch`) once the org's cap is
         // read (EP-2 S8); none here, so every other run is the bytes it was.
         wide_research: None,
+        // The agent's tool allowlist is set by the caller (`spawn_run_dispatch`), which holds the turn's pin (EP-6 S9);
+        // none here.
+        agent_tool_allowlist: None,
     }
 }
 
@@ -13814,6 +13851,10 @@ fn agentic_run_stream(
     // The claimed goal turn of a Continue turn (EP-7 S2), settled from this run's answer and
     // answered with a `goal_progress` frame. `None` for every other turn and every continuation.
     goal_turn: Option<crate::thread_goal::GoalTurnLedger>,
+    // The agent's tool allowlist of a Do turn (EP-6 S9), carried on the run for execution-core to enforce. `None`
+    // for an Ask turn, for a turn whose version states none (or with MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST off), and
+    // for a continuation, whose tools are the snapshot its pause retained.
+    agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -14017,6 +14058,7 @@ fn agentic_run_stream(
             run_effort,
             max_questions,
             wide_research,
+            agent_tool_allowlist,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -21370,6 +21412,8 @@ pub(crate) async fn continue_run(
             String::new(),
             // Nor a goal turn: a continuation resumes a run, it claims no new turn (EP-7 S2).
             None,
+            // Nor an agent allowlist: its tools are the snapshot the pause retained, already narrowed (EP-6 S9).
+            None,
         )
     };
     if !resume_enabled {
@@ -23267,6 +23311,7 @@ mod continue_run_tests {
             None,
             String::new(),
             None,
+            None,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -24776,6 +24821,7 @@ mod continue_run_tests {
             Vec::new(),
             None,
             String::new(),
+            None,
             None,
         );
         let frames = frames_of_stream(stream).await;

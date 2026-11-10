@@ -339,8 +339,9 @@ func (s *Server) setupRoutes() {
 	// pull (WS10-S2). Own scope org:model-entitlement:read:any; no-store.
 	internal.GET("/orgs/:orgId/model-entitlement", s.getModelEntitlementInternal)
 	// The resolved agent-browser site decision for the broker's grant mint
-	// (WS21-S3). Own scope org:browser-site:read:any, held by browser-broker alone;
-	// no-store.
+	// (WS21-S3) and for the Model Plane's web-domain check (EP-9 W3), which
+	// model-gateway and execution-core read. Own scope org:browser-site:read:any,
+	// held by browser-broker, model-gateway and execution-core alone; no-store.
 	internal.GET("/orgs/:orgId/browser-sites/resolve", s.getBrowserSitesInternal)
 	// The org's effective web policy for Auth Core's web_policy token claim
 	// (WS7.H, read by WS7.I). Own scope org:web-policy:read:any, held by auth-core

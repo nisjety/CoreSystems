@@ -17,7 +17,7 @@ const NO: Translator = { tr: (noText) => noText }
 const EN: Translator = { tr: (_noText, enText) => enText }
 const NORWEGIAN_LETTERS = /[æøåÆØÅ]/
 
-const FAMILIES: ToolFamily[] = ['search', 'read', 'command', 'account', 'change', 'generic']
+const FAMILIES: ToolFamily[] = ['search', 'read', 'command', 'account', 'change', 'generic', 'image']
 const STATES: NarrationState[] = ['started', 'done', 'failed', 'retrying', 'awaiting_approval']
 
 /** A call under the id the notices below refer to. */

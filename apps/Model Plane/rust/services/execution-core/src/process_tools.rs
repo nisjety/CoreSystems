@@ -41,6 +41,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use mp_contracts::model_plane::v1::{Process, ProcessSignal, ProcessState, ProcessStream};
+use mp_contracts::zdr_refusal::Refusal;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -112,6 +113,10 @@ pub(crate) struct ProcessToolContext<'a> {
     /// Present only for `process_start`, which is the one tool that needs a
     /// lease and a workspace to exist.
     pub start: Option<StartContext<'a>>,
+    /// Whether the run is zero-retention or on a waived route. A pseudo-terminal's
+    /// output is content the registry would keep, so a `tty` request is refused
+    /// on such a run.
+    pub persistence_free: bool,
 }
 
 /// The extra context `process_start` needs, resolved lazily so that reading
@@ -158,11 +163,20 @@ struct StartInput {
     ttl_secs: Option<u64>,
     #[serde(default)]
     stdin: bool,
+    /// Run the program on a pseudo-terminal. Honoured only where the deployment
+    /// has enabled terminals; see `StartRequest::tty`.
+    #[serde(default)]
+    tty: bool,
 }
 
 async fn start(tool_input: &str, ctx: &ProcessToolContext<'_>) -> Result<String, String> {
     let input: StartInput = serde_json::from_str(tool_input)
         .map_err(|error| format!("invalid process_start input: {error}"))?;
+    if input.tty && ctx.persistence_free {
+        // Refused before any process is registered or spawned. The refusal is the
+        // typed ZDR one, as the other tools that would keep content return it.
+        return Err(Refusal::feature_not_supported("command_execution").message());
+    }
     let start = ctx
         .start
         .as_ref()
@@ -213,6 +227,7 @@ async fn start(tool_input: &str, ctx: &ProcessToolContext<'_>) -> Result<String,
         }),
         ttl: input.ttl_secs.map(Duration::from_secs),
         stdin: input.stdin,
+        tty: input.tty,
     };
     let started = ctx
         .host

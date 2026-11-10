@@ -50,7 +50,7 @@ pub(crate) mod run_live;
 pub(crate) mod sidebar;
 mod schedule_template;
 mod stream;
-mod memory;
+pub(crate) mod memory;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -4022,10 +4022,12 @@ async fn apply_space_agent_state(
         );
     };
 
-    // EP-6 P3: a revoked agent's notes in this room go with its binding. Best-effort and after the
-    // revocation has landed, so it never changes the answer below; repeating a revoke repeats it,
-    // which is how a missed erase is retried. Pause and resume keep the notes.
-    if status == "revoked" {
+    // EP-6 P3 and EP-8 S10: a revoked agent's notes in this room go with its binding. Best-effort
+    // and after the revocation has landed, so it never changes the answer below; repeating a revoke
+    // repeats it, which is how a missed erase is retried. Pause and resume keep the notes. Dark
+    // behind GATEWAY_SPACE_MEMORY_UI (`SpaceFeatureFlags::memory_ui`, default off), like the Space
+    // memory routes.
+    if status == "revoked" && state.space_features.memory_ui {
         if let Some(headers) = headers {
             let subject_id = updated
                 .get("subjectId")

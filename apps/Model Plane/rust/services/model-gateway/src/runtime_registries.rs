@@ -1127,31 +1127,7 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
         ));
     }
     "http".clone_into(&mut server.transport);
-    server.url = server.url.trim().trim_end_matches('/').to_owned();
-    if server.url.len() > 2_048 {
-        return Err(Status::invalid_argument("server.url is too long"));
-    }
-    let endpoint = reqwest::Url::parse(&server.url)
-        .map_err(|_| Status::invalid_argument("server.url must be a valid HTTPS URL"))?;
-    // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may register
-    // over plain HTTP on a private address (the bundled bridge sidecar); all other
-    // servers stay public-HTTPS-only + SSRF-guarded. Credential/query/fragment
-    // hygiene is enforced for every server regardless.
-    let host_allowed = endpoint.host_str().is_some_and(host_in_internal_allowlist);
-    let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
-    if !scheme_ok
-        || endpoint.host().is_none()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-        || endpoint.port_or_known_default().is_none()
-        || (!host_allowed && endpoint_host_is_forbidden(&endpoint))
-    {
-        return Err(Status::invalid_argument(
-            "server.url must be a public HTTPS base URL (or an allowlisted internal MCP host) without credentials, query, or fragment",
-        ));
-    }
+    server.url = validate_mcp_url(&server.url)?;
     if !server.token.trim().is_empty() {
         return Err(Status::invalid_argument(
             "raw MCP credentials are not accepted; configure a managed secret reference",
@@ -1182,6 +1158,43 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
     }
     server.tool_allowlist = exact_names;
     Ok(())
+}
+
+/// The URL rules an MCP server must meet, shared by registration and the probe (`mcp_probe`): surrounding
+/// space and trailing slashes are dropped, at most 2 KiB remain, and the URL is a public HTTPS base URL (or
+/// an allowlisted internal MCP host) without credentials, query or fragment. Returns the normalized URL.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` when the URL breaks one of those rules.
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_mcp_url(raw: &str) -> Result<String, Status> {
+    let url = raw.trim().trim_end_matches('/').to_owned();
+    if url.len() > 2_048 {
+        return Err(Status::invalid_argument("server.url is too long"));
+    }
+    let endpoint = reqwest::Url::parse(&url)
+        .map_err(|_| Status::invalid_argument("server.url must be a valid HTTPS URL"))?;
+    // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may register
+    // over plain HTTP on a private address (the bundled bridge sidecar); all other
+    // servers stay public-HTTPS-only + SSRF-guarded. Credential/query/fragment
+    // hygiene is enforced for every server regardless.
+    let host_allowed = endpoint.host_str().is_some_and(host_in_internal_allowlist);
+    let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
+    if !scheme_ok
+        || endpoint.host().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.port_or_known_default().is_none()
+        || (!host_allowed && endpoint_host_is_forbidden(&endpoint))
+    {
+        return Err(Status::invalid_argument(
+            "server.url must be a public HTTPS base URL (or an allowlisted internal MCP host) without credentials, query, or fragment",
+        ));
+    }
+    Ok(url)
 }
 
 /// Pure allowlist membership test: is `host` one of the comma-separated entries
