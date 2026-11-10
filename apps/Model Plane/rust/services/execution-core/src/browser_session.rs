@@ -151,6 +151,13 @@ pub(crate) const HELP_DECLINED: Refusal = Refusal {
     code: "browser_help_declined",
     message: "The person chose not to help with this site, so the browser session was closed. Use another source.",
 };
+/// The person answered a `browser_human_assist` pause with "Skip this site" (EP-1 S2, D3-647), so the
+/// held page was closed. Final for this site: the model looks elsewhere. It never carries the
+/// person's reason.
+pub(crate) const SITE_SKIPPED: Refusal = Refusal {
+    code: "browser_site_skipped",
+    message: "The person skipped this site; use another source.",
+};
 /// The page shows a wall a person can clear by hand (EP-1 S2), one refusal per assist kind so the
 /// loop can tell which wall it was. The model does not read these: the loop pauses the run for the
 /// person, or tells the model [`BLOCKED`] when it cannot pause. The kinds are the closed
@@ -752,6 +759,30 @@ pub(crate) async fn decline_help(
         end_session(&session, dispatch, quarry, "the person declined to help").await;
     }
     HELP_DECLINED
+}
+
+/// Releases the page of a run whose person answered a `browser_human_assist` pause with "Skip this
+/// site" (denied, EP-1 S2, D3-647), and returns what the model reads: [`SITE_SKIPPED`].
+///
+/// `None` leaves everything as it was: the help switch is off, or the run does not hold a page for a
+/// person. Otherwise the hold ends and the page is closed through the same release the run's end
+/// makes (grant revoked, Quarry run closed), so a skipped site cannot keep a Quarry run open until
+/// the grant lapses. The run's help count stays, so a skipped site does not earn the run more
+/// requests than [`MAX_HELP_REQUESTS_PER_RUN`]. The person's reason is neither read nor logged. It
+/// only closes; it never opens or acts on a page.
+pub(crate) async fn skip_site(
+    dispatch: &BrowserDispatch<'_>,
+    quarry: Option<&QuarryAgentClient>,
+) -> Option<Refusal> {
+    if !human_assist_enabled() || !is_held_for_person(dispatch.run_id) {
+        return None;
+    }
+    take_pending_help(dispatch.run_id);
+    end_hold(dispatch.run_id);
+    if let Some(session) = dispatch.state.take_browser_session(dispatch.run_id) {
+        end_session(&session, dispatch, quarry, "the person skipped this site").await;
+    }
+    Some(SITE_SKIPPED)
 }
 
 /// The ids of one open page, held in [`StateStore`] for its run. None of them reaches the model.

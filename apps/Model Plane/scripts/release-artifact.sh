@@ -89,6 +89,7 @@ RUNTIME_SECRET_KEYS=(
   CAPABILITY_CORE_DECISION_SIGNING_KEY
   EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY
   DEEP_RESEARCH_REPORT_TOKENS
+  VERTEX_GEMINI_CREDENTIALS_FILE
 )
 DEPLOY_FILES=(
   docker-compose.yml
@@ -912,6 +913,57 @@ check_zdr_attestations() {
   done
 }
 
+# The Vertex locations that keep processing in the EU. Keep this list identical to
+# VERTEX_EU_LOCATIONS in rust/services/inference-core/src/config.rs.
+VERTEX_EU_LOCATIONS=(
+  eu europe-central2 europe-north1 europe-southwest1 europe-west1 europe-west2
+  europe-west3 europe-west4 europe-west6 europe-west8 europe-west9
+)
+
+# Check the Vertex Gemini route the way inference-core registers it. Off (the switch is
+# absent or anything but the literal true) there is nothing to check, except that no
+# VERTEX_GEMINI_ZDR_* key may exist at all: Vertex Gemini has no retention attestation
+# and is not ZDR-capable, so the policy must never claim one. On, it needs a project, a
+# location on the EU allowlist, a plain model list, and the service-account key path in
+# the secret partition (never the signed public policy).
+validate_vertex_gemini_route() {
+  local policy_file="$1" config_file="$2"
+  local enabled project location models credentials_partition location_ok allowed
+  if grep -q '^VERTEX_GEMINI_ZDR_' "$policy_file"; then
+    die "Vertex Gemini is not ZDR-capable: VERTEX_GEMINI_ZDR_* keys are refused"
+  fi
+  if grep -q '^VERTEX_GEMINI_CREDENTIALS_FILE=' "$policy_file"; then
+    die "VERTEX_GEMINI_CREDENTIALS_FILE belongs in the secret partition, not the signed public policy"
+  fi
+  grep -q '^VERTEX_GEMINI_ENABLED=' "$policy_file" || return 0
+  enabled="$(assignment_value "$policy_file" VERTEX_GEMINI_ENABLED)"
+  [[ "$enabled" == "true" || "$enabled" == "false" ]] ||
+    die "VERTEX_GEMINI_ENABLED must be true or false"
+  [[ "$enabled" == "true" ]] || return 0
+  [[ "$(grep -c '^VERTEX_GEMINI_PROJECT=.' "$policy_file" || true)" == "1" ]] ||
+    die "Vertex Gemini requires a signed VERTEX_GEMINI_PROJECT"
+  project="$(assignment_value "$policy_file" VERTEX_GEMINI_PROJECT)"
+  [[ "$project" =~ ^[a-z][a-z0-9-]*$ ]] ||
+    die "Vertex Gemini has an invalid project"
+  [[ "$(grep -c '^VERTEX_GEMINI_LOCATION=.' "$policy_file" || true)" == "1" ]] ||
+    die "Vertex Gemini requires a signed VERTEX_GEMINI_LOCATION"
+  location="$(assignment_value "$policy_file" VERTEX_GEMINI_LOCATION)"
+  location_ok=false
+  for allowed in "${VERTEX_EU_LOCATIONS[@]}"; do
+    [[ "$location" == "$allowed" ]] && location_ok=true
+  done
+  [[ "$location_ok" == "true" ]] ||
+    die "Vertex Gemini location is not on the EU allowlist"
+  [[ "$(grep -c '^VERTEX_GEMINI_MODELS=.' "$policy_file" || true)" == "1" ]] ||
+    die "Vertex Gemini requires a signed VERTEX_GEMINI_MODELS"
+  models="$(assignment_value "$policy_file" VERTEX_GEMINI_MODELS)"
+  [[ "$models" =~ ^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$ ]] ||
+    die "Vertex Gemini has an invalid model catalog"
+  credentials_partition="$(policy_partition "$config_file" VERTEX_GEMINI_CREDENTIALS_FILE || true)"
+  [[ "$credentials_partition" == "secret" ]] ||
+    die "Vertex Gemini credentials must be a secret-partition reference"
+}
+
 validate_runtime_public_policy() {
   local policy_source="$1" gates_source="$2" config_source="$3"
   local policy_file gates_file config_file
@@ -1022,6 +1074,7 @@ validate_runtime_public_policy_files() {
       die "ZDR provider route has an invalid Anthropic deployment catalog"
     validate_zdr_attestation "$policy_file" AZURE_ANTHROPIC "$today"
   fi
+  validate_vertex_gemini_route "$policy_file" "$config_file"
 }
 
 validate_runtime_config() {
@@ -1056,6 +1109,10 @@ validate_runtime_config() {
         die "ZDR provider route requires ${surface_key}_API_KEY in the secret runtime file"
     fi
   done
+  if grep -q '^VERTEX_GEMINI_ENABLED=true$' "$public_policy"; then
+    [[ "$(grep -c '^VERTEX_GEMINI_CREDENTIALS_FILE=.' "$runtime_file" || true)" == "1" ]] ||
+      die "Vertex Gemini requires VERTEX_GEMINI_CREDENTIALS_FILE in the secret runtime file"
+  fi
 }
 
 snapshot_runtime_config() {

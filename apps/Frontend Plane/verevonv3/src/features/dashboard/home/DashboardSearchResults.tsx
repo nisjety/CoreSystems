@@ -21,6 +21,11 @@ function reportOpened(event: MouseEvent, report: ((page: OpenedPage) => void) | 
 }
 
 export function SearchResultCard(props: {
+  /**
+   * The result's own address when it is http(s) (safeExternalHref in DashboardSearchPanel),
+   * otherwise null: the card then has no link and its title cannot open the result.
+   */
+  externalHref: string | null
   image?: ImageHit
   index: number
   onFindSimilar?: (result: PreviewResult) => void
@@ -42,6 +47,7 @@ export function SearchResultCard(props: {
             <button
               type="button"
               class="dashboard-xresult__open"
+              disabled={!props.externalHref}
               onClick={() => props.onOpen?.(props.result)}
               aria-label={i18n.tr(`Åpne ${props.result.title} i Verevon`, `Open ${props.result.title} in Verevon`)}
             >
@@ -128,18 +134,22 @@ export function SearchResultCard(props: {
           </Show>
         </div>
       </div>
-      <a
-        href={props.result.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="dashboard-xresult__external"
-        onClick={(event) => reportOpened(event, props.onOpenPage, props.result)}
-        onAuxClick={(event) => reportOpened(event, props.onOpenPage, props.result)}
-        aria-label={i18n.tr(`Åpne ${props.result.title} i ny fane`, `Open ${props.result.title} in a new tab`)}
-      >
-        <ExternalLink class="size-3.5" aria-hidden="true" />
-        {i18n.tr('Ny fane', 'New tab')}
-      </a>
+      <Show when={props.externalHref}>
+        {(href) => (
+          <a
+            href={href()}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="dashboard-xresult__external"
+            onClick={(event) => reportOpened(event, props.onOpenPage, props.result)}
+            onAuxClick={(event) => reportOpened(event, props.onOpenPage, props.result)}
+            aria-label={i18n.tr(`Åpne ${props.result.title} i ny fane`, `Open ${props.result.title} in a new tab`)}
+          >
+            <ExternalLink class="size-3.5" aria-hidden="true" />
+            {i18n.tr('Ny fane', 'New tab')}
+          </a>
+        )}
+      </Show>
     </article>
   )
 }

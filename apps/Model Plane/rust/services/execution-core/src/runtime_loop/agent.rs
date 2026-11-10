@@ -2054,10 +2054,31 @@ async fn run_agent_with_route_parkable(
         (None, Some(_)) if super::park::is_park_resume(&req) => {
             return Err(tonic::Status::invalid_argument("resume_incomplete"));
         }
-        (None, Some(resume)) => Some(
-            begin_continuation(&session_channel, session_bearer.as_deref(), &req, resume, &route)
+        (None, Some(resume)) => {
+            // EP-1 S2 (D3-647): a denied help pause ("Skip this site") releases the held page
+            // before the consume refuses the denied approval, so the page does not wait out its
+            // grant. Nothing else changes for the request.
+            release_skipped_site(
+                &session_channel,
+                session_bearer.as_deref(),
+                browser_bearer.as_deref(),
+                state,
+                &req,
+                resume,
+                &route,
+            )
+            .await;
+            Some(
+                begin_continuation(
+                    &session_channel,
+                    session_bearer.as_deref(),
+                    &req,
+                    resume,
+                    &route,
+                )
                 .await?,
-        ),
+            )
+        }
         (None, None) => None,
     };
     // The loop reads the floor, the rung, plan mode and the round budget off the
@@ -2465,11 +2486,18 @@ const MAX_INJECTED_SKILLS: usize = 3;
 /// operator just edited or deleted. Advisory — any failure (no bearer, no
 /// org, RPC error) yields an empty Vec so the run proceeds unaffected, exactly
 /// like the gateway path.
+///
+/// With `EXECUTION_CORE_SKILL_PINS` on and a run that keeps state (`retention_bound`
+/// false: not ZDR, not waived) the versions of the skills that were actually
+/// injected are pinned on `run_id` (EP-11 S3, [`crate::skill_pins`]). Off, or for a
+/// retention-bound run, nothing is recorded.
 async fn fetch_skill_context(
     session_channel: &Channel,
     bearer: Option<&str>,
     org_id: &str,
     goal: &str,
+    run_id: &str,
+    retention_bound: bool,
 ) -> Vec<String> {
     let Some(bearer) = bearer else {
         return Vec::new();
@@ -2531,10 +2559,11 @@ async fn fetch_skill_context(
     // text with no length limit, so three long skills could take more of the
     // prompt than the conversation they exist to steer — and nothing would fail,
     // the model would just have less room and answer worse.
+    let candidates: Vec<pb::AgentSkill> = scored.into_iter().map(|(_, skill)| skill).collect();
     let fitted = runtime_loop::skill_budget::fit_skill_blocks(
-        scored
-            .into_iter()
-            .map(|(_, skill)| format!("## Skill: {}\n{}", skill.name, skill.content))
+        candidates
+            .iter()
+            .map(|skill| format!("## Skill: {}\n{}", skill.name, skill.content))
             .collect(),
     );
     if fitted.truncated > 0 || fitted.dropped > 0 {
@@ -2545,6 +2574,25 @@ async fn fetch_skill_context(
             budget_chars = runtime_loop::skill_budget::SKILL_CONTEXT_BUDGET_CHARS,
             "skill guidance exceeded its context budget; degraded to fit"
         );
+    }
+    // EP-11 S3: pin the versions that steer this run. Only skills whose block
+    // survived the budget are pinned (a dropped skill never reached the model),
+    // and only for a run that keeps state.
+    if crate::skill_pins::applies(crate::skill_pins::enabled(), retention_bound, false)
+        && !fitted.blocks.is_empty()
+    {
+        let mut unused: Vec<&pb::AgentSkill> = candidates.iter().collect();
+        let mut pins = Vec::new();
+        for block in &fitted.blocks {
+            let Some(at) = unused
+                .iter()
+                .position(|skill| block.starts_with(&format!("## Skill: {}\n", skill.name)))
+            else {
+                continue;
+            };
+            pins.push(crate::skill_pins::pin_of(unused.remove(at)));
+        }
+        crate::skill_pins::record(session_channel, bearer, org_id, run_id, pins).await;
     }
     fitted.blocks
 }
@@ -3061,8 +3109,15 @@ async fn seed_messages(ctx: &LoopContext<'_>, goal: &str) -> Vec<pb::ChatMessage
     // approval-gated, real-world-effect tools (book_shipment,
     // execute_provider_action, browser_agent, ...) actually run. Injected once
     // per run (not per round) as a single system message.
-    let skill_blocks =
-        fetch_skill_context(ctx.session_channel, ctx.session_bearer, &ctx.req.org_id, goal).await;
+    let skill_blocks = fetch_skill_context(
+        ctx.session_channel,
+        ctx.session_bearer,
+        &ctx.req.org_id,
+        goal,
+        &ctx.req.run_id,
+        ctx.req.zdr || ctx.route.is_waived(),
+    )
+    .await;
     let skills = (!skill_blocks.is_empty()).then(|| {
         format!(
             "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{}",
@@ -10205,6 +10260,86 @@ async fn released_hand_back_note(ctx: &LoopContext<'_>) -> Option<String> {
     hand_back_note_of(&approval, &ctx.req.run_id)
 }
 
+/// "Skip this site" (EP-1 S2, D3-647): a continue naming a DENIED `browser_human_assist` approval of
+/// this run releases the page the run held for the person, and returns the closer the model reads
+/// (`browser_site_skipped`). Only the approval's own state and cause are read: the person's reason is
+/// neither read nor logged. `None`, with nothing changed, when the help switch is off, the run is
+/// zero-retention, waived, Space-scoped or holds no browser bearer, the approval cannot be read, or it
+/// is not a denied help pause of this run. The consume that follows refuses a denied approval exactly
+/// as it did before.
+async fn release_skipped_site(
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    browser_bearer: Option<&str>,
+    state: &crate::state::StateStore,
+    req: &pb::RunAgentRequest,
+    resume: &pb::AgentResume,
+    route: &crate::agent_route::ModelRoute,
+) -> Option<String> {
+    if !crate::browser_session::human_assist_enabled()
+        || req.zdr
+        || route.is_waived()
+        || !req.space_id.is_empty()
+        || resume.approval_id.is_empty()
+    {
+        return None;
+    }
+    let bearer = browser_bearer?;
+    let request = authenticated_session_request(
+        pb::GetApprovalRequest {
+            approval_id: resume.approval_id.clone(),
+            org_id: req.org_id.clone(),
+            ..Default::default()
+        },
+        session_bearer,
+    )
+    .ok()?;
+    let approval = match OrchestrationCoreServiceClient::new(session_channel.clone())
+        .get_approval(request)
+        .await
+    {
+        Ok(response) => response.into_inner().approval?,
+        Err(error) => {
+            warn!(
+                run_id = %req.run_id,
+                code = ?error.code(),
+                "run_agent: the skipped approval could not be read; the page is kept"
+            );
+            return None;
+        }
+    };
+    let tool = skipped_assist_tool_of(&approval, &req.run_id)?;
+    let quarry = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
+    let closer = super::resume::skipped_site_closer(
+        &crate::browser_session::BrowserDispatch {
+            state,
+            broker: crate::browser_session::production_broker(),
+            bearer,
+            org_id: &req.org_id,
+            run_id: &req.run_id,
+        },
+        quarry.as_ref(),
+        tool,
+    )
+    .await;
+    if closer.is_some() {
+        info!(
+            run_id = %req.run_id,
+            "run_agent: the person skipped the site; its page was released"
+        );
+    }
+    closer
+}
+
+/// The tool of a denied `browser_human_assist` approval of `run_id`, `None` for any other approval.
+fn skipped_assist_tool_of<'a>(approval: &'a pb::Approval, run_id: &str) -> Option<&'a str> {
+    let cause = approval.cause.as_ref()?;
+    (approval.run_id == run_id
+        && approval.state == pb::ApprovalState::Denied as i32
+        && cause.code == CauseCode::BrowserHumanAssist.as_str())
+    .then_some(cause.tool.as_str())
+}
+
 /// The note of a granted `browser_human_assist` approval of `run_id`, `None` for any other.
 fn hand_back_note_of(approval: &pb::Approval, run_id: &str) -> Option<String> {
     let is_hand_back = approval.run_id == run_id
@@ -14309,6 +14444,8 @@ mod tests {
             Some("test-bearer"),
             "org_test",
             "please book a shipment to Oslo",
+            "run_test",
+            false,
         )
         .await;
 
@@ -14327,8 +14464,15 @@ mod tests {
         )];
         let session_channel = spawn_session_channel(rec).await;
 
-        let blocks =
-            fetch_skill_context(&session_channel, None, "org_test", "book a shipment").await;
+        let blocks = fetch_skill_context(
+            &session_channel,
+            None,
+            "org_test",
+            "book a shipment",
+            "run_test",
+            false,
+        )
+        .await;
 
         assert!(blocks.is_empty(), "no bearer must never call session-core");
     }
@@ -14343,8 +14487,15 @@ mod tests {
         )];
         let session_channel = spawn_session_channel(rec).await;
 
-        let blocks =
-            fetch_skill_context(&session_channel, Some("b"), "org_test", "what is 2+2").await;
+        let blocks = fetch_skill_context(
+            &session_channel,
+            Some("b"),
+            "org_test",
+            "what is 2+2",
+            "run_test",
+            false,
+        )
+        .await;
 
         assert!(blocks.is_empty());
     }

@@ -2,6 +2,7 @@ import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untr
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   filterModels,
+  formatContextWindow,
   formatModelListPrice,
   getModelEntitlementMeta,
   groupChatModels,
@@ -245,9 +246,10 @@ export function AiModelPicker(props: {
                 </button>
               )}</For>
             </div>
-            <For each={modelGroups()}>{(group) => (
-              <div class="dashboard-composer-model-group">
-                <p class="dashboard-composer-model-group__label">{group.label}</p>
+            <For each={modelGroups()}>{(group) => {
+              // A folded group opens by itself while the search is on (it lists only matching models) and when the selection is one of its models.
+              const opened = () => activeQuery() !== '' || group.models.some((model) => selected().model === model.id && selected().provider === model.provider)
+              const rows = () => (
                 <For each={group.models}>{(model) => {
                   const blocked = () => model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && subscriptionBlocked()
                   return (
@@ -260,10 +262,13 @@ export function AiModelPicker(props: {
                       onClick={() => chooseCatalogModel(model)}
                       class={{ 'dashboard-composer-model-menu__item--active': selected().model === model.id && selected().provider === model.provider }}
                     >
-                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
+                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={formatContextWindow(model.contextWindowTokens)}>{(windowLabel) => <span class="dashboard-composer-model-context">{windowLabel()}</span>}</Show><Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
                       <span class="dashboard-composer-model-menu__right">
                         <Show when={model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Tilkoblet', 'Connected')}</span>
+                        </Show>
+                        <Show when={model.lifecycle === 'preview'}>
+                          <span class="dashboard-composer-model-badge dashboard-composer-model-badge--preview">{i18n.tr('Forhåndsversjon', 'Preview')}</span>
                         </Show>
                         <Show when={model.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER && isExpensiveModel(model)}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--premium">$$</span>
@@ -273,8 +278,19 @@ export function AiModelPicker(props: {
                     </button>
                   )
                 }}</For>
-              </div>
-            )}</For>
+              )
+              return group.folded ? (
+                <details class="dashboard-composer-model-group dashboard-composer-model-group--folded" open={opened()}>
+                  <summary class="dashboard-composer-model-group__label">{group.label}</summary>
+                  {rows()}
+                </details>
+              ) : (
+                <div class="dashboard-composer-model-group">
+                  <p class="dashboard-composer-model-group__label">{group.label}</p>
+                  {rows()}
+                </div>
+              )
+            }}</For>
             <Show when={activeQuery() !== '' && modelGroups().length === 0}>
               <p class="dashboard-composer-model-empty" role="status">{i18n.tr('Ingen modeller passer', 'No models match')}</p>
             </Show>

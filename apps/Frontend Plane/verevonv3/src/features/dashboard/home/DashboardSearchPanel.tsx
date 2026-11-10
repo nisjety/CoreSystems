@@ -263,20 +263,32 @@ export function SearchPanel(props: {
   const openPage = (page: { title?: string | null; url: string }) => {
     if (rememberSearches()) recordWebPage(page)
   }
+  // Only an absolute http(s) result opens. Any other result is refused before it is
+  // recorded, and its card shows no link (see SearchResultCard's externalHref).
   const openResult = (result: PreviewResult) => {
+    const href = safeExternalHref(result.url)
+    if (!href) return
     openPage(result)
     const address = webAddress(result.url)
     if (address && props.onOpenBrowser) props.onOpenBrowser(address)
-    else if (!props.onOpenBrowser) window.open(result.url, '_blank', 'noopener,noreferrer')
+    else if (!props.onOpenBrowser) window.open(href, '_blank', 'noopener,noreferrer')
   }
 
+  // A link in the panel is followed only when it resolves to http(s): a javascript:,
+  // data: or other link is stopped here, whichever button or key activated it.
   // Normal result-link clicks open in Nett. Modifier clicks and explicit
   // new-tab controls keep the browser's usual external-link behavior.
   const openLinkedResult = (event: MouseEvent) => {
-    if (!props.onOpenBrowser || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-    const target = event.target instanceof Element ? event.target.closest('a[target="_blank"]') : null
-    if (!(target instanceof HTMLAnchorElement) || target.classList.contains('dashboard-xresult__external')) return
-    const address = webAddress(target.href)
+    if (event.defaultPrevented) return
+    const link = event.target instanceof Element ? event.target.closest('a[href]') : null
+    if (!(link instanceof HTMLAnchorElement)) return
+    if (!safeExternalHref(link.href)) {
+      event.preventDefault()
+      return
+    }
+    if (!props.onOpenBrowser || link.target !== '_blank' || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+    if (link.classList.contains('dashboard-xresult__external')) return
+    const address = webAddress(link.href)
     if (!address) return
     event.preventDefault()
     props.onOpenBrowser(address)
@@ -664,7 +676,7 @@ export function SearchPanel(props: {
     <Show
       when={!props.expanded}
       fallback={
-        <div class="verevon-panel-in verevon-search-expanded-shell" onClick={openLinkedResult}>
+        <div class="verevon-panel-in verevon-search-expanded-shell" onClick={openLinkedResult} onAuxClick={openLinkedResult}>
           <div class="dashboard-xsearch-header">
             <form onSubmit={submit}>
               <div class="dashboard-xsearch-input-row">
@@ -873,6 +885,7 @@ export function SearchPanel(props: {
                       <For each={webResults().slice(0, visibleCount())}>
                         {(result, index) => (
                           <SearchResultCard
+                            externalHref={safeExternalHref(result.url)}
                             result={result}
                             index={index()}
                             image={images()[index() % Math.max(images().length, 1)]}
@@ -1001,7 +1014,7 @@ export function SearchPanel(props: {
                             type="button"
                             class="dashboard-search-preview-result"
                             onClick={() => {
-                              if (props.onOpenBrowser && webAddress(result.url)) {
+                              if (props.onOpenBrowser && safeExternalHref(result.url) && webAddress(result.url)) {
                                 openResult(result)
                                 return
                               }
@@ -1043,6 +1056,21 @@ export function SearchPanel(props: {
       </div>
     </Show>
   )
+}
+
+/**
+ * The address a search result may be opened or linked by: its own URL when it is an
+ * absolute http or https address, otherwise null. A javascript:, data:, relative or
+ * malformed URL never reaches window.open or an anchor href, so it cannot run in the
+ * app's origin. Pure: no request and no storage.
+ */
+export function safeExternalHref(url: string): string | null {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null
+  } catch {
+    return null
+  }
 }
 
 function readSearchSnapshot(key: string | null): SearchSnapshot | null {

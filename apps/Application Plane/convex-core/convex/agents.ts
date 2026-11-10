@@ -5,7 +5,7 @@
  * All calls require a valid service key (server-side only).
  */
 
-import { mutation, query } from "./_generated/server";
+import { internalMutation, mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
 import { assertServiceKey, requireGatewayMember } from "./authz";
@@ -311,8 +311,11 @@ export const listActiveByOrg = query({
  *
  * Model-gateway's `kb_search` tool forwards these to
  * `retrieval-engine-rs::hybrid` as filters on every retrieval.
+ *
+ * Internal only (D3-243): no client can call it. It had no caller and no service-key check, so
+ * any client holding an agent id and its org id could widen that agent's retrieval scope.
  */
-export const updateKnowledgeBindings = mutation({
+export const updateKnowledgeBindings = internalMutation({
   args: {
     agentId: v.id("agents"),
     orgId: v.id("organizations"),
@@ -347,8 +350,10 @@ export const updateKnowledgeBindings = mutation({
  * "Configure RAG"). Stored on the agents row; gateway forwards on
  * every retrieval call. Defaults applied retrieval-side so empty
  * fields stay empty (operator-set vs derived).
+ *
+ * Internal only (D3-243): no client can call it. It had no caller and no service-key check.
  */
-export const updateRetrievalConfig = mutation({
+export const updateRetrievalConfig = internalMutation({
   args: {
     agentId: v.id("agents"),
     orgId: v.id("organizations"),
@@ -608,7 +613,8 @@ export const saveDraftForGateway = mutation({
  * Publish the draft as the agent's next version: one immutable row is written and the
  * pointer moves. Earlier rows are never touched, so a turn pinned to version N keeps N.
  * Publishing an unchanged draft still takes a new number, because the act is what the
- * history records.
+ * history records. The agent row mirrors the version's name, model and knowledge bindings in
+ * the same write (see the patch below).
  */
 export const publishForGateway = mutation({
   args: {
@@ -647,7 +653,18 @@ export const publishForGateway = mutation({
       publishedBy: args.externalAuthId,
       publishedAt: now,
     });
-    await ctx.db.patch(args.agentId, { publishedVersion: version, updatedAt: now });
+    // OD-4 (b), D3-249: the version is authoritative. The row mirrors the published name, model
+    // and knowledge bindings in this same write, so live readers (the Space roster's name, the
+    // retrieval scope) follow the version. systemPrompt and tools are not mirrored: agents:update
+    // refuses them once the agent is versioned. An absent binding clears the row's, as the
+    // version has none. Authored configuration only, no conversation content (ZDR).
+    await ctx.db.patch(args.agentId, {
+      publishedVersion: version,
+      name: body.name,
+      model: body.model,
+      knowledgeBindings: body.knowledgeBindings,
+      updatedAt: now,
+    });
     return { version, digest };
   },
 });

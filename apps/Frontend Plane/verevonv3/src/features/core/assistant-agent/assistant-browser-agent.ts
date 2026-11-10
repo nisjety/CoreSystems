@@ -54,7 +54,7 @@ export function assistantBrowserTarget(raw: string): URL | null {
 }
 
 function requestedSiteHost(error: unknown): string | null {
-  if (!(error instanceof ApiError) || error.details?.canRequestAccess !== true) return null
+  if (!(error instanceof ApiError) || Array.isArray(error.details) || error.details?.canRequestAccess !== true) return null
   const host = error.details.host
   return typeof host === 'string' && host.length <= 253 && /^(?:[a-z\d-]+\.)+[a-z\d-]+$/.test(host) ? host : null
 }
@@ -427,7 +427,7 @@ export function createAssistantBrowserAgent(options: {
         const siteAccessRefused = hasErrorCode(error, 'browser_grant_denied')
         const redirectAccessRefused = hasErrorCode(error, 'browser_redirect_access_denied')
         const navigationTimedOut = error instanceof ApiError && error.status === 504 &&
-          error.code === 'TIMEOUT' && error.details?.op === 'navigate'
+          error.code === 'TIMEOUT' && !Array.isArray(error.details) && error.details?.op === 'navigate'
         const browserStartUnavailable = !startSent && !run.cancelled &&
           (navigationTimedOut || hasErrorCode(error, 'upstream_unavailable'))
         const siteHandoffUrl = !startSent && !run.cancelled

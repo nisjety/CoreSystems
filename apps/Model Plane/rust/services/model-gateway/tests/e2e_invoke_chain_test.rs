@@ -12510,6 +12510,13 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
         Err(Status::unimplemented("reset_memory not needed in test"))
     }
 
+    async fn erase_agent_memory(
+        &self,
+        _: TReq<mpv1::EraseAgentMemoryRequest>,
+    ) -> Result<Response<mpv1::EraseAgentMemoryResponse>, Status> {
+        Err(Status::unimplemented("erase_agent_memory not needed in test"))
+    }
+
     async fn get_user_profile(
         &self,
         _: TReq<mpv1::GetUserProfileRequest>,

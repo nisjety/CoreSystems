@@ -17,7 +17,10 @@ use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
 
 use mp_contracts::model_plane::v1::routing_policy_client::RoutingPolicyClient;
-use mp_contracts::model_plane::v1::{GetRoutingPolicyRequest, SetRoutingPolicyRequest};
+use mp_contracts::model_plane::v1::{
+    GetRoutingPolicyRequest, PolicyCandidate, PromoteCandidateRequest, ProposeCandidateRequest,
+    SetRoutingPolicyRequest,
+};
 
 use super::routing_policy::RoutingPolicy;
 
@@ -123,6 +126,39 @@ impl PolicyAuth {
     }
 }
 
+/// Why a candidate call failed (EP-14 S10). The gRPC code is kept so the HTTP edge can tell a superseded candidate
+/// (`ABORTED`), an unevaluated one or a switched-off store (`FAILED_PRECONDITION`) and an unknown id (`NOT_FOUND`)
+/// apart. A failure that never reached session-core (a serialization or parse error) is `Internal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateError {
+    /// The gRPC status code session-core answered with.
+    pub code: tonic::Code,
+    /// The status message, or the local failure.
+    pub message: String,
+}
+
+impl CandidateError {
+    fn local(message: String) -> Self {
+        Self {
+            code: tonic::Code::Internal,
+            message,
+        }
+    }
+
+    fn from_status(operation: &str, status: &tonic::Status) -> Self {
+        Self {
+            code: status.code(),
+            message: format!("session-core {operation}: {}", status.message()),
+        }
+    }
+}
+
+impl std::fmt::Display for CandidateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
 /// Lazily-connected client for session-core's `RoutingPolicy` gRPC service.
 #[derive(Clone)]
 pub struct PolicyClient {
@@ -209,6 +245,71 @@ impl PolicyClient {
             .map_err(|status| format!("session-core set_policy: {status}"))?
             .into_inner();
         serde_json::from_str(&resp.config_json).map_err(|e| format!("parse stored policy: {e}"))
+    }
+
+    /// Record `policy` as a candidate in session-core instead of writing it live (EP-14 S10). `diff_json` is the
+    /// offline routing diff computed by inference-core. The live policy is untouched: the candidate goes live only
+    /// through [`Self::promote_candidate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CandidateError`] when serialization fails or session-core refuses the proposal (including
+    /// `FAILED_PRECONDITION` when its candidate switch is off).
+    pub async fn propose_candidate(
+        &self,
+        policy: &RoutingPolicy,
+        proposed_by: &str,
+        diff_json: String,
+    ) -> Result<PolicyCandidate, CandidateError> {
+        let config_json = serde_json::to_string(policy)
+            .map_err(|e| CandidateError::local(format!("serialize policy: {e}")))?;
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self
+            .authed_request(ProposeCandidateRequest {
+                config_json,
+                proposed_by: proposed_by.to_owned(),
+                diff_json,
+            })
+            .await;
+        let resp = client
+            .propose_candidate(request)
+            .await
+            .map_err(|status| CandidateError::from_status("propose_candidate", &status))?
+            .into_inner();
+        resp.candidate.ok_or_else(|| {
+            CandidateError::local("session-core propose_candidate returned no candidate".to_owned())
+        })
+    }
+
+    /// Make an evaluated candidate the live policy, returning the policy session-core wrote. The caller hot-swaps
+    /// its live copy with the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CandidateError`] carrying session-core's code: `ABORTED` when the live policy moved past the
+    /// candidate, `FAILED_PRECONDITION` when it is not evaluated (or the switch is off), `NOT_FOUND` for an unknown id.
+    pub async fn promote_candidate(
+        &self,
+        candidate_id: &str,
+        decided_by: &str,
+    ) -> Result<RoutingPolicy, CandidateError> {
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self
+            .authed_request(PromoteCandidateRequest {
+                candidate_id: candidate_id.to_owned(),
+                decided_by: decided_by.to_owned(),
+            })
+            .await;
+        let resp = client
+            .promote_candidate(request)
+            .await
+            .map_err(|status| CandidateError::from_status("promote_candidate", &status))?
+            .into_inner();
+        let message = resp.policy.ok_or_else(|| {
+            CandidateError::local("session-core promote_candidate returned no policy".to_owned())
+        })?;
+        serde_json::from_str(&message.config_json)
+            .map_err(|e| CandidateError::local(format!("parse promoted policy: {e}")))
     }
 }
 

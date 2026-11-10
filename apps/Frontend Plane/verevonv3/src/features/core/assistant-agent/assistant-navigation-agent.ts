@@ -157,7 +157,8 @@ export function createAssistantNavigationAgent(options: {
       } catch (error) {
         const address = new URL(target)
         if (!namedSite || !hasDestination(address) || !(error instanceof ApiError) ||
-          error.status !== 504 || error.code !== 'TIMEOUT' || error.details?.op !== 'navigate') throw error
+          error.status !== 504 || error.code !== 'TIMEOUT' || Array.isArray(error.details) ||
+          error.details?.op !== 'navigate') throw error
         // A ranked result can stall before the agent starts. For an explicit
         // named-site task, make one attempt from the same site's homepage.
         requireCurrent()

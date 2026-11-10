@@ -340,6 +340,8 @@ function McpAppDocument(props: {
           </div>
         )}
       </Show>
+      {/* The print export's twin: print.ts replaces the whole figure with this document as code, so a PDF shows the app's source, never the frame. */}
+      <pre class="verevon-inline-widget__export" hidden><code>{props.resource.html}</code></pre>
     </figure>
   )
 }

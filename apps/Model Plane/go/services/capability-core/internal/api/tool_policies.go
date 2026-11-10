@@ -348,7 +348,7 @@ func (h *ToolPoliciesHandler) set(w http.ResponseWriter, r *http.Request, capabi
 	// Every provider write already asks the person, so an ask on it changes
 	// nothing and is refused rather than stored as a level that looks chosen.
 	if capabilityID == providerExecuteCapability && request.Decision == policy.ToolPolicyAsk {
-		jsonErr(w, errAlreadyAlwaysAsk, http.StatusUnprocessableEntity)
+		writeTypedError(w, http.StatusUnprocessableEntity, errAlreadyAlwaysAsk, "Every action with this app already asks you first.")
 		return
 	}
 	var expiresAt *time.Time

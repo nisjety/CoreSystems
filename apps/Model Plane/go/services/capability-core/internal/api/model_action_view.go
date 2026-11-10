@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
@@ -428,4 +429,72 @@ func (v controlModelActionAuthority) validate(now time.Time) error {
 		return fmt.Errorf("Control model action view authority is invalid")
 	}
 	return nil
+}
+
+const (
+	// ownerActionsAdmittedPath serves the ids of the owner actions this org's run view can offer.
+	ownerActionsAdmittedPath = "/api/v1/capabilities/owner-actions/admitted"
+	// ownerActionsModeTicketsOnly is reported while the admission table is off.
+	ownerActionsModeTicketsOnly = "tickets_only"
+	// ownerActionsModeTable is reported while the admission table is on.
+	ownerActionsModeTable = "table"
+)
+
+// agentActionAdmissionLister reads every enabled admission row. It is a separate, optional
+// interface so a backend that only answers ListEnabled keeps working for the run view.
+type agentActionAdmissionLister interface {
+	ListAllEnabled(context.Context) ([]*registry.AgentActionAdmission, error)
+}
+
+type ownerActionsAdmittedData struct {
+	Mode      string   `json:"mode"`
+	ActionIDs []string `json:"action_ids"`
+}
+
+type ownerActionsAdmittedResponse struct {
+	Data ownerActionsAdmittedData `json:"data"`
+}
+
+// listAdmittedOwnerActions answers GET /api/v1/capabilities/owner-actions/admitted with the
+// sorted ids of the owner actions the run view could offer, following the same rule as
+// admittedRows: tickets.create only while the admission table is off, every enabled row while it
+// is on. It carries ids only, never schemas or descriptions, and reveals configuration, not
+// content; a ZDR principal is still refused so the route keeps the posture of the other reads.
+func (h *CapabilitiesHandler) listAdmittedOwnerActions(w http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	principal, ok := authctx.PrincipalFromContext(request.Context())
+	if !ok || principal.OrganizationID == "" || principal.ZeroDataRetention {
+		jsonErr(w, "owner actions are unavailable", http.StatusForbidden)
+		return
+	}
+	if h.modelActionViews == nil {
+		jsonErr(w, "owner actions are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	data := ownerActionsAdmittedData{Mode: ownerActionsModeTicketsOnly, ActionIDs: []string{ticketsCreateToolName}}
+	if h.modelActionViews.admissionTable {
+		lister, listable := h.modelActionViews.admissions.(agentActionAdmissionLister)
+		if !listable || lister == nil {
+			jsonErr(w, "model action admission is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		rows, err := lister.ListAllEnabled(request.Context())
+		if err != nil {
+			jsonErr(w, "model action admission is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		ids := make([]string, 0, len(rows))
+		for _, row := range rows {
+			if row == nil || row.Status != registry.AgentActionAdmissionEnabled || strings.TrimSpace(row.ActionID) == "" {
+				continue
+			}
+			ids = append(ids, row.ActionID)
+		}
+		sort.Strings(ids)
+		data = ownerActionsAdmittedData{Mode: ownerActionsModeTable, ActionIDs: ids}
+	}
+	writeJSON(w, ownerActionsAdmittedResponse{Data: data})
 }

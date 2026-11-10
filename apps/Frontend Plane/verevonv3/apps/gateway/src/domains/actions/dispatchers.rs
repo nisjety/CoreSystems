@@ -6654,6 +6654,7 @@ pub(super) async fn dispatch_space_set_agent_state(
 pub(super) async fn dispatch_space_revoke_agent(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let space_ref = ticket_string(input, "spaceRef");
@@ -6666,6 +6667,7 @@ pub(super) async fn dispatch_space_revoke_agent(
     let (status, Json(payload)) = revoke_space_agent(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        headers.clone(),
         PathExtractor((space_ref.to_owned(), binding_ref.to_owned())),
     )
     .await;

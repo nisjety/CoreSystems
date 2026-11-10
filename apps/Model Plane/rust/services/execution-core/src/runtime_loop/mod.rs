@@ -1518,7 +1518,15 @@ async fn execute_step_inner(
         )
         .await
     } else if tool_name == REATTACH_SKILL_TOOL {
-        execute_reattach_skill(tool_input, org_id, session_channel.as_ref(), session_bearer).await
+        execute_reattach_skill(
+            tool_input,
+            org_id,
+            run_id,
+            zdr || waived,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
     } else if tool_name == PLAN_PROPOSE_TOOL {
         execute_propose_plan(
             tool_input,
@@ -3797,6 +3805,8 @@ fn tool_error(message: String) -> tool_bridge::ToolExecution {
 async fn execute_reattach_skill(
     tool_input: &str,
     org_id: &str,
+    run_id: &str,
+    retention_bound: bool,
     session_channel: Option<&tonic::transport::Channel>,
     session_bearer: Option<&str>,
 ) -> tool_bridge::ToolExecution {
@@ -3862,7 +3872,36 @@ async fn execute_reattach_skill(
         }
     };
 
-    let output = match recover_skill(&skills, &input.name) {
+    // EP-11 S3: with Do-run skill pins on, a skill whose text moved since the run
+    // injected it is recovered at the version the run pinned. A gone version is
+    // reported and a failed read is a tool error; neither falls back to the moved text.
+    let pinned = match crate::skill_pins::recover(
+        channel,
+        bearer,
+        org_id,
+        run_id,
+        retention_bound,
+        &skills,
+        &input.name,
+    )
+    .await
+    {
+        crate::skill_pins::Recovery::Current => None,
+        crate::skill_pins::Recovery::Pinned(skill) => Some(skill),
+        crate::skill_pins::Recovery::Gone(rendered) => {
+            return tool_bridge::ToolExecution {
+                output: rendered,
+                error: None,
+            }
+        }
+        crate::skill_pins::Recovery::ReadFailed => {
+            return tool_error(crate::skill_pins::READ_FAILED.to_owned())
+        }
+    };
+    let output = match pinned.as_ref().map_or_else(
+        || recover_skill(&skills, &input.name),
+        |skill| recover_skill(std::slice::from_ref(skill), &skill.name),
+    ) {
         RecoveredSkill::Found {
             name,
             description,

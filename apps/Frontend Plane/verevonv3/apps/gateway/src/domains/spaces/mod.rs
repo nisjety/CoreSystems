@@ -3962,6 +3962,7 @@ pub(crate) async fn remove_space_member(
 async fn apply_space_agent_state(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: Option<&axum::http::HeaderMap>,
     space_ref: &str,
     binding_ref: &str,
     status: &str,
@@ -4018,6 +4019,22 @@ async fn apply_space_agent_state(
         );
     };
 
+    // EP-6 P3: a revoked agent's notes in this room go with its binding. Best-effort and after the
+    // revocation has landed, so it never changes the answer below; repeating a revoke repeats it,
+    // which is how a missed erase is retried. Pause and resume keep the notes.
+    if status == "revoked" {
+        if let Some(headers) = headers {
+            let subject_id = updated
+                .get("subjectId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            memory::erase_agent_memory_after_revocation(
+                state, user, headers, &org_id, space_ref, subject_id,
+            )
+            .await;
+        }
+    }
+
     // Only revocation changes who is in the room, so only revocation needs
     // Control to converge. Pausing keeps the agent a member that may not be
     // invoked, which the gateway's own invocation path already enforces.
@@ -4067,7 +4084,7 @@ pub(crate) async fn set_space_agent_state(
             )),
         );
     }
-    apply_space_agent_state(&state, &user, &space_ref, &binding_ref, status).await
+    apply_space_agent_state(&state, &user, None, &space_ref, &binding_ref, status).await
 }
 
 /// `DELETE /api/v1/spaces/{space_ref}/agents/{binding_ref}` — revoke.
@@ -4079,9 +4096,11 @@ pub(crate) async fn set_space_agent_state(
 pub(crate) async fn revoke_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Path((space_ref, binding_ref)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    apply_space_agent_state(&state, &user, &space_ref, &binding_ref, "revoked").await
+    apply_space_agent_state(&state, &user, Some(&headers), &space_ref, &binding_ref, "revoked")
+        .await
 }
 
 /// Who may grant a new agent (created or bound) a place in this room: the

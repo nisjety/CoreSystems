@@ -52,6 +52,7 @@ mod session_terminal_auth;
 pub mod shipping_tools;
 pub mod site_policy_client;
 pub mod skill_mounts;
+pub mod skill_pins;
 pub mod social_tools;
 pub(crate) mod quarantine;
 pub(crate) mod space_gate;

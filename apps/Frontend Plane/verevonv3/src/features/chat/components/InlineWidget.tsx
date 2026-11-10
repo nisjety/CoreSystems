@@ -286,6 +286,8 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
       <Show when={showCode()}>
         <div class="verevon-inline-widget__code">{props.fallback}</div>
       </Show>
+      {/* The print export's twin: print.ts replaces the whole figure with this code, so a PDF shows the source, never the frame. */}
+      <pre class="verevon-inline-widget__export" hidden><code>{props.source}</code></pre>
     </figure>
   )
 }

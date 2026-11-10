@@ -35,7 +35,8 @@ export function archiveErrorCopy(
   action: 'archive' | 'unarchive',
 ): string {
   const code = (err as { code?: unknown } | null)?.code
-  const details = (err as { details?: Readonly<Record<string, unknown>> | null } | null)?.details
+  const raw = (err as { details?: unknown } | null)?.details
+  const details = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Readonly<Record<string, unknown>>) : null
   if (code === 'rate_limited') {
     const seconds = details?.retry_after_seconds
     return typeof seconds === 'number' && Number.isFinite(seconds) && seconds > 0

@@ -81,8 +81,13 @@ import { dictateAudioBlob } from "@/shared/api/audio-client";
 import {
 	actionKey,
 	BUILTIN_ACTIONS,
+	LEARN_ACTION,
+	LEARN_NOTE_MAX_CHARS,
+	learnCommandAvailable,
 	loadSlashTemplates,
 	loadSpecializedActions,
+	requestLearnFromThread,
+	type LearnCommandContext,
 	type SpecializedAction,
 	type SpecializedActionKind,
 } from "@/shared/api/chat-actions-client";
@@ -121,10 +126,12 @@ import {
 	enforcedMaxEffort,
 	extractChatDocument,
 	getAttachmentPolicy,
+	getComposerCapabilities,
 	getModelEntitlementMeta,
 	groupChatModels,
 	catalogueAdvertisesConnectorScope,
 	filterModels,
+	formatContextWindow,
 	formatModelListPrice,
 	hasZeroRetentionModel,
 	isExpensiveModel,
@@ -404,6 +411,14 @@ export type DashboardComposerBrowserContext = {
  */
 export function tabMentionChipsEnabled(): boolean {
 	return import.meta.env.VITE_BROWSER_TAB_MENTIONS === "1";
+}
+
+/**
+ * Build-time switch for the `/learn` command (EP-11 S7). Only the literal `true` turns it on, the same
+ * strict reading the server's `LEARN_COMMAND_ENABLED` uses. Default off.
+ */
+export function learnCommandEnabled(): boolean {
+	return import.meta.env.VITE_LEARN_COMMAND === "true";
 }
 
 /**
@@ -691,6 +706,14 @@ const BUILTIN_COMMANDS: ComposerCommand[] = [
 		name: "schedule",
 	},
 ];
+
+/** The composer's registry id for `/learn` (EP-11 S7), kept with the other fixed `builtin:` ids. */
+const LEARN_COMMAND_ID = "builtin:learn";
+/** What a refused `/learn` says when the server's code has no copy of its own. The draft is kept. */
+const LEARN_FAILED_COPY = {
+	no: "Kunne ikke be Verevon lære av samtalen. Utkastet er beholdt.",
+	en: "Could not ask Verevon to learn from this conversation. Your draft has been kept.",
+};
 
 // The `/` menu opens only when the slash starts the draft. A slash typed inside
 // a sentence — "2026/09", "og/eller", "kr 200/mnd" — is ordinary text and stays
@@ -1063,6 +1086,12 @@ export function DashboardComposer(props: {
 	 * where a send navigates away (the dashboard), so Voice mode closes instead.
 	 */
 	voiceReply?: VoiceReply | null;
+	/**
+	 * What the `/learn` command (EP-11 S7) needs from the page: the saved thread, and whether this chat is
+	 * temporary, zero retention and allowed to learn. Ignored unless VITE_LEARN_COMMAND is "true"; without it
+	 * the command is not offered.
+	 */
+	learnContext?: LearnCommandContext;
 }) {
 	const i18n = useI18n();
 	const navigate = useNavigate();
@@ -1147,6 +1176,8 @@ export function DashboardComposer(props: {
 	// While either is held the page shows its notice instead of reloading.
 	onCleanup(registerReloadGuard(() => files().length > 0 || handoffPending()));
 	const [submitError, setSubmitError] = createSignal<string | null>(null);
+	// What a `/learn` that was queued says, under the composer (EP-11 S7). Cleared by the next send or `/learn`.
+	const [learnNotice, setLearnNotice] = createSignal<string | null>(null);
 	const [historyPanelPosition, setHistoryPanelPosition] =
 		createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 });
 	const [historyThreads, setHistoryThreads] = createSignal<
@@ -1288,6 +1319,18 @@ export function DashboardComposer(props: {
 	);
 	const zeroRetentionTurn = () =>
 		Boolean(props.temporaryChatLocked || props.temporaryChat) || orgZeroRetention() === true;
+	// Deep research over the organization's knowledge (EP-2 S7): the gateway says whether it serves that scope, and
+	// it never does for a zero-retention caller. Asked only once "Kun organisasjon" is picked; until the answer
+	// arrives, and on any failure, the composer offers nothing.
+	const [composerCapabilities] = createResource(
+		() => retrievalScope() === 'knowledge_only',
+		() => getComposerCapabilities(),
+	);
+	// Deep research stays off under "Kun organisasjon" unless the gateway serves that scope. A zero-retention turn,
+	// a Temporary chat included, is refused for deep research whatever its scope, so it stays off there too.
+	const deepSearchBlockedByScope = () =>
+		retrievalScope() === 'knowledge_only'
+		&& (composerCapabilities()?.deepResearchKnowledge !== true || zeroRetentionTurn());
 	// `@tab` chips (E3.3-c, D9): one per token in the draft, resolved against
 	// the caller's tab list as a preview only. Empty with the flag off or no
 	// session, so nothing renders.
@@ -1647,10 +1690,12 @@ export function DashboardComposer(props: {
 		const parsed = draftCommand();
 		return parsed ? parsed.argument : props.message;
 	});
+	// A typed `/learn` is a request even with no note, so the command itself counts as content (EP-11 S7).
+	const learnDraft = createMemo(() => draftCommand()?.command.registered?.id === LEARN_COMMAND_ID);
 	// Measured on the body, not the raw draft: a bare "/image" is an unfinished
 	// command, not a message, and must not arm the send button.
 	const hasContent = createMemo(
-		() => commandBody().trim().length > 0 || files().length > 0,
+		() => commandBody().trim().length > 0 || files().length > 0 || learnDraft(),
 	);
 	const imageMode = createMemo(() => !subscriptionBacked() && (props.imageMode ?? false));
 	const planMode = createMemo(() => planModeAvailable() && (props.planMode ?? false));
@@ -1689,6 +1734,88 @@ export function DashboardComposer(props: {
 	const temporaryChat = createMemo(
 		() => props.temporaryChatLocked || (props.temporaryChat ?? false),
 	);
+	// `/learn` (EP-11 S7). Offered only behind VITE_LEARN_COMMAND, and only where the page says this chat is saved,
+	// not temporary or zero retention, and allowed to learn. The composer also reads its own temporary and
+	// zero-retention state (the organization's included), so a page that leaves that out still hides it. The server
+	// refuses each case on its own too.
+	const learnAvailable = createMemo(() => {
+		const context = props.learnContext;
+		if (!learnCommandEnabled() || !context) return false;
+		return learnCommandAvailable({
+			threadId: context.threadId,
+			temporaryChat: context.temporaryChat || temporaryChat(),
+			zeroRetention: context.zeroRetention || zeroRetentionTurn(),
+			learningAllowed: context.learningAllowed,
+		});
+	});
+	// Asks Verevon to learn from this saved conversation. The note is what was typed after the command, and the
+	// server reads it as data. The draft is cleared only once the request is queued, so a refusal keeps it.
+	const runLearnCommand = async (typedNote: string): Promise<ComposerSubmitResult> => {
+		const threadId = props.learnContext?.threadId?.trim() ?? "";
+		if (!threadId || !learnAvailable() || handoffPending()) return { ok: false };
+		setSubmitError(null);
+		setLearnNotice(null);
+		const note = typedNote.trim();
+		if (Array.from(note).length > LEARN_NOTE_MAX_CHARS) {
+			const message = i18n.tr(
+				`Notatet er for langt: høyst ${LEARN_NOTE_MAX_CHARS} tegn. Utkastet er beholdt.`,
+				`The note is too long: at most ${LEARN_NOTE_MAX_CHARS} characters. Your draft has been kept.`,
+			);
+			setSubmitError(message);
+			return { ok: false, message };
+		}
+		const sentDraft = props.message;
+		setHandoffPending(true);
+		try {
+			await requestLearnFromThread(threadId, note);
+			// Cleared only if the person has not typed since the command went out.
+			if (props.message === sentDraft) {
+				flush(() => {
+					props.onMessageChange("");
+					setEntities([]);
+				});
+			}
+			setLearnNotice(
+				i18n.tr(
+					"Verevon lærer av samtalen; forslaget kommer i læringsinnboksen.",
+					"Verevon is learning from this conversation; the proposal will reach the learning inbox.",
+				),
+			);
+			return { ok: true };
+		} catch (error) {
+			const message = translateApiError(error, i18n.tr, LEARN_FAILED_COPY);
+			setSubmitError(message);
+			return { ok: false, message };
+		} finally {
+			setHandoffPending(false);
+		}
+	};
+	const learnCommand: RegisteredSlashCommand = {
+		id: LEARN_COMMAND_ID,
+		name: "learn",
+		aliases: ["lær"],
+		label: LEARN_ACTION.name,
+		description: {
+			no: "Verevon foreslår en ferdighet fra denne samtalen. Ingenting tas i bruk før du godtar.",
+			en: "Verevon proposes a skill from this conversation. Nothing is used until you accept it.",
+		},
+		icon: BookOpen,
+		// Picked from the menu: the draft holds only `/learn` by then, so there is no note to send.
+		run: () => {
+			void runLearnCommand("");
+		},
+	};
+	// Registered while `/learn` is offered and withdrawn the moment it is not, so the menu never lists a command the
+	// page would refuse. The registry belongs to this composer, so it starts without the command.
+	let unregisterLearn: (() => void) | undefined;
+	createEffect(() => learnAvailable(), (available) => {
+		if (available && !unregisterLearn) unregisterLearn = slashRegistry.register(learnCommand);
+		if (!available && unregisterLearn) {
+			unregisterLearn();
+			unregisterLearn = undefined;
+		}
+	});
+	onCleanup(() => unregisterLearn?.());
 	// WS14 S2a, the "Kjør plan" pill. Why the turn that runs the approved plan
 	// cannot be sent from here, or undefined when it can. Each reason mirrors a
 	// condition the controller and the gateway enforce again at send time, so the
@@ -2835,6 +2962,10 @@ export function DashboardComposer(props: {
 			applySlashTemplate(pendingTemplate, pendingCommand?.argument ?? "");
 			return { ok: false };
 		}
+		// A typed `/learn note` is never a chat turn: the note goes to the learning request instead (EP-11 S7).
+		if (pendingCommand?.command.registered?.id === LEARN_COMMAND_ID) {
+			return runLearnCommand(pendingCommand?.argument ?? "");
+		}
 		// Typed commands apply even when the menu was never opened: "/image en
 		// rød katt" straight off the keyboard must carry the image tool, and
 		// "/kvalitet rapport uke 12" must carry the skill.
@@ -2959,6 +3090,7 @@ export function DashboardComposer(props: {
 		// refused) while the tier lookup waits.
 		setHandoffPending(true);
 		setSubmitError(null);
+		setLearnNotice(null);
 		try {
 			const turnTier = resolveTurnPrivacyTier(payloadInput.model, modelProvider);
 			const payload = createComposerSubmitPayload({
@@ -3320,12 +3452,15 @@ export function DashboardComposer(props: {
 										tabindex={0}
 									>
 										<For each={shownChatModelGroups()}>
-											{(group) => (
-												<div class="dashboard-composer-model-group">
-													<p class="dashboard-composer-model-group__label">
-												{group.label}
-													</p>
-											<For each={group.models}>
+											{(group) => {
+												// A folded group opens by itself while the search is on (it lists only matching models) and when the selection is one of its models.
+												const opened = () =>
+													activeModelQuery() !== "" ||
+													group.models.some(
+														(model) => model.id === selectedModel() && model.provider === selectedModelProvider(),
+													);
+												const rows = () => (
+												<For each={group.models}>
 												{(model) => (
 													<button
 														type="button"
@@ -3349,6 +3484,13 @@ export function DashboardComposer(props: {
 															</span>
 															<span>
 																{model.name}
+																<Show when={formatContextWindow(model.contextWindowTokens)}>
+																	{(windowLabel) => (
+																		<span class="dashboard-composer-model-context">
+																			{windowLabel()}
+																		</span>
+																	)}
+																</Show>
 																<Show when={model.price}>
 																	{(price) => (
 																		<span class="dashboard-composer-model-price">
@@ -3386,6 +3528,11 @@ export function DashboardComposer(props: {
 																	</span>
 																)}
 															</Show>
+															<Show when={model.lifecycle === "preview"}>
+																<span class="dashboard-composer-model-badge dashboard-composer-model-badge--preview">
+																	{i18n.tr("Forhåndsversjon", "Preview")}
+																</span>
+															</Show>
 															<Show when={isExpensiveModel(model)}>
 																<span
 																	class="dashboard-composer-model-badge dashboard-composer-model-badge--premium"
@@ -3405,9 +3552,23 @@ export function DashboardComposer(props: {
 														</span>
 													</button>
 												)}
-											</For>
-												</div>
-											)}
+												</For>
+												);
+												return group.folded ? (
+													<details
+														class="dashboard-composer-model-group dashboard-composer-model-group--folded"
+														open={opened()}
+													>
+														<summary class="dashboard-composer-model-group__label">{group.label}</summary>
+														{rows()}
+													</details>
+												) : (
+													<div class="dashboard-composer-model-group">
+														<p class="dashboard-composer-model-group__label">{group.label}</p>
+														{rows()}
+													</div>
+												);
+											}}
 										</For>
 										<Show when={activeModelQuery() !== "" && shownChatModelGroups().length === 0}>
 											<p class="dashboard-composer-model-empty" role="status">
@@ -3894,6 +4055,9 @@ export function DashboardComposer(props: {
 					<Show when={submitError()}>
 						<p class="dashboard-composer-attachments__notice" role="alert">{submitError()}</p>
 					</Show>
+					<Show when={learnNotice()}>
+						<p class="dashboard-composer-attachments__notice" role="status">{learnNotice()}</p>
+					</Show>
 					{/* Seen after a press on Voice input in Temporary chat; screen
 					    readers get the same words from its description and status. */}
 					<Show when={temporaryChat() && voiceInputBlockedShown()}>
@@ -4138,11 +4302,11 @@ export function DashboardComposer(props: {
 							</ComposerIconButton>
 							<ComposerIconButton
 								active={deepSearch()}
-								disabled={subscriptionBacked() || conversationOnly() || retrievalScope() === 'knowledge_only'}
+								disabled={subscriptionBacked() || conversationOnly() || deepSearchBlockedByScope()}
 								label={
 									subscriptionBacked()
 										? `${i18n.tr("Dyp research", "Deep search")} — ${subscriptionDisabledTitle()}`
-										: retrievalScope() === 'knowledge_only'
+										: deepSearchBlockedByScope()
 											? `${i18n.tr("Dyp research", "Deep search")} — ${i18n.tr("Ikke tilgjengelig med kildefilteret Kun organisasjon", "Not available with the Organization only source filter")}`
 											: i18n.tr("Dyp research", "Deep search")
 								}

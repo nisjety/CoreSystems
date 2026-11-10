@@ -617,6 +617,12 @@ export type ChatTurn = {
   /** The context chips this turn was sent with (EP-3 S5): kind, id and label only. */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /**
+   * The deep-research plan this assistant turn ended with (EP-2 S5), read back from the persisted
+   * `research_plan` on a reload. Shown as a read-only card once a later turn exists; never set while
+   * the live plan card is still open.
+   */
+  researchPlan?: import('@/shared/api/chat-client').ChatResearchPlanEvent
+  /**
    * The server's own confirmation of `retrievalScope` (`source_scope_applied`
    * SSE event) — the concrete "shown in the receipt" surface. Absent until
    * the event arrives. A turn whose scope was `auto`/omitted gets one only

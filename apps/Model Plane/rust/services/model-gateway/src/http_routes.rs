@@ -408,6 +408,12 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         // verifies it and is the authority.
         .route("/v1/spaces/:space_id/memory/list", post(list_space_memories))
         .route("/v1/spaces/:space_id/memory/delete", post(delete_space_memory_entry))
+        // One named agent's memory in the Space, erased when its binding is revoked (EP-6 P3). The
+        // same decision-in-the-body shape; the agent is the path's `agent_subject_id`.
+        .route(
+            "/v1/spaces/:space_id/agents/:agent_subject_id/memory/erase",
+            post(erase_space_agent_memory),
+        )
         // Learning governance (WS07-S9): the owner's decisions on learned skills and
         // the ledger of what was learned. The user bearer only; the owner is the
         // verified caller on every hop, and session-core re-checks ownership.
@@ -601,6 +607,10 @@ fn proxy_routes() -> Router<AppState> {
     Router::new()
         // Capabilities
         .route("/v1/capabilities", get(list_capabilities_proxy))
+        .route(
+            "/v1/capabilities/owner-actions/admitted",
+            get(admitted_owner_actions_proxy),
+        )
         .route("/v1/capabilities/:id", get(get_capability_proxy))
         // MCP servers — add/list/remove an MCP server (and thus its tools) over
         // HTTP. The gateway exposes registered tools to the model automatically
@@ -7745,6 +7755,26 @@ async fn get_capability_proxy(
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     Ok(Json(capability_contract_value(&c)))
+}
+
+/// `GET /v1/capabilities/owner-actions/admitted`: the ids of the owner actions the org's run view
+/// can offer, as capability-core answers them. The caller's capability bearer is forwarded
+/// unchanged; capability-core decides the mode and refuses a ZDR principal, so the gateway adds
+/// no answer of its own (D3-254/D3-257).
+async fn admitted_owner_actions_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        "capabilities/owner-actions/admitted",
+        "GET",
+        None,
+    )
+    .await
 }
 
 // ============================================================================
@@ -15857,6 +15887,44 @@ async fn delete_space_memory_entry(
     }))
 }
 
+/// Erases one named agent's memory in a Space, under a Control Space memory decision issued for
+/// that agent (EP-6 P3). Session Core verifies the decision and is the authority; a no-op that
+/// answers zero while agent memory is off. Allowed under every posture, as every delete is, and the
+/// answer carries a count only.
+async fn erase_space_agent_memory(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path((space_id, agent_subject_id)): Path<(String, String)>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::EraseAgentMemoryRequest;
+    let agent_subject_id = agent_subject_id.trim().to_owned();
+    let fields = space_memory_fields(&space_id, &body)
+        .filter(|_| !agent_subject_id.is_empty() && agent_subject_id.len() <= SPACE_MEMORY_MAX_ID_BYTES);
+    let (space_id, decision_ref, token) = fields.ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .erase_agent_memory(authenticated_session_request(
+            EraseAgentMemoryRequest {
+                org_id: claims.org_id.clone(),
+                space_id,
+                agent_subject_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    Ok(Json(json!({ "erased": response.erased })))
+}
+
 #[cfg(test)]
 mod space_memory_route_tests {
     use super::*;
@@ -21267,6 +21335,13 @@ mod user_profile_route_tests {
             &self,
             _: TonicRequest<pb::ResetMemoryRequest>,
         ) -> Result<TonicResponse<pb::ResetMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn erase_agent_memory(
+            &self,
+            _: TonicRequest<pb::EraseAgentMemoryRequest>,
+        ) -> Result<TonicResponse<pb::EraseAgentMemoryResponse>, Status> {
             unused()
         }
 

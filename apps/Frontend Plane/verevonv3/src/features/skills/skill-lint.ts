@@ -29,7 +29,7 @@ function asFindings(value: unknown): SkillLintFinding[] {
 
 /** The findings of a write the lint refused; empty for any other failure. */
 export function skillLintRefusal(err: unknown): SkillLintFinding[] {
-  if (!(err instanceof ApiError) || err.code !== SKILL_LINT_FAILED) return []
+  if (!(err instanceof ApiError) || err.code !== SKILL_LINT_FAILED || Array.isArray(err.details)) return []
   return asFindings(err.details?.findings)
 }
 

@@ -89,7 +89,8 @@ export function ChangeWebhooksPanel(props: { orgId: string }) {
       setDescription('')
       await refetchSubscriptions()
     } catch (caught) {
-      if (caught instanceof ApiError && caught.details?.reason === 'webhook_off_process') setZdrRefused(true)
+      if (caught instanceof ApiError && !Array.isArray(caught.details)
+        && caught.details?.reason === 'webhook_off_process') setZdrRefused(true)
       failed(caught)
     } finally {
       setSaving(false)

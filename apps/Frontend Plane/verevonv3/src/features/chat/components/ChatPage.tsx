@@ -24,11 +24,14 @@ import { spaceDisplayName } from '@/features/spaces/lib/space-name'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import {
   DashboardComposer,
+  learnCommandEnabled,
   type DashboardComposerAttachment,
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
-import { getComposerCapabilities, getThreadContext } from '@/shared/api/chat-client'
+import type { LearnCommandContext } from '@/shared/api/chat-actions-client'
+import { getComposerCapabilities, getThreadContext, type ChatTurnTiming } from '@/shared/api/chat-client'
+import { getLearningAllowed } from '@/shared/api/memory-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
 import {
@@ -84,6 +87,7 @@ import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjec
 import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
+import { runLedgerEnabled } from '../lib/run-ledger'
 import { BrowserDockControls } from '@/features/browser/dock/BrowserDockControls'
 import { InteractiveBrowserPane } from '@/features/browser/dock/InteractiveBrowserPane'
 import { OpenBrowserButton } from '@/features/browser/dock/OpenBrowserButton'
@@ -228,6 +232,23 @@ export default function ChatPage() {
   const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
   // EP-3 S4. The gateway's own answer on whether the Output panel may edit an artifact; `artifactEditing` is false until it says otherwise.
   const [composerCapabilities] = createResource(() => getComposerCapabilities())
+  // EP-11 S7, behind `VITE_LEARN_COMMAND`: whether the memory controls let this person learn, read once per page. A failed
+  // read counts as not allowed, so `/learn` stays hidden rather than offered and refused. Nothing is read with the switch off.
+  const [learningAllowed] = createResource(
+    () => (learnCommandEnabled() ? true : false),
+    () => getLearningAllowed().catch(() => false),
+  )
+  // What the composer's `/learn` command reads (EP-11 S7). A temporary chat is zero retention, so it is never offered there;
+  // the composer also checks the organization's zero retention itself.
+  const learnContext = createMemo<LearnCommandContext>(() => {
+    const temporary = temporaryChat() || isActiveThreadTemporary()
+    return {
+      threadId: state.threadId ?? null,
+      temporaryChat: temporary,
+      zeroRetention: temporary,
+      learningAllowed: learningAllowed() === true,
+    }
+  })
   const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
   // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
   // switch off the rules change nothing, so the transcript renders as it did.
@@ -573,6 +594,7 @@ export default function ChatPage() {
         // stream and the queued-input arc had no reachable client.
         temporaryChat={temporaryChat()}
         temporaryChatLocked={temporaryChatLocked()}
+        learnContext={learnContext()}
         disabled={isForeignOriginThread()}
         onKnowledgeImport={importAttachmentsToKnowledge}
         voiceReply={voiceReply()}
@@ -794,6 +816,15 @@ export default function ChatPage() {
   // strip, the stale-tab guard and the auto-open rule all have to agree on what
   // counts as work (audit item 27 -- the header offered "Arbeid 4" for four
   // lifecycle rows). `isWorkStep` in chat-normalizers.ts owns the rule.
+  // The run ledger's rounds come from each turn's `turn_timing`, keyed by the turn id the events carry.
+  const turnTimings = createMemo(() => {
+    const timings = new Map<string, ChatTurnTiming>()
+    if (!runLedgerEnabled) return timings
+    for (const turn of state.turns) {
+      if (turn.timing !== undefined) timings.set(turn.id, turn.timing)
+    }
+    return timings
+  })
   const workStepCount = createMemo(() => state.taskSteps.filter(isWorkStep).length)
   // What the Kilder badge counts. A deep-research turn lists every hit it found
   // but reads a handful, and a badge showing the full list told the reader two
@@ -1158,7 +1189,7 @@ export default function ChatPage() {
         />
       </Match>
       <Match when={activeTab() === 'trace'}>
-        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} />
+        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} timings={turnTimings()} />
       </Match>
     </Switch>
   )

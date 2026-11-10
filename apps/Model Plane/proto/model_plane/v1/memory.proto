@@ -68,6 +68,14 @@ service MemoryService {
   // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc RebuildUserProfile(RebuildUserProfileRequest) returns (UserProfileResponse);
+
+  // Erase one named agent's memory in one Space (EP-6 P3, EP-8 S10): every
+  // scope = 'agent' row of that (Space, agent) binding. Called after the
+  // binding is revoked. Authorized by a Control Space memory decision issued to
+  // the Space's owner or admin for this agent; a person only, never a service.
+  // Open to a ZDR caller too: erasure only removes. A no-op that erases zero
+  // rows while SESSION_AGENT_MEMORY_ENABLED is off.
+  rpc EraseAgentMemory(EraseAgentMemoryRequest) returns (EraseAgentMemoryResponse);
 }
 
 message SearchMemoryRequest {
@@ -524,4 +532,35 @@ message UserProfileResponse {
   // "zdr", "policy_unavailable"). A paused profile is still returned (listed
   // and editable); off and org_disabled hide it. Empty when it is used.
   string skip_reason = 2;
+}
+
+// Request to erase one agent's memory in one Space (EP-6 P3).
+message EraseAgentMemoryRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The Space the agent was bound in. Bound into the Control decision.
+  string space_id = 2;
+
+  // The agent's subject id in that Space (the revoked binding's subject).
+  // Bound into the Control decision as its row id.
+  string agent_subject_id = 3;
+
+  // The Control `model.space.memory.manage` decision reference, issued for
+  // this Space and agent. Never logged.
+  string space_control_decision_ref = 4;
+
+  // The signed Control `model.space.memory.manage` decision token, issued for
+  // this Space and agent. Never logged.
+  string space_control_decision_token = 5;
+
+  // The person asking. Must be the caller; the decision is issued to them.
+  string user_id = 6;
+}
+
+// What an agent memory erase removed.
+message EraseAgentMemoryResponse {
+  // How many durable agent rows were erased. Zero when the agent had none or
+  // agent memory is switched off.
+  uint64 erased = 1;
 }

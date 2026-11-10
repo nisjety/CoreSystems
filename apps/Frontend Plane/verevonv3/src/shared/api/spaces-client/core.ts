@@ -1049,7 +1049,7 @@ export async function loadSpaceTranscript(
   } catch (error) {
     if (error instanceof ApiError && error.status === 403) {
       return readSpaceDenial(error)
-        ? { state: 'restricted', denial: { code: error.code, details: error.details } }
+        ? { state: 'restricted', denial: { code: error.code, details: Array.isArray(error.details) ? null : error.details } }
         : { state: 'restricted' }
     }
     if (error instanceof ApiError && error.status === 404) return { state: 'missing' }

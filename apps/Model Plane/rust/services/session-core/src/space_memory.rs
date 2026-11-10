@@ -880,9 +880,7 @@ pub(crate) async fn recall_agent_memory(
 /// Erases one binding's notes when the binding is revoked (EP-8 S10). Space deletion erases every
 /// binding's notes already (EP-8 S7, by the `<space_id>:` prefix). Agent rows have no Letta copy,
 /// so the durable delete is the whole erasure. Returns how many rows went.
-// Not yet reachable: the revocation RPC that calls it needs a memory.proto number the integration
-// reports do not reserve (see the slice report). Kept here, tested, so the RPC is a thin wrapper.
-#[allow(dead_code)]
+/// Reached through `MemoryService.EraseAgentMemory` (EP-6 P3), under a Control Space memory decision.
 pub(crate) async fn erase_agent_memory(
     pool: &PgPool,
     org_id: &str,

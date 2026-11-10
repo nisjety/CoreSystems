@@ -833,6 +833,24 @@ pub(crate) fn decision_closer(denied: bool, tool_name: &str) -> String {
     )
 }
 
+/// The closer of a browser call whose `browser_human_assist` pause the person denied ("Skip this
+/// site", EP-1 S2, D3-647): the held page is released and the model reads
+/// `browser_site_skipped` instead of the generic declined sentence. `None` when `tool_name` is not a
+/// Do browser tool, the help switch is off, or the run holds no page for a person: the generic
+/// [`decision_closer`] then applies unchanged. The person's reason is never read here.
+pub(crate) async fn skipped_site_closer(
+    dispatch: &crate::browser_session::BrowserDispatch<'_>,
+    quarry: Option<&crate::quarry_agent::QuarryAgentClient>,
+    tool_name: &str,
+) -> Option<String> {
+    if !crate::browser_session::is_do_tool(tool_name) {
+        return None;
+    }
+    crate::browser_session::skip_site(dispatch, quarry)
+        .await
+        .map(crate::browser_session::Refusal::text)
+}
+
 // ---------------------------------------------------------------------------------------
 // The in-place resume (build plan WS03 S7b).
 //

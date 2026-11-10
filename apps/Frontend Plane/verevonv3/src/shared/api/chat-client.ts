@@ -111,6 +111,27 @@ function stringList(value: unknown): string[] {
     : []
 }
 
+/**
+ * A persisted deep-research plan (`research_plan`, EP-2 S5) back to the card's shape, or `undefined` when it
+ * is not an object or holds no sub-query. Read by name: the record's version and any other key are dropped.
+ * The cap is the record's own `caps.max_sub_queries` when it has one (the BFF transcript relays none), never
+ * below the stored sub-query count.
+ */
+export function normalizeStoredResearchPlan(value: unknown): ChatResearchPlanEvent | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const subQueries = stringList(record.sub_queries)
+  if (subQueries.length === 0) return undefined
+  const caps = record.caps && typeof record.caps === 'object' ? (record.caps as Record<string, unknown>) : undefined
+  const stored = caps?.max_sub_queries
+  const cap = typeof stored === 'number' && Number.isInteger(stored) && stored > 0 ? stored : RESEARCH_PLAN_DEFAULT_MAX_SUB_QUERIES
+  return {
+    subQueries,
+    questions: stringList(record.questions).slice(0, 3),
+    maxSubQueries: Math.max(cap, subQueries.length),
+  }
+}
+
 function wideResearchWire(
   start: WideResearchStart,
 ): { item_cap?: number; items?: string[] } | { retry_of_child_run_id: string; batch_id?: string } {
@@ -1376,6 +1397,8 @@ export type ChatMessage = {
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   /** The context chips a user turn was sent with (EP-3 S5), from `metadata.context_refs`: kind, id and label only. */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /** The plan an assistant plan turn ended with (EP-2 S5), from `metadata.research_plan`: sub-queries and questions only. */
+  researchPlan?: ChatResearchPlanEvent
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -3045,7 +3068,7 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
     return {
       code: err.code ?? 'forbidden',
       message: err.message,
-      ...(err.details ? { details: err.details } : {}),
+      ...(err.details && !Array.isArray(err.details) ? { details: err.details } : {}),
     }
   }
   if (err instanceof ApiError && err.status === 401) {
@@ -4016,7 +4039,7 @@ export async function restoreArtifactRevision(input: {
 /** The head another tab or turn moved the artifact to, when `error` is the edit routes' `revision_mismatch`. */
 export function artifactConflictHeadVersion(error: unknown): number | null {
   if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'revision_mismatch') return null
-  const head = error.details?.head_version
+  const head = Array.isArray(error.details) ? undefined : error.details?.head_version
   return typeof head === 'number' && Number.isInteger(head) && head > 0 ? head : null
 }
 
@@ -4187,6 +4210,8 @@ export type ComposerCapabilities = {
   selectionEdit: boolean
   /** Save an artifact revision to knowledge (EP-3 S8): the BFF's own switch, added to the gateway's answer. */
   artifactPromote: boolean
+  /** Deep research over the organization's knowledge (EP-2 S7): the gateway's switch, off for a ZDR caller. */
+  deepResearchKnowledge: boolean
 }
 
 export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
@@ -4196,6 +4221,7 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
   threadReferences: false,
   selectionEdit: false,
   artifactPromote: false,
+  deepResearchKnowledge: false,
 }
 
 /**
@@ -4217,6 +4243,7 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
     threadReferences: record?.thread_references === true,
     selectionEdit: record?.selection_edit === true,
     artifactPromote: record?.artifact_promote === true,
+    deepResearchKnowledge: record?.deep_research_knowledge === true,
   }
 }
 
@@ -4526,6 +4553,8 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       // The chips the turn was sent with (EP-3 S5), read by name and normalized like the wire: a turn
       // recorded before references existed has no key at all.
       ...contextRefsField(objectValue(item.metadata)?.context_refs),
+      // The plan an assistant plan turn ended with (EP-2 S5), read by name like the chips above.
+      ...researchPlanField(objectValue(item.metadata)?.research_plan ?? item.research_plan),
       // Turn metadata the backend flattens onto the message. Present only for
       // assistant turns recorded since the score became durable, so a missing
       // field means "not recorded" — never a score of zero.
@@ -4539,6 +4568,12 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
 function contextRefsField(value: unknown): { contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[] } {
   const refs = normalizeContextRefs(value)
   return refs.length > 0 ? { contextRefs: refs } : {}
+}
+
+/** The `researchPlan` key for a turn that stored a plan, and no key at all for one that did not. */
+function researchPlanField(value: unknown): { researchPlan?: ChatResearchPlanEvent } {
+  const plan = normalizeStoredResearchPlan(value)
+  return plan ? { researchPlan: plan } : {}
 }
 
 /** A turn's place in a versioned thread, read by name. A malformed place is dropped, never guessed. */

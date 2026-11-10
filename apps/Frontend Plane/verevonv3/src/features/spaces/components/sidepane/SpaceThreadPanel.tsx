@@ -96,7 +96,11 @@ export function SpaceThreadPanel(props: SpaceThreadPanelProps) {
       } catch (error) {
         if (error instanceof ApiError && error.status === 403) {
           return readSpaceDenial(error)
-            ? { threadId, state: 'restricted', denial: { code: error.code, details: error.details } }
+            ? {
+                threadId,
+                state: 'restricted',
+                denial: { code: error.code, details: Array.isArray(error.details) ? null : error.details },
+              }
             : { threadId, state: 'restricted' }
         }
         if (error instanceof ApiError && error.status === 404) return { threadId, state: 'missing' }

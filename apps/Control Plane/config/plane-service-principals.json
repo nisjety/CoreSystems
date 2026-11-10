@@ -286,14 +286,16 @@
     "consumerEnv": "INFERENCE_ROUTING_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
-      "session-core": "zdr"
+      "session-core": "persistent"
     },
     "scopes": [
-      "routing:read"
+      "routing:read",
+      "session:request-snapshots:write"
     ],
     "scopesByAudience": {
       "session-core": [
-        "routing:read"
+        "routing:read",
+        "session:request-snapshots:write"
       ]
     }
   },

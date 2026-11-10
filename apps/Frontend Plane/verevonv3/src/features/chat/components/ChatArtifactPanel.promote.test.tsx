@@ -57,6 +57,7 @@ const PROMOTE_ON: ComposerCapabilities = {
   threadReferences: false,
   selectionEdit: false,
   artifactPromote: true,
+  deepResearchKnowledge: false,
 }
 
 beforeEach(() => {

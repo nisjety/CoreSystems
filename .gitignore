@@ -239,5 +239,7 @@ DEPLOYED_SERVICES_CREDENTIALS.txt
 **/DEPLOYED_SERVICES_CREDENTIALS.txt
 .env.generated-secrets
 **/.env.generated-secrets
+# Model Plane: the optional Vertex Gemini service-account key mount (docker-compose.yml).
+apps/Model Plane/deploy/secrets/vertex-gemini/
 .vercel
 .env*

@@ -1377,9 +1377,27 @@ services:
       INFERENCE_ROUTE_NOTE: ${INFERENCE_ROUTE_NOTE:-false}
       # EP-14 S6: capture of what each model call was sent (off until S7 and D3).
       INFERENCE_REQUEST_CAPTURE: ${INFERENCE_REQUEST_CAPTURE:-false}
-      # EP-14 S10: a policy PUT must go through a candidate. Keep it off: this build answers
-      # 503 candidate_store_unwired with it on (owner decision D9 and the candidate client are open).
+      # EP-14 S10: a policy PUT must go through a candidate: with it on, PUT answers 202 with the
+      # candidate id and offline diff, and POST /internal/v1/router-policy/candidates/:id/promote
+      # makes an evaluated candidate live. Needs SESSION_CORE_ROUTING_CANDIDATES_ENABLED on
+      # session-core (otherwise 503 candidate_store_disabled). Only the literal true enables it.
       ROUTING_POLICY_PROMOTION_REQUIRED: ${ROUTING_POLICY_PROMOTION_REQUIRED:-false}
+      # EP-13 S6-S8: Vertex AI Gemini, a provider route that stays OFF. Only the literal
+      # `true` enables it. Read before turning it on: it is EU-resident only when the
+      # location is an EU one, it is NOT ZDR-capable (a ZDR turn skips it, and the release
+      # gate refuses any VERTEX_GEMINI_ZDR_* key), and Gemini calls cost money that is not
+      # priced yet (the cost-core price row needs owner decision D2). The release gate
+      # checks project, an EU location and the model list when the switch is true.
+      VERTEX_GEMINI_ENABLED: ${VERTEX_GEMINI_ENABLED:-false}
+      VERTEX_GEMINI_PROJECT: ${VERTEX_GEMINI_PROJECT:-}
+      VERTEX_GEMINI_LOCATION: ${VERTEX_GEMINI_LOCATION:-}
+      VERTEX_GEMINI_MODELS: ${VERTEX_GEMINI_MODELS:-}
+      # Path of the mounted service-account key inside the container. The key is a secret
+      # held outside this file: it is mounted from VERTEX_GEMINI_MOUNT_DIR (below).
+      VERTEX_GEMINI_CREDENTIALS_FILE: ${VERTEX_GEMINI_CREDENTIALS_FILE:-/run/secrets/vertex_gemini/credentials.json}
+      # EP-13: send `thinkingConfig` to Gemini and list effort levels for it. Only the
+      # literal `true`; off, a Gemini request is byte-identical to before.
+      INFERENCE_GEMINI_EFFORT_ENABLED: ${INFERENCE_GEMINI_EFFORT_ENABLED:-false}
       # Optional ChatGPT subscription route. Add openai-codex-subscription to
       # INFERENCE_PROVIDER_ORDER only after setting all three variables. This
       # service gets an opaque connection id plus this dedicated service key;
@@ -1541,6 +1559,12 @@ services:
         aliases:
           - model-plane-inference-core-1
           - inference-core
+    # Optional Vertex Gemini key mount. This is a directory bind, not a Docker secret, so
+    # compose still starts when nothing is there (a missing host directory is created
+    # empty). Put the service-account key in it as credentials.json. The directory holds
+    # a secret: keep it out of git and out of images.
+    volumes:
+      - ${VERTEX_GEMINI_MOUNT_DIR:-./secrets/vertex-gemini}:/run/secrets/vertex_gemini:ro
     depends_on:
       nats:
         condition: service_healthy
@@ -1743,6 +1767,11 @@ services:
       # read-back; an outage or a missing verifier is reported as "could not
       # verify", never as a failure.
       EXECUTION_POST_MUTATION_VERIFY_ENABLED: ${EXECUTION_POST_MUTATION_VERIFY_ENABLED:-false}
+      # EP-11 S3 for Do runs. A RunAgent run records the skill versions it
+      # injected, and reattach_skill reads the pinned version when the skill has
+      # changed mid-run. Never for a zero-retention or waived run. Only the literal
+      # "true" turns it on.
+      EXECUTION_CORE_SKILL_PINS: ${EXECUTION_CORE_SKILL_PINS:-false}
       # Wide-research fan-out (the subagent.research_fan_out tool). Not
       # secrets — behaviour knobs. WIDE_RESEARCH_FAN_OUT_ENABLED=false stops
       # the tool being offered or dispatched without a rebuild (the kill switch
@@ -2071,6 +2100,10 @@ services:
       # logs a WARN: ratings survive only until the next restart, so a skill can
       # never accumulate enough samples to be promoted.
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
+      # EP-11 S3 part b: key ratings by skill version (`id@N`) and quarantine only
+      # when the newest rated version is below the bar. Only the literal `true`
+      # turns it on; off pools every rating per skill id. Needs migration 0003.
+      FEEDBACK_SKILL_VERSIONS: ${FEEDBACK_SKILL_VERSIONS:-false}
       # --- StartWorkflow (OrchestratorWorkflowService) -----------------------
       # The production entry point into the durable Temporal tier. It is the ONLY
       # locally-authenticated RPC here; the OrchestrationCoreService methods stay

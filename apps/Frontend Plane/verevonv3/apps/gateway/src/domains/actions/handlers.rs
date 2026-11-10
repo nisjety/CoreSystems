@@ -694,7 +694,7 @@ pub(super) async fn execute_action(
         "spaces.set_agent_state" => {
             dispatch_space_set_agent_state(&state, &user, &body.input).await
         }
-        "spaces.revoke_agent" => dispatch_space_revoke_agent(&state, &user, &body.input).await,
+        "spaces.revoke_agent" => dispatch_space_revoke_agent(&state, &user, &headers, &body.input).await,
         "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
         "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
         "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,

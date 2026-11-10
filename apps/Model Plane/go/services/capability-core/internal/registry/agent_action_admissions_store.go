@@ -77,3 +77,35 @@ func (s *AgentActionAdmissionsStore) ListEnabled(ctx context.Context, actionIDs 
 	}
 	return out, rows.Err()
 }
+
+// ListAllEnabled returns every enabled row, ordered by action id. It backs the read-only
+// owner-actions listing: declared and retired rows are never returned, so the list can only
+// name actions the run view could offer.
+func (s *AgentActionAdmissionsStore) ListAllEnabled(ctx context.Context) ([]*AgentActionAdmission, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT action_id, tool_name, capability_id, model_access, side_effect_class, approval_floor,
+		       authority, hash_basis, action_schema_hash, parameters_json, description,
+		       requires_approval, status
+		FROM agent_action_admissions
+		WHERE status = $1
+		ORDER BY action_id
+	`, AgentActionAdmissionEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("list all enabled agent action admissions: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*AgentActionAdmission
+	for rows.Next() {
+		row := &AgentActionAdmission{}
+		if err := rows.Scan(
+			&row.ActionID, &row.ToolName, &row.CapabilityID, &row.ModelAccess, &row.SideEffectClass,
+			&row.ApprovalFloor, &row.Authority, &row.HashBasis, &row.ActionSchemaHash,
+			&row.ParametersJSON, &row.Description, &row.RequiresApproval, &row.Status,
+		); err != nil {
+			return nil, fmt.Errorf("scan agent action admission: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}

@@ -13,7 +13,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
-    DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest,
+    DeleteMemoryRequest, DeleteMemoryResponse, EraseAgentMemoryRequest, EraseAgentMemoryResponse,
+    GetMemoryControlsRequest,
     GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
     ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
     MemoryHealthResponse, MemoryState, RebuildUserProfileRequest, ResetMemoryRequest,
@@ -1142,6 +1143,64 @@ impl MemoryService for MemoryGrpc {
             true,
             degradation_reason.or(ancestor_degradation),
         )))
+    }
+
+    async fn erase_agent_memory(
+        &self,
+        request: Request<EraseAgentMemoryRequest>,
+    ) -> Result<Response<EraseAgentMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        let (org_id, user_id, space_id, agent_subject_id) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.agent_subject_id.trim(),
+        );
+        if org_id.is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if user_id.is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        if space_id.is_empty() {
+            return Err(Status::invalid_argument("space_id is required"));
+        }
+        if agent_subject_id.is_empty() {
+            return Err(Status::invalid_argument("agent_subject_id is required"));
+        }
+        // The same authority as a Space memory list or delete: a person, the caller's own org and user,
+        // a verified Control decision for this Space and this agent (issued to the Space's owner or
+        // admin), and no membership revocation. Allowed under every retention posture: removing is
+        // never storing, and the call carries ids, never content.
+        self.authorize_space_memory(
+            &caller,
+            org_id,
+            user_id,
+            space_id,
+            req.space_control_decision_ref.trim(),
+            req.space_control_decision_token.trim(),
+            crate::grpc::SPACE_MEMORY_OPERATION_ERASE_AGENT,
+            agent_subject_id,
+        )
+        .await?;
+        // With agent memory off no agent row is written or read, so there is nothing to erase.
+        if !crate::space_memory::agent_enabled() {
+            return Ok(Response::new(EraseAgentMemoryResponse { erased: 0 }));
+        }
+        let erased = crate::space_memory::erase_agent_memory(&self.pool, org_id, space_id, agent_subject_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        // Ids and a count only, never content: who erased which agent's notes in which Space.
+        tracing::info!(
+            org_id,
+            space_id,
+            agent_subject_id,
+            actor = user_id,
+            erased,
+            "agent memory erased on binding revocation"
+        );
+        Ok(Response::new(EraseAgentMemoryResponse { erased }))
     }
 
     async fn health(

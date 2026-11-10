@@ -238,7 +238,8 @@ pub(crate) async fn list_artifact_revisions(
 }
 
 /// What the composer and the Output panel may offer, from this gateway's own switches. Each field
-/// follows the switch behind it; the two reference fields are set by `with_reference_switches`.
+/// follows the switch behind it; the two reference fields are set by `with_reference_switches`, and
+/// `deep_research_knowledge` by `with_deep_research_switch`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComposerCapabilities {
     artifact_history: bool,
@@ -246,6 +247,7 @@ pub(crate) struct ComposerCapabilities {
     context_refs: bool,
     thread_references: bool,
     selection_edit: bool,
+    deep_research_knowledge: bool,
 }
 
 fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> ComposerCapabilities {
@@ -258,6 +260,8 @@ fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> Co
         context_refs: false,
         thread_references: false,
         selection_edit: crate::selection_guard::enabled_for(mode) && !zdr,
+        // Set by `with_deep_research_switch`, which reads the switch this pure function does not.
+        deep_research_knowledge: false,
     }
 }
 
@@ -274,6 +278,18 @@ fn with_reference_switches(
     capabilities
 }
 
+/// Deep research over the organization's knowledge follows its own switch (EP-2 S7, read by
+/// `deep_research::knowledge_sources_enabled`). A ZDR caller is offered none: deep research is refused
+/// for every zero-retention turn, whatever its scope.
+fn with_deep_research_switch(
+    mut capabilities: ComposerCapabilities,
+    knowledge_sources: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.deep_research_knowledge = knowledge_sources && !zdr;
+    capabilities
+}
+
 pub(crate) async fn composer_capabilities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -285,12 +301,17 @@ pub(crate) async fn composer_capabilities(
     )
     .unwrap_or(true);
     let context_refs = crate::context_refs::enabled();
+    let deep_research_knowledge = crate::deep_research::knowledge_sources_enabled();
     Json(json!({
-        "data": with_reference_switches(
-            capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
-            context_refs,
-            // A thread is referenced only through a reference, so its tools need the reference switch too.
-            context_refs && crate::thread_reference_tools::enabled(),
+        "data": with_deep_research_switch(
+            with_reference_switches(
+                capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
+                context_refs,
+                // A thread is referenced only through a reference, so its tools need the reference switch too.
+                context_refs && crate::thread_reference_tools::enabled(),
+                zdr,
+            ),
+            deep_research_knowledge,
             zdr,
         )
     }))
@@ -686,6 +707,7 @@ mod tests {
                 "context_refs": false,
                 "thread_references": false,
                 "selection_edit": false,
+                "deep_research_knowledge": false,
             }})
         );
     }

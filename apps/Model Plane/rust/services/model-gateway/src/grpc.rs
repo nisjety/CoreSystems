@@ -3998,6 +3998,14 @@ mod tests {
             Err(Status::unimplemented("reset_memory not needed in test"))
         }
 
+        async fn erase_agent_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::EraseAgentMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::EraseAgentMemoryResponse>, Status>
+        {
+            Err(Status::unimplemented("erase_agent_memory not needed in test"))
+        }
+
         async fn get_user_profile(
             &self,
             _: Request<mp_contracts::model_plane::v1::GetUserProfileRequest>,

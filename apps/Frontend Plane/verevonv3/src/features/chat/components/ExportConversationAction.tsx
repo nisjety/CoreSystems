@@ -186,7 +186,9 @@ function failureOf(error: unknown): Failure {
   if (typeof error !== 'object' || error === null) return {}
   const record = error as { code?: unknown; feature?: unknown; message?: unknown; details?: unknown }
   const details =
-    typeof record.details === 'object' && record.details !== null ? (record.details as Record<string, unknown>) : {}
+    typeof record.details === 'object' && record.details !== null && !Array.isArray(record.details)
+      ? (record.details as Record<string, unknown>)
+      : {}
   return {
     code: typeof record.code === 'string' ? record.code : undefined,
     feature: typeof record.feature === 'string' ? record.feature : undefined,

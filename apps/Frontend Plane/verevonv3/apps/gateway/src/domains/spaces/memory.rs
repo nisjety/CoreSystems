@@ -46,6 +46,9 @@ const MAX_MEMORY_ID_LEN: usize = 64;
 /// The two operations a Control Space memory decision binds; Session Core's names.
 const OPERATION_LIST: &str = "list";
 const OPERATION_DELETE: &str = "delete";
+/// The decision operation that erases one named agent's memory in the Space (EP-6 P3). Its
+/// `memory_id` is the agent's subject id, so one decision erases one agent's rows only.
+const OPERATION_ERASE_AGENT: &str = "erase_agent";
 
 const DENIED: &str = "Managing this Space's memory is not authorized.";
 
@@ -239,6 +242,81 @@ async fn space_memory_core(
     )
     .await;
     relay_answer(status, &response, operation, memory_id)
+}
+
+/// Best-effort erase of one named agent's memory once its binding is revoked (EP-6 P3, EP-8 S10).
+///
+/// Runs after the revocation has landed and never changes the revoke's answer: any failure here is
+/// logged by status only and the revoke still succeeds. Not behind the Space memory UI flag, since
+/// that flag gates a screen, not whether a revoked agent's notes may outlive its binding. Session
+/// Core is the authority: it verifies the fresh Control decision issued for THIS agent, and erases
+/// nothing (answers zero) while agent memory is off. Allowed under every retention posture: the
+/// call removes rows and carries ids, never content, and only a row count is logged.
+pub(super) async fn erase_agent_memory_after_revocation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+    space_ref: &str,
+    agent_subject_id: &str,
+) {
+    let space_ref = space_ref.trim();
+    let agent_subject_id = agent_subject_id.trim();
+    if org_id.trim().is_empty() || !valid_space_ref(space_ref) || !valid_memory_id(agent_subject_id) {
+        tracing::warn!("revoked agent memory erase skipped: no valid Space or agent subject");
+        return;
+    }
+    let (decision_ref, token) = match space_memory_decision(
+        state,
+        user,
+        org_id,
+        space_ref,
+        OPERATION_ERASE_AGENT,
+        agent_subject_id,
+    )
+    .await
+    {
+        Ok(decision) => decision,
+        Err((status, _)) => {
+            tracing::warn!(%status, "revoked agent memory erase skipped: Control gave no decision");
+            return;
+        }
+    };
+    let session_token =
+        match crate::domains::chat::shared::required_session_token(state, user, headers).await {
+            Ok(token) => token,
+            Err(_) => {
+                tracing::warn!("revoked agent memory erase skipped: delegated credentials unavailable");
+                return;
+            }
+        };
+    let model_token = crate::domains::chat::shared::model_token(state, user, headers).await;
+    let url = format!(
+        "{}/v1/spaces/{}/agents/{}/memory/erase",
+        state.model_gateway_url,
+        urlencoding::encode(space_ref),
+        urlencoding::encode(agent_subject_id),
+    );
+    let (status, Json(response)) = crate::domains::chat::shared::proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_control_decision_ref": decision_ref,
+            "space_control_decision_token": token,
+        })),
+        model_token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if status.is_success() {
+        // A count only, never content.
+        let erased = response.get("erased").and_then(Value::as_u64).unwrap_or(0);
+        tracing::info!(erased, "revoked agent memory erased");
+    } else {
+        tracing::warn!(%status, "revoked agent memory erase failed");
+    }
 }
 
 /// Asks Control for the `model.space.memory.manage` decision of this call. A refusal (a member

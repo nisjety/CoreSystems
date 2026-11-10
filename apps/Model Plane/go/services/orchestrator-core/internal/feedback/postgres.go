@@ -12,7 +12,7 @@ import (
 )
 
 // PostgresStore is the durable rating sink. One row per
-// (org_id, run_id, user_id, skill_id); a re-rating UPSERTs, so a user who clicks
+// (org_id, run_id, user_id, skill_id, skill_version, source, signal_kind); a re-rating UPSERTs, so a user who clicks
 // thumbs-up then thumbs-down leaves one row with the latest value rather than
 // two contradictory samples.
 //
@@ -56,13 +56,16 @@ func (s *PostgresStore) Record(ctx context.Context, r Rating) error {
 		return err
 	}
 	// The conflict target includes source and signal_kind, so an implicit signal
-	// can never upsert over a human's rating — see migration 0002.
+	// can never upsert over a human's rating — see migration 0002. It also
+	// includes skill_version (migration 0003; always 0 while
+	// FEEDBACK_SKILL_VERSIONS is off), so rating v3 and v4 of one skill on the
+	// same run leaves two rows.
 	const q = `
 		INSERT INTO feedback_ratings
-			(org_id, user_id, run_id, skill_id, from_scope, to_scope, rating, note,
+			(org_id, user_id, run_id, skill_id, skill_version, from_scope, to_scope, rating, note,
 			 source, signal_kind, signal_strength, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
-		ON CONFLICT (org_id, run_id, user_id, skill_id, source, signal_kind) DO UPDATE SET
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+		ON CONFLICT (org_id, run_id, user_id, skill_id, skill_version, source, signal_kind) DO UPDATE SET
 			from_scope      = EXCLUDED.from_scope,
 			to_scope        = EXCLUDED.to_scope,
 			rating          = EXCLUDED.rating,
@@ -70,7 +73,7 @@ func (s *PostgresStore) Record(ctx context.Context, r Rating) error {
 			signal_strength = EXCLUDED.signal_strength,
 			updated_at      = EXCLUDED.updated_at`
 	if _, err := s.pool.Exec(ctx, q,
-		clean.OrgID, clean.UserID, clean.RunID, clean.SkillID,
+		clean.OrgID, clean.UserID, clean.RunID, clean.SkillID, clean.SkillVersion,
 		clean.FromScope, clean.ToScope, clean.Rating, clean.Note,
 		clean.Source, clean.SignalKind, clean.SignalStrength, clean.CreatedAt,
 	); err != nil {
@@ -87,45 +90,51 @@ func (s *PostgresStore) Record(ctx context.Context, r Rating) error {
 // Skill-attached rows only: quarantining acts on a skill, and a run-level rating
 // (skill_id ”) names nothing to act on.
 func (s *PostgresStore) Quarantine(ctx context.Context) ([]QuarantineCandidate, error) {
+	// Grouped by skill_version too; the Go side buckets by version only while
+	// FEEDBACK_SKILL_VERSIONS is on, so off it pools them back into one verdict.
 	const q = `
-		SELECT org_id, skill_id,
+		SELECT org_id, skill_id, skill_version,
 		       COUNT(*) FILTER (WHERE source = 'explicit' AND rating = $1)  AS explicit_good,
 		       COUNT(*) FILTER (WHERE source = 'explicit' AND rating <> $1) AS explicit_bad,
 		       COALESCE(SUM(signal_strength) FILTER (WHERE source = 'implicit'), 0) AS implicit_bad
 		FROM feedback_ratings
 		WHERE skill_id <> ''
-		GROUP BY org_id, skill_id`
+		GROUP BY org_id, skill_id, skill_version`
 	rows, err := s.pool.Query(ctx, q, RatingGood)
 	if err != nil {
 		return nil, fmt.Errorf("feedback: query quarantine candidates: %w", err)
 	}
 	defer rows.Close()
 
-	out := make([]QuarantineCandidate, 0)
+	versioned := SkillVersionsEnabled()
+	evidence := make(map[skillKey]map[int]quality.Evidence)
 	for rows.Next() {
-		var candidate QuarantineCandidate
+		var orgID, skillID string
+		var version int
 		var good, bad int64
 		var implicitBad float64
-		if err := rows.Scan(
-			&candidate.OrgID, &candidate.SkillID, &good, &bad, &implicitBad,
-		); err != nil {
+		if err := rows.Scan(&orgID, &skillID, &version, &good, &bad, &implicitBad); err != nil {
 			return nil, fmt.Errorf("feedback: scan quarantine candidate: %w", err)
 		}
-		candidate.Score = quality.Evaluate(quality.Evidence{
+		sk := skillKey{orgID, skillID}
+		if evidence[sk] == nil {
+			evidence[sk] = make(map[int]quality.Evidence)
+		}
+		bucket := bucketVersion(version, versioned)
+		agg := aggregate{evidence: evidence[sk][bucket]}
+		agg.merge(quality.Evidence{
 			ExplicitGood:      int(good),
 			ExplicitBad:       int(bad),
 			ImplicitBadWeight: implicitBad,
 		})
-		if quality.Decide(quality.StateActive, candidate.Score) != quality.DecisionQuarantine {
-			continue
-		}
-		out = append(out, candidate)
+		evidence[sk][bucket] = agg.evidence
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("feedback: iterate quarantine candidates: %w", err)
 	}
-	sortQuarantine(out)
-	return out, nil
+	// Each skill is judged on its current version only (quality.EvaluateCurrent),
+	// so a poor v3 does not quarantine the v4 that replaced it.
+	return quarantineFromVersions(evidence), nil
 }
 
 func (s *PostgresStore) Candidates(ctx context.Context, minSamples int, threshold float64) ([]Candidate, error) {
@@ -133,34 +142,56 @@ func (s *PostgresStore) Candidates(ctx context.Context, minSamples int, threshol
 	// then two stores would each carry a copy of the policy and they would drift —
 	// and the drift that matters is one store promoting what the other would not.
 	const q = `
-		SELECT org_id, skill_id, from_scope, to_scope,
+		SELECT org_id, skill_id, skill_version, from_scope, to_scope,
 		       COUNT(*) FILTER (WHERE source = 'explicit' AND rating = $1)  AS explicit_good,
 		       COUNT(*) FILTER (WHERE source = 'explicit' AND rating <> $1) AS explicit_bad,
 		       COALESCE(SUM(signal_strength) FILTER (WHERE source = 'implicit'), 0) AS implicit_bad
 		FROM feedback_ratings
 		WHERE skill_id <> ''
-		GROUP BY org_id, skill_id, from_scope, to_scope`
+		GROUP BY org_id, skill_id, skill_version, from_scope, to_scope`
 	rows, err := s.pool.Query(ctx, q, RatingGood)
 	if err != nil {
 		return nil, fmt.Errorf("feedback: query candidates: %w", err)
 	}
 	defer rows.Close()
 
-	var out []Candidate
+	// Bucket by version only while FEEDBACK_SKILL_VERSIONS is on; off, rows of
+	// every version fold into one bucket per scope pair, as before.
+	versioned := SkillVersionsEnabled()
+	groups := make(map[groupKey]*aggregate)
 	for rows.Next() {
-		var c Candidate
+		var gk groupKey
+		var version int
 		var good, bad int64
 		var implicitBad float64
 		if err := rows.Scan(
-			&c.OrgID, &c.SkillID, &c.FromScope, &c.ToScope, &good, &bad, &implicitBad,
+			&gk.orgID, &gk.skillID, &version, &gk.fromScope, &gk.toScope, &good, &bad, &implicitBad,
 		); err != nil {
 			return nil, fmt.Errorf("feedback: scan candidate: %w", err)
 		}
-		score := quality.Evaluate(quality.Evidence{
+		gk.skillVersion = bucketVersion(version, versioned)
+		agg, ok := groups[gk]
+		if !ok {
+			agg = &aggregate{}
+			groups[gk] = agg
+		}
+		agg.merge(quality.Evidence{
 			ExplicitGood:      int(good),
 			ExplicitBad:       int(bad),
 			ImplicitBadWeight: implicitBad,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("feedback: iterate candidates: %w", err)
+	}
+	if versioned {
+		// Promotion is judged on the version that would actually be served.
+		keepCurrentVersions(groups)
+	}
+
+	var out []Candidate
+	for gk, agg := range groups {
+		score := quality.Evaluate(agg.evidence)
 		// The caller's threshold still governs promotion — an operator's
 		// configured bar is not this package's to override. What changed is WHAT
 		// it is compared against: the Wilson lower bound rather than the raw
@@ -174,13 +205,16 @@ func (s *PostgresStore) Candidates(ctx context.Context, minSamples int, threshol
 		if score.LowerBound < threshold {
 			continue
 		}
-		c.Good = int(good)
-		c.Total = int(good + bad)
-		c.Score = score.LowerBound
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("feedback: iterate candidates: %w", err)
+		out = append(out, Candidate{
+			OrgID:        gk.orgID,
+			SkillID:      gk.skillID,
+			SkillVersion: gk.skillVersion,
+			FromScope:    gk.fromScope,
+			ToScope:      gk.toScope,
+			Good:         agg.evidence.ExplicitGood,
+			Total:        agg.evidence.ExplicitGood + agg.evidence.ExplicitBad,
+			Score:        score.LowerBound,
+		})
 	}
 	sortCandidates(out)
 	return out, nil

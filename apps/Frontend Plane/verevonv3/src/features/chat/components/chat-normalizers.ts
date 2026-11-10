@@ -11,9 +11,11 @@ import {
   type ChatMessage,
   type CitationLocator,
   getAttachmentPolicy,
+  normalizeStoredResearchPlan,
   type RecalledMemory,
   type ResearchProvenance,
 } from '@/shared/api/chat-client'
+import { normalizeContextRefs } from '@/shared/actions/chat-context-refs'
 import {
   isModelEntitlementCode,
   type ModelEntitlementCode,
@@ -90,6 +92,7 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     sourceScope: msg.sourceScope,
     retrievalScope: msg.retrievalScope,
     contextRefs: msg.contextRefs,
+    researchPlan: msg.researchPlan,
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -875,6 +878,8 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     role: turn.role,
     sourceScope: turn.sourceScope === 'conversation' ? 'conversation' : 'workspace',
     retrievalScope: turn.retrievalScope === 'knowledge_only' || turn.retrievalScope === 'web_only' ? turn.retrievalScope : undefined,
+    ...restoredContextRefsField(turn.contextRefs),
+    ...restoredResearchPlanField(turn.researchPlan),
     content: visibleTurnContent(turn.role, turn.content),
     createdAt: turn.createdAt,
     streaming: false,
@@ -911,6 +916,21 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     connectorSuggestion: restoredConnectorSuggestion(turn.connectorSuggestion),
     attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
   }
+}
+
+/** The `contextRefs` key for a transcript turn that carries chips, and no key at all for one that does not. */
+function restoredContextRefsField(value: unknown): Pick<ChatTurn, 'contextRefs'> {
+  const refs = normalizeContextRefs(value)
+  return refs.length > 0 ? { contextRefs: refs } : {}
+}
+
+/**
+ * The `researchPlan` key for a transcript turn that carries a persisted plan (EP-2 S5), and no key for
+ * one that does not. The BFF relays sub-queries and questions only, so the card gets the default cap.
+ */
+function restoredResearchPlanField(value: unknown): Pick<ChatTurn, 'researchPlan'> {
+  const plan = normalizeStoredResearchPlan(value)
+  return plan ? { researchPlan: plan } : {}
 }
 
 /**
@@ -1082,6 +1102,10 @@ export function mergeServerTurnsWithCachedMetadata(
       memoryRecallCount: serverTurn.memoryRecallCount ?? cachedTurn.memoryRecallCount,
       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
+      // The chips and the plan come from the BFF transcript (the cached side here), which flattens them off
+      // the message metadata; the messages read may carry the chips too, and wins when it does.
+      contextRefs: serverTurn.contextRefs ?? cachedTurn.contextRefs,
+      researchPlan: serverTurn.researchPlan ?? cachedTurn.researchPlan,
       // Stream-only too: the server's message never carries the suggestion card.
       connectorSuggestion: serverTurn.connectorSuggestion ?? restoredConnectorSuggestion(cachedTurn.connectorSuggestion),
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,

@@ -228,9 +228,14 @@ export interface RouterPolicyRoleIssue {
   effort?: string
 }
 
-/** The refusals in an `invalid_role_table` body that name a purpose the page shows. Anything else is dropped. */
+/**
+ * The refusals in an `invalid_role_table` body that name a purpose the page shows. Anything else is dropped. The
+ * issues sit under `details.issues`; a bare array of them, as some upstreams send, is read the same way.
+ */
 export function roleIssuesFrom(details: unknown): RouterPolicyRoleIssue[] {
-  const listed = details && typeof details === 'object' ? (details as Record<string, unknown>).issues : undefined
+  const keyed =
+    details && typeof details === 'object' && !Array.isArray(details) ? (details as Record<string, unknown>).issues : undefined
+  const listed = Array.isArray(details) ? details : keyed
   if (!Array.isArray(listed)) return []
   const issues: RouterPolicyRoleIssue[] = []
   for (const item of listed as unknown[]) {

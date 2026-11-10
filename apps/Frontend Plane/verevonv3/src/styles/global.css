@@ -23836,6 +23836,11 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-ledger__id { font-family: var(--font-mono); font-size: 11px; color: var(--verevon-e-muted); }
 .verevon-chat-ledger__copy-status { color: var(--verevon-e-subtle); font-size: 11px; }
 .verevon-chat-ledger__close { justify-self: end; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.verevon-chat-ledger__round { display: flex; align-items: baseline; justify-content: space-between; gap: 7px; padding: 4px 8px 4px 16px; color: var(--verevon-e-subtle); font-size: 11px; font-weight: 600; border-top: 1px solid var(--verevon-border-warm); }
+/* Windowed ledger (EP-14 S4): fixed-height rows so the window plan can place them; keep in step with LEDGER_ROW_HEIGHT_PX / LEDGER_VIEWPORT_PX in RunLedger.tsx. */
+.verevon-chat-ledger__window { height: 480px; overflow-y: auto; border: 1px solid var(--verevon-border-warm); border-radius: 8px; min-width: 0; }
+.verevon-chat-ledger__window .verevon-chat-ledger__turn-head, .verevon-chat-ledger__window .verevon-chat-ledger__row, .verevon-chat-ledger__window .verevon-chat-ledger__round { box-sizing: border-box; height: 30px; align-items: center; overflow: hidden; white-space: nowrap; }
+.verevon-chat-ledger__window .verevon-chat-ledger__turn-head { border-top: 1px solid var(--verevon-border-warm); }
 
 @media (max-width: 720px) {
   .verevon-chat-telemetry {
@@ -50577,6 +50582,15 @@ so it
 .dashboard-composer-model-price { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
 /* EP-9-C5: provider data-use line under a model name in the composer picker */
 .dashboard-composer-model-data-use { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
+/* EP-13-S2: record v2 in the composer picker: the context window under a name, the preview chip, and the folded older models */
+.dashboard-composer-model-context { display: block; margin-top: 1px; font-size: 11px; font-weight: 400; color: var(--verevon-text-muted); }
+.dashboard-composer-model-badge--preview { background: transparent; border: 1px solid var(--verevon-border); color: var(--verevon-text-muted); }
+.dashboard-composer-model-group--folded { display: block; }
+.dashboard-composer-model-group--folded > summary { cursor: pointer; list-style: none; }
+.dashboard-composer-model-group--folded > summary::-webkit-details-marker { display: none; }
+.dashboard-composer-model-group--folded > summary::before { content: '\25B8'; display: inline-block; margin-right: 6px; transition: transform 140ms ease; }
+.dashboard-composer-model-group--folded[open] > summary::before { transform: rotate(90deg); }
+.dashboard-composer-model-group--folded > summary:hover { color: var(--verevon-j-text); }
 .dashboard-composer-model-empty { margin: 6px 12px; font-size: 13px; color: var(--verevon-text-muted); }
 
 /* EP-14-S3: the docked step strip. Never display:none: the live region stays in the accessibility tree. */

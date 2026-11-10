@@ -11,7 +11,7 @@ import {
   Sparkles,
   Square,
 } from '@/shared/icons'
-import type { ThreadContext } from '@/shared/api/chat-client'
+import type { ChatTurnTiming, ThreadContext } from '@/shared/api/chat-client'
 import { OPEN_FEEDBACK_EVENT } from '@/features/core/components/FeedbackWidget'
 import { isSafeLinkHref } from '../lib/safe-href'
 import {
@@ -1572,6 +1572,8 @@ export function TracePanel(props: {
   runId?: string | null
   /** A tool call the Inspect action asked the ledger to select (EP-14 S4). Read only with the ledger on. */
   inspectRequest?: { callId: string } | null
+  /** Each turn's `turn_timing` by turn id, so the ledger can show a turn's rounds. Read only with the ledger on. */
+  timings?: ReadonlyMap<string, ChatTurnTiming>
 }) {
   const i18n = useI18n()
   return (
@@ -1590,7 +1592,7 @@ export function TracePanel(props: {
           <span>{props.events.length} hendelser</span>
         </header>
         {runLedgerEnabled ? (
-          <RunLedger events={props.events} replayTruncated={props.replayTruncated} inspectRequest={props.inspectRequest} />
+          <RunLedger events={props.events} replayTruncated={props.replayTruncated} inspectRequest={props.inspectRequest} timings={props.timings} />
         ) : (
           <>
             <Show when={props.replayTruncated}>

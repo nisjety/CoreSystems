@@ -288,7 +288,10 @@ export default function RouterPolicyPage() {
       setNotice('Router policy saved.')
     } catch (reason) {
       setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre ruterpolicyen.', en: 'Could not save router policy.' }))
-      setRoleIssues(reason instanceof ApiError ? roleIssuesFrom(reason.details) : [])
+      // Only the role table refusal names rows: its issues sit under the envelope's details (or are the details).
+      setRoleIssues(
+        reason instanceof ApiError && reason.code === 'invalid_role_table' ? roleIssuesFrom(reason.details) : [],
+      )
     } finally {
       setBusy(false)
     }

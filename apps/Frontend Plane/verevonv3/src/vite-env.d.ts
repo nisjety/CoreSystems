@@ -58,6 +58,8 @@ interface ImportMetaEnv {
 	readonly VITE_SPACE_COMMAND_PALETTE_UI?: string;
 	/** "true" shows row checkboxes and "Ingest selected" on a run's fetched pages (re-fetch, then ingest). Default off. */
 	readonly VITE_INGEST_SELECTED?: string;
+	/** "true" offers `/learn` in the composer's slash menu: a request to learn from a saved conversation (EP-11 S7). Default off. */
+	readonly VITE_LEARN_COMMAND?: string;
 }
 
 interface ImportMeta {

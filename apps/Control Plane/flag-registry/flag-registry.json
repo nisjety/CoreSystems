@@ -148,6 +148,17 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_SKILL_PINS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-11 S3 for Do runs: a RunAgent run records the skill versions it injected on its run record, and reattach_skill reads the version the run pinned when the skill has changed since. Never applies to a zero-retention or waived run. Only the literal true turns it on; off, injection and recovery read the current skill row as before. Read once at start, so a change needs a restart.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_SKILL_PINS", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_DO_COMPUTER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -171,6 +182,17 @@
       ]
     },
     {
+      "name": "FEEDBACK_SKILL_VERSIONS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-11 S3 part b: keys feedback ratings by skill version and quarantines a skill only when its newest rated version is below the bar. Only the literal true turns it on; off pools every rating per skill id as before.",
+      "declarations": [
+        { "service": "orchestrator-core", "env": "FEEDBACK_SKILL_VERSIONS", "default": "false" }
+      ]
+    },
+    {
       "name": "FINETUNE_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -180,6 +202,17 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "FINETUNE_ENABLED", "default": "0" }
+      ]
+    },
+    {
+      "name": "INFERENCE_GEMINI_EFFORT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-13: sends thinkingConfig on Gemini requests and lists effort levels for Gemini models. Only the literal true turns it on; off, a Gemini request is unchanged.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_GEMINI_EFFORT_ENABLED", "default": "false" }
       ]
     },
     {
@@ -374,6 +407,17 @@
       ]
     },
     {
+      "name": "ROUTING_POLICY_PROMOTION_REQUIRED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-14 S10: a routing-policy PUT in inference-core records a candidate (202 with its offline diff) instead of writing live; POST .../candidates/:id/promote makes it live. Only the literal true enables it. Needs SESSION_CORE_ROUTING_CANDIDATES_ENABLED on session-core.",
+      "declarations": [
+        { "service": "inference-core", "env": "ROUTING_POLICY_PROMOTION_REQUIRED", "default": "false" }
+      ]
+    },
+    {
       "name": "TASK_EXECUTOR_ENABLED",
       "kind": "choice",
       "owner": "model-plane",
@@ -396,6 +440,17 @@
       "codeDefault": "true",
       "declarations": [
         { "service": "inference-core", "env": "VEREVON_INTENT_ENABLED", "default": "1" }
+      ]
+    },
+    {
+      "name": "VERTEX_GEMINI_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-13 S6-S8: registers the Vertex AI Gemini provider in inference-core. Only the literal true turns it on. EU-resident only on an EU location, not ZDR-capable (a ZDR turn skips it), and unpriced until the cost-core price row lands. The release gate checks project, EU location, models and a secret-partition key when it is true.",
+      "declarations": [
+        { "service": "inference-core", "env": "VERTEX_GEMINI_ENABLED", "default": "false" }
       ]
     },
     {

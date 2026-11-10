@@ -96,6 +96,10 @@ export type ChatThreadTranscriptTurn = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   /** See `ChatMessage.retrievalScope`. */
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /** The chips a user turn was sent with (EP-3 S5), as the BFF re-emits `metadata.context_refs`: kind, id, label only. */
+  contextRefs?: unknown[]
+  /** The plan an assistant plan turn ended with (EP-2 S5), as the BFF re-emits `metadata.research_plan`: sub-queries and questions only. */
+  researchPlan?: { sub_queries?: unknown; questions?: unknown }
   attachments?: unknown[]
   artifacts?: unknown[]
   citations?: unknown[]

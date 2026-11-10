@@ -90,7 +90,7 @@ function thrownFailure(
         code: error.code ?? 'request_failed',
         message: error.message,
         ...(error.feature ? { feature: error.feature } : {}),
-        ...(error.details ? { details: error.details } : {}),
+        ...(error.details && !Array.isArray(error.details) ? { details: error.details } : {}),
       }),
     }
   }

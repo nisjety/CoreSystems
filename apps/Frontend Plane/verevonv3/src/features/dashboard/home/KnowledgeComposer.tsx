@@ -1085,7 +1085,8 @@ export function KnowledgeComposer(props: {
     } catch (reason) {
       const apiError = reason instanceof ApiError ? reason : null
       const driverBlock = apiError?.code === 'DRIVER_FAILED' && apiError.blockReason !== null
-      const details = apiError?.code === 'DRIVER_FAILED' && !driverBlock ? apiError.details : null
+      const details =
+        apiError?.code === 'DRIVER_FAILED' && !driverBlock && !Array.isArray(apiError.details) ? apiError.details : null
       const httpResponseFailed = details?.http_status !== 407 && (
         details?.reason === 'navigation_http_response'
         || (typeof details?.error === 'string' && /\bnet::ERR_HTTP_RESPONSE_CODE_FAILURE\b/.test(details.error))

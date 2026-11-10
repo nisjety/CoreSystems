@@ -1925,6 +1925,147 @@ func (x *UserProfileResponse) GetSkipReason() string {
 	return ""
 }
 
+// Request to erase one agent's memory in one Space (EP-6 P3).
+type EraseAgentMemoryRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tenant context.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The Space the agent was bound in. Bound into the Control decision.
+	SpaceId string `protobuf:"bytes,2,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// The agent's subject id in that Space (the revoked binding's subject).
+	// Bound into the Control decision as its row id.
+	AgentSubjectId string `protobuf:"bytes,3,opt,name=agent_subject_id,json=agentSubjectId,proto3" json:"agent_subject_id,omitempty"`
+	// The Control `model.space.memory.manage` decision reference, issued for
+	// this Space and agent. Never logged.
+	SpaceControlDecisionRef string `protobuf:"bytes,4,opt,name=space_control_decision_ref,json=spaceControlDecisionRef,proto3" json:"space_control_decision_ref,omitempty"`
+	// The signed Control `model.space.memory.manage` decision token, issued for
+	// this Space and agent. Never logged.
+	SpaceControlDecisionToken string `protobuf:"bytes,5,opt,name=space_control_decision_token,json=spaceControlDecisionToken,proto3" json:"space_control_decision_token,omitempty"`
+	// The person asking. Must be the caller; the decision is issued to them.
+	UserId        string `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EraseAgentMemoryRequest) Reset() {
+	*x = EraseAgentMemoryRequest{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EraseAgentMemoryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EraseAgentMemoryRequest) ProtoMessage() {}
+
+func (x *EraseAgentMemoryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EraseAgentMemoryRequest.ProtoReflect.Descriptor instead.
+func (*EraseAgentMemoryRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *EraseAgentMemoryRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *EraseAgentMemoryRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *EraseAgentMemoryRequest) GetAgentSubjectId() string {
+	if x != nil {
+		return x.AgentSubjectId
+	}
+	return ""
+}
+
+func (x *EraseAgentMemoryRequest) GetSpaceControlDecisionRef() string {
+	if x != nil {
+		return x.SpaceControlDecisionRef
+	}
+	return ""
+}
+
+func (x *EraseAgentMemoryRequest) GetSpaceControlDecisionToken() string {
+	if x != nil {
+		return x.SpaceControlDecisionToken
+	}
+	return ""
+}
+
+func (x *EraseAgentMemoryRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+// What an agent memory erase removed.
+type EraseAgentMemoryResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How many durable agent rows were erased. Zero when the agent had none or
+	// agent memory is switched off.
+	Erased        uint64 `protobuf:"varint,1,opt,name=erased,proto3" json:"erased,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *EraseAgentMemoryResponse) Reset() {
+	*x = EraseAgentMemoryResponse{}
+	mi := &file_model_plane_v1_memory_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *EraseAgentMemoryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*EraseAgentMemoryResponse) ProtoMessage() {}
+
+func (x *EraseAgentMemoryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_memory_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use EraseAgentMemoryResponse.ProtoReflect.Descriptor instead.
+func (*EraseAgentMemoryResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_memory_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *EraseAgentMemoryResponse) GetErased() uint64 {
+	if x != nil {
+		return x.Erased
+	}
+	return 0
+}
+
 var File_model_plane_v1_memory_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_memory_proto_rawDesc = "" +
@@ -2059,7 +2200,16 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x13UserProfileResponse\x125\n" +
 	"\aprofile\x18\x01 \x01(\v2\x1b.model_plane.v1.UserProfileR\aprofile\x12\x1f\n" +
 	"\vskip_reason\x18\x02 \x01(\tR\n" +
-	"skipReason*s\n" +
+	"skipReason\"\x8c\x02\n" +
+	"\x17EraseAgentMemoryRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x19\n" +
+	"\bspace_id\x18\x02 \x01(\tR\aspaceId\x12(\n" +
+	"\x10agent_subject_id\x18\x03 \x01(\tR\x0eagentSubjectId\x12;\n" +
+	"\x1aspace_control_decision_ref\x18\x04 \x01(\tR\x17spaceControlDecisionRef\x12?\n" +
+	"\x1cspace_control_decision_token\x18\x05 \x01(\tR\x19spaceControlDecisionToken\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\"2\n" +
+	"\x18EraseAgentMemoryResponse\x12\x16\n" +
+	"\x06erased\x18\x01 \x01(\x04R\x06erased*s\n" +
 	"\x10MemoryProvenance\x12!\n" +
 	"\x1dMEMORY_PROVENANCE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18MEMORY_PROVENANCE_STATED\x10\x01\x12\x1e\n" +
@@ -2068,7 +2218,7 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x18MEMORY_STATE_UNSPECIFIED\x10\x00\x12\x13\n" +
 	"\x0fMEMORY_STATE_ON\x10\x01\x12\x17\n" +
 	"\x13MEMORY_STATE_PAUSED\x10\x02\x12\x14\n" +
-	"\x10MEMORY_STATE_OFF\x10\x032\x95\b\n" +
+	"\x10MEMORY_STATE_OFF\x10\x032\xfc\b\n" +
 	"\rMemoryService\x12Y\n" +
 	"\fSearchMemory\x12#.model_plane.v1.SearchMemoryRequest\x1a$.model_plane.v1.SearchMemoryResponse\x12V\n" +
 	"\vIndexMemory\x12\".model_plane.v1.IndexMemoryRequest\x1a#.model_plane.v1.IndexMemoryResponse\x12S\n" +
@@ -2081,7 +2231,8 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\vResetMemory\x12\".model_plane.v1.ResetMemoryRequest\x1a#.model_plane.v1.ResetMemoryResponse\x12\\\n" +
 	"\x0eGetUserProfile\x12%.model_plane.v1.GetUserProfileRequest\x1a#.model_plane.v1.UserProfileResponse\x12\\\n" +
 	"\x0eSetUserProfile\x12%.model_plane.v1.SetUserProfileRequest\x1a#.model_plane.v1.UserProfileResponse\x12d\n" +
-	"\x12RebuildUserProfile\x12).model_plane.v1.RebuildUserProfileRequest\x1a#.model_plane.v1.UserProfileResponseB\xb3\x01\n" +
+	"\x12RebuildUserProfile\x12).model_plane.v1.RebuildUserProfileRequest\x1a#.model_plane.v1.UserProfileResponse\x12e\n" +
+	"\x10EraseAgentMemory\x12'.model_plane.v1.EraseAgentMemoryRequest\x1a(.model_plane.v1.EraseAgentMemoryResponseB\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vMemoryProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -2097,7 +2248,7 @@ func file_model_plane_v1_memory_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_memory_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_model_plane_v1_memory_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_model_plane_v1_memory_proto_goTypes = []any{
 	(MemoryProvenance)(0),             // 0: model_plane.v1.MemoryProvenance
 	(MemoryState)(0),                  // 1: model_plane.v1.MemoryState
@@ -2124,20 +2275,22 @@ var file_model_plane_v1_memory_proto_goTypes = []any{
 	(*SetUserProfileRequest)(nil),     // 22: model_plane.v1.SetUserProfileRequest
 	(*RebuildUserProfileRequest)(nil), // 23: model_plane.v1.RebuildUserProfileRequest
 	(*UserProfileResponse)(nil),       // 24: model_plane.v1.UserProfileResponse
-	(*timestamppb.Timestamp)(nil),     // 25: google.protobuf.Timestamp
+	(*EraseAgentMemoryRequest)(nil),   // 25: model_plane.v1.EraseAgentMemoryRequest
+	(*EraseAgentMemoryResponse)(nil),  // 26: model_plane.v1.EraseAgentMemoryResponse
+	(*timestamppb.Timestamp)(nil),     // 27: google.protobuf.Timestamp
 }
 var file_model_plane_v1_memory_proto_depIdxs = []int32{
-	25, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
+	27, // 0: model_plane.v1.SearchMemoryRequest.updated_after:type_name -> google.protobuf.Timestamp
 	4,  // 1: model_plane.v1.SearchMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
-	25, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
+	27, // 2: model_plane.v1.MemoryEntry.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 3: model_plane.v1.MemoryEntry.provenance:type_name -> model_plane.v1.MemoryProvenance
 	4,  // 4: model_plane.v1.ListMemoryResponse.entries:type_name -> model_plane.v1.MemoryEntry
 	1,  // 5: model_plane.v1.SetMemoryControlsRequest.state:type_name -> model_plane.v1.MemoryState
 	1,  // 6: model_plane.v1.MemoryControls.state:type_name -> model_plane.v1.MemoryState
-	25, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
+	27, // 7: model_plane.v1.MemoryControls.updated_at:type_name -> google.protobuf.Timestamp
 	15, // 8: model_plane.v1.GetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
 	15, // 9: model_plane.v1.SetMemoryControlsResponse.controls:type_name -> model_plane.v1.MemoryControls
-	25, // 10: model_plane.v1.UserProfile.updated_at:type_name -> google.protobuf.Timestamp
+	27, // 10: model_plane.v1.UserProfile.updated_at:type_name -> google.protobuf.Timestamp
 	20, // 11: model_plane.v1.UserProfileResponse.profile:type_name -> model_plane.v1.UserProfile
 	2,  // 12: model_plane.v1.MemoryService.SearchMemory:input_type -> model_plane.v1.SearchMemoryRequest
 	5,  // 13: model_plane.v1.MemoryService.IndexMemory:input_type -> model_plane.v1.IndexMemoryRequest
@@ -2150,19 +2303,21 @@ var file_model_plane_v1_memory_proto_depIdxs = []int32{
 	21, // 20: model_plane.v1.MemoryService.GetUserProfile:input_type -> model_plane.v1.GetUserProfileRequest
 	22, // 21: model_plane.v1.MemoryService.SetUserProfile:input_type -> model_plane.v1.SetUserProfileRequest
 	23, // 22: model_plane.v1.MemoryService.RebuildUserProfile:input_type -> model_plane.v1.RebuildUserProfileRequest
-	3,  // 23: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
-	6,  // 24: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
-	10, // 25: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
-	12, // 26: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
-	8,  // 27: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
-	16, // 28: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
-	17, // 29: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
-	19, // 30: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
-	24, // 31: model_plane.v1.MemoryService.GetUserProfile:output_type -> model_plane.v1.UserProfileResponse
-	24, // 32: model_plane.v1.MemoryService.SetUserProfile:output_type -> model_plane.v1.UserProfileResponse
-	24, // 33: model_plane.v1.MemoryService.RebuildUserProfile:output_type -> model_plane.v1.UserProfileResponse
-	23, // [23:34] is the sub-list for method output_type
-	12, // [12:23] is the sub-list for method input_type
+	25, // 23: model_plane.v1.MemoryService.EraseAgentMemory:input_type -> model_plane.v1.EraseAgentMemoryRequest
+	3,  // 24: model_plane.v1.MemoryService.SearchMemory:output_type -> model_plane.v1.SearchMemoryResponse
+	6,  // 25: model_plane.v1.MemoryService.IndexMemory:output_type -> model_plane.v1.IndexMemoryResponse
+	10, // 26: model_plane.v1.MemoryService.ListMemory:output_type -> model_plane.v1.ListMemoryResponse
+	12, // 27: model_plane.v1.MemoryService.DeleteMemory:output_type -> model_plane.v1.DeleteMemoryResponse
+	8,  // 28: model_plane.v1.MemoryService.Health:output_type -> model_plane.v1.MemoryHealthResponse
+	16, // 29: model_plane.v1.MemoryService.GetMemoryControls:output_type -> model_plane.v1.GetMemoryControlsResponse
+	17, // 30: model_plane.v1.MemoryService.SetMemoryControls:output_type -> model_plane.v1.SetMemoryControlsResponse
+	19, // 31: model_plane.v1.MemoryService.ResetMemory:output_type -> model_plane.v1.ResetMemoryResponse
+	24, // 32: model_plane.v1.MemoryService.GetUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	24, // 33: model_plane.v1.MemoryService.SetUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	24, // 34: model_plane.v1.MemoryService.RebuildUserProfile:output_type -> model_plane.v1.UserProfileResponse
+	26, // 35: model_plane.v1.MemoryService.EraseAgentMemory:output_type -> model_plane.v1.EraseAgentMemoryResponse
+	24, // [24:36] is the sub-list for method output_type
+	12, // [12:24] is the sub-list for method input_type
 	12, // [12:12] is the sub-list for extension type_name
 	12, // [12:12] is the sub-list for extension extendee
 	0,  // [0:12] is the sub-list for field type_name
@@ -2179,7 +2334,7 @@ func file_model_plane_v1_memory_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_memory_proto_rawDesc), len(file_model_plane_v1_memory_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   23,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -30,6 +30,7 @@ const (
 	MemoryService_GetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/GetUserProfile"
 	MemoryService_SetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/SetUserProfile"
 	MemoryService_RebuildUserProfile_FullMethodName = "/model_plane.v1.MemoryService/RebuildUserProfile"
+	MemoryService_EraseAgentMemory_FullMethodName   = "/model_plane.v1.MemoryService/EraseAgentMemory"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -88,6 +89,13 @@ type MemoryServiceClient interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	RebuildUserProfile(ctx context.Context, in *RebuildUserProfileRequest, opts ...grpc.CallOption) (*UserProfileResponse, error)
+	// Erase one named agent's memory in one Space (EP-6 P3, EP-8 S10): every
+	// scope = 'agent' row of that (Space, agent) binding. Called after the
+	// binding is revoked. Authorized by a Control Space memory decision issued to
+	// the Space's owner or admin for this agent; a person only, never a service.
+	// Open to a ZDR caller too: erasure only removes. A no-op that erases zero
+	// rows while SESSION_AGENT_MEMORY_ENABLED is off.
+	EraseAgentMemory(ctx context.Context, in *EraseAgentMemoryRequest, opts ...grpc.CallOption) (*EraseAgentMemoryResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -208,6 +216,16 @@ func (c *memoryServiceClient) RebuildUserProfile(ctx context.Context, in *Rebuil
 	return out, nil
 }
 
+func (c *memoryServiceClient) EraseAgentMemory(ctx context.Context, in *EraseAgentMemoryRequest, opts ...grpc.CallOption) (*EraseAgentMemoryResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(EraseAgentMemoryResponse)
+	err := c.cc.Invoke(ctx, MemoryService_EraseAgentMemory_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -264,6 +282,13 @@ type MemoryServiceServer interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	RebuildUserProfile(context.Context, *RebuildUserProfileRequest) (*UserProfileResponse, error)
+	// Erase one named agent's memory in one Space (EP-6 P3, EP-8 S10): every
+	// scope = 'agent' row of that (Space, agent) binding. Called after the
+	// binding is revoked. Authorized by a Control Space memory decision issued to
+	// the Space's owner or admin for this agent; a person only, never a service.
+	// Open to a ZDR caller too: erasure only removes. A no-op that erases zero
+	// rows while SESSION_AGENT_MEMORY_ENABLED is off.
+	EraseAgentMemory(context.Context, *EraseAgentMemoryRequest) (*EraseAgentMemoryResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -306,6 +331,9 @@ func (UnimplementedMemoryServiceServer) SetUserProfile(context.Context, *SetUser
 }
 func (UnimplementedMemoryServiceServer) RebuildUserProfile(context.Context, *RebuildUserProfileRequest) (*UserProfileResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RebuildUserProfile not implemented")
+}
+func (UnimplementedMemoryServiceServer) EraseAgentMemory(context.Context, *EraseAgentMemoryRequest) (*EraseAgentMemoryResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method EraseAgentMemory not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -526,6 +554,24 @@ func _MemoryService_RebuildUserProfile_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_EraseAgentMemory_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(EraseAgentMemoryRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).EraseAgentMemory(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_EraseAgentMemory_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).EraseAgentMemory(ctx, req.(*EraseAgentMemoryRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -576,6 +622,10 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RebuildUserProfile",
 			Handler:    _MemoryService_RebuildUserProfile_Handler,
+		},
+		{
+			MethodName: "EraseAgentMemory",
+			Handler:    _MemoryService_EraseAgentMemory_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

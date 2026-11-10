@@ -40,11 +40,27 @@ ALTER TABLE feedback_ratings
 -- Repoint the primary key. Existing rows all default to
 -- ('explicit', '') so the new key is a strict superset of the old one and no
 -- row can collide during the swap.
-ALTER TABLE feedback_ratings
-    DROP CONSTRAINT IF EXISTS feedback_ratings_pkey;
-ALTER TABLE feedback_ratings
-    ADD CONSTRAINT feedback_ratings_pkey
-    PRIMARY KEY (org_id, run_id, user_id, skill_id, source, signal_kind);
+--
+-- Guarded: the container entrypoint replays every *.up.sql on each start. Without
+-- the guard, a replay after 0003 would try to narrow the key back and fail on any
+-- rows that differ only by skill_version (a crash loop). The swap runs only while
+-- the key does not yet carry signal_kind.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'feedback_ratings'::regclass
+          AND contype = 'p'
+          AND pg_get_constraintdef(oid) LIKE '%signal_kind%'
+    ) THEN
+        ALTER TABLE feedback_ratings
+            DROP CONSTRAINT IF EXISTS feedback_ratings_pkey;
+        ALTER TABLE feedback_ratings
+            ADD CONSTRAINT feedback_ratings_pkey
+            PRIMARY KEY (org_id, run_id, user_id, skill_id, source, signal_kind);
+    END IF;
+END
+$$;
 
 -- The demotion sweep reads skill-attached rows per tenant and needs the source
 -- split to weigh them, so carry it in the index rather than re-reading the heap.

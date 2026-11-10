@@ -3954,6 +3954,19 @@ async fn dispatch_tool_with_cost(
                 })
                 .unwrap_or_else(|| id.to_owned());
             let id = resolved_id.as_str();
+            // A slide deck is written only by the deck tool, which owns its manifest (EP-5
+            // S2/S3). A text rewrite would persist hand-made manifest content (forged slide
+            // states, say) under the deck's id, so refuse it and name the owning tool.
+            if state.artifact_versions.kind_of(thread_id, id)
+                == Some(crate::artifacts::ArtifactKind::Deck)
+            {
+                return err_outcome(
+                    call,
+                    format!(
+                        "artifact '{id}' is a slide deck; change it with the deck tool, not update_artifact"
+                    ),
+                );
+            }
             // An unknown id means the model is revising something the user has
             // never seen. Creating it silently would produce a "v1" the user
             // cannot relate to anything, so refuse and name the fix.

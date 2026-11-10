@@ -4298,9 +4298,12 @@ pub(crate) fn verify_run_control_space_decision(
 pub(crate) const CONTROL_SPACE_MEMORY_ACTION: &str = "model.space.memory.manage";
 pub(crate) const CONTROL_SPACE_MEMORY_SCHEMA: &str = "sha256:space-memory-manage-v1";
 pub(crate) const SPACE_MEMORY_PERMISSION: &str = "memory:manage";
-/// The two operations a Space memory decision binds.
+/// The operations a Space memory decision binds.
 pub(crate) const SPACE_MEMORY_OPERATION_LIST: &str = "list";
 pub(crate) const SPACE_MEMORY_OPERATION_DELETE: &str = "delete";
+/// Erase one named agent's memory in the Space (EP-6 P3). Its `memory_id` is the agent's subject id,
+/// so one token erases one agent's rows and no other agent's.
+pub(crate) const SPACE_MEMORY_OPERATION_ERASE_AGENT: &str = "erase_agent";
 
 /// What a verified Space memory decision tells the reader: the Space's audience as Control signed
 /// it now, so the owner's list can mark the rows a current member is not shown, and the

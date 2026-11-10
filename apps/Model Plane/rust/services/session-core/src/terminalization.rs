@@ -26,6 +26,11 @@ const RECOVERY_FAILURE_CODE: &str = "outcome_unknown";
 /// Written by recovery only, like [`RECOVERY_FAILURE_CODE`]: a caller may not submit it, so it is not
 /// in [`ALLOWED_FAILURE_CODES`], though the column accepts it (migration 0088).
 const QUESTION_EXPIRED_FAILURE_CODE: &str = "question_expired";
+/// The failure a run ends with when its takeover pause (a `browser_human_assist` approval) timed out
+/// (build plan EP-1 S5). Written by recovery only, like [`QUESTION_EXPIRED_FAILURE_CODE`]: a caller
+/// may not submit it, so it is not in [`ALLOWED_FAILURE_CODES`], though the column accepts it
+/// (migration 0115).
+const BROWSER_HELP_TIMED_OUT_FAILURE_CODE: &str = "browser_help_timed_out";
 const MANAGED_RECOVERY_LEASE_SECS: i64 = 60;
 pub(crate) const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
 const MANAGED_RECOVERY_BATCH: usize = 32;
@@ -222,7 +227,8 @@ pub(crate) fn is_startable_source(source: pb::ManagedRunSource) -> bool {
 /// code missing here is rejected before any database access; one missing from
 /// the CHECK fails the write instead, so both lists move together.
 /// `outcome_unknown` is deliberately absent: it is set only by reconciliation,
-/// never submitted by a caller.
+/// never submitted by a caller. `question_expired` and `browser_help_timed_out` are absent for
+/// the same reason: recovery writes them, and the CHECK admits them (migrations 0088 and 0115).
 const ALLOWED_FAILURE_CODES: &[&str] = &[
     "browser_failed",
     "browser_permission_denied",
@@ -1841,9 +1847,11 @@ async fn supersede_terminalized_obligations(pool: &PgPool) -> Result<u64, sqlx::
 /// Off: any `requested` or `granted`, unconsumed approval holds the recovery worker back from
 /// its run whatever `expires_at` says, exactly as committed. On: such an approval holds the run
 /// back only until it expires (one with no `expires_at` never does), or while a delivery worker
-/// holds a live lease on it; an expired, never-consumed one no longer does, so the run ends `outcome_unknown` at its deadline and its
-/// fold is purged by the unchanged terminal path. The one answer is bound into both copies of
-/// the clause (`claim_due_recovery` and `has_pending_approval`), so they cannot disagree.
+/// holds a live lease on it; an expired, never-consumed one no longer does, so the run ends
+/// `outcome_unknown` at its deadline and its fold is purged by the unchanged terminal path (a
+/// takeover pause whose approval timed out ends as `browser_help_timed_out` instead, see
+/// [`expired_browser_assist_approval`]). The one answer is bound into both copies of the clause
+/// (`claim_due_recovery` and `has_pending_approval`), so they cannot disagree.
 pub(crate) fn approval_expiry_enabled() -> bool {
     // A test forces the answer for its own thread, so it does not race the tests that set the
     // process environment. Compiled out of the binary.
@@ -2101,6 +2109,31 @@ async fn expired_resume_question(
     .map_err(database_error)
 }
 
+/// Whether the run's takeover pause timed out (build plan EP-1 S5): a `browser_human_assist`
+/// approval the person never decided, that is TIMED_OUT or still `requested` past its `expires_at`,
+/// and was never consumed. Such a run ends as browser_help_timed_out, because the cause is known,
+/// rather than as an unknown outcome. The cause is the code the creator stored at
+/// `approvals.metadata.cause.code`.
+async fn expired_browser_assist_approval(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<bool, Status> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM approvals AS a
+             WHERE a.run_id = $1
+               AND a.metadata #>> '{cause,code}' = $2
+               AND a.consumed_at IS NULL
+               AND (a.status = 'timed_out' OR (a.status = 'requested' AND a.expires_at <= now()))
+         )",
+    )
+    .bind(run_id)
+    .bind(mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)
+}
+
 async fn release_recovery_for_activity(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2295,8 +2328,17 @@ async fn recover_claimed_terminalization(
     // so the run is applied as failed with that cause; only an unknown outcome needs reconciliation
     // (the outbox CHECK admits `reconciliation_required` with `outcome_unknown` alone).
     let question_expired = expired_resume_question(&mut transaction, &claim.row.run_id).await?;
+    // A takeover pause whose approval timed out ends the same way, as browser_help_timed_out (build
+    // plan EP-1 S5). It is read only behind the approval-expiry switch, so with the switch off the run
+    // ends as it always did, as outcome_unknown.
+    let help_timed_out = !question_expired
+        && approval_expiry_enabled()
+        && expired_browser_assist_approval(&mut transaction, &claim.row.run_id).await?;
+    let known_cause = question_expired || help_timed_out;
     let failure_code = if question_expired {
         QUESTION_EXPIRED_FAILURE_CODE
+    } else if help_timed_out {
+        BROWSER_HELP_TIMED_OUT_FAILURE_CODE
     } else {
         RECOVERY_FAILURE_CODE
     };
@@ -2306,7 +2348,7 @@ async fn recover_claimed_terminalization(
         source,
         step_id,
         ManagedOutcome::Failed(failure_code),
-        !question_expired,
+        !known_cause,
         now,
     )
     .await?;

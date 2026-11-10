@@ -61,16 +61,19 @@ export function extractError(
     }
     if (errorField && typeof errorField === 'object') {
       const e = errorField as Record<string, unknown>
+      // The envelope's details: an object, or a bare array of them (per-row issues from some upstreams), kept whole
+      // for the caller that reads it. The hints below read named keys, which only an object has.
       const details =
-        e.details && typeof e.details === 'object' && !Array.isArray(e.details) ? (e.details as Record<string, unknown>) : null
-      const blockReason = e.blockReason ?? details?.block_reason
+        e.details && typeof e.details === 'object' ? (e.details as Record<string, unknown> | unknown[]) : null
+      const keyed = Array.isArray(details) ? null : details
+      const blockReason = e.blockReason ?? keyed?.block_reason
       return {
         code: typeof e.code === 'string' ? e.code : null,
         message: typeof e.message === 'string' && e.message.trim() ? e.message : `Request failed (${status})`,
         hints: {
           details,
-          retryAfterSeconds: boundedSeconds(e.retryAfterSeconds) ?? boundedSeconds(details?.retry_after_seconds),
-          resumable: e.resumable === true || details?.resumable === true,
+          retryAfterSeconds: boundedSeconds(e.retryAfterSeconds) ?? boundedSeconds(keyed?.retry_after_seconds),
+          resumable: e.resumable === true || keyed?.resumable === true,
           blockReason: typeof blockReason === 'string' ? blockReason : null,
           feature: typeof e.feature === 'string' && e.feature.trim() ? e.feature : null,
         },

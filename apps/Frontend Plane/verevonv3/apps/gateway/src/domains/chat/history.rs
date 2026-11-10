@@ -1377,6 +1377,92 @@ struct CanonicalMessage {
     /// thread because the only copy lived in the browser that streamed it.
     #[serde(default)]
     artifacts: Option<Value>,
+    /// The context chips a user turn was sent with (Wave 3 EP-3 S5), flattened
+    /// from `messages.metadata.context_refs` like the keys above. Held as a raw
+    /// value and re-emitted through `relayed_context_refs`, which keeps only
+    /// `kind`, `id` and `label`: the metadata map carries gateway bookkeeping
+    /// that must never reach the browser.
+    #[serde(default)]
+    context_refs: Option<Value>,
+    /// The deep-research plan an assistant plan turn ended with (Wave 3 EP-2 S5),
+    /// flattened from `messages.metadata.research_plan`. Re-emitted through
+    /// `relayed_research_plan`, which keeps only the sub-queries and questions.
+    #[serde(default)]
+    research_plan: Option<Value>,
+}
+
+/// Most chips a turn relays: the gateway's own cap on `context_refs`.
+const RELAYED_CONTEXT_REFS_MAX: usize = 20;
+/// Longest chip label relayed, in characters: the gateway cuts labels at the same length.
+const RELAYED_CONTEXT_REF_LABEL_MAX: usize = 120;
+/// Longest chip id relayed: the gateway's own id bound.
+const RELAYED_CONTEXT_REF_ID_MAX: usize = 128;
+/// The chip kinds the composer can attach.
+const RELAYED_CONTEXT_REF_KINDS: [&str; 5] = ["document", "thread", "space", "skill", "artifact_selection"];
+/// Most sub-queries a relayed plan keeps.
+const RELAYED_PLAN_SUB_QUERIES_MAX: usize = 20;
+/// Longest sub-query or question relayed, in characters.
+const RELAYED_PLAN_TEXT_MAX: usize = 200;
+/// Most clarifying questions a relayed plan keeps: the plan card's own cap.
+const RELAYED_PLAN_QUESTIONS_MAX: usize = 3;
+
+/// The chips of a stored `context_refs` value, as `[{kind, id, label}]`, or `None` when nothing
+/// valid is left. Only an array is read, only an object entry with a known kind and an id is kept,
+/// and every other key on an entry (a selection range, anything the gateway added) is dropped.
+fn relayed_context_refs(value: Option<&Value>) -> Option<Value> {
+    let entries = value?.as_array()?;
+    let chips: Vec<Value> = entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.as_object()?;
+            let kind = entry.get("kind")?.as_str()?;
+            if !RELAYED_CONTEXT_REF_KINDS.contains(&kind) {
+                return None;
+            }
+            let id = entry.get("id")?.as_str()?;
+            if id.is_empty() || id.chars().count() > RELAYED_CONTEXT_REF_ID_MAX {
+                return None;
+            }
+            let label: String = entry
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(RELAYED_CONTEXT_REF_LABEL_MAX)
+                .collect();
+            Some(json!({ "kind": kind, "id": id, "label": label }))
+        })
+        .take(RELAYED_CONTEXT_REFS_MAX)
+        .collect();
+    (!chips.is_empty()).then(|| Value::Array(chips))
+}
+
+/// The non-blank strings of one plan list, cut to length and to `max` entries.
+fn relayed_plan_strings(value: Option<&Value>, max: usize) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| text.chars().take(RELAYED_PLAN_TEXT_MAX).collect::<String>())
+                .take(max)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The plan of a stored `research_plan` value, as `{sub_queries, questions}`, or `None` when it is
+/// not an object or holds no sub-query. Everything else on the record (its version, its caps) is
+/// dropped; the card re-derives its cap itself.
+fn relayed_research_plan(value: Option<&Value>) -> Option<Value> {
+    let record = value?.as_object()?;
+    let sub_queries = relayed_plan_strings(record.get("sub_queries"), RELAYED_PLAN_SUB_QUERIES_MAX);
+    if sub_queries.is_empty() {
+        return None;
+    }
+    let questions = relayed_plan_strings(record.get("questions"), RELAYED_PLAN_QUESTIONS_MAX);
+    Some(json!({ "sub_queries": sub_queries, "questions": questions }))
 }
 
 async fn read_canonical_transcript(
@@ -1477,6 +1563,14 @@ fn canonical_messages_to_transcript(
                 .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()))
             {
                 turn["artifacts"] = artifacts;
+            }
+            // Allowlisted re-emits (Wave 3 EP-3 S5 / EP-2 S5): absent unless the stored
+            // value is the expected shape, and never the metadata map itself.
+            if let Some(refs) = relayed_context_refs(message.context_refs.as_ref()) {
+                turn["contextRefs"] = refs;
+            }
+            if let Some(plan) = relayed_research_plan(message.research_plan.as_ref()) {
+                turn["researchPlan"] = plan;
             }
             turn
         })
@@ -2071,6 +2165,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2083,6 +2179,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2107,6 +2205,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2118,6 +2218,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2153,6 +2255,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2168,6 +2272,8 @@ mod tests {
                     })),
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2179,6 +2285,8 @@ mod tests {
                     grounding: Some(Value::Null),
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2210,6 +2318,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2221,6 +2331,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2232,6 +2344,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     // An unrecognized value must never be relayed verbatim —
@@ -2245,6 +2359,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2276,6 +2392,8 @@ mod tests {
                     artifacts: Some(json!([
                         { "id": "rapport", "kind": "document", "title": "Salgsrapport", "content": "# Uke 37", "version": 2 },
                     ])),
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2287,6 +2405,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: Some(json!([])),
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2317,6 +2437,8 @@ mod tests {
                         { "id": "w1", "title": "Oslo", "url": "https://example.test/oslo", "snippet": "capital" },
                     ])),
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2329,6 +2451,8 @@ mod tests {
                     // An empty list is not evidence; it must not create the key.
                     citations: Some(json!([])),
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )

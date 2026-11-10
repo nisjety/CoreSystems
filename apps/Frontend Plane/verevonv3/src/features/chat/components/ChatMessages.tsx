@@ -1,4 +1,5 @@
 import { ConnectorSuggestionCard } from './ConnectorSuggestionCard'
+import { ResearchPlanCard, researchPlanTurnEnabled } from './ResearchPlanCard'
 import type { ConnectIntent } from '@/shared/integrations/connect-intent'
 import { ForkAction, threadForkEnabled } from './ForkAction'
 import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
@@ -960,6 +961,11 @@ export function AssistantMessage(props: {
             />
           </Show>
         </div>
+        {/* EP-2 S5: a reloaded plan turn shows its persisted plan as a read-only card once a later turn exists. While the
+            plan turn is the latest answer the live card in the composer trays owns the plan, so nothing is mounted here. */}
+        <Show when={researchPlanTurnEnabled() && !props.isLatest && !props.message.streaming ? props.message.researchPlan : undefined}>
+          {(plan) => <ResearchPlanCard readOnly plan={plan()} onStart={() => {}} onCancel={() => {}} />}
+        </Show>
         {/* EP-10 S8: at most one connected-app suggestion per turn; the card hides itself in a Space or temporary chat. */}
         <Show when={props.connectorSuggestion ? props.message.connectorSuggestion : undefined}>
           {(suggestion) => (

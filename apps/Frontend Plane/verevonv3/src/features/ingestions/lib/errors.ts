@@ -11,14 +11,14 @@ import { isAiFormat, type ScrapeFormat } from '@/features/ingestions/lib/playgro
 type Tr = (no: string, en: string) => string
 
 function fieldsOf(error: unknown): Array<Record<string, unknown>> {
-  if (!(error instanceof ApiError)) return []
+  if (!(error instanceof ApiError) || Array.isArray(error.details)) return []
   const fields = error.details?.fields
   if (!Array.isArray(fields)) return []
   return fields.filter((field): field is Record<string, unknown> => typeof field === 'object' && field !== null)
 }
 
 function reasonOf(error: unknown): string | null {
-  if (!(error instanceof ApiError)) return null
+  if (!(error instanceof ApiError) || Array.isArray(error.details)) return null
   const reason = error.details?.reason
   return typeof reason === 'string' ? reason : null
 }

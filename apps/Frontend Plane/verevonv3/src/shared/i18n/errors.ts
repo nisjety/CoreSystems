@@ -39,7 +39,7 @@ type ApiErrorLike =
       blockReason?: string | null
       resumable?: boolean
       feature?: string | null
-      details?: Record<string, unknown> | null
+      details?: Record<string, unknown> | unknown[] | null
     }
   | null
   | undefined
@@ -1468,7 +1468,8 @@ function describe(
   // A refusal that names why the wall is up gets the sentence for that reason.
   if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
   // A memory refusal that names a shared Space or an agent run says so.
-  const memoryScope = like?.details?.reason
+  const details = like?.details
+  const memoryScope = details && !Array.isArray(details) ? details.reason : undefined
   if (code === 'memory_not_enabled' && typeof memoryScope === 'string') copy ??= MEMORY_SCOPE_COPY.get(memoryScope)
   copy ??= code ? ERROR_COPY[code] : undefined
   if (!copy) {
