@@ -261,6 +261,22 @@ describe('Control Plane deployment contract', () => {
     expect(entrypoint.indexOf('init_better_auth.sql')).toBeLessThan(
       entrypoint.indexOf('[0-9][0-9][0-9]_*.sql'),
     );
+    // Space W1 live proof F6: an empty database could not boot because the
+    // bootstrap file had been deleted while the entrypoint skipped missing
+    // files. The file must ship, and its absence must stop the container.
+    expect(
+      existsSync(resolve(process.cwd(), 'migrations', 'init_better_auth.sql')),
+    ).toBe(true);
+    expect(
+      existsSync(resolve(process.cwd(), 'migrations', 'gdpr_hard_delete.sql')),
+    ).toBe(true);
+    expect(entrypoint).toContain(
+      'for bootstrap in init_better_auth.sql gdpr_hard_delete.sql; do',
+    );
+    expect(entrypoint).toContain('is missing from the image');
+    expect(entrypoint.indexOf('is missing from the image')).toBeLessThan(
+      entrypoint.indexOf('Applying SQL migrations for'),
+    );
     expect(entrypoint).not.toContain('drizzle-kit push || true');
     expect(entrypoint).toContain('POSTGRES_READY_MAX_ATTEMPTS');
     expect(entrypoint).toContain('Postgres readiness timed out');
