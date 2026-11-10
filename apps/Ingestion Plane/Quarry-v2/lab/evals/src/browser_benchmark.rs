@@ -257,6 +257,7 @@ impl BrowserDriver for DeterministicBrowserDriver {
         Ok(LiveFrame {
             mime_type: "image/jpeg".to_owned(),
             data_base64: BASE64_STANDARD.encode(&self.live_frame_bytes),
+            agent_cursor: None,
         })
     }
 
